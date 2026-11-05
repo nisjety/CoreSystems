@@ -201,6 +201,7 @@ fn observation(
         screenshot_ref: String::new(),
         dom_snapshot_ref: snapshot_id.to_owned(),
         snapshot_generation: Some(generation),
+        rendered_controls: Vec::new(),
         snapshot_targets: targets,
         error_message: String::new(),
         challenge: None,
@@ -1085,6 +1086,7 @@ async fn browser_agent_attaches_to_a_live_person_run() {
         stop_criteria: "Example Domain".to_owned(),
         start_url: Some("https://example.com".to_owned()),
         attach: Some(execution_core::browser_agent::AttachConfig {
+            target_tab: None,
             session_run_id: session_run_id.clone(),
         }),
         ..Default::default()

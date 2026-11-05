@@ -19,7 +19,7 @@ use mp_contracts::model_plane::v1::{
 };
 use tonic::transport::Channel;
 use tonic::{Request, Status};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::browser_agent::{
     approval_poll_interval, approval_timeout_seconds, ApprovalOutcome, BrowserAction,
@@ -74,6 +74,7 @@ pub struct OrchestrationEventSink {
     /// (grant/deny/timeout only).
     state: Option<StateStore>,
     bearer: Option<std::sync::Arc<str>>,
+    receipt_persistence_confirmed: bool,
 }
 
 impl OrchestrationEventSink {
@@ -86,12 +87,20 @@ impl OrchestrationEventSink {
             channel,
             state,
             bearer: None,
+            receipt_persistence_confirmed: false,
         }
     }
 
     #[must_use]
     pub fn with_verified_bearer(mut self, bearer: &str) -> Self {
         self.bearer = Some(std::sync::Arc::from(bearer));
+        self
+    }
+
+    /// Only an authenticated ingress can confirm durable receipt eligibility.
+    #[must_use]
+    pub fn with_receipt_persistence_confirmed(mut self, confirmed: bool) -> Self {
+        self.receipt_persistence_confirmed = confirmed;
         self
     }
 
@@ -206,6 +215,30 @@ impl OrchestrationEventSink {
 
 #[tonic::async_trait]
 impl BrowserEventSink for OrchestrationEventSink {
+    async fn record_final_answer(&self, config: &PlanConfig, answer: &str) {
+        // A zero-retention result must not cross a durable content boundary.
+        if config.zdr || config.run_id.trim().is_empty() || answer.trim().is_empty() {
+            return;
+        }
+        let request = match self.request(pb::RecordRunOutputRequest {
+            run_id: config.run_id.clone(),
+            output: answer.to_owned(),
+        }) {
+            Ok(request) => request,
+            Err(_) => {
+                warn!(run_id = %config.run_id, reason = "credential_unavailable", "browser final answer was not stored");
+                return;
+            }
+        };
+        let mut client = pb::managed_run_lifecycle_client::ManagedRunLifecycleClient::new(self.channel.clone());
+        match tokio::time::timeout(std::time::Duration::from_secs(3), client.record_run_output(request)).await {
+            Ok(Ok(_)) => {}
+            // Never log the answer or a transport message that may contain it.
+            Ok(Err(status)) => warn!(run_id = %config.run_id, grpc_code = ?status.code(), "browser final answer was not stored"),
+            Err(_) => warn!(run_id = %config.run_id, reason = "timeout", "browser final answer was not stored"),
+        }
+    }
+
     async fn action_dispatched(&self, config: &PlanConfig, action: &BrowserAction) {
         // Only run-scoped events are deliverable on the per-run stream; skip
         // when the loop wasn't given a run id (avoids a guaranteed RPC reject).
@@ -234,7 +267,11 @@ impl BrowserEventSink for OrchestrationEventSink {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
                 action_id: observation.action_id.clone(),
-                status: observation.status.as_str().to_owned(),
+                status: if observation.challenge.as_ref().is_some_and(|challenge| challenge.requires_user()) {
+                    "site_blocked"
+                } else {
+                    observation.status.as_str()
+                }.to_owned(),
                 // WS12.S4: the event leaves the loop (session-core fans it out
                 // to the UI and the log), so the URL loses a query token and
                 // the title a credential shape here, at the boundary. The
@@ -321,7 +358,7 @@ impl BrowserEventSink for OrchestrationEventSink {
         attach_id: &str,
         tab_id: &str,
     ) {
-        if config.run_id.is_empty() {
+        if !self.receipt_persistence_confirmed || config.zdr || config.run_id.is_empty() {
             return;
         }
         let event = orchestration_event::Event::BrowserAttachSharedJar(
@@ -333,7 +370,44 @@ impl BrowserEventSink for OrchestrationEventSink {
                 tab_id: tab_id.to_owned(),
             },
         );
-        self.publish(&config.run_id, event).await;
+        let request = pb::RecordOrchestrationEventRequest {
+            event: Some(pb::OrchestrationEvent { event_id: String::new(), at: None, event: Some(event) }),
+        };
+        let result = match self.request(request) {
+            Ok(request) => self.client().record_orchestration_event(request).await,
+            Err(error) => Err(error),
+        };
+        // The typed event alone is owner-writable, so it is not proof of origin.
+        // Always publish a signed receipt on success or when an older session
+        // rejects that unknown oneof; never bypass ZDR or authorization errors.
+        let can_publish_signed = result.as_ref().is_ok_and(|_| true)
+            || result.as_ref().is_err_and(|error| error.code() == tonic::Code::InvalidArgument);
+        if can_publish_signed {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs());
+                let key = std::env::var("BROWSER_ATTACH_COMPAT_HMAC_KEY").ok();
+                if let (Some(now), Some(key)) = (now, key) {
+                    let receipt = crate::browser_attach_compat::Receipt {
+                        run_id: config.run_id.clone(), plan_id: config.plan_id.clone(),
+                        session_run_id: session_run_id.to_owned(), attach_id: attach_id.to_owned(),
+                        tab_id: tab_id.to_owned(), issued_at: now,
+                    };
+                    if let Some(envelope) = crate::browser_attach_compat::sign(key.as_bytes(), &receipt) {
+                        let legacy = orchestration_event::Event::BrowserObservationReceived(
+                            orchestration_event::BrowserObservationReceived {
+                                run_id: config.run_id.clone(), plan_id: config.plan_id.clone(),
+                                action_id: "verevon-attach-compat-v1".to_owned(), status: envelope,
+                                page_url: String::new(), page_title: String::new(),
+                                screenshot_ref: String::new(), dom_snapshot_ref: String::new(),
+                            },
+                        );
+                        self.publish(&config.run_id, legacy).await;
+                        return;
+                    }
+                }
+        }
+        if let Err(error) = result {
+            debug!(run_id = %config.run_id, error = %error, "failed to publish browser attachment (best-effort)");
+        }
     }
 
     /// The run-level gate's decision, on the same event the in-loop gates use.
@@ -494,6 +568,26 @@ impl BrowserEventSink for OrchestrationEventSink {
                     .await;
             }
         };
+
+        // The first event explains the pending action even if creation fails;
+        // this second one binds that same action to the actual durable record.
+        // A client must never offer an approval control for the empty-id event.
+        self.publish(
+            &config.run_id,
+            orchestration_event::Event::BrowserActionApprovalRequired(
+                orchestration_event::BrowserActionApprovalRequired {
+                    run_id: config.run_id.clone(),
+                    plan_id: config.plan_id.clone(),
+                    action_id: detail.action_id.clone(),
+                    action_type: detail.action_type.clone(),
+                    url: detail.url.clone(),
+                    selector: detail.selector.clone(),
+                    reason: detail.reason.clone(),
+                    risk_category: detail.risk_category.as_str().to_owned(),
+                    approval_id: approval_id.clone(),
+                },
+            ),
+        ).await;
 
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(expires_in));
@@ -702,6 +796,7 @@ mod tests {
         created: Arc<Mutex<Vec<CreateApprovalRequest>>>,
         /// Every `RecordOrchestrationEvent` the sink sent, in order.
         recorded: Arc<Mutex<Vec<RecordOrchestrationEventRequest>>>,
+        reject_attach: bool,
     }
 
     #[tonic::async_trait]
@@ -1004,7 +1099,13 @@ mod tests {
             &self,
             request: TonicRequest<RecordOrchestrationEventRequest>,
         ) -> Result<Response<RecordOrchestrationEventResponse>, Status> {
-            self.recorded.lock().unwrap().push(request.into_inner());
+            let request = request.into_inner();
+            let reject = self.reject_attach && matches!(
+                request.event.as_ref().and_then(|event| event.event.as_ref()),
+                Some(orchestration_event::Event::BrowserAttachSharedJar(_))
+            );
+            self.recorded.lock().unwrap().push(request);
+            if reject { return Err(Status::invalid_argument("event payload is required")); }
             Ok(Response::new(RecordOrchestrationEventResponse {
                 event_id: "evt-test".into(),
             }))
@@ -1026,6 +1127,46 @@ mod tests {
             .connect()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_attach_fallback_is_signed_and_absent_for_zdr_or_missing_key() {
+        let key = "test-only-compat-key-32-characters-long";
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded), reject_attach: true, ..Default::default()
+        }).await;
+        let unconfirmed = OrchestrationEventSink::new(channel.clone(), None).with_verified_bearer("test-bearer");
+        unconfirmed.attach_shared_jar(&test_config(), "session_1", "attach_1", "tab_1").await;
+        assert!(recorded.lock().unwrap().is_empty(), "unknown retention must not publish");
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer").with_receipt_persistence_confirmed(true);
+        let config = test_config();
+        sink.attach_shared_jar(&config, "session_1", "attach_1", "tab_1").await;
+        {
+            let events = recorded.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            let Some(orchestration_event::Event::BrowserObservationReceived(payload)) =
+                events[1].event.as_ref().and_then(|event| event.event.as_ref()) else { panic!("missing legacy envelope") };
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let receipt = crate::browser_attach_compat::verify(key.as_bytes(), &payload.status, &config.run_id, &config.plan_id, now).unwrap();
+            assert_eq!((&*receipt.session_run_id, &*receipt.attach_id, &*receipt.tab_id), ("session_1", "attach_1", "tab_1"));
+            assert!(payload.page_url.is_empty() && payload.page_title.is_empty());
+        }
+        let mut zdr = test_config(); zdr.zdr = true;
+        sink.attach_shared_jar(&zdr, "session_1", "attach_1", "tab_1").await;
+        assert_eq!(recorded.lock().unwrap().len(), 2);
+        let supported = Arc::new(Mutex::new(Vec::new()));
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&supported), ..Default::default()
+        }).await;
+        let modern_sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer").with_receipt_persistence_confirmed(true);
+        modern_sink.attach_shared_jar(&config, "session_1", "attach_1", "tab_1").await;
+        assert_eq!(supported.lock().unwrap().len(), 2, "a modern server must also get signed proof");
+        assert!(matches!(supported.lock().unwrap()[1].event.as_ref().and_then(|event| event.event.as_ref()), Some(orchestration_event::Event::BrowserObservationReceived(_))));
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        sink.attach_shared_jar(&config, "session_1", "attach_1", "tab_1").await;
+        assert_eq!(recorded.lock().unwrap().len(), 3, "no unsigned fallback");
     }
 
     fn test_config() -> PlanConfig {
@@ -1058,6 +1199,52 @@ mod tests {
             risk_category: RiskCategory::Login,
             reason: "test".to_owned(),
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct OutputRecorder(Arc<Mutex<Vec<(String, pb::RecordRunOutputRequest)>>>);
+
+    #[tonic::async_trait]
+    impl pb::managed_run_lifecycle_server::ManagedRunLifecycle for OutputRecorder {
+        async fn record_run_output(&self, request: Request<pb::RecordRunOutputRequest>) -> Result<Response<pb::RecordRunOutputResponse>, Status> {
+            let bearer = request.metadata().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned();
+            if bearer != "Bearer delegated-owner" { return Err(Status::permission_denied("not owner")); }
+            let body = request.into_inner();
+            if body.run_id != "run_001" { return Err(Status::not_found("not owner")); }
+            let response = pb::RecordRunOutputResponse { run_id: body.run_id.clone(), stored_chars: body.output.chars().count() as u32 };
+            self.0.lock().unwrap().push((bearer, body));
+            Ok(Response::new(response))
+        }
+        async fn start_managed_run(&self, _: Request<pb::StartManagedRunRequest>) -> Result<Response<pb::StartManagedRunResponse>, Status> { Err(Status::unimplemented("unused")) }
+        async fn record_terminal_outcome(&self, _: Request<pb::RecordTerminalOutcomeRequest>) -> Result<Response<pb::RecordTerminalOutcomeResponse>, Status> { Err(Status::unimplemented("unused")) }
+        async fn heartbeat_managed_run(&self, _: Request<pb::HeartbeatManagedRunRequest>) -> Result<Response<pb::HeartbeatManagedRunResponse>, Status> { Err(Status::unimplemented("unused")) }
+        async fn complete_direct_run_with_message(&self, _: Request<pb::CompleteDirectRunWithMessageRequest>) -> Result<Response<pb::CompleteDirectRunWithMessageResponse>, Status> { Err(Status::unimplemented("unused")) }
+    }
+
+    #[tokio::test]
+    async fn final_answer_uses_owner_credential_and_never_records_zdr() {
+        let recorder = OutputRecorder::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = pb::managed_run_lifecycle_server::ManagedRunLifecycleServer::new(recorder.clone());
+        let server = tokio::spawn(async move {
+            Server::builder().add_service(service).serve_with_incoming(TcpListenerStream::new(listener)).await.unwrap();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}")).unwrap().connect().await.unwrap();
+        let sink = OrchestrationEventSink::new(channel.clone(), None).with_verified_bearer("delegated-owner");
+        sink.record_final_answer(&test_config(), "Actual planner answer").await;
+        let mut zdr = test_config();
+        zdr.zdr = true;
+        sink.record_final_answer(&zdr, "must not persist").await;
+        sink.record_final_answer(&test_config(), " ").await;
+        let wrong = OrchestrationEventSink::new(channel, None).with_verified_bearer("other-user");
+        wrong.record_final_answer(&test_config(), "not authorized").await;
+        let sent = recorder.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "Bearer delegated-owner");
+        assert_eq!(sent[0].1.run_id, "run_001");
+        assert_eq!(sent[0].1.output, "Actual planner answer");
+        server.abort();
     }
 
     #[tokio::test]
@@ -1102,6 +1289,28 @@ mod tests {
         assert_eq!(decision, pb::ApprovalState::Denied as i32);
         assert_eq!(decided_by, "system:user-cancelled");
         assert_eq!(reason, "run cancelled by user while awaiting approval");
+    }
+
+    #[tokio::test]
+    async fn risk_event_republishes_the_durable_approval_id_for_the_same_action() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded), ..Default::default()
+        }).await;
+        let state = StateStore::new();
+        assert!(state.cancel("run_001", Some("stop".to_owned())));
+        let sink = OrchestrationEventSink::new(channel, Some(state)).with_verified_bearer("test-bearer");
+        let _ = sink.require_approval(&test_config(), &test_detail()).await;
+        let sent = recorded.lock().unwrap();
+        let approvals: Vec<_> = sent.iter().filter_map(|r| match r.event.as_ref()?.event.as_ref()? {
+            orchestration_event::Event::BrowserActionApprovalRequired(e) => Some(e),
+            _ => None,
+        }).collect();
+        assert_eq!(approvals.len(), 2);
+        assert_eq!(approvals[0].approval_id, "");
+        assert_eq!(approvals[1].approval_id, "appr-test-1");
+        assert_eq!(approvals[1].run_id, approvals[0].run_id);
+        assert_eq!(approvals[1].action_id, approvals[0].action_id);
     }
 
     #[tokio::test]
@@ -1357,6 +1566,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: "snap-1".to_owned(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: Vec::new(),
             error_message: String::new(),
             challenge: None,
@@ -1446,13 +1656,22 @@ mod tests {
             &observation_at("https://example.com/a?b=1", "Example Domain"),
         )
         .await;
+        let mut challenge = observation_at("https://example.com/", "Site access");
+        challenge.challenge = Some(crate::browser_agent::BrowserChallenge {
+            kind: crate::browser_agent::ChallengeKind::Waf,
+            strength: crate::browser_agent::ChallengeStrength::Strong,
+            block_reason: Some(crate::browser_agent::BlockReason::WafInterstitial),
+            recovery: crate::browser_agent::ChallengeRecovery::Exhausted,
+            confidence_per_mille: 1000,
+        });
+        sink.observation_received(&config, &challenge).await;
 
         let sent = recorded.lock().unwrap();
         let events: Vec<_> = sent
             .iter()
             .filter_map(|request| request.event.as_ref()?.event.clone())
             .collect();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         let orchestration_event::Event::BrowserObservationReceived(masked) = &events[0] else {
             panic!("{:?}", events[0]);
         };
@@ -1465,5 +1684,10 @@ mod tests {
         };
         assert_eq!(clean.page_url, "https://example.com/a?b=1");
         assert_eq!(clean.page_title, "Example Domain");
+        assert_eq!(clean.status, "success");
+        let orchestration_event::Event::BrowserObservationReceived(blocked) = &events[2] else {
+            panic!("{:?}", events[2]);
+        };
+        assert_eq!(blocked.status, "site_blocked");
     }
 }

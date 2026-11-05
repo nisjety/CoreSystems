@@ -59,6 +59,8 @@ var ErrUnavailable = errors.New("browser site policy is unavailable")
 type Decision struct {
 	Host      string `json:"host"`
 	Effective string `json:"effective"`
+	Cap       string `json:"cap"`
+	Source    string `json:"source"`
 }
 
 // Resolution is org-core's answer for a set of hosts for one caller.

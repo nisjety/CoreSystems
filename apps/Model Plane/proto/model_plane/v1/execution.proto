@@ -11,7 +11,20 @@ import "model_plane/v1/inference.proto";
 // Owns: tool planning/selection, permission checkpoints, tool execution,
 //       artifacts, subagents, step transitions, compaction triggers.
 service ExecutionCore {
-  // Execute a single step within a run.
+  // Authenticated execution-protocol handshake. This says only what this
+  // deployment implements; Quarry must still acknowledge every attachment.
+  rpc BrowserAgentCapabilities(BrowserAgentCapabilitiesRequest) returns (BrowserAgentCapabilitiesResponse);
+
+  // Restricted attached browser runs use a distinct RPC so mixed-version
+  // deployments fail closed: an older execution instance cannot accidentally
+  // accept and drop a restriction it does not understand. It takes the ExecuteStep
+  // request and response on purpose: the payload is the same step, only the route differs.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc ExecuteRestrictedBrowserStep(ExecuteStepRequest) returns (ExecuteStepResponse);
+  // Execute a single step within a run. ExecuteRestrictedBrowserStep shares its types.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
 
   // Resume a paused or checkpointed run.
@@ -38,6 +51,16 @@ service ExecutionCore {
   // to make Temporal work. The lane remains disabled until Session Core's
   // current-run claim/receipt and Control's per-step decision are deployed.
   rpc ExecuteScheduledStep(ExecuteScheduledStepRequest) returns (ExecuteScheduledStepResponse);
+}
+
+// BrowserAgentCapabilitiesRequest asks which execution protocol this deployment implements.
+message BrowserAgentCapabilitiesRequest { string org_id = 1; }
+
+// BrowserAgentCapabilitiesResponse names the protocol this deployment implements; Quarry
+// must still acknowledge every attachment.
+message BrowserAgentCapabilitiesResponse {
+  // The attached-browser policy protocol version this deployment implements.
+  uint32 attached_policy_protocol = 1;
 }
 
 // ExecuteScheduledStepRequest contains only non-secret, immutable bindings.

@@ -266,6 +266,14 @@ pub(crate) async fn execute_browser_agent(
                         return BrowserAgentExecution::Failed { reason: error };
                     }
                 };
+            if plan_config.attach.is_some()
+                && plan_config.policy.as_ref().is_some_and(|ask| !ask.is_empty())
+                && plan_config.planner_flag.as_deref() == Some("unavailable")
+            {
+                return BrowserAgentExecution::Failed {
+                    reason: "browser planner organization policy unavailable".to_owned(),
+                };
+            }
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
             let client = match crate::quarry_agent::QuarryAgentClient::from_env() {
@@ -289,6 +297,14 @@ pub(crate) async fn execute_browser_agent(
             let (planner, deterministic_reason) = match selection {
                 PlannerSelection::Llm(planner) => (Some(planner), None),
                 PlannerSelection::Deterministic(reason) => {
+                    if plan_config.attach.is_some() && plan_config.policy.as_ref().is_some_and(|ask| !ask.is_empty()) {
+                        // A restricted attached run is surfaced as a live AI
+                        // assistant. Never silently substitute observation-only
+                        // deterministic behavior when its planner is disabled.
+                        return BrowserAgentExecution::Failed {
+                            reason: format!("browser planner unavailable ({})", reason.as_str()),
+                        };
+                    }
                     tracing::info!(reason = reason.as_str(), "browser run uses the deterministic loop");
                     browser_agent::metrics::record_deterministic(reason);
                     // The default deployment (`mode_off`) keeps the output it
@@ -1931,6 +1947,8 @@ struct BrowserAgentInput {
     /// run never acquires a lease of its own.
     #[serde(default)]
     attach_session_id: Option<String>,
+    #[serde(default)]
+    attach_tab: Option<crate::quarry_agent::AttachTabTarget>,
     /// WS8.J: the mark an attached run puts on its tab when it completes
     /// (`none`, `deliverable`, `handoff`; absent = `deliverable`). A value
     /// outside the set fails the input. Meaningless without `attach_session_id`.
@@ -2021,8 +2039,14 @@ fn browser_plan_config_with(
         .map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty());
     let attach_grant = validated_grant.kind() == ATTACH_GRANT_KIND;
+    if input.attach_tab.is_some() && (attach_session_id.is_none() || input.start_url.is_some()) {
+        return Err("continuing in a browser tab requires an attached run without a start URL".to_owned());
+    }
     let attach = match (attach_session_id, attach_grant) {
-        (Some(session_run_id), true) => Some(browser_agent::AttachConfig { session_run_id }),
+        (Some(session_run_id), true) => Some(browser_agent::AttachConfig {
+            session_run_id,
+            target_tab: input.attach_tab,
+        }),
         (None, false) => None,
         (Some(_), false) => {
             return Err("browser attach requires a broker-derived attach grant".to_owned());
@@ -2057,7 +2081,7 @@ fn browser_plan_config_with(
         stop_criteria: input.stop_criteria.unwrap_or_default(),
         require_approval: input.require_approval.unwrap_or(false),
         max_cost_usd: input.max_cost_usd,
-        zdr: verified_zdr,
+        zdr: verified_zdr || validated_grant.zdr(),
         profile_id,
         start_url: input.start_url,
         postcondition: input.postcondition.unwrap_or_default(),
@@ -2130,6 +2154,16 @@ mod tests {
         assert!(zdr.starts_with("zdr_feature_not_supported: "), "{zdr}");
         let signed_out = browser_do_unavailable(false).error.expect("refused");
         assert!(signed_out.starts_with("browser_unavailable: "), "{signed_out}");
+    }
+
+    #[test]
+    fn legacy_attach_refuses_when_broker_grant_is_zdr() {
+        let input: BrowserAgentInput = serde_json::from_str(
+            r#"{"grant_id":"grant-att","attach_session_id":"session-1","max_steps":3}"#,
+        ).unwrap();
+        let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "parent", "user-1", true);
+        assert!(browser_plan_config(input, "org-1", false, &grant).is_err(),
+            "broker ZDR cannot be downgraded by a non-ZDR request");
     }
 
     #[test]
@@ -3115,6 +3149,7 @@ mod tests {
             screenshot_ref: "shot_1".to_owned(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
@@ -3216,6 +3251,7 @@ mod tests {
         assert_eq!(
             plan.attach,
             Some(browser_agent::AttachConfig {
+                target_tab: None,
                 session_run_id: "run_user_1".to_owned()
             })
         );

@@ -1,9 +1,21 @@
-import { useLocation } from '@solidjs/router'
-import { createEffect, createMemo, createSignal, Show, untrack } from 'solid-js'
+import { useLocation, useNavigate } from '@solidjs/router'
+import { createEffect, createMemo, createSignal, onCleanup, Show, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
+import { GlobalAssistant, type AssistantAgentView } from '@/features/core/components/GlobalAssistant'
+import type { DashboardComposerSubmitPayload } from '@/features/dashboard/home/DashboardComposer'
+import { AssistantNavigationCursor, createAssistantNavigationGuide } from '@/features/core/assistant-navigation/assistant-navigation'
+import { AssistantNavigationContext } from '@/features/core/assistant-navigation/assistant-navigation-context'
+import { createInlineAssistantController, type InlineAssistantState } from '@/features/core/lib/inline-assistant'
+import { createAssistantNavigationAgent, type AssistantNavigationAgentState } from '@/features/core/assistant-agent/assistant-navigation-agent'
+import { assistantBrowserTarget, createAssistantBrowserAgent } from '@/features/core/assistant-agent/assistant-browser-agent'
+import { AssistantBrowserContext, type NettBrowserOwner, type NettTabSelection } from '@/features/core/assistant-agent/assistant-browser-context'
+import { isAssistantTaskBusy, submitAssistantTask } from '@/features/core/assistant-agent/assistant-task-routing'
+import { clearAssistantChatDraft, queueAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
+import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
+import type { ChatSourceScope } from '@/shared/actions/chat-source-scope'
 import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
 import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
 import { AnnouncerRegions } from '@/shared/a11y/announcer'
@@ -19,6 +31,7 @@ import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import { createAttentionStore, navbarRefreshDelayMs, type AttentionStore, type AttentionStreamHealth } from '@/features/core/lib/attention-store'
 import { CoreWorkspaceContext } from '@/features/core/lib/workspace-context'
 import { getAttention, type AttentionItem } from '@/shared/api/attention-client'
+import { getBrowserSession } from '@/shared/api/browser-client'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
 import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { useI18n } from '@/shared/i18n'
@@ -32,6 +45,7 @@ const DELETION_BANNER_HEIGHT_PX = 40
 
 export function CoreShell(props: { children?: JSX.Element }) {
   const location = useLocation()
+  const navigate = useNavigate()
   const session = getSession()
   // One-time peek to seed the initial signal value; the reactive read for
   // ongoing updates is activeRoute (below), a proper createMemo.
@@ -40,14 +54,201 @@ export function CoreShell(props: { children?: JSX.Element }) {
     defaultSidebarExpandedForRoute(initialRoute, { pathname: untrack(() => location.pathname), phone: isPhoneViewport() }),
   )
   const [searchOpen, setSearchOpen] = createSignal(false)
+  const [assistantOpen, setAssistantOpen] = createSignal(initialRoute === '/dashboard')
+  const [assistantForceReveal, setAssistantForceReveal] = createSignal(false)
+  // Home shows the assistant by default. A user-opened assistant stays open
+  // while navigating; a Home-only default does not follow to other pages.
+  let assistantAutomaticallyOpened = initialRoute === '/dashboard'
+  const [assistantZeroRetention] = createSignal<boolean | undefined>(undefined)
+  const [assistantMessage, setAssistantMessage] = createSignal('')
+  const [continueTab, setContinueTab] = createSignal<NettTabSelection | null>(null)
+  const [assistantSourceScope, setAssistantSourceScope] = createSignal<ChatSourceScope>('workspace')
+  const [assistantState, setAssistantState] = createSignal<InlineAssistantState>({ turns: [], status: 'idle', error: null, activity: null, threadId: null, needsFullChat: false })
+  const assistantScope = () => session.user?.id && session.activeOrg?.id ? JSON.stringify([session.user.id, session.activeOrg.id]) : null
+  const nettBrowsers = new Set<() => NettBrowserOwner | null>()
+  const registerNettBrowser = (readOwner: () => NettBrowserOwner | null) => {
+    nettBrowsers.add(readOwner)
+    return () => { nettBrowsers.delete(readOwner) }
+  }
+  const onNett = () => location.pathname === '/dashboard' && new URLSearchParams(location.search).get('tab') === 'web'
+  const currentOwnedTab = async (signal: AbortSignal, sessionId?: string) => {
+    if (signal.aborted || !onNett()) return null
+    const ownedByUser = (owner: NettBrowserOwner | null): owner is NettBrowserOwner =>
+      Boolean(owner && owner.userId === session.user?.id && owner.orgId === session.activeOrg?.id)
+    for (const readOwner of nettBrowsers) {
+      const owner = readOwner()
+      if (!ownedByUser(owner) || (sessionId && sessionId !== owner.sessionId)) continue
+      try {
+        // The owner projection strips query and fragment data and reports
+        // whether Quarry still has a live browser.
+        const { session: browser } = await getBrowserSession(owner.orgId, owner.sessionId, signal)
+        const visibleOwner = readOwner()
+        if (signal.aborted || !onNett() || !nettBrowsers.has(readOwner) ||
+          !ownedByUser(visibleOwner) || visibleOwner.userId !== owner.userId ||
+          visibleOwner.orgId !== owner.orgId || visibleOwner.sessionId !== owner.sessionId ||
+          browser.id !== owner.sessionId || browser.status !== 'live' || browser.control?.mode !== 'human_takeover') return null
+        const [activeTab, secondActiveTab] = browser.tabs?.filter(tab => tab.active) ?? []
+        if (!activeTab?.url || secondActiveTab) return null
+        const url = assistantBrowserTarget(activeTab.url)
+        return url ? { tab: activeTab, url } : null
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+  const currentBrowserTarget = async (signal: AbortSignal): Promise<string | null> =>
+    (await currentOwnedTab(signal))?.url.href ?? null
+  onCleanup(clearAssistantChatDraft)
+  const assistantController = createInlineAssistantController({ scope: assistantScope, onChange: setAssistantState, tr: (no, en) => i18n.tr(no, en) })
+  onCleanup(assistantController.dispose)
+  const assistantGuide = createAssistantNavigationGuide({
+    scope: assistantScope,
+    navigate: (href) => navigate(href),
+    tr: (no, en) => i18n.tr(no, en),
+    onOpenChat: () => setAssistantOpen(true),
+    onFailure: (error) => {
+      setNavigationAgentState({ status: 'error', error })
+      setAssistantOpen(true)
+    },
+    onComplete: (suggestion) => {
+      setAssistantMessage((current) => current.trim() ? current : suggestion)
+      setAssistantOpen(true)
+    },
+  })
+  const startAssistantNavigation = (prompt: string, origin?: HTMLElement | null) => {
+    if (isAssistantTaskBusy(browserAgent.state().status, navigationAgent.state().status, Boolean(assistantGuide.destination()))) return false
+    if (!assistantGuide.start(prompt, origin)) return false
+    setAssistantMessage('')
+    assistantAutomaticallyOpened = false
+    setAssistantOpen(false)
+    return true
+  }
+  const [navigationAgentState, setNavigationAgentState] = createSignal<AssistantNavigationAgentState>({ status: 'idle', error: null })
+  const navigationAgent = createAssistantNavigationAgent({
+    scope: assistantScope,
+    onChange: setNavigationAgentState,
+    tr: (no, en) => i18n.tr(no, en),
+    currentBrowserTarget,
+    onBrowserTask: (goal, target) => browserAgent.send(goal, target),
+    onAction: (action) => {
+      if (!assistantGuide.startAction(action, document.querySelector<HTMLElement>('.global-assistant'))) return false
+      browserAgent.reset()
+      assistantAutomaticallyOpened = false
+      setAssistantOpen(false)
+      return true
+    },
+  })
+  onCleanup(navigationAgent.dispose)
+  const [agentBrowserSurfaceVisible, setAgentBrowserSurfaceVisible] = createSignal(false)
+  const [agentBrowserRevealVersion, setAgentBrowserRevealVersion] = createSignal(0)
+  const [browserAgentState, setBrowserAgentState] = createSignal<AssistantAgentView>({ available: false, kind: 'browser', status: 'idle', goal: '', error: null, action: null, sessionId: null, runId: null, receipt: null })
+  const browserAgent = createAssistantBrowserAgent({
+    scope: () => session.user?.id && session.activeOrg?.id ? { userId: session.user.id, orgId: session.activeOrg.id } : null,
+    onChange: setBrowserAgentState,
+    tr: (no, en) => i18n.tr(no, en),
+  })
+  onCleanup(browserAgent.dispose)
+  const assistantTaskBusy = () => isAssistantTaskBusy(browserAgent.state().status, navigationAgent.state().status, Boolean(assistantGuide.destination()))
+  const prepareContinuation = (tab: NettTabSelection) => {
+    if (!onNett() || assistantTaskBusy()) return
+    setContinueTab(tab)
+    assistantAutomaticallyOpened = false
+    setAssistantForceReveal(true)
+    setAssistantOpen(true)
+  }
+  createEffect(onNett, (visible) => { if (!visible) setContinueTab(null) })
+  const revealAgentBrowser = () => {
+    setAgentBrowserRevealVersion((version) => version + 1)
+    const params = new URLSearchParams(location.pathname === '/dashboard' ? location.search : '')
+    params.delete('overview')
+    params.set('tab', 'web')
+    const search = `?${params}`
+    if (location.pathname !== '/dashboard' || location.search !== search) navigate(`/dashboard${search}`)
+  }
+  let lastRevealedRunId: string | null = null
+  createEffect(() => {
+    const task = browserAgentState()
+    return task.kind === 'browser' && task.sessionId && ['starting', 'running', 'disconnected', 'completed'].includes(task.status)
+      ? task.runId : null
+  }, (runId) => {
+    if (!runId || runId === lastRevealedRunId) return
+    lastRevealedRunId = runId
+    revealAgentBrowser()
+  })
+  const submitOrdinaryAssistant = (payload: DashboardComposerSubmitPayload | string) => submitAssistantTask(payload, {
+    browserStatus: () => browserAgent.state().status,
+    navigationStatus: () => navigationAgent.state().status,
+    guiding: () => Boolean(assistantGuide.destination()),
+    resetNavigation: navigationAgent.reset,
+    sendBrowser: browserAgent.send,
+    sendNavigation: navigationAgent.send,
+    openChatDraft: (action) => {
+      if (!queueAssistantChatDraft(action)) return false
+      assistantAutomaticallyOpened = false
+      setAssistantOpen(false)
+      if (location.pathname !== action.href || (action.newChat && location.search)) navigate(action.href)
+      return true
+    },
+    tr: (no, en) => i18n.tr(no, en),
+  })
+  const submitAssistant = async (goal: string) => {
+    const selection = continueTab()
+    if (!selection) return submitOrdinaryAssistant(goal)
+    const current = await currentOwnedTab(AbortSignal.timeout(5000), selection.sessionId)
+    if (continueTab() !== selection) throw new Error(i18n.tr('Fanevalget er avbrutt. Utkastet er beholdt.', 'The tab selection was cancelled. Your draft has been kept.'))
+    if (assistantTaskBusy()) throw new Error(i18n.tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (current?.tab.tabId !== selection.tabId || current.tab.tabEpoch !== selection.tabEpoch ||
+        current.tab.holder !== 'human' || current.url.origin !== selection.origin) {
+      throw new Error(i18n.tr('Fanen er endret. Velg fanen på nytt for å fortsette.', 'The tab has changed. Select it again to continue.'))
+    }
+    navigationAgent.reset()
+    await browserAgent.send(goal, selection.origin, {
+      sessionId: selection.sessionId,
+      tabId: selection.tabId,
+      expectedEpoch: selection.tabEpoch,
+      expectedOrigin: selection.origin,
+    })
+    if (continueTab() === selection) setContinueTab(null)
+  }
   const [navbarData, { refetch: refetchNavbar }] = createResource(fetchNavbarData)
   const orgId = createMemo(() => session.activeOrg?.id ?? null)
+  let assistantOrgId = untrack(assistantScope)
+  createEffect(assistantScope, (currentOrgId) => {
+    if (currentOrgId === assistantOrgId) return
+    assistantOrgId = currentOrgId
+    clearAssistantChatDraft()
+    assistantGuide.stop()
+    navigationAgent.reset()
+    browserAgent.reset()
+    assistantController.reset()
+    setContinueTab(null)
+    setAssistantMessage('')
+    setAssistantSourceScope('workspace')
+    assistantAutomaticallyOpened = routeFromPath(location.pathname) === '/dashboard'
+    setAssistantOpen(assistantAutomaticallyOpened)
+  })
   const [deletionStatus, { refetch: refetchDeletionStatus }] = createResource(
     orgId,
     fetchDeletionStatus,
   )
   const deletionBannerVisible = createMemo(() => Boolean(deletionStatus.latest?.pending ?? deletionStatus()?.pending))
   const activeRoute = createMemo(() => routeFromPath(location.pathname))
+  let lastAssistantRoute = initialRoute
+  createEffect(activeRoute, (route) => {
+    if (route === lastAssistantRoute) return
+    lastAssistantRoute = route
+    if (route === '/dashboard') {
+      if (!assistantOpen()) {
+        assistantAutomaticallyOpened = true
+        setAssistantForceReveal(false)
+        setAssistantOpen(true)
+      }
+    } else if (assistantAutomaticallyOpened) {
+      assistantAutomaticallyOpened = false
+      setAssistantOpen(false)
+    }
+  })
   // Support uses a compact navigation column so conversation and ticket work
   // retain the horizontal space they need.
   const expandedSidebarWidth = () => activeRoute() === '/support' ? 303 : SIDEBAR_EXPANDED_WIDTH
@@ -160,6 +361,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
 
   return (
     <AgentsProvider routeLocation={location}>
+      <AssistantNavigationContext value={{ start: startAssistantNavigation, canStart: assistantGuide.canStart, submit: submitOrdinaryAssistant, zeroRetention: assistantZeroRetention, open: () => { assistantAutomaticallyOpened = false; setAssistantForceReveal(true); setAssistantOpen(true) }, openWithPrompt: (prompt) => { setContinueTab(null); assistantAutomaticallyOpened = false; setAssistantMessage(prompt); setAssistantOpen(true) }, isAssistantVisible: () => assistantOpen() || Boolean(assistantGuide.destination()) }}>
       <div
         class="core-product-shell"
         data-chat-appearance={activeRoute() === '/chat' ? chatAppearanceTokens() : chatAppearanceActive('navigation') ? 'navigation' : undefined}
@@ -179,6 +381,8 @@ export function CoreShell(props: { children?: JSX.Element }) {
             activeRoute={activeRoute()}
             navbarData={navbarData.latest ?? navbarData()}
             onNavbarRefresh={() => void refetchNavbar()}
+            assistantOpen={assistantOpen()}
+            onAssistantToggle={() => { assistantAutomaticallyOpened = false; setAssistantForceReveal(!assistantOpen()); setAssistantOpen((open) => !open) }}
             searchOpen={searchOpen()}
             onSearchOpenChange={setSearchOpen}
             workspace={workspace()}
@@ -214,15 +418,58 @@ export function CoreShell(props: { children?: JSX.Element }) {
         <main class="core-main">
           <div class="verevon-workspace-panel dashboard-main-panel core-main__panel">
             <CoreWorkspaceContext value={workspace}>
+              <AssistantBrowserContext value={{ view: browserAgentState, stop: browserAgent.stop, claimRetained: browserAgent.claimRetained, setSurfaceVisible: setAgentBrowserSurfaceVisible, revealVersion: agentBrowserRevealVersion, registerNettBrowser, prepareContinuation, taskBusy: assistantTaskBusy }}>
               <RegionBoundary region="outlet" resetKey={() => location.pathname}>
                 {props.children}
               </RegionBoundary>
+              </AssistantBrowserContext>
             </CoreWorkspaceContext>
           </div>
         </main>
+        <AssistantNavigationCursor guide={assistantGuide} />
+        <Show when={assistantOpen()}>
+          <RegionBoundary region="panel" compact>
+            <GlobalAssistant
+              forceReveal={assistantForceReveal()}
+              message={assistantMessage()}
+              onMessageChange={setAssistantMessage}
+              onBeforeSubmit={() => false}
+              canHandleBeforeSubmit={assistantGuide.canStart}
+              onClose={() => { setContinueTab(null); setAssistantOpen(false) }}
+              continuation={continueTab()}
+              onCancelContinuation={() => setContinueTab(null)}
+              state={assistantState()}
+              agentView={browserAgentState()}
+              browserPresentedInWorkspace={agentBrowserSurfaceVisible()}
+              onStopAgent={browserAgent.stop}
+              onOpenAgentBrowser={revealAgentBrowser}
+              onApprovalDecision={(decision) => { void browserAgent.decide(decision) }}
+              onRetryAgent={() => {
+                const selection = continueTab()
+                const draft = assistantMessage()
+                void browserAgent.retry().then(() => {
+                  if (!selection || continueTab() !== selection) return
+                  setContinueTab(null)
+                  if (assistantMessage() === draft && browserAgent.state().goal === draft.trim()) setAssistantMessage('')
+                }).catch(() => undefined)
+              }}
+              onAllowSiteAccess={browserAgent.allowSiteAccess}
+              onDeclineSiteAccess={browserAgent.declineSiteAccess}
+              navigationAgent={navigationAgentState()}
+              onStopNavigation={navigationAgent.stop}
+              onStop={assistantController.stop}
+              sourceScope={assistantSourceScope()}
+              onSourceScopeChange={setAssistantSourceScope}
+              onNewChat={() => { navigationAgent.reset(); browserAgent.reset(); assistantGuide.stop(); assistantController.reset(); setContinueTab(null); setAssistantMessage(''); setAssistantSourceScope('workspace') }}
+              onOpenChat={() => { const threadId = assistantState().threadId; if (threadId) { setAssistantOpen(false); navigate(chatThreadHref(threadId)) } }}
+              onSubmit={submitAssistant}
+            />
+          </RegionBoundary>
+        </Show>
         <FeedbackWidget />
         <AnnouncerRegions />
       </div>
+      </AssistantNavigationContext>
     </AgentsProvider>
   )
 }

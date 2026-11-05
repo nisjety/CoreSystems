@@ -210,6 +210,7 @@ pub async fn step(
             initiator: derive_initiator_ref(&claims, body.initiated_by, &body.advisory_agent()),
             action: &body.action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            consented_tab_control: false,
             last_observation: lane.last_observation.as_deref(),
         },
     )
@@ -431,6 +432,7 @@ pub(super) async fn execute_ws_action(
             initiator: derive_initiator_ref(claims, hint, &AdvisoryAgent::default()),
             action: &action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            consented_tab_control: false,
             last_observation: lane.last_observation.as_deref(),
         },
     )

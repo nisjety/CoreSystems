@@ -5750,6 +5750,11 @@ pub(super) async fn dispatch_browser_run_start(
     if session_id.is_empty() || goal.is_empty() {
         return ticket_bad_request("browser_run.start requires non-empty 'sessionId' and 'goal'");
     }
+    let require_attached = match input.get("requireAttached") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return ticket_bad_request("browser_run.start 'requireAttached' must be a boolean"),
+    };
     let allowed_domains = input
         .get("allowedDomains")
         .and_then(Value::as_array)
@@ -5760,7 +5765,11 @@ pub(super) async fn dispatch_browser_run_start(
                 .collect()
         });
     let body = StartAiRunBody {
+        continue_in_tab: None,
         goal: goal.to_owned(),
+        require_attached,
+        assistant_interactive: false,
+        plan_mode: None,
         allowed_domains,
         max_steps: input
             .get("maxSteps")
@@ -5972,6 +5981,7 @@ pub(super) async fn dispatch_browser_create_session(
     });
     let body = CreateSessionBody {
         url: url.to_owned(),
+        purpose: None,
         profile_id: input
             .get("profileId")
             .and_then(Value::as_str)

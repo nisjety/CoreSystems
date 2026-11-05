@@ -510,6 +510,7 @@ fn probe_bwrap() -> bool {
     // success means bwrap can genuinely build the sandbox here, not merely that
     // the binary exists.
     match std::process::Command::new(BWRAP_BIN)
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
         .args(["--ro-bind", "/", "/", "--unshare-pid", "--", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -531,6 +532,7 @@ fn probe_prlimit() -> bool {
     // The same shape the real wrapper uses (`prlimit <flags> -- <command>`),
     // with the cheapest flag and command.
     match std::process::Command::new(PRLIMIT_BIN)
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
         .args(["--core=0", "--", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

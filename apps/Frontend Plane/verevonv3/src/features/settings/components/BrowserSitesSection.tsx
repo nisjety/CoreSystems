@@ -1,8 +1,10 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { requestJson } from '@/shared/api/http'
+import { browserSitesPath as base, explainBrowserSite, setMyBrowserSiteChoice, type BrowserSiteChoice, type BrowserSiteExplanation, type BrowserSiteLevel, type BrowserSiteMode } from '@/shared/api/browser-sites-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
+import { canonicalBrowserHost } from '@/features/settings/components/BrowserPolicySection'
 import {
   SectionHeader,
   SettingsButton,
@@ -21,40 +23,15 @@ import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
  * reachable.
  */
 
-export type BrowserSiteLevel = 'none' | 'read' | 'act'
+export { setMyBrowserSiteChoice } from '@/shared/api/browser-sites-client'
+export type { BrowserSiteChoice, BrowserSiteLevel, BrowserSiteMode } from '@/shared/api/browser-sites-client'
 export type BrowserSiteRule = 'block' | 'read' | 'act'
-export type BrowserSiteMode = 'open' | 'allowlist'
-
-export interface BrowserSiteChoice {
-  host: string
-  level: BrowserSiteLevel
-  expires_at: string
-  updated_at: string
-}
 
 export interface BrowserSiteChoices {
   organization_id: string
   user_id: string
   revision: number
   prefs: BrowserSiteChoice[]
-}
-
-export interface BrowserSiteDecision {
-  host: string
-  effective: 'deny' | 'ask' | 'read' | 'act'
-  cap: BrowserSiteLevel
-  source: 'org_block' | 'org_cap' | 'user_pref' | 'default'
-}
-
-export interface BrowserSiteExplanation {
-  organization_id: string
-  user_id: string
-  revision: number
-  mode: BrowserSiteMode
-  decision: BrowserSiteDecision
-  org_rule: string
-  user_level: string
-  user_expires_at: string | null
 }
 
 export interface BrowserSiteRuleRow {
@@ -79,10 +56,6 @@ export function browserSitesEnabled(): boolean {
   return import.meta.env.VITE_BROWSER_SITES === 'true'
 }
 
-function base(orgId: string): string {
-  return `/api/v1/orgs/${encodeURIComponent(orgId)}/browser-sites`
-}
-
 function hostPath(orgId: string, host: string): string {
   return `${base(orgId)}/me/${encodeURIComponent(host)}`
 }
@@ -91,25 +64,8 @@ export function getMyBrowserSiteChoices(orgId: string): Promise<BrowserSiteChoic
   return requestJson<BrowserSiteChoices>(`${base(orgId)}/me`)
 }
 
-/** Sets the caller's choice for one host, against the revision the caller read. */
-export function setMyBrowserSiteChoice(
-  orgId: string,
-  host: string,
-  expectedRevision: number,
-  level: BrowserSiteLevel,
-): Promise<BrowserSiteChoice> {
-  return requestJson<BrowserSiteChoice>(hostPath(orgId, host), {
-    method: 'PUT',
-    body: JSON.stringify({ expected_revision: expectedRevision, level }),
-  })
-}
-
 export function forgetMyBrowserSiteChoice(orgId: string, host: string): Promise<void> {
   return requestJson<void>(hostPath(orgId, host), { method: 'DELETE' })
-}
-
-export function explainBrowserSite(orgId: string, host: string): Promise<BrowserSiteExplanation> {
-  return requestJson<BrowserSiteExplanation>(`${base(orgId)}/explain?host=${encodeURIComponent(host)}`)
 }
 
 export function getBrowserSitePolicy(orgId: string): Promise<BrowserSitePolicy> {
@@ -149,7 +105,7 @@ export function decisionLabel(effective: string, tr: Tr): string {
     case 'deny':
       return tr('Nettstedet er ikke tillatt', 'The site is not allowed')
     case 'ask':
-      return tr('Du blir spurt før første bruk', 'You will be asked before first use')
+      return tr('Ingen tilgang valgt ennå', 'No access choice made yet')
     default:
       return effective
   }
@@ -181,9 +137,12 @@ export function BrowserSitesSection() {
     (id) => getMyBrowserSiteChoices(id),
   )
 
-  const [newHost, setNewHost] = createSignal('')
+  const requestedHost = typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('host') ?? ''
+  const canonicalHost = canonicalBrowserHost(requestedHost)
+  const reviewHost = canonicalHost.ok && canonicalHost.host.includes('.') ? canonicalHost.host : ''
+  const [newHost, setNewHost] = createSignal(reviewHost)
   const [newLevel, setNewLevel] = createSignal<BrowserSiteLevel>('read')
-  const [probe, setProbe] = createSignal('')
+  const [probe, setProbe] = createSignal(reviewHost)
   const [explanation, setExplanation] = createSignal<BrowserSiteExplanation | null>(null)
   const [problem, setProblem] = createSignal<string | null>(null)
   const [busy, setBusy] = createSignal(false)

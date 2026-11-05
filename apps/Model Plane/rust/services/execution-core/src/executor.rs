@@ -702,6 +702,12 @@ async fn spawn_capture(
     timeout: Duration,
     limits: Option<&ResourceLimits>,
 ) -> std::io::Result<ExecOutcome> {
+    // An unisolated same-UID child could read the parent's /proc environment,
+    // even if its own environment was cleared. Never start one while this
+    // process holds the attachment signing key.
+    if !cmd.sandboxed && std::env::var_os("BROWSER_ATTACH_COMPAT_HMAC_KEY").is_some() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "browser receipt signing requires an isolated tool process"));
+    }
     let mut command = tokio::process::Command::new(&cmd.program);
     command.args(&cmd.args);
     // Set on the spawned process itself, not just via bwrap's `--chdir`/
@@ -715,6 +721,9 @@ async fn spawn_capture(
         command.env_clear();
         command.envs(allowlist.iter().map(|(key, value)| (key, value)));
     }
+    // The shell path may inherit the service environment when sandboxing is
+    // unavailable. Receipt signing authority must never reach a tool process.
+    command.env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY");
     // `kill_on_drop` is what makes the timeout real: `timeout()` cancels by
     // DROPPING the output future, and without it the orphaned child keeps
     // running (and holding its sandbox) after we've already given up on it.
@@ -838,6 +847,17 @@ pub(crate) async fn hold_every_spawn_permit_for_test() -> HeldGate {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_attach_secret_refuses_unisolated_shell() {
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "test-only-secret-for-child-environment");
+        let cmd = super::sandbox::SandboxedCommand {
+            program: "/bin/sh".into(), args: vec!["-c".into(), "if [ -n \"${BROWSER_ATTACH_COMPAT_HMAC_KEY+x}\" ]; then echo leaked; else echo absent; fi".into()], sandboxed: false, limits_applied: false,
+        };
+        let result = super::spawn_capture(&cmd, None, None, std::time::Duration::from_secs(5), None).await;
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    }
     use super::*;
 
     fn args(v: &[&str]) -> Vec<String> {

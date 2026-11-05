@@ -26,6 +26,7 @@ const boot = () => {
 
   // The boot watchdog (WS07-S2) waits for this flag; it means the first render ran.
   ;(window as unknown as { __verevonBoot?: boolean }).__verevonBoot = true
+  document.getElementById('verevon-boot-failure')?.remove()
 
   // Stale-tab check (WS07-S2): compares /version.json with this build; shows the banner, never reloads.
   startVersionCheck()

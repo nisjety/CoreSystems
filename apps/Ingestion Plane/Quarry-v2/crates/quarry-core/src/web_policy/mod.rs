@@ -845,6 +845,11 @@ impl ResolvedPolicy {
         hosts
     }
 
+    /// Whether a policy layer explicitly limits network requests by host.
+    pub fn has_host_allowlist(&self) -> bool {
+        !self.allow_terms.is_empty()
+    }
+
     /// WS7.G 6b: the policy as a snapshot a durable job carries from the handoff to every
     /// page run. It states only what a layer can state, so [`PolicyLayer::from_snapshot_json`]
     /// turns it back into a layer that the page's own policy meets (tighten-only). Modes equal

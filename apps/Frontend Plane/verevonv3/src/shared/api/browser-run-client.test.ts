@@ -57,6 +57,26 @@ describe('startBrowserAiRun', () => {
     })
     expect(result).toEqual({ runId: 'run_1', threadId: 'thread_1', planId: 'plan_1' })
   })
+
+  it('explicitly requests a session binding when required', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ run_id: 'run_1', thread_id: 'thread_1', plan_id: 'plan_1' }))
+    vi.stubGlobal('fetch', fetchMock)
+    await startBrowserAiRun('org_1', 'session_1', { goal: 'navigate', requireAttached: true })
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toMatchObject({ goal: 'navigate', requireAttached: true })
+  })
+})
+
+describe('assistant interactive browser policy', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('sends the server-owned interactive policy without plan mode', async () => {
+    const mock = vi.fn().mockResolvedValue(jsonResponse({ run_id: 'run_1', thread_id: 'thread_1', plan_id: 'plan_1' }))
+    vi.stubGlobal('fetch', mock)
+    await startBrowserAiRun('org_1', 'session_1', { goal: 'inspect', requireAttached: true, assistantInteractive: true })
+    const [, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toMatchObject({ requireAttached: true, assistantInteractive: true })
+    expect(JSON.parse(init.body as string)).not.toHaveProperty('planMode')
+  })
 })
 
 const STARTED = { run_id: 'run_1', thread_id: 'thread_1', plan_id: 'plan_1' }
@@ -221,6 +241,12 @@ describe('the AI-run start keyring', () => {
     const keys = createAiRunStartKeyring()
     const first = keys.keyFor('session_1', { goal: 'g', maxSteps: 5 })
     expect(keys.keyFor('session_1', { goal: 'g', maxSteps: 6 })).not.toBe(first)
+  })
+
+  it('never reuses an ambiguous unattached start key for an attachment-required run', () => {
+    const keys = createAiRunStartKeyring()
+    const previous = keys.keyFor('session_1', { goal: 'g' })
+    expect(keys.keyFor('session_1', { goal: 'g', requireAttached: true })).not.toBe(previous)
   })
 })
 

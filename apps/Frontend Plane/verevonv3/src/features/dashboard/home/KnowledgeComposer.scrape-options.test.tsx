@@ -48,6 +48,7 @@ function stubGateway(): Sent[] {
 
 async function mounted() {
   const view = render(() => <KnowledgeComposer />)
+  fireEvent.click([...view.container.querySelectorAll<HTMLButtonElement>('.dashboard-knowledge-composer__modes button')].find(button => button.textContent?.includes('Extract'))!)
   const input = await waitFor(() => {
     const field = view.container.querySelector<HTMLInputElement>('.dashboard-knowledge-composer__input')
     expect(field).not.toBeNull()

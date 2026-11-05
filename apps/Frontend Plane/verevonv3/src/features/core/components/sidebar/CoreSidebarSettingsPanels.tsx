@@ -57,6 +57,8 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'audit-log', label: 'Revisjonslogg', icon: FileText, href: '/settings/audit-log' },
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
   { id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' },
+  { id: 'browser-sites', label: 'Sites for the agent', icon: Globe2, href: '/settings/browser-sites' },
+  { id: 'org-browser-policy', label: 'Browser policy', icon: ShieldCheck, href: '/settings/org-browser-policy' },
   { id: 'space-policy', label: 'Rom-policy', icon: Layers, href: '/settings/space-policy' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
@@ -120,6 +122,8 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
             (section.id !== 'platform-users' || hasPlatformAdminAccess(getSession())) &&
             (section.id !== 'audit-log' || hasWorkspaceAdminAccess(getSession())) &&
             (section.id !== 'model-access' || props.modelAccessEnabled) &&
+            (section.id !== 'browser-sites' || import.meta.env.VITE_BROWSER_SITES === 'true') &&
+            (section.id !== 'org-browser-policy' || (import.meta.env.VITE_BROWSER_SITES === 'true' && hasWorkspaceAdminAccess(getSession()))) &&
             (section.id !== 'space-policy' || spacePolicyEnabled()),
         )}
         activeSectionId={activeSectionId()}
@@ -299,6 +303,10 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Router-policy', 'Router policy')
     case 'model-access':
       return i18n.tr('Modelltilgang', 'Model access')
+    case 'browser-sites':
+      return i18n.tr('Nettsider for agenten', 'Sites for the agent')
+    case 'org-browser-policy':
+      return i18n.tr('Nettleserpolicy', 'Browser policy')
     case 'space-policy':
       return i18n.tr('Rom-policy', 'Room policy')
     case 'finetune':

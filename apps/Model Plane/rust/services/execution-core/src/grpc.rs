@@ -1412,8 +1412,65 @@ fn authorize_scheduled_step_service(
     Ok(())
 }
 
+fn validate_restricted_browser_step(req: &pb::ExecuteStepRequest) -> Result<(), Status> {
+    if req.tool_name != "browser_agent" {
+        return Err(Status::invalid_argument("restricted browser dispatch requires browser_agent"));
+    }
+    let input: serde_json::Value = serde_json::from_str(&req.tool_input)
+        .map_err(|_| Status::invalid_argument("invalid restricted browser input"))?;
+    let has_attach = input.get("attach_session_id").and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let ask: crate::quarry_agent::WireRequestAsk = input.get("policy").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| Status::invalid_argument("restricted attachment requires a policy"))?;
+    if !has_attach || ask.is_empty() {
+        return Err(Status::invalid_argument("restricted attachment requires a non-empty policy"));
+    }
+    if !["browser.act.upload", "browser.act.download"].iter().all(|required| ask.disable.iter().any(|capability| capability == required)) {
+        return Err(Status::invalid_argument("restricted attachment must disable file transfers"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod restricted_browser_dispatch_tests {
+    use super::*;
+    #[test]
+    fn restricted_rpc_refuses_missing_policy_or_attachment() {
+        let mut req = pb::ExecuteStepRequest { tool_name: "browser_agent".into(), ..Default::default() };
+        for input in ["{}", r#"{"attach_session_id":"s","policy":{}}"#, r#"{"policy":{"disable":["browser.act.input"]}}"#] {
+            req.tool_input = input.into();
+            assert!(validate_restricted_browser_step(&req).is_err());
+        }
+        req.tool_input = r#"{"attach_session_id":"s","policy":{"disable":["browser.act.input"]}}"#.into();
+        assert!(validate_restricted_browser_step(&req).is_err());
+        req.tool_input = r#"{"attach_session_id":"s","policy":{"disable":["browser.act.upload","browser.act.download"]}}"#.into();
+        assert!(validate_restricted_browser_step(&req).is_ok());
+        req.tool_name = "echo".into();
+        assert!(validate_restricted_browser_step(&req).is_err());
+    }
+}
+
 #[tonic::async_trait]
 impl ExecutionCore for ExecutionService {
+    async fn browser_agent_capabilities(
+        &self,
+        request: Request<pb::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<Response<pb::BrowserAgentCapabilitiesResponse>, Status> {
+        let caller = self.auth.authenticate(&request).await?;
+        caller.authorize(&request.get_ref().org_id, None)?;
+        Ok(Response::new(pb::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
+    async fn execute_restricted_browser_step(
+        &self,
+        request: Request<pb::ExecuteStepRequest>,
+    ) -> Result<Response<pb::ExecuteStepResponse>, Status> {
+        validate_restricted_browser_step(request.get_ref())?;
+        // The existing method authenticates all delegated credentials and
+        // run ownership before validating the broker grant or starting Quarry.
+        self.execute_step(request).await
+    }
     // single-step RPC: gate → execute → HITL → persist is one linear flow
     #[allow(clippy::too_many_lines)]
     async fn execute_step(
@@ -1532,7 +1589,10 @@ impl ExecutionCore for ExecutionService {
             self.session_channel.clone(),
             Some(self.state.clone()),
         )
-        .with_verified_bearer(session_bearer.as_str());
+        .with_verified_bearer(session_bearer.as_str())
+        .with_receipt_persistence_confirmed(
+            !req.zdr && !caller.zdr && caller.org_zdr == Some(false) && caller.zdr_waiver.is_none(),
+        );
 
         let sandbox = sandbox_bearer
             .as_ref()

@@ -76,15 +76,57 @@ const storedQuery = (key = keyA) => (JSON.parse(stored(key) ?? 'null') as { quer
 const tick = () => new Promise<void>((resolve) => queueMicrotask(resolve))
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function setup() {
+function setup(onOpenBrowser?: (url: string) => void) {
   const [expanded, setExpanded] = createSignal(false)
   const view = render(() => (
     <QueryClientProvider client={queryClient}>
-      <SearchPanel expanded={expanded()} onExpandedChange={setExpanded} onPreviewActiveChange={() => undefined} rememberSearches />
+      <SearchPanel expanded={expanded()} onExpandedChange={setExpanded} onPreviewActiveChange={() => undefined} onOpenBrowser={onOpenBrowser} rememberSearches />
     </QueryClientProvider>
   ))
   return { ...view, expanded }
 }
+
+describe('the shared search and browser entry', () => {
+  it('opens a typed address without searching for it', async () => {
+    const open = vi.fn()
+    setup(open)
+    type('example.com/status')
+    fireEvent.submit(compactBox().closest('form')!); flush()
+    expect(open).toHaveBeenCalledWith('https://example.com/status')
+    expect(api.runWebSearch).not.toHaveBeenCalled()
+  })
+
+  it('opens a search result in the workspace browser and leaves the search visible to return to', async () => {
+    const open = vi.fn()
+    const view = setup(open)
+    await searchFor()
+    fireEvent.click(screen.getByRole('button', { name: 'Open Agent status overview in Verevon' }))
+    expect(open).toHaveBeenCalledWith('https://example.com/status')
+    expect(view.expanded()).toBe(true)
+    expect(window.open).not.toHaveBeenCalled()
+  })
+
+  it('opens an address entered after search results are already shown', async () => {
+    const open = vi.fn()
+    setup(open)
+    await searchFor()
+    api.runWebSearch.mockClear()
+    fireEvent.input(expandedBox(), { target: { value: 'https://www.iana.org/' } }); flush()
+    fireEvent.submit(expandedBox().closest('form')!); flush()
+    expect(open).toHaveBeenCalledWith('https://www.iana.org/')
+    expect(api.runWebSearch).not.toHaveBeenCalled()
+  })
+
+  it('opens an ordinary source link in the workspace browser', async () => {
+    const open = vi.fn()
+    const view = setup(open)
+    await searchFor()
+    const link = view.container.querySelector('a.dashboard-xrail__source') as HTMLAnchorElement
+    expect(link).toBeTruthy()
+    fireEvent.click(link)
+    expect(open).toHaveBeenCalledWith('https://example.com/status')
+  })
+})
 
 // Types a search and submits it; resolves once the results page is open.
 async function searchFor(text = 'agent status') {

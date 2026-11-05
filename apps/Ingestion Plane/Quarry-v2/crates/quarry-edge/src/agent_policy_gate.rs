@@ -145,11 +145,16 @@ pub fn egress_policy(decision: &Decision, allowed_domains: &[String]) -> Browser
     // sub-resource, frame or redirect to one of them is refused where it happens, even on
     // a run whose allow list is empty or names a parent domain. Empty when no rule denies.
     let denied = decision.policy().denied_hosts();
-    egress_for_narrowing(
+    let egress = egress_for_narrowing(
         decision.policy().narrow_egress(allowed_domains),
         allowed_domains,
         &denied,
-    )
+    );
+    if decision.policy().has_host_allowlist() {
+        egress
+    } else {
+        egress.with_public_assets()
+    }
 }
 
 /// The browser boundary for one narrowing result. `from_allowed_domains(&[])` is the
@@ -236,6 +241,72 @@ pub fn check_action(policy: &ResolvedPolicy, action: &AgentAction) -> Result<(),
         policy.check_url(url)?;
     }
     Ok(())
+}
+
+/// Resolve an attachment's own tighten-only ask as an enforced independent layer.
+/// Unlike an operator baseline running in observe mode, an explicit restriction
+/// accepted from the caller must never silently become advisory.
+pub(crate) fn attachment_policy(ask: &RequestAsk) -> QuarryResult<ResolvedPolicy> {
+    let layer = ask.into_layer().map_err(web_policy_edge::ask_error)?;
+    resolve(&PolicyInputs {
+        principal: Principal::Autonomous,
+        zdr: false, // ZDR attachments are rejected before this is called.
+        baseline: PolicyLayer::default(),
+        org: OrgInput::Absent,
+        grant: None,
+        request: Some(layer),
+    }).map_err(|denial| quarry_error(&denial))
+}
+
+/// Enforce the explicit attachment restriction in addition to the run's normal
+/// admission chain; an operator's observe mode must not weaken this promise.
+pub(crate) fn gate_attachment_action(policy: &ResolvedPolicy, action: &AgentAction) -> QuarryResult<()> {
+    check_action(policy, action).map_err(|denial| {
+        record_denial(&denial, true);
+        quarry_error(&denial)
+    })
+}
+
+pub(crate) fn gate_attachment_url(policy: &ResolvedPolicy, url: &str) -> QuarryResult<()> {
+    policy.check_url(url).map_err(|denial| {
+        record_denial(&denial, true);
+        quarry_error(&denial)
+    })
+}
+
+/// The tab boundary meets this with the parent session's own egress policy.
+pub(crate) fn attachment_egress_policy(
+    policy: &ResolvedPolicy,
+    allowed_domains: &[String],
+    ask: &RequestAsk,
+) -> BrowserEgressPolicy {
+    // A narrower request may name a child of a grant root. Filtering only the
+    // grant roots would deny that legitimate intersection. Candidate roots can
+    // come from either side, but each must satisfy both the grant and policy.
+    let mut candidates: Vec<String> = allowed_domains.iter()
+        .chain(ask.allow_domains.iter().flatten())
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect();
+    candidates.retain(|host| {
+        allowed_domains.iter().any(|grant| {
+            let grant = grant.trim().to_ascii_lowercase();
+            !grant.is_empty() && (host == &grant || host.strip_suffix(&grant).is_some_and(|prefix| prefix.ends_with('.')))
+        }) && policy.check_host(host).is_ok()
+    });
+    candidates.sort();
+    candidates.dedup();
+    if candidates.is_empty() {
+        BrowserEgressPolicy::deny_all()
+    } else {
+        let egress = BrowserEgressPolicy::from_allowed_domains(&candidates)
+            .with_denied_domains(&policy.denied_hosts());
+        if policy.has_host_allowlist() {
+            egress
+        } else {
+            egress.with_public_assets()
+        }
+    }
 }
 
 fn gate_live(
@@ -1821,5 +1892,40 @@ mod origin_consent_tests {
         assert!(egress.allows_url("https://login.example.net/sso"));
         assert!(!egress.allows_url("https://elsewhere.example/"));
         assert_eq!(extended_allowed_domains(&[], &extension), None);
+    }
+}
+
+#[cfg(test)]
+mod attachment_policy_tests {
+    use super::*;
+    #[test]
+    fn attachment_ask_restricts_actions_and_the_browser_network_boundary() {
+        let ask = RequestAsk {
+            disable: vec!["browser.act.interact".into()],
+            allow_domains: Some(vec!["docs.example.com".into()]),
+            deny_domains: vec!["ads.docs.example.com".into()],
+            ..Default::default()
+        };
+        let policy = attachment_policy(&ask).unwrap();
+        assert!(gate_attachment_action(&policy, &AgentAction::Click { selector: "button".into() }).is_err());
+        assert!(gate_attachment_action(&policy, &AgentAction::Wait { ms: 0 }).is_ok());
+        let boundary = attachment_egress_policy(&policy, &["example.com".into()], &ask);
+        assert!(boundary.allows_url("https://docs.example.com/"));
+        assert!(!boundary.allows_url("https://ads.docs.example.com/"));
+        assert!(!boundary.allows_url("https://example.com/"));
+        assert!(attachment_policy(&RequestAsk { disable: vec!["unknown.capability".into()], ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn attachment_intersection_never_expands_the_grant() {
+        let ask = RequestAsk { allow_domains: Some(vec!["example.com".into()]), ..Default::default() };
+        let policy = attachment_policy(&ask).unwrap();
+        let narrow = attachment_egress_policy(&policy, &["docs.example.com".into()], &ask);
+        assert!(narrow.allows_url("https://docs.example.com/"));
+        assert!(!narrow.allows_url("https://example.com/"));
+        assert!(!narrow.allows_url("https://other.example.com/"));
+        let disjoint = attachment_egress_policy(&policy, &["other.test".into()], &ask);
+        assert!(!disjoint.allows_url("https://example.com/"));
+        assert!(!disjoint.allows_url("https://other.test/"));
     }
 }

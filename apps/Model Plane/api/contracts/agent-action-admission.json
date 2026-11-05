@@ -364,7 +364,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:b680505df8834cd85800af8855cadee866289b09ab923af4835ace3b17a2caed",
+      "schemaHash": "sha256:a24a488b1322dce77b3f4bb8020d959e56b2abbcdc306e8f3f2c8aca808fc6bf",
       "zdr_allowed": false
     },
     {

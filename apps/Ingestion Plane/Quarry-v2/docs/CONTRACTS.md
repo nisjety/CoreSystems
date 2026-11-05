@@ -473,6 +473,13 @@ robots cannot be silently treated as permission. Generic `/v1/scrape` and
 `fetch_bounded` do not gain redirect permission.
 
 `POST /v1/audit/page` requires authenticated `scrape:read` for service actors.
+
+The assistant gateway calls `POST /v1/browser/redirect-hop` with `{url}` to inspect one
+public HTTP(S) response. Service actors require `browser:execute`. The response
+envelope carries `data.target` as an absolute URL for a validated 301, 302, 303, 307
+or 308 redirect, or `null` for other statuses. The probe pins public DNS addresses,
+checks Quarry web policy, and reads the response headers without cookies or storage.
+The gateway checks site access and the next hop before continuing the chain.
 It permits at most eight in-flight captures per process and rejects excess
 requests with 429 without queueing. This is a local transport capacity guard,
 not durable per-organization billing or scheduled-job quota management.

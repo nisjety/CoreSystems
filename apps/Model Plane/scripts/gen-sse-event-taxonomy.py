@@ -229,6 +229,11 @@ def parse_arms(body: str) -> dict[str, str | None]:
 def orchestration_arms(body: str) -> dict[str, str]:
     """Map each OrchestrationEvent oneof variant to the wire name its arm returns."""
     flat = " ".join(strip_line_comments(body).split())
+    # Count only inside the naming match: guards before it (an early `return None`
+    # or a verified early event) name variants too, but they are not arms.
+    start = flat.find("let event_name = match")
+    if start >= 0:
+        flat = flat[start:]
     arms = ORCHESTRATION_ARM.findall(flat)
     written = flat.count("orchestration_event::Event::")
     if not arms or len(arms) != written:
@@ -434,7 +439,10 @@ def build(rust: dict[str, str], proto: str, consumer: str) -> Taxonomy:
     )
     members = oneof_fields(proto)
     cases = native_cases(consumer)
-    literals = literal_writers(rust)
+    # A literal write under an orchestration arm's own name (the verified attach receipt,
+    # browser_attach_compat) is the run-events vocabulary the run console reads, not a
+    # chat-stream frame, so it is checked as that arm, not as a literal producer.
+    literals = literal_writers(rust) - set(arms.values())
 
     events = sorted((names[variant], variant, families[variant]) for variant in names)
     chat_names = {name for name, _, _ in events}

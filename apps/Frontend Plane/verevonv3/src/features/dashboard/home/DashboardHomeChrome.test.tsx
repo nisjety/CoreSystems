@@ -7,9 +7,9 @@ import type { DashboardTab } from './dashboard-home-types'
 const searchPanel = vi.hoisted(() => ({ mounts: 0, unmounts: 0, remember: undefined as boolean | undefined }))
 
 vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
-vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: string; onMessageChange: (value: string) => void }) => {
+vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: string; onMessageChange: (value: string) => void; onBeforeSubmit?: (text: string) => boolean; onSubmit?: (payload: { text: string }) => void }) => {
   const [attachment, setAttachment] = createSignal(false)
-  return <><input aria-label="Draft" value={props.message} onInput={(event) => props.onMessageChange(event.currentTarget.value)} /><button onClick={() => setAttachment(true)}>Attach test file</button><span>{attachment() ? 'File retained' : 'No file'}</span></>
+  return <><input aria-label="Draft" value={props.message} onInput={(event) => props.onMessageChange(event.currentTarget.value)} /><button onClick={() => setAttachment(true)}>Attach test file</button><button onClick={() => { if (!props.onBeforeSubmit?.(props.message)) props.onSubmit?.({ text: props.message }) }}>Submit draft</button><button onClick={() => props.onSubmit?.({ text: props.message })}>Send through assistant</button><span>{attachment() ? 'File retained' : 'No file'}</span></>
 } }))
 vi.mock('./DashboardSearchPanel', async () => {
   const { createEffect, onCleanup } = await import('solid-js')
@@ -22,8 +22,27 @@ vi.mock('./DashboardSearchPanel', async () => {
 })
 vi.mock('./KnowledgeComposer', () => ({ KnowledgeComposer: () => <p>Crawl tool</p> }))
 import { DashboardComposerPanel, DashboardTabs } from './DashboardHomeChrome'
+import { AssistantNavigationContext } from '@/features/core/assistant-navigation/assistant-navigation-context'
 
 describe('Home tool switching', () => {
+  it('sends Home navigation requests to the shared assistant instead of the scripted guide', () => {
+    const start = vi.fn(() => true)
+    const submit = vi.fn(async () => undefined)
+    const noop = () => undefined
+    render(() => <AssistantNavigationContext value={{ start, submit }}><DashboardComposerPanel activeTab="Chat" message="hvor er kunskaps" onMessageChange={noop} onKnowledgePreviewActiveChange={noop} onLaunchStart={noop} onSearchExpandedChange={noop} onSearchPreviewActiveChange={noop} previewCollapsed={false} searchExpanded={false} /></AssistantNavigationContext>)
+    fireEvent.click(screen.getByRole('button', { name: 'Submit draft' }))
+    expect(start).not.toHaveBeenCalled()
+    expect(submit).toHaveBeenCalledExactlyOnceWith({ text: 'hvor er kunskaps' })
+  })
+
+  it('hands ordinary Home messages to the same assistant submit handler', () => {
+    const submit = vi.fn(async () => undefined)
+    const noop = () => undefined
+    render(() => <AssistantNavigationContext value={{ start: () => false, submit }}><DashboardComposerPanel activeTab="Chat" message="Forklar HACCP" onMessageChange={noop} onKnowledgePreviewActiveChange={noop} onLaunchStart={noop} onSearchExpandedChange={noop} onSearchPreviewActiveChange={noop} previewCollapsed={false} searchExpanded={false} /></AssistantNavigationContext>)
+    fireEvent.click(screen.getByRole('button', { name: 'Send through assistant' }))
+    expect(submit).toHaveBeenCalledExactlyOnceWith({ text: 'Forklar HACCP' })
+  })
+
   it('keeps the chat draft and attachment state through Search, Crawl and layout comparison', () => {
     const [tab, setTab] = createSignal<DashboardTab>('Chat')
     const [message, setMessage] = createSignal('')
@@ -106,7 +125,7 @@ describe('Search panel history gate', () => {
 })
 
 describe('Home tab double-click', () => {
-  const tabButton = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name })
+  const tabButton = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name: name === 'Chat' ? 'Assistant' : name })
   // What a browser sends for a double-click: click, click, dblclick.
   const doubleClick = (button: HTMLElement) => {
     fireEvent.click(button, { detail: 1 }); flush()

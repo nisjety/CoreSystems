@@ -52,6 +52,10 @@ pub async fn live_frame_ws(
     // W3-E3.4-5: read after the owner check, so a caller who does not own the run gets the
     // plain 404 above; a view-only share of a ZDR run is refused here (403).
     let scope = owner_live_scope(&headers, zdr, &request_id)?;
+    let session = frame_session(&state, &session, query.frame.tab_id.as_deref(), &request_id).await?;
+    // A tab-addressed stream is an observer surface; it must not execute
+    // socket input against the run's separately selected tab.
+    let scope = if query.frame.tab_id.is_some() { LiveScope::ViewOnly } else { scope };
     let viewer = handle.live.viewer_guard();
     let options = live_frame_options(&query.frame, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;

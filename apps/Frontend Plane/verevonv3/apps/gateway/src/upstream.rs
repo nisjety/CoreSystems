@@ -1673,8 +1673,7 @@ pub(crate) async fn proxy_bearer_json_with_headers(
 }
 
 /// As `proxy_bearer_json`, with a per-request ceiling in place of the standard
-/// client's 25 s. For the one upstream call that is meant to run longer (a scrape
-/// that drives the browser); every other caller keeps the client default.
+/// client's 25 s for operations that have a longer upstream deadline.
 pub(crate) async fn proxy_bearer_json_with_timeout(
     state: &AppState,
     method: Method,

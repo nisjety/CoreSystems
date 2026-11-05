@@ -11,6 +11,7 @@ export type WebSearchResult = {
   displayUrl?: string
   highlights?: string[]
   hostname?: string
+  provider?: string
   score?: number
   snippet?: string
   title?: string
@@ -98,6 +99,7 @@ export function runWebSearch(
     filters?: WebSearchFilters
     includeAnswer?: boolean
     limit?: number
+    publicOnly?: boolean
     query: string
   },
   signal?: AbortSignal,
@@ -117,6 +119,7 @@ export function runWebSearch(
   if (filters.excludeDomains?.length) body.excludeDomains = filters.excludeDomains
   if (filters.country) body.country = filters.country
   if (filters.language) body.language = filters.language
+  if (input.publicOnly) body.publicOnly = true
   return requestJson<WebSearchPayload>('/api/v1/search/web', {
     method: 'POST',
     body: JSON.stringify(body),

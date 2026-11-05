@@ -302,6 +302,7 @@ fn render_requested_in(raw: Option<&str>) -> bool {
 /// the sandbox, so it must not change what `cap.command.sandbox` attests.
 fn office_render_ready() -> bool {
     let Ok(mut child) = std::process::Command::new("soffice")
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -818,6 +819,7 @@ fn run_probe_child(
             env.iter()
                 .map(|(key, value)| (key.as_str(), value.as_str())),
         )
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

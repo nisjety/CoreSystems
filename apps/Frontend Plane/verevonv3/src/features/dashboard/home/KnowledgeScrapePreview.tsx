@@ -264,6 +264,7 @@ export function ScrapeCapturesSection(props: { captures?: ScrapeCaptureView; tit
 }
 
 function BrowserSessionSurface(props: {
+  browsing?: boolean
   browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
@@ -317,6 +318,8 @@ function BrowserSessionSurface(props: {
       }]}
     >
       <BrowserChrome
+        personalBrowsing={props.browsing}
+        allowAssistantContinuation={props.browsing}
         browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
@@ -420,7 +423,7 @@ function BrowserSessionSurface(props: {
         </div>
       </BrowserChrome>
 
-      <div class="knowledge-browser-frame__footer">
+      <Show when={!props.browsing}><div class="knowledge-browser-frame__footer">
         <div class="knowledge-browser-frame__selection">
           <span><Code2 class="size-3.5" /> {props.selectedCount}/{props.total} seksjoner valgt</span>
           <span>{props.selectedChars.toLocaleString('nb-NO')} tegn</span>
@@ -468,13 +471,14 @@ function BrowserSessionSurface(props: {
             }}
           </For>
         </div>
-      </details>
+      </details></Show>
     </div>
   )
 }
 
 export function ScrapePreviewPanel(props: {
   adding: boolean
+  browsing?: boolean
   browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
@@ -536,6 +540,7 @@ export function ScrapePreviewPanel(props: {
       aria-label="Nettleser"
     >
       <BrowserSessionSurface
+        browsing={props.browsing}
         browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}

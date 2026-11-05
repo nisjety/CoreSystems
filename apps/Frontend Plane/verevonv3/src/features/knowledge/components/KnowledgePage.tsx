@@ -43,6 +43,7 @@ import {
   isExpandable,
   KNOWLEDGE_GRAPH_ROOT_ID,
   type KnowledgeHierarchy,
+  type KnowledgeHierarchyNode,
 } from '@/features/knowledge/components/knowledgeGraphHierarchy'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
@@ -105,7 +106,7 @@ import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/Ve
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import { cn } from '@/shared/lib/cn'
 
-type KnowledgeView = 'overview' | 'operating-map' | 'graph' | 'chunks'
+type KnowledgeView = 'overview' | 'operating-map' | 'chunks'
 type KnowledgeLayout = 'grid' | 'list'
 type KnowledgeIcon = Component<LucideProps>
 
@@ -314,6 +315,9 @@ export default function KnowledgePage() {
   const graphHierarchy = createMemo(() => {
     const knowledge = visibleKnowledge()
     if (!knowledge) return null
+    const snapshot = operatingMap()
+    const pending = snapshot?.proposals.find((proposal) => proposal.status === 'pending')
+    const version = pending?.proposedVersion ?? snapshot?.currentVersion
     return buildKnowledgeHierarchy(knowledge, {
       root: i18n.tr('Kunnskapsbase', 'Knowledge base'),
       documents: (count) =>
@@ -323,7 +327,12 @@ export default function KnowledgePage() {
         ),
       chunks: (count) =>
         i18n.tr(`${count} utdrag`, `${count} ${count === 1 ? 'chunk' : 'chunks'}`),
-    })
+    }, version ? {
+      key: pending?.id ?? version.id,
+      status: pending ? 'pending' : 'accepted',
+      statusLabel: pending ? i18n.tr('Forslag', 'Proposed') : i18n.tr('Godkjent', 'Accepted'),
+      workflows: version.workflows,
+    } : undefined)
   })
 
   /**
@@ -331,10 +340,12 @@ export default function KnowledgePage() {
    * real payload node; the synthetic root/provider/document tiers are projected
    * onto the same shape so one inspector serves every tier.
    */
-  const selectedGraphNode = createMemo<LiveKnowledgeGraphNode | null>(() => {
+  const selectedHierarchyNode = createMemo(() => {
     const hierarchy = graphHierarchy()
-    if (!hierarchy) return null
-    const node = hierarchy.byId.get(selectedGraphNodeId() ?? hierarchy.rootId)
+    return hierarchy?.byId.get(selectedGraphNodeId() ?? hierarchy.rootId) ?? null
+  })
+  const selectedGraphNode = createMemo<LiveKnowledgeGraphNode | null>(() => {
+    const node = selectedHierarchyNode()
     if (!node) return null
     if (node.liveNode) return node.liveNode
     return {
@@ -343,7 +354,7 @@ export default function KnowledgePage() {
       label: node.label,
       radius: 1,
       sourceIds: node.sourceIds,
-      sourceRefs: [],
+      sourceRefs: node.workflow?.value.evidenceRefs ?? [],
       tone: node.tier === 'root' ? 'core' : node.tier === 'provider' ? 'support' : 'product',
       x: 0,
       y: 0,
@@ -458,7 +469,7 @@ export default function KnowledgePage() {
     (requestedView) => {
       if (requestedView) {
         setKnowledgeRequestedView(null)
-        setActiveView(requestedView)
+        setActiveView(requestedView === 'graph' ? 'operating-map' : requestedView)
       }
     },
   )
@@ -986,17 +997,18 @@ export default function KnowledgePage() {
               liveKnowledge={visibleKnowledge()!}
               loading={operatingMapLoading()}
               operatingMap={operatingMap()}
+              graph={(
+                <GraphCanvas
+                  hierarchy={graphHierarchy()}
+                  relatedSources={relatedGraphSources()}
+                  selectedNode={selectedGraphNode()}
+                  workflowNode={selectedHierarchyNode()?.workflow}
+                  onSelectNode={setSelectedGraphNodeId}
+                />
+              )}
               onCreateBlueprint={(blueprint) => void handleCreateAgentBlueprint(blueprint)}
               onGenerate={() => void handleGenerateOperatingMap()}
               onReviewProposal={(proposal, decision) => void handleReviewOperatingMapProposal(proposal, decision)}
-            />
-          </Show>
-          <Show when={activeView() === 'graph'}>
-            <GraphCanvas
-              hierarchy={graphHierarchy()}
-              relatedSources={relatedGraphSources()}
-              selectedNode={selectedGraphNode()}
-              onSelectNode={setSelectedGraphNodeId}
             />
           </Show>
           <Show when={activeView() === 'chunks'}>
@@ -1065,17 +1077,33 @@ function WorkspaceHeader(props: {
             </VerevonSelect>
             <ChevronDown class="knowledge-header__chevron" strokeWidth={2} />
           </div>
-          <span class="knowledge-header__scope">{i18n.tr('Arbeidsområdebibliotek', 'Workspace library')}</span>
         </div>
         <p class="knowledge-header__copy">
           {i18n.tr(
-            'Ett rolig sted for kildesamlinger, delte filer og bevisene Verevon bruker for å svare.',
-            'One calm place for source collections, shared files, and the evidence Verevon uses to answer.',
+            'Finn kildene og utdragene Verevon bruker for å svare.',
+            'Find the sources and excerpts Verevon uses to answer.',
           )}
         </p>
       </div>
 
       <div class="knowledge-header__actions">
+        <a href="/ingestions" link class="button button--secondary button--md knowledge-link-button">
+          <ArrowUpRight class="size-4" />
+          {i18n.tr('Innhenting', 'Ingestions')}
+        </a>
+        <Button size="md" onClick={props.onSync} disabled={props.syncing}>
+          <RefreshCw class={cn('size-4', props.syncing && 'knowledge-spin')} />
+          {props.syncing ? i18n.tr('Synkroniserer…', 'Syncing…') : i18n.tr('Synkroniser', 'Sync')}
+        </Button>
+        <Button variant="primary" size="md" onClick={props.onAddSource}>
+          <FilePlus2 class="size-4" />
+          {i18n.tr('Legg til kilde', 'Add source')}
+        </Button>
+      </div>
+
+      <div class="knowledge-header__navigation">
+        <SegmentedView activeView={props.activeView} onActiveViewChange={props.onActiveViewChange} />
+        <div class="knowledge-header__tools">
         <label class="knowledge-toolbar-search">
           <Search class="size-4" aria-hidden="true" />
           <VerevonInput
@@ -1084,7 +1112,6 @@ function WorkspaceHeader(props: {
             onInput={(event) => props.onSearchChange(event.currentTarget.value)}
             placeholder={i18n.tr('Søk', 'Search')}
           />
-          <kbd>⌘ K</kbd>
         </label>
         <button
           type="button"
@@ -1097,6 +1124,7 @@ function WorkspaceHeader(props: {
           <Filter class="size-4" />
           <span>{i18n.tr('Filter', 'Filter')}</span>
         </button>
+        <Show when={props.activeView === 'overview'}>
         <div class="knowledge-toolbar-view" role="group" aria-label={i18n.tr('Visningsstil for kunnskap', 'Knowledge view style')}>
           <button
             type="button"
@@ -1117,19 +1145,8 @@ function WorkspaceHeader(props: {
             <List class="size-4" />
           </button>
         </div>
-        <SegmentedView activeView={props.activeView} onActiveViewChange={props.onActiveViewChange} />
-        <a href="/ingestions" link class="button button--secondary button--md knowledge-link-button">
-          <ArrowUpRight class="size-4" />
-          {i18n.tr('Innhenting', 'Ingestions')}
-        </a>
-        <Button size="md" onClick={props.onSync} disabled={props.syncing}>
-          <RefreshCw class={cn('size-4', props.syncing && 'knowledge-spin')} />
-          {i18n.tr('Synkroniser', 'Sync')}
-        </Button>
-        <Button variant="primary" size="md" onClick={props.onAddSource}>
-          <FilePlus2 class="size-4" />
-          {i18n.tr('Legg til kilde', 'Add source')}
-        </Button>
+        </Show>
+        </div>
       </div>
     </header>
   )
@@ -1198,7 +1215,6 @@ function SegmentedView(props: {
   const views = createMemo<Array<{ Icon: KnowledgeIcon; id: KnowledgeView; label: string }>>(() => [
     { id: 'overview', label: i18n.tr('Oversikt', 'Overview'), Icon: Grid2X2 },
     { id: 'operating-map', label: i18n.tr('AI-kart', 'AI Map'), Icon: MapIcon },
-    { id: 'graph', label: i18n.tr('Graf', 'Graph'), Icon: Network },
     { id: 'chunks', label: i18n.tr('Utdrag', 'Chunks'), Icon: Table2 },
   ])
 
@@ -1721,13 +1737,14 @@ function GraphCanvas(props: {
   hierarchy: KnowledgeHierarchy | null
   relatedSources: LiveKnowledgeSource[]
   selectedNode: LiveKnowledgeGraphNode | null
+  workflowNode?: KnowledgeHierarchyNode['workflow']
   onSelectNode: (nodeId: string) => void
 }) {
   return (
-    <main class="knowledge-graph-layout">
+    <div class="knowledge-graph-layout">
       <GraphPanel hierarchy={props.hierarchy} selectedNode={props.selectedNode} onSelectNode={props.onSelectNode} />
-      <GraphInspectorPanel selectedNode={props.selectedNode} relatedSources={props.relatedSources} />
-    </main>
+      <GraphInspectorPanel selectedNode={props.selectedNode} relatedSources={props.relatedSources} workflowNode={props.workflowNode} />
+    </div>
   )
 }
 
@@ -1863,11 +1880,11 @@ function GraphPanel(props: {
   }
 
   return (
-    <section class="verevon-panel knowledge-graph-panel" aria-label={i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}>
+    <section class="verevon-panel knowledge-graph-panel" aria-label={i18n.tr('Kunnskapsgraf', 'Knowledge graph')}>
       <div class="knowledge-graph-panel__header">
         <div>
-          <h2>{i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}</h2>
-          <p>{i18n.tr('Klikk en node for å utvide den. Øverste nivå holdes oppdatert automatisk.', 'Click a node to expand it. The top level stays up to date automatically.')}</p>
+          <h2>{i18n.tr('Kunnskapsgraf', 'Knowledge graph')}</h2>
+          <p>{i18n.tr('Utforsk arbeidsflyter og kildene de viser til. Klikk en node for detaljer.', 'Explore workflows and the sources they reference. Select a node for details.')}</p>
         </div>
         <GitBranch class="size-5" />
       </div>
@@ -1882,7 +1899,7 @@ function GraphPanel(props: {
           ref={graphRef}
           class={['onboarding-source-graph__engine', { 'onboarding-source-graph__engine--hovering': hoveringNode() }]}
           aria-label={hasNodes()
-            ? i18n.tr('Interaktiv 3D-kunnskapsgraf', 'Interactive 3D knowledge graph')
+            ? i18n.tr('Interaktiv kunnskapsgraf', 'Interactive knowledge graph')
             : i18n.tr('Kunnskapsgraf uten noder ennå', 'Knowledge graph with no nodes yet')}
           role="group"
         />
@@ -1930,10 +1947,13 @@ function GraphPanel(props: {
 function GraphInspectorPanel(props: {
   relatedSources: LiveKnowledgeSource[]
   selectedNode: LiveKnowledgeGraphNode | null
+  workflowNode?: KnowledgeHierarchyNode['workflow']
 }) {
   const i18n = useI18n()
   const chunkEvidence = () => props.relatedSources
-    .flatMap((source) => source.chunksPreview.map((chunk) => ({ ...chunk, sourceTitle: source.title })))
+    .flatMap((source) => source.chunksPreview
+      .filter((chunk) => !props.workflowNode || props.workflowNode.value.evidenceRefs.includes(chunk.id))
+      .map((chunk) => ({ ...chunk, sourceTitle: source.title })))
     .slice(0, 4)
 
   return (
@@ -1950,12 +1970,23 @@ function GraphInspectorPanel(props: {
       {(node) => (
         <section class="verevon-panel knowledge-graph-inspector">
           <h2>{node.label}</h2>
-          <p>
+          <Show when={props.workflowNode} fallback={<p>
             {i18n.tr(
               `${formatGraphGroup(node.group)} · ${node.sourceRefs.length} tilknyttet utdragsreferanse${node.sourceRefs.length === 1 ? '' : 'r'}.`,
               `${formatGraphGroup(node.group)} · ${node.sourceRefs.length} linked chunk reference${node.sourceRefs.length === 1 ? '' : 's'}.`,
             )}
-          </p>
+          </p>}>
+            {(workflow) => <>
+              <p>{workflow().status === 'pending' ? i18n.tr('Forslag · må gjennomgås', 'Proposal · review required') : i18n.tr('Godkjent arbeidsflyt', 'Accepted workflow')} · {workflow().value.phase} · {i18n.tr('Risiko', 'Risk')}: {workflow().value.risk}</p>
+              <p>{i18n.tr(`${props.relatedSources.length} kilder funnet i gjeldende kildeutvalg.`, `${props.relatedSources.length} sources found in the current selection.`)}</p>
+              <Show when={workflow().unresolvedRefs.length > 0}>
+                <p>{i18n.tr(`${workflow().unresolvedRefs.length} henvisninger ble ikke funnet i gjeldende kildeutvalg.`, `${workflow().unresolvedRefs.length} references were not found in the current source selection.`)}</p>
+              </Show>
+              <Show when={workflow().value.evidenceRefs.length === 0}>
+                <p>{i18n.tr('Ingen kildehenvisninger oppgitt.', 'No source references provided.')}</p>
+              </Show>
+            </>}
+          </Show>
 
           <div class="knowledge-tag-row">
             <Show
@@ -2023,6 +2054,7 @@ function ChunksPanel(props: {
             </For>
           </div>
           <div class="knowledge-chunk-list">
+            <Show when={source.chunksPreview.length > 0} fallback={<p class="knowledge-chunks-empty">{i18n.tr('Ingen utdrag er tilgjengelige for denne kilden ennå.', 'No excerpts are available for this source yet.')}</p>}>
             <For each={source.chunksPreview}>
               {(chunk) => (
                 <ChunkPreviewCard
@@ -2033,6 +2065,7 @@ function ChunksPanel(props: {
                 />
               )}
             </For>
+            </Show>
           </div>
         </section>
       )}
@@ -2047,17 +2080,22 @@ function ChunkPreviewCard(props: {
   text: string
   title: string
 }) {
+  const i18n = useI18n()
   return (
     <article class="knowledge-chunk-card">
       <div class="knowledge-chunk-card__meta">
         <span>
           <Blocks class="size-4" />
-          {props.sourceTitle ?? props.id}
+          {props.sourceTitle ?? i18n.tr('Utdrag', 'Excerpt')}
         </span>
         <small class={props.score.startsWith('#') ? '' : 'knowledge-chunk-score'}>{props.score}</small>
       </div>
       <h3>{props.title}</h3>
       <p>{props.text}</p>
+      <details class="knowledge-chunk-card__trace">
+        <summary>{i18n.tr('Vis utdrags-ID', 'Show excerpt ID')}</summary>
+        <code>{props.id}</code>
+      </details>
     </article>
   )
 }

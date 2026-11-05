@@ -24,11 +24,11 @@ use std::time::{Duration, Instant};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use mp_contracts::model_plane::v1::{
-    CancelRunRequest, DeriveRunGrantRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest,
+    BrowserAgentCapabilitiesRequest, CancelRunRequest, DeriveRunGrantRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest,
     RevokeGrantRequest, ValidateGrantRequest,
 };
 use mp_ids::new_ulid;
@@ -48,15 +48,63 @@ use crate::{
 
 type ApiError = (StatusCode, Json<Value>);
 
+async fn dispatch_browser_step(
+    client: &mut mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient<tonic::transport::Channel>,
+    request: tonic::Request<ExecuteStepRequest>,
+    restricted: bool,
+) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+    if restricted {
+        client.execute_restricted_browser_step(request).await
+    } else {
+        client.execute_step(request).await
+    }
+}
+
 /// `/v1/browser/runs*` routes. Merged into the auth-gated router next to the
 /// existing `/v1/browser/suggest-action`.
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/v1/browser/runs/capabilities", get(browser_run_capabilities))
         .route("/v1/browser/runs", post(browser_run_start))
         .route(
             "/v1/browser/runs/:run_id/control",
             post(browser_run_control),
         )
+}
+
+/// An authenticated handshake with execution-core, not a claim about Quarry's
+/// running version: Quarry must acknowledge each restricted attachment itself.
+async fn verify_attached_policy_protocol(
+    state: &AppState,
+    org_id: &str,
+    bearer: &VerifiedExecutionBearer,
+) -> Result<(), ApiError> {
+    let unavailable = || (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"browser_attach_policy_unavailable"})));
+    let authorization = format!("Bearer {}", bearer.as_str()).parse().map_err(|_| unavailable())?;
+    let mut request = tonic::Request::new(BrowserAgentCapabilitiesRequest { org_id: org_id.to_owned() });
+    request.metadata_mut().insert("authorization", authorization);
+    let reply = tokio::time::timeout(Duration::from_secs(3), state.execution_client.clone().browser_agent_capabilities(request))
+        .await.map_err(|_| unavailable())?.map_err(|_| unavailable())?.into_inner();
+    if reply.attached_policy_protocol < 1 { return Err(unavailable()); }
+    Ok(())
+}
+
+async fn browser_run_capabilities(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedExecutionBearer,
+) -> Result<Json<Value>, ApiError> {
+    let enabled = attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref())
+        && policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref())
+        && attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED").ok().as_deref());
+    if !enabled {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"browser_attach_policy_unavailable"}))));
+    }
+    let quotas_enabled = planner_quotas_flag(std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok().as_deref());
+    let quota = planner_quota(&state, &claims.org_id).await;
+    verify_restricted_planner_quota(quotas_enabled, quota.flag)?;
+    verify_attached_policy_protocol(&state, &claims.org_id, &bearer).await?;
+    Ok(Json(json!({"protocol_version":1,"attached_policy_supported":true})))
 }
 
 fn bad_request(message: impl Into<String>) -> ApiError {
@@ -78,6 +126,23 @@ fn reject_unsupported_browser_approval(request: &BrowserRunStartRequest) -> Resu
             Json(json!({
                 "error": "browser_approval_continuation_unavailable"
             })),
+        ));
+    }
+    Ok(())
+}
+
+/// The standalone browser-run path creates a personal run and does not verify a
+/// Space decision. Refuse an explicit Space target before creating any grant or
+/// run instead of silently ignoring it and reporting a personal run as shared.
+fn reject_unbound_space(request: &BrowserRunStartRequest) -> Result<(), ApiError> {
+    if request.space_id.is_some()
+        || request.space_ref.is_some()
+        || request.space_context.is_some()
+        || request.space_browser_authority.is_some()
+    {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "space_browser_run_unavailable" })),
         ));
     }
     Ok(())
@@ -196,6 +261,21 @@ async fn browser_run_replay(
 
 #[derive(Debug, Deserialize, Clone)]
 struct BrowserRunStartRequest {
+    /// Reserved until the Space-aware start path verifies a Control decision.
+    /// Accept arbitrary non-null JSON only so every explicit target fails closed.
+    #[serde(default, alias = "spaceId")]
+    space_id: Option<Value>,
+    #[serde(default, alias = "spaceRef")]
+    space_ref: Option<Value>,
+    #[serde(default, alias = "spaceContext")]
+    space_context: Option<Value>,
+    #[serde(
+        default,
+        alias = "spaceBrowserAuthority",
+        alias = "space_authority",
+        alias = "spaceAuthority"
+    )]
+    space_browser_authority: Option<Value>,
     #[serde(default)]
     thread_id: Option<String>,
     goal: String,
@@ -263,12 +343,22 @@ struct BrowserRunStartRequest {
     /// is refused 400 `browser_attach_unavailable`.
     #[serde(default)]
     attach_session_id: Option<String>,
+    #[serde(default)]
+    attach_tab: Option<AttachTabTarget>,
     /// What the agent leaves on its tab when an attached run completes (WS8.J):
     /// `none`, `deliverable` (the default) or `handoff`. Only meaningful with
     /// `attach_session_id`; named without one it is refused 400
     /// `tab_mark_requires_attach`, outside the set 400 `tab_mark_on_complete_invalid`.
     #[serde(default)]
     tab_mark_on_complete: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct AttachTabTarget {
+    tab_id: String,
+    expected_epoch: u64,
+    expected_origin: String,
 }
 
 /// The three keys a model-driven run may ask Quarry to tighten on. Same shape
@@ -313,8 +403,26 @@ const MAX_ATTACH_SESSION_ID_BYTES: usize = 128;
 /// refused `attach_session_id_invalid`.
 fn attach_session_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<String>, ApiError> {
     let Some(raw) = req.attach_session_id.as_deref() else {
+        if req.attach_tab.is_some() {
+            return Err(bad_request("attach_tab_requires_session"));
+        }
         return Ok(None);
     };
+    if let Some(tab) = &req.attach_tab {
+        let origin = reqwest::Url::parse(&tab.expected_origin)
+            .map_err(|_| bad_request("attach_tab_origin_invalid"))?;
+        if tab.tab_id.is_empty()
+            || tab.tab_id.len() > MAX_ATTACH_SESSION_ID_BYTES
+            || !tab.tab_id.bytes().all(|byte| byte.is_ascii_graphic())
+            || req.start_url.is_some()
+            || !matches!(origin.scheme(), "http" | "https")
+            || origin.origin().ascii_serialization() != tab.expected_origin
+            || !req.allowed_domains.as_deref().is_some_and(|hosts|
+                matches!(hosts, [host] if Some(host.as_str()) == origin.host_str()))
+        {
+            return Err(bad_request("attach_tab_scope_invalid"));
+        }
+    }
     if !enabled {
         return Err(bad_request("browser_attach_unavailable"));
     }
@@ -324,6 +432,21 @@ fn attach_session_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Opt
         return Err(bad_request("attach_session_id_invalid"));
     }
     Ok(Some(id.to_owned()))
+}
+
+/// Attached delegate steps currently inherit only the owner session policy. The
+/// run's tighten-only ask is not yet forwarded to the attachment, so refusing it
+/// here prevents a restricted run from silently executing without restrictions.
+fn reject_attached_policy(attach_session: Option<&str>, ask: Option<&Value>, enforced: bool) -> Result<(), ApiError> {
+    // Only enable after execution-core enforces Quarry's positive policy receipt.
+    // During mixed-version rollouts, old execution-core could drop the ask.
+    if attach_session.is_some() && ask.is_some() && !enforced {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "browser_attach_policy_unavailable" })),
+        ));
+    }
+    Ok(())
 }
 
 /// The tab mark of a start (WS8.J), checked against the closed set. `Ok(None)`
@@ -673,6 +796,17 @@ struct StartGuardInner {
     grants: HashMap<String, (String, Instant)>,
     /// run key -> (request fingerprint, remembered at)
     fingerprints: HashMap<String, (String, Instant)>,
+    /// Local proof of this gateway's outstanding browser dispatch, not durable
+    /// authority: absence after a restart or on another replica fails closed.
+    dispatches: HashMap<String, (BrowserDispatchState, Instant)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserDispatchState {
+    Active,
+    StopRequested,
+    Parked,
+    CancellingParked,
 }
 
 impl RunStartGuard {
@@ -705,6 +839,61 @@ impl RunStartGuard {
     fn release_grant(&self, grant_id: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.grants.remove(grant_id);
+    }
+
+    fn begin_dispatch(&self, run_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        inner.dispatches.retain(|_, (_, at)| now.saturating_duration_since(*at) < START_FINGERPRINT_TTL);
+        if inner.dispatches.len() < START_GUARD_MAX_ENTRIES {
+            inner.dispatches.insert(run_id.to_owned(), (BrowserDispatchState::Active, now));
+        }
+    }
+
+    /// Only a locally confirmed parked response can authorize a durable stop.
+    /// An in-flight dispatch records the intent but stays live until it reports
+    /// either cancellation or an actual parked result.
+    fn request_dispatch_stop(&self, run_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.dispatches.get_mut(run_id) {
+            Some((state @ BrowserDispatchState::Active, _)) => { *state = BrowserDispatchState::StopRequested; false }
+            Some((state @ BrowserDispatchState::Parked, _)) => { *state = BrowserDispatchState::CancellingParked; true }
+            _ => false,
+        }
+    }
+
+    /// Called only after ExecuteStep returned awaiting_approval, never while an
+    /// action may still be in flight. A racing stop is reconciled here.
+    fn dispatch_parked(&self, run_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.dispatches.get_mut(run_id) {
+            Some((state @ BrowserDispatchState::Active, _)) => { *state = BrowserDispatchState::Parked; false }
+            Some((state @ BrowserDispatchState::StopRequested, _)) => { *state = BrowserDispatchState::CancellingParked; true }
+            _ => false,
+        }
+    }
+
+    /// A resume can invalidate a previously observed parked result. Fence the
+    /// local state before forwarding it; do not race an in-flight cancellation.
+    fn prepare_dispatch_resume(&self, run_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.dispatches.get_mut(run_id) {
+            Some((state @ BrowserDispatchState::Parked, _)) => { *state = BrowserDispatchState::Active; true }
+            Some((BrowserDispatchState::StopRequested | BrowserDispatchState::CancellingParked, _)) => false,
+            _ => true,
+        }
+    }
+
+    fn restore_parked(&self, run_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((state @ BrowserDispatchState::CancellingParked, _)) = inner.dispatches.get_mut(run_id) {
+            *state = BrowserDispatchState::Parked;
+        }
+    }
+
+    fn forget_dispatch(&self, run_id: &str) {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.dispatches.remove(run_id);
     }
 
     fn check_fingerprint(&self, run_key: &str, fingerprint: &str) -> FingerprintCheck {
@@ -785,6 +974,11 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     if let Some(session) = non_empty(req.attach_session_id.as_deref()) {
         // Only when attaching: a retry that names another session is another request.
         part("attach_session_id", session);
+    }
+    if let Some(tab) = &req.attach_tab {
+        part("attach_tab_id", &tab.tab_id);
+        part("attach_tab_epoch", &tab.expected_epoch.to_string());
+        part("attach_tab_origin", &tab.expected_origin);
     }
     if let Some(mark) = non_empty(req.tab_mark_on_complete.as_deref()) {
         // Only when named: a retry that asks for another mark is another request.
@@ -1035,6 +1229,20 @@ struct PlannerQuota {
     token_ceiling: Option<i64>,
     /// `browser_agent_llm_planner` (fail closed: an unreadable read is `Unavailable`).
     flag: crate::org_quota::PlannerFlag,
+}
+
+/// A restricted interactive assistant must not proceed if the organisation's
+/// planner switch could not be read. An absent row is a real, readable unset;
+/// the execution plane's scoped allowlist still decides whether it may run.
+fn verify_restricted_planner_quota(enabled: bool, flag: crate::org_quota::PlannerFlag) -> Result<(), ApiError> {
+    use crate::org_quota::PlannerFlag;
+    if !enabled || flag == PlannerFlag::Unavailable {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"browser_planner_policy_unavailable"}))));
+    }
+    if flag == PlannerFlag::Off {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error":"browser_planner_disabled"}))));
+    }
+    Ok(())
 }
 
 impl PlannerQuota {
@@ -1855,6 +2063,7 @@ async fn browser_run_start_inner(
     headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    reject_unbound_space(&req)?;
     if browser_run_zdr_blocked(&claims, req.zdr)? {
         return Err((
             StatusCode::PRECONDITION_FAILED,
@@ -1887,6 +2096,18 @@ async fn browser_run_start_inner(
         attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref()),
         &req,
     )?;
+    // Rollout attestation is off by default; old execution-core would drop it.
+    reject_attached_policy(attach_session.as_deref(), policy_ask.as_ref(),
+        attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED").ok().as_deref()))?;
+    let restricted_planner = if attach_session.is_some() && policy_ask.is_some() {
+        let enabled = planner_quotas_flag(std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok().as_deref());
+        let quota = planner_quota(&state, &claims.org_id).await;
+        verify_restricted_planner_quota(enabled, quota.flag)?;
+        Some(quota)
+    } else { None };
+    if attach_session.is_some() && policy_ask.is_some() {
+        verify_attached_policy_protocol(&state, &claims.org_id, &execution_bearer).await?;
+    }
     // The mark of a completed attached run: closed set, attach only; refused
     // the same way, before any write.
     let tab_mark = tab_mark_for(&req, attach_session.as_deref())?;
@@ -2115,7 +2336,10 @@ async fn browser_run_start_inner(
     // it the loop runs "blind": no events, no pause/resume/stop.
     // The grant's budget claim tightens what execution-core is told, so the
     // planner and Quarry bound the run by the same numbers.
-    let planner = planner_quota(&state, &org_id).await;
+    let planner = match restricted_planner {
+        Some(quota) => quota,
+        None => planner_quota(&state, &org_id).await,
+    };
     let (max_steps, max_runtime_s, max_cost_usd, max_planner_tokens) =
         bounded_run_params_with_planner_tokens(
             &req,
@@ -2138,7 +2362,11 @@ async fn browser_run_start_inner(
         "profile_id": req.profile_id,
         "start_url": req.start_url,
     });
+    let restricted_dispatch = attach_session.is_some() && policy_ask.is_some();
     insert_attach_fields(&mut tool_input, attach_session.as_deref());
+    if let Some(tab) = &req.attach_tab {
+        tool_input["attach_tab"] = json!(tab);
+    }
     insert_tab_mark(&mut tool_input, tab_mark);
     insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
     insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
@@ -2153,6 +2381,7 @@ async fn browser_run_start_inner(
     let dispatch_run_id = run_id.clone();
     let revoke_bearer = browser_bearer.clone();
     let revoke_grant = browser_grant.clone();
+    state.run_start_guard.begin_dispatch(&dispatch_run_id);
     tokio::spawn(async move {
         let mut execution_request = tonic::Request::new(ExecuteStepRequest {
             run_id: dispatch_run_id.clone(),
@@ -2211,7 +2440,9 @@ async fn browser_run_start_inner(
                 .expect("verified Browser Broker bearer is valid gRPC metadata"),
         );
         let execution_result = {
-            let execution = execution_client.execute_step(execution_request);
+            // An old instance returns UNIMPLEMENTED for the restricted RPC;
+            // `dispatch_browser_step` never retries with the legacy one.
+            let execution = dispatch_browser_step(&mut execution_client, execution_request, restricted_dispatch);
             tokio::pin!(execution);
             let mut heartbeat =
                 tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
@@ -2245,6 +2476,7 @@ async fn browser_run_start_inner(
                 let outcome = classify_browser_execution_status(&resp.status);
                 match browser_run_finalization(outcome) {
                     BrowserRunFinalization::Complete(terminal) => {
+                        terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
                         // The loop has finished: its run grant has no further use.
                         revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         if let Err(error) =
@@ -2262,6 +2494,7 @@ async fn browser_run_start_inner(
                         }
                     }
                     BrowserRunFinalization::Cancel(reason) => {
+                        terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
                         revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         if let Err(error) =
                             crate::session_flow::cancel_browser_agent_run_authenticated(
@@ -2285,8 +2518,23 @@ async fn browser_run_start_inner(
                             // turn it into a terminal failure/completion merely
                             // because the HTTP start response has already returned.
                             info!(run_id = %dispatch_run_id, "browser-agent run is awaiting approval");
+                            if terminal_state.run_start_guard.dispatch_parked(&dispatch_run_id) {
+                                match crate::session_flow::cancel_browser_agent_run_authenticated(
+                                    &terminal_state, &dispatch_run_id, "user_stop", &session_bearer,
+                                ).await {
+                                    Ok(_) => {
+                                        terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
+                                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                                    }
+                                    Err(error) => {
+                                        terminal_state.run_start_guard.restore_parked(&dispatch_run_id);
+                                        warn!(%error, run_id = %dispatch_run_id, "parked browser cancellation could not be durably recorded");
+                                    }
+                                }
+                            }
                         }
                         BrowserExecutionOutcome::Unknown => {
+                            terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
                             // A new/unknown response status cannot safely be
                             // interpreted as terminal. Leave the durable run for
                             // observation/retry rather than guessing a transition.
@@ -2301,6 +2549,19 @@ async fn browser_run_start_inner(
                 }
             }
             Err(error) => {
+                terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
+                if restricted_dispatch && error.code() == tonic::Code::Unimplemented {
+                    // The selected execution instance does not implement the
+                    // versioned RPC; it definitively did not run this step.
+                    revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
+                    if let Err(terminal_error) = crate::session_flow::terminalize_browser_agent_run_authenticated(
+                        &terminal_state, &terminal_run,
+                        crate::session_flow::BrowserAgentTerminal::Failed("browser_attach_policy_unavailable"),
+                    ).await {
+                        warn!(%terminal_error, run_id = %dispatch_run_id, "could not record unsupported restricted-browser dispatch");
+                    }
+                    return;
+                }
                 warn!(
                     error = %error,
                     run_id = %dispatch_run_id,
@@ -2465,6 +2726,14 @@ async fn browser_run_control(
             }
         }
         BrowserRunControlAction::Resume => {
+            // Resolve the owner before touching the local guard: the execution
+            // RPC also verifies ownership, but happens after this fence.
+            crate::session_flow::require_durable_run_owner_with_token(
+                &state, &run_id, &claims.org_id, &claims.sub, session_bearer.as_str(),
+            ).await.map_err(|error| grpc_status_to_http(&error))?;
+            if !state.run_start_guard.prepare_dispatch_resume(&run_id) {
+                return Err((StatusCode::CONFLICT, Json(json!({ "error": "browser_stop_in_progress" }))));
+            }
             let request = authenticated_execution_request(
                 ResumeRunRequest {
                     run_id: run_id.clone(),
@@ -2501,10 +2770,25 @@ async fn browser_run_control(
                 .await
                 .map_err(|e| grpc_status_to_http(&e))?
                 .into_inner();
-            if resp.cancelled {
-                "cancelled"
-            } else {
+            if !resp.cancelled {
                 "running"
+            } else if state.run_start_guard.request_dispatch_stop(&run_id) {
+                // The local dispatcher has received the parked response, so it
+                // cannot still be executing a browser step. Session Core owns
+                // the terminal receipt and may reject a competing terminal.
+                match crate::session_flow::cancel_browser_agent_run_authenticated(
+                    &state, &run_id, "user_stop", &session_bearer,
+                ).await {
+                    Ok(true) => { state.run_start_guard.forget_dispatch(&run_id); "cancelled" }
+                    Ok(false) => { state.run_start_guard.forget_dispatch(&run_id); "terminal" }
+                    Err(_) => {
+                        state.run_start_guard.restore_parked(&run_id);
+                        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "browser_stop_not_confirmed" }))));
+                    }
+                }
+            } else {
+                // Latch acceptance alone is not a durable cancellation receipt.
+                "stopping"
             }
         }
     };
@@ -2565,6 +2849,46 @@ fn authenticated_execution_request<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parked_browser_stop_requires_a_confirmed_dispatch_response() {
+        let guard = RunStartGuard::default();
+        // A different replica, process restart, or unknown run is never proof.
+        assert!(!guard.request_dispatch_stop("unknown"));
+        guard.begin_dispatch("normal");
+        assert!(!guard.request_dispatch_stop("normal"));
+        // The still-running dispatch cannot be durably cancelled yet. Its
+        // later parked result safely hands the cancellation to that worker.
+        assert!(guard.dispatch_parked("normal"));
+        assert!(!guard.request_dispatch_stop("normal"));
+        // A failed Session Core write is retriable without fabricating success.
+        guard.restore_parked("normal");
+        assert!(guard.request_dispatch_stop("normal"));
+        guard.forget_dispatch("normal");
+        assert!(!guard.request_dispatch_stop("normal"));
+
+        // The response arrives first: exactly one caller owns cancellation.
+        guard.begin_dispatch("parked");
+        assert!(!guard.dispatch_parked("parked"));
+        assert!(guard.request_dispatch_stop("parked"));
+        assert!(!guard.request_dispatch_stop("parked"));
+        guard.forget_dispatch("parked");
+
+        // A concurrent resume invalidates the locally parked proof, and a
+        // cancellation already in progress fences a later resume.
+        guard.begin_dispatch("resumed");
+        assert!(!guard.dispatch_parked("resumed"));
+        assert!(guard.prepare_dispatch_resume("resumed"));
+        assert!(!guard.request_dispatch_stop("resumed"));
+        assert!(!guard.prepare_dispatch_resume("resumed"));
+        guard.forget_dispatch("resumed");
+
+        // A completed/unknown dispatch gives no authority to rewrite outcome.
+        guard.begin_dispatch("completed");
+        guard.forget_dispatch("completed");
+        assert!(!guard.request_dispatch_stop("completed"));
+        assert!(!guard.dispatch_parked("completed"));
+    }
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -2763,6 +3087,20 @@ mod tests {
 
     #[tonic::async_trait]
     impl ExecutionCore for ExecutionControlRecorder {
+    async fn execute_restricted_browser_step(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::ExecuteStepRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used by this test"))
+    }
+
+    async fn browser_agent_capabilities(
+        &self,
+        _request: tonic::Request<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse>, tonic::Status> {
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
         async fn execute_step(
             &self,
             _request: tonic::Request<ExecuteStepRequest>,
@@ -2836,6 +3174,10 @@ mod tests {
 
     fn browser_request(grant_id: &str) -> BrowserRunStartRequest {
         BrowserRunStartRequest {
+            space_id: None,
+            space_ref: None,
+            space_context: None,
+            space_browser_authority: None,
             thread_id: None,
             goal: "safe browser task".to_owned(),
             grant_id: grant_id.to_owned(),
@@ -2854,6 +3196,7 @@ mod tests {
             policy: None,
             run_source: None,
             attach_session_id: None,
+            attach_tab: None,
             tab_mark_on_complete: None,
         }
     }
@@ -2878,6 +3221,36 @@ mod tests {
             service_id: None,
             reason: None,
         }
+    }
+
+    #[test]
+    fn standalone_browser_start_refuses_explicit_space_binding() {
+        for field in [
+            "space_id",
+            "spaceId",
+            "space_ref",
+            "spaceRef",
+            "space_context",
+            "spaceContext",
+            "space_browser_authority",
+            "spaceBrowserAuthority",
+            "space_authority",
+            "spaceAuthority",
+        ] {
+            let mut body = json!({ "goal": "read the page", "grant_id": "grant-1" });
+            body[field] = json!({ "id": "space-1" });
+            let request: BrowserRunStartRequest =
+                serde_json::from_value(body).expect("parse request");
+            let (status, Json(error)) =
+                reject_unbound_space(&request).expect_err("Space target must be refused");
+            assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+            assert_eq!(error["error"], "space_browser_run_unavailable");
+        }
+        let personal: BrowserRunStartRequest = serde_json::from_value(json!({
+            "goal": "read the page", "grant_id": "grant-1", "space_id": null
+        }))
+        .expect("parse personal request");
+        assert!(reject_unbound_space(&personal).is_ok());
     }
 
     #[test]
@@ -3711,6 +4084,28 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_tab_is_bound_to_one_canonical_origin_and_no_start_url() {
+        let mut request = attach_request("session-1", &["example.com"]);
+        request.attach_tab = Some(AttachTabTarget {
+            tab_id: "tab-1".into(),
+            expected_epoch: 0,
+            expected_origin: "https://example.com".into(),
+        });
+        assert!(attach_session_for(true, &request).is_ok());
+
+        request.start_url = Some("https://example.com/".into());
+        assert!(attach_session_for(true, &request).is_err());
+        request.start_url = None;
+
+        request.allowed_domains = Some(vec!["example.com".into(), "other.example".into()]);
+        assert!(attach_session_for(true, &request).is_err());
+        request.allowed_domains = Some(vec!["example.com".into()]);
+
+        request.attach_tab.as_mut().unwrap().expected_origin = "https://example.com/".into();
+        assert!(attach_session_for(true, &request).is_err());
+    }
+
+    #[test]
     fn tab_mark_on_complete_passes_through_for_an_attach_start_only() {
         // Not named: nothing in the tool input, nothing in the fingerprint.
         let plain = attach_request("session-1", &["example.com"]);
@@ -3994,6 +4389,16 @@ mod tests {
     }
 
     #[test]
+    fn restricted_assistant_requires_a_readable_non_disabled_org_planner_policy() {
+        use crate::org_quota::PlannerFlag;
+        assert_eq!(verify_restricted_planner_quota(false, PlannerFlag::Unset).unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(verify_restricted_planner_quota(true, PlannerFlag::Unavailable).unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(verify_restricted_planner_quota(true, PlannerFlag::Off).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert!(verify_restricted_planner_quota(true, PlannerFlag::Unset).is_ok());
+        assert!(verify_restricted_planner_quota(true, PlannerFlag::On).is_ok());
+    }
+
+    #[test]
     fn the_planner_keys_are_written_only_when_they_have_a_value() {
         let base = json!({ "grant_id": "g", "max_steps": 5 });
         let mut untouched = base.clone();
@@ -4089,6 +4494,19 @@ mod tests {
         );
         assert_eq!(with_ask["policy"]["disable"][0], "browser.act.upload");
         assert_eq!(with_ask["trace"]["origin"], "USER");
+    }
+
+    #[test]
+    fn attached_runs_reject_policy_restrictions_instead_of_dropping_them() {
+        let mut request = attach_request("session-1", &["example.com"]);
+        request.plan_mode = Some(true);
+        let ask = policy_ask_for(true, &request).expect("valid plan ask");
+        let failure = reject_attached_policy(Some("session-1"), ask.as_ref(), false).expect_err("must refuse");
+        assert_eq!(failure.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(failure.1 .0["error"], "browser_attach_policy_unavailable");
+        assert!(reject_attached_policy(None, ask.as_ref(), false).is_ok());
+        assert!(reject_attached_policy(Some("session-1"), None, false).is_ok());
+        assert!(reject_attached_policy(Some("session-1"), ask.as_ref(), true).is_ok());
     }
 
     #[test]
@@ -5008,6 +5426,22 @@ mod tests {
         (result, connections.load(Ordering::SeqCst))
     }
 
+    #[tokio::test]
+    async fn explicit_space_start_is_refused_before_any_grant_or_run_write() {
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        let mut request = browser_request("session-1");
+        request.space_ref = Some(json!({ "space_id": "space-1" }));
+        let (result, session_connections) = start_with(broker.clone(), request).await;
+        let (status, Json(error)) = result.expect_err("Space authority is not implemented");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(error["error"], "space_browser_run_unavailable");
+        assert_eq!(session_connections, 0);
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+    }
+
     // Plan name: derive_failure_creates_no_thread_or_run. A refused derive
     // stops the start before Session Core is contacted at all.
     #[tokio::test]
@@ -5463,10 +5897,35 @@ mod tests {
         #[derive(Clone, Default)]
         struct FakeExecution {
             executes: Arc<Mutex<Vec<ExecuteStepRequest>>>,
+            restricted_unimplemented: Arc<AtomicBool>,
+            capabilities_unimplemented: Arc<AtomicBool>,
+            capability_bearer: Arc<Mutex<Option<String>>>,
         }
 
         #[tonic::async_trait]
         impl ExecutionCore for FakeExecution {
+    async fn execute_restricted_browser_step(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::ExecuteStepRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ExecuteStepResponse>, tonic::Status> {
+        if self.restricted_unimplemented.load(Ordering::SeqCst) {
+            Err(Status::unimplemented("older execution deployment"))
+        } else {
+            self.execute_step(request).await
+        }
+    }
+
+    async fn browser_agent_capabilities(
+        &self,
+        request: tonic::Request<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse>, tonic::Status> {
+        if self.capabilities_unimplemented.load(Ordering::SeqCst) {
+            return Err(Status::unimplemented("older execution deployment"));
+        }
+        *self.capability_bearer.lock().unwrap() = request.metadata().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned);
+        Ok(tonic::Response::new(mp_contracts::model_plane::v1::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
             async fn execute_step(
                 &self,
                 request: tonic::Request<ExecuteStepRequest>,
@@ -5670,6 +6129,27 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             false
+        }
+
+        #[tokio::test]
+        async fn restricted_dispatch_never_falls_back_to_legacy_rpc() {
+            let h = Harness::new(true).await;
+            h.execution.restricted_unimplemented.store(true, Ordering::SeqCst);
+            let error = dispatch_browser_step(&mut h.state.execution_client.clone(), tonic::Request::new(ExecuteStepRequest::default()), true)
+                .await.expect_err("an older execution instance must refuse the restricted RPC");
+            assert_eq!(error.code(), tonic::Code::Unimplemented);
+            assert!(h.dispatches().is_empty(), "the legacy execution RPC must not run");
+        }
+
+        #[tokio::test]
+        async fn capability_probe_forwards_execution_credential_and_refuses_old_server() {
+            let h = Harness::new(true).await;
+            let bearer = VerifiedExecutionBearer::for_test("execution-token");
+            verify_attached_policy_protocol(&h.state, "org-a", &bearer).await.expect("protocol supported");
+            assert_eq!(h.execution.capability_bearer.lock().unwrap().as_deref(), Some("Bearer execution-token"));
+            h.execution.capabilities_unimplemented.store(true, Ordering::SeqCst);
+            let failure = verify_attached_policy_protocol(&h.state, "org-a", &bearer).await.expect_err("old server is unavailable");
+            assert_eq!(failure.0, StatusCode::SERVICE_UNAVAILABLE);
         }
 
         fn run_key() -> String {

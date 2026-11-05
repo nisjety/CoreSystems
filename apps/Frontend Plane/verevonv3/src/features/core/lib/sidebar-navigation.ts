@@ -22,7 +22,6 @@ import {
   PanelsTopLeft,
   PenLine,
   Plug,
-  Presentation,
   Radar,
   Repeat2,
   Route,
@@ -31,6 +30,7 @@ import {
   Settings,
   ShieldCheck,
   Telescope,
+  Target,
   TestTubeDiagonal,
   TicketCheck,
   TrendingUp,
@@ -198,7 +198,7 @@ export const sidebarSections: SidebarSection[] = [
     id: 'engagement',
     label: 'Engasjement',
     href: '/engagement',
-    icon: Presentation,
+    icon: Target,
     description: 'Synlighet, søkeoptimalisering og anbudsoppfølging.',
     panelGroups: [
       {

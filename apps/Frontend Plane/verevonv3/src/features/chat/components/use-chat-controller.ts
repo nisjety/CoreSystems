@@ -53,6 +53,7 @@ import {
 import {
   consumePendingChatLaunchAsync,
 } from '@/features/chat/lib/pending-chat-launch'
+import { pendingAssistantChatDraft, takeAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
 import {
   bindSupportChatThread,
   isSupportChatThread,
@@ -2332,6 +2333,37 @@ export function useChatController() {
     setTemporaryChat(false)
   }
 
+  const startNewChat = () => {
+    setProjectSpaceRef(null)
+    clearActiveChatThreadId()
+    resetChatState()
+  }
+
+  const [assistantDraftReady, setAssistantDraftReady] = createSignal(false)
+  createEffect(
+    () => assistantDraftReady() ? pendingAssistantChatDraft() : null,
+    (pending) => {
+      if (!pending) return
+      const action = takeAssistantChatDraft(pending)
+      if (!action) return
+
+      const [needsNewChat, wasTemporaryNewChat] = untrack(() => {
+        const threadId = state.threadId
+        const project = threadId ? scopedThreadRefs.has(threadId) : Boolean(projectSpaceRef())
+        const readOnly = isForeignOriginThread(threadId) || isSupportChatThread(threadId ?? undefined)
+        return [action.newChat || project || readOnly, !threadId && temporaryChat()]
+      })
+      let draft = untrack(input)
+      if (needsNewChat) {
+        draft = untrack(chatDraft.readNewDraft)
+        startNewChat()
+        if (wasTemporaryNewChat) setTemporaryChat(true)
+      }
+      setActiveTab('chat')
+      setInput(draft.trim() ? `${draft}\n\n${action.text}` : action.text)
+    },
+  )
+
   createEffect(
     () => undefined,
     () => {
@@ -2455,7 +2487,7 @@ export function useChatController() {
           const attachments = await toStreamAttachments(pending.attachments ?? [])
           const inlined = await inlineTextAttachments(pending.attachments ?? [])
           triggerLaunchMotion()
-          await sendContent(pending.text, pending.model, {
+          const sending = sendContent(pending.text, pending.model, {
             attachments: attachments.length > 0 ? attachments : undefined,
             modelContent: inlined.length > 0 ? appendInlinedAttachments(pending.text, inlined) : undefined,
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
@@ -2472,6 +2504,10 @@ export function useChatController() {
             tone: pending.tone,
             zdr: pending.zdr,
           })
+          // The routed send has selected its thread and cleared its own draft.
+          // A later assistant draft need not wait for the answer to finish.
+          setAssistantDraftReady(true)
+          await sending
           const currentThreadId = untrack(() => state.threadId)
           if (pending.supportHandoff && currentThreadId) {
             bindSupportChatThread(pending.supportHandoff, currentThreadId)
@@ -2479,7 +2515,7 @@ export function useChatController() {
         }
       }
 
-      void initializeChat()
+      void initializeChat().finally(() => setAssistantDraftReady(true))
 
       return () => {
         window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
@@ -5259,12 +5295,6 @@ export function useChatController() {
     if (!result) return
     setVersionState(result.state)
     setState((s) => { s.turns = result.turns })
-  }
-
-  const startNewChat = () => {
-    setProjectSpaceRef(null)
-    clearActiveChatThreadId()
-    resetChatState()
   }
 
   const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {

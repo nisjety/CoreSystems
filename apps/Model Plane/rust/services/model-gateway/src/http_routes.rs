@@ -2833,6 +2833,11 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
     let event_type = EventType::try_from(event.event_type)
         .map(|kind| kind.as_str_name().to_owned())
         .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
+    if event_type == "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR" {
+        // Session accepts events from an owner; an unsigned audit record is
+        // not sufficient to authorize a live attachment projection.
+        return None;
+    }
     if let Some(status) = run_terminal_status(&event_type, &event) {
         if event.resource_ref != format!("run:{run_id}") && event.correlation_id != run_id {
             return None;
@@ -2888,6 +2893,20 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
         .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok())?;
     if payload.get("run_id").and_then(Value::as_str) != Some(run_id) {
         return None;
+    }
+    if event_type == "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
+        && payload.get("action_id").and_then(Value::as_str) == Some(crate::browser_attach_compat::ACTION_ID)
+    {
+        let plan = payload.get("plan_id").and_then(Value::as_str)?;
+        let envelope = payload.get("status").and_then(Value::as_str)?;
+        let receipt = crate::browser_attach_compat::verify_configured(envelope, run_id, plan)?;
+        return Some(DurableRunEventProjection {
+            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            event_id: event.event_id,
+            event_type: "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR".to_owned(),
+            payload: json!({ "run_id": receipt.run_id, "plan_id": receipt.plan_id,
+                "session_run_id": receipt.session_run_id, "attach_id": receipt.attach_id, "tab_id": receipt.tab_id }),
+        });
     }
     Some(DurableRunEventProjection {
         at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
@@ -21530,6 +21549,28 @@ mod run_replay_projection_tests {
     const RUN_TERMINAL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
 
     #[test]
+    fn compat_attach_replay_requires_signature_and_matching_run() {
+        let key = "test-only-compat-key-32-characters-long";
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let receipt = crate::browser_attach_compat::Receipt { run_id: "run-1".into(), plan_id: "plan-1".into(), session_run_id: "session-1".into(), attach_id: "attach-1".into(), tab_id: "tab-1".into(), issued_at: now };
+        let envelope = crate::browser_attach_compat::sign(key.as_bytes(), &receipt).unwrap();
+        let payload = json!({"run_id":"run-1","plan_id":"plan-1","action_id":crate::browser_attach_compat::ACTION_ID,"status":envelope}).to_string();
+        let make_event = || event(EventType::BrowserObservationReceived as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserObservationReceived", &payload);
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "0".repeat(37));
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        assert!(project_run_replay_event("run-other", make_event()).is_none());
+        let projected = project_run_replay_event("run-1", make_event()).unwrap();
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload, json!({"run_id":"run-1","plan_id":"plan-1","session_run_id":"session-1","attach_id":"attach-1","tab_id":"tab-1"}));
+        let forged = event(EventType::BrowserAttachSharedJar as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar", r#"{"run_id":"run-1"}"#);
+        assert!(project_run_replay_event("run-1", forged).is_none(), "unsigned typed event must not become proof");
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+    }
+
+    #[test]
     fn a_managed_run_failed_is_projected_exactly() {
         let projected = project_run_replay_event(
             "run-1",
@@ -21643,7 +21684,7 @@ mod run_replay_projection_tests {
     }
 
     #[test]
-    fn an_attach_shared_jar_event_is_replayed_for_its_run() {
+    fn an_unsigned_attach_shared_jar_event_is_not_replayed() {
         let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
         let projected = project_run_replay_event(
             "run-1",
@@ -21654,10 +21695,8 @@ mod run_replay_projection_tests {
                 "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
                 payload,
             ),
-        )
-        .expect("a reconnecting client replays the attach audit event");
-        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
-        assert_eq!(projected.payload["attach_id"], "att-1");
+        );
+        assert!(projected.is_none(), "unsigned audit event must not become attachment proof");
         // Another run's attach event is not replayed.
         let other = event(
             EventType::BrowserAttachSharedJar as i32,

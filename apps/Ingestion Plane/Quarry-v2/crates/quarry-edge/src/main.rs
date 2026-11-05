@@ -32,6 +32,7 @@ mod api_key;
 mod budget;
 mod audio_routes;
 mod audit_page;
+mod browser_redirect;
 mod audit_seo;
 mod auth;
 mod cache;

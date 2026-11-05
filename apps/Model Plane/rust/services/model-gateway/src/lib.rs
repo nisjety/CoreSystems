@@ -12,6 +12,7 @@ pub mod audit;
 pub mod auth;
 pub mod author_guidance;
 pub mod browser_grants;
+mod browser_attach_compat;
 pub mod browser_run;
 pub mod budget;
 pub mod calibration;

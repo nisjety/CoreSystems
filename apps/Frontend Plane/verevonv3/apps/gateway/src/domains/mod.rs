@@ -17,6 +17,7 @@ pub mod briefs;
 pub mod browser;
 pub mod browser_context;
 pub mod browser_evidence;
+mod browser_redirect;
 pub mod browser_sites;
 pub mod chat;
 pub mod client_config;

@@ -1010,6 +1010,10 @@ export function DashboardComposer(props: {
 	onApprovedPlanSelect?: () => void;
 	onStop?: () => void;
 	onLaunchStart?: () => void;
+	/** Handle a plain local command before model or provider validation. */
+	onBeforeSubmit?: (text: string) => boolean;
+	/** Pure check for a locally handled command, used while the provider loads. */
+	canHandleBeforeSubmit?: (text: string) => boolean;
 	onSubmit?: (
 		payload: DashboardComposerSubmitPayload,
 	) => Promise<void> | void;
@@ -1783,10 +1787,18 @@ export function DashboardComposer(props: {
 	const showTextareaExpand = createMemo(() =>
 		shouldShowTextareaExpandButton(hasOverflow(), textareaExpanded()),
 	);
+	const canInterceptLocalDraft = () => {
+		const body = commandBody().trim();
+		const browsing = browseWeb();
+		return Boolean(body && !draftCommand() && files().length === 0 && activeActions().length === 0 &&
+			!browsing && !deepSearch() && !shouldResearchLinkedProducts({ browseWeb: browsing, message: body }) &&
+			!imageMode() && !agentMode() && retrievalScope() === 'auto' && connectorScope().length === 0 &&
+			!(tabMentionChipsEnabled() && composerBrowserContext(body, props.browserSessionId, zeroRetentionTurn() || temporaryChat())));
+	};
 	const submitEnabled = createMemo(() =>
 		isComposerSubmitEnabled({
 			hasContent: hasContent(),
-			submitting: handoffPending() || subscriptionConnectionPending() || (props.submitting && !props.allowMidRunSubmit),
+			submitting: handoffPending() || (subscriptionConnectionPending() && !(props.onBeforeSubmit && props.canHandleBeforeSubmit && canInterceptLocalDraft() && props.canHandleBeforeSubmit(props.message.trim()))) || (props.submitting && !props.allowMidRunSubmit),
 			voiceMode: voiceMode(),
 			voiceRecording: voiceRecording(),
 		}),
@@ -2784,14 +2796,6 @@ export function DashboardComposer(props: {
 		fromVoiceMode?: boolean;
 	}): Promise<ComposerSubmitResult> => {
 		if (props.disabled || handoffPending()) return { ok: false };
-		if (subscriptionConnectionPending())
-			return {
-				ok: false,
-				message: i18n.tr(
-					"Kontrollerer ChatGPT-abonnementet … Prøv igjen om et øyeblikk.",
-					"Checking your ChatGPT subscription … Try again in a moment.",
-				),
-			};
 		// A deliberately-opened menu (slash commands / actions) still blocks a
 		// send — the user is mid-command. The ambient "date" suggestion must
 		// NOT: it is the other half of the F-03 fix above. Without this, Enter
@@ -2870,6 +2874,25 @@ export function DashboardComposer(props: {
 		});
 		const initialEffectiveDeepSearch =
 			deepSearch() || productResearch || commandBuiltin === "deep_research";
+		// Local navigation does not need a model connection. Only intercept an
+		// unqualified text turn so explicit tools, context and attachments retain
+		// their usual submission semantics.
+		if (
+			props.onBeforeSubmit && canInterceptLocalDraft() &&
+			props.onBeforeSubmit(initialSnapshot.submittedText)
+		) {
+			setSubmitError(null);
+			resetComposerDraft();
+			return { ok: true };
+		}
+		if (subscriptionConnectionPending())
+			return {
+				ok: false,
+				message: i18n.tr(
+					"Kontrollerer ChatGPT-abonnementet … Prøv igjen om et øyeblikk.",
+					"Checking your ChatGPT subscription … Try again in a moment.",
+				),
+			};
 		const subscriptionRoute = selectedSubscriptionRoute();
 		if (subscriptionBacked() && !subscriptionRoute) {
 			setStaleSubscriptionNotice(true);

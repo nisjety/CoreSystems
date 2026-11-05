@@ -2,7 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { createRouter, memoryHistory, useLocation } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SearchAnswerHandlers, WebSearchPayload } from '@/shared/api/search-client'
 
@@ -106,12 +106,13 @@ function setup(path = '/dashboard?tab=web') {
   const history = memoryHistory(path)
   const TestRouter = createRouter({ history, explicitLinks: true, routes: [{ path: '/*all', component: () => {
     const location = useLocation()
-    return <><DashboardHome /><output data-testid="location">{location.pathname}{location.search}</output></>
+    const [assistantDraft, setAssistantDraft] = createSignal('')
+    return <><DashboardHome /><input aria-label="Draft" value={assistantDraft()} onInput={(event) => setAssistantDraft(event.currentTarget.value)} /><output data-testid="location">{location.pathname}{location.search}</output></>
   } }] })
   const view = render(() => <QueryClientProvider client={queryClient}><TestRouter>{(props) => props.children}</TestRouter></QueryClientProvider>)
   return { history, ...view }
 }
-const tab = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name })
+const tab = (name: 'Chat' | 'Web' | 'Extract') => screen.getByRole('button', { name: name === 'Chat' ? 'Assistant' : name })
 const pressed = () => (['Chat', 'Web', 'Extract'] as const).filter((name) => tab(name).getAttribute('aria-pressed') === 'true')
 const searchBox = () => screen.getByRole('combobox', { name: 'Search on the web or ask' }) as HTMLInputElement
 const draft = () => screen.getByLabelText('Draft') as HTMLInputElement
@@ -230,13 +231,13 @@ describe('Double-clicking the active Nett tab', () => {
     fireEvent.input(draft(), { target: { value: 'Keep this draft' } }); flush()
     const composer = draft()
     await openExpandedSearch()
-    expect(composer.closest('[hidden]')).not.toBeNull()
+    expect(composer.closest('[hidden]')).toBeNull()
 
     doubleClick('Web')
 
     expect(draft()).toBe(composer)
     expect(composer.value).toBe('Keep this draft')
-    expect(composer.closest('[hidden]')).not.toBeNull()
+    expect(composer.closest('[hidden]')).toBeNull()
     await switchTo('Chat')
     expect(draft()).toBe(composer)
     expect(composer.value).toBe('Keep this draft')

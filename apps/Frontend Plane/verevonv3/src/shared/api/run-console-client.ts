@@ -96,6 +96,15 @@ export type BrowserActionDispatchedEvent = {
   at?: string
 }
 
+/** An owner-run attach receipt; identity correlation only, not a viewer grant. */
+export type BrowserAttachSharedJarEvent = {
+  runId: string
+  planId: string
+  attachId: string
+  sessionRunId: string
+  tabId: string
+}
+
 export type BrowserObservationReceivedEvent = {
   runId?: string
   planId?: string
@@ -228,6 +237,7 @@ export type RunEventHandlers = {
   onSubagentAttached?: (event: SubagentAttachedEvent) => void
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
+  onBrowserAttachSharedJar?: (event: BrowserAttachSharedJarEvent) => void
   onBrowserObservation?: (event: BrowserObservationReceivedEvent) => void
   onBrowserRunPaused?: (event: BrowserRunPausedEvent) => void
   onBrowserRunResumed?: (event: BrowserRunResumedEvent) => void
@@ -241,6 +251,11 @@ export type RunEventHandlers = {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function attachmentId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && /^[A-Za-z0-9_.:-]+$/.test(value)
+    ? value : undefined
 }
 
 function nonNegativeInt(value: unknown): number | undefined {
@@ -348,6 +363,17 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         at: str(payload.at),
       })
       break
+    case 'browser_attach_shared_jar': {
+      const runId = attachmentId(payload.run_id)
+      const planId = attachmentId(payload.plan_id)
+      const attachId = attachmentId(payload.attach_id)
+      const sessionRunId = attachmentId(payload.session_run_id)
+      const tabId = attachmentId(payload.tab_id)
+      if (runId && planId && attachId && sessionRunId && tabId) {
+        handlers.onBrowserAttachSharedJar?.({ runId, planId, attachId, sessionRunId, tabId })
+      }
+      break
+    }
     case 'browser_action_dispatched':
       handlers.onBrowserAction?.({
         runId: str(payload.run_id) ?? str(payload.runId),

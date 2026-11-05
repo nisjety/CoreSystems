@@ -48,6 +48,7 @@ export function IngestionsMonitoringView(props: {
   monitors: ChangeMonitor[] | null
   onMonitorsChanged: () => Promise<void>
   orgId: string
+  showWebhooks?: boolean
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -321,7 +322,7 @@ export function IngestionsMonitoringView(props: {
           </div>
         </section>
 
-        <ChangeWebhooksPanel orgId={props.orgId} />
+        <Show when={props.showWebhooks !== false}><ChangeWebhooksPanel orgId={props.orgId} /></Show>
 
         <section class="verevon-panel ingestions-card ingestions-runs-panel">
           <div class="ingestions-card__header">

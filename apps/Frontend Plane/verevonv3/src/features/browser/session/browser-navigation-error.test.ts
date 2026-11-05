@@ -63,6 +63,19 @@ describe('navigationFailureFromError (WS9.B)', () => {
     expect(failure?.sentence.length).toBeGreaterThan(0)
   })
 
+  it('keeps a typed security block distinct from a site response', () => {
+    const failure = navigationFailureFromError(
+      { type: 'navigate', url: 'https://example.com' },
+      new ApiError('Blocked', 502, 'DRIVER_FAILED', {
+        blockReason: 'waf_interstitial',
+        details: { reason: 'navigation_http_response', http_status: 403 },
+      }),
+      tr,
+    )
+    expect(failure?.reason).toBe('blocked')
+    expect(failure?.openOutsideUrl).toBeUndefined()
+  })
+
   it('returns no retry URL when there is no failure', () => {
     expect(retryUrlOf(null)).toBeNull()
     expect(retryUrlOf(undefined)).toBeNull()

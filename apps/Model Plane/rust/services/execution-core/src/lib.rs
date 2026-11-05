@@ -7,6 +7,7 @@ pub mod attestation;
 pub mod auth;
 pub mod browser_agent;
 pub mod browser_events;
+mod browser_attach_compat;
 pub(crate) mod browser_session;
 pub mod capability_client;
 pub mod capability_policy;

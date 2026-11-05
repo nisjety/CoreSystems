@@ -144,6 +144,7 @@ services:
       # is the environment's default, never a looser mode. Keep the default empty here:
       # a value in this base file would be inherited by the production overlay.
       BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
+      BROWSER_HUMAN_BROWSE: ${BROWSER_HUMAN_BROWSE:-false}
       QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
       # Result caching/rate limiting degrades safely to in-process storage when
       # no frontend-owned cache contract is configured.
@@ -155,11 +156,16 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      BROWSER_SITES_ENABLED: ${BROWSER_SITES_ENABLED:-false}
       # WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true.
       SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
       # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
       BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
+      # Allow a verified agent run to attach to the owner-scoped browser session.
+      BROWSER_AI_RUN_ATTACH_SESSION: ${BROWSER_AI_RUN_ATTACH_SESSION:-false}
+      # Use task-scoped, public-site grants. Enable after deploying the matching browser broker.
+      BROWSER_ASSISTANT_TASK_GRANTS: ${BROWSER_ASSISTANT_TASK_GRANTS:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.

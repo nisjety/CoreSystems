@@ -9,6 +9,7 @@ vi.mock('@/shared/api/search-client', () => ({
 }))
 
 import { runWebSearch } from '@/shared/api/search-client'
+import { AssistantBrowserContext } from '@/features/core/assistant-agent/assistant-browser-context'
 import { BrowserChrome } from './BrowserChrome'
 import { attachBrowserSession, browserSessionFromPreview } from './browser-session'
 import type { ScrapePreview } from './knowledge-preview'
@@ -70,6 +71,60 @@ async function searchAndClickResult(container: HTMLElement) {
 }
 
 describe('BrowserChrome search results and the run-domain limit (D2-046)', () => {
+  it('hands the active tab and its initial epoch to the assistant from personal Nett', async () => {
+    const prepareContinuation = vi.fn()
+    const url = 'https://vg.no/section'
+    const view = browserSessionFromPreview(attachBrowserSession(page, {
+      session: {
+        capabilities: ['navigate'], id: 'run-1', renderMode: 'chromium', status: 'live',
+        control: { mode: 'human_takeover' },
+        profile: { scope: 'run_scoped', storage: 'isolated' },
+        tabs: [{ tabId: 'person-tab', active: true, url, tabEpoch: 0, holder: 'human' }],
+        title: 'VG', url, viewport: { width: 1280, height: 800 },
+      },
+    }))
+    render(() => (
+      <AssistantBrowserContext value={{ view: () => null, stop: vi.fn(), prepareContinuation }}>
+        <BrowserChrome session={view} personalBrowsing allowAssistantContinuation />
+      </AssistantBrowserContext>
+    ))
+    fireEvent.click(await screen.findByRole('button', { name: 'La Verevon fortsette i denne fanen' }))
+    expect(prepareContinuation).toHaveBeenCalledWith({
+      sessionId: 'run-1', tabId: 'person-tab', origin: 'https://vg.no', tabEpoch: 0,
+    })
+  })
+
+  it('shows the attempted address instead of Chromium’s error document in the omnibox', async () => {
+    const url = 'https://example.org/missing'
+    render(() => <BrowserChrome session={session('chrome-error://chromewebdata/')} browserNavigationError={{
+      url, reason: 'http_response', sentence: 'Nettstedet svarte med HTTP 404.',
+    }} />)
+    const input = screen.getByRole<HTMLInputElement>('combobox', { name: 'Nettleseradresse' })
+    await waitFor(() => expect(input.value).toBe(url))
+  })
+
+  it('keeps an unfinished address while focused and reflects the observed page on blur', async () => {
+    const [url, setUrl] = createSignal('https://vg.no/')
+    const view = render(() => <BrowserChrome session={session(url())} searchEnabled onBrowserAction={vi.fn()} />)
+    const input = view.container.querySelector<HTMLInputElement>('input[aria-label="Nettleseradresse"]')!
+    await waitFor(() => expect(input.value).toBe('https://vg.no/'))
+    input.focus()
+    fireEvent.input(input, { target: { value: 'unfinished search' } })
+    setUrl('https://vg.no/news')
+    await waitFor(() => expect(input.value).toBe('unfinished search'))
+    input.blur()
+    await waitFor(() => expect(input.value).toBe('https://vg.no/news'))
+  })
+
+  it('updates the address when an unfocused browser navigates', async () => {
+    const [url, setUrl] = createSignal('https://vg.no/')
+    const view = render(() => <BrowserChrome session={session(url())} searchEnabled onBrowserAction={vi.fn()} />)
+    const input = view.container.querySelector<HTMLInputElement>('input[aria-label="Nettleseradresse"]')!
+    await waitFor(() => expect(input.value).toBe('https://vg.no/'))
+    setUrl('https://vg.no/news')
+    await waitFor(() => expect(input.value).toBe('https://vg.no/news'))
+  })
+
   it('keeps the results open on a refusal outside the run domains and names both hosts', async () => {
     const onAction = vi.fn()
     const [error, setError] = createSignal<BrowserNavigationFailure | null>(null)
@@ -116,5 +171,16 @@ describe('BrowserChrome search results and the run-domain limit (D2-046)', () =>
     await searchAndClickResult(view.container)
     setError({ ...refusal, reason: 'unreachable', sentence: 'Adressen finnes ikke.' })
     await waitFor(() => expect(view.container.querySelector('.browser-search-results')).toBeNull())
+  })
+})
+
+
+describe('personal browser controls', () => {
+  it('opens the page tools from the compact menu', async () => {
+    const view = render(() => <BrowserChrome personalBrowsing session={session('https://vg.no/')} onBrowserAction={vi.fn()} />)
+    expect(view.container.querySelector('.knowledge-browser-chrome--personal')).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Flere valg' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Sideverktøy' }))
+    await waitFor(() => expect(view.container.querySelector('.knowledge-browser-devtools')).not.toBeNull())
   })
 })

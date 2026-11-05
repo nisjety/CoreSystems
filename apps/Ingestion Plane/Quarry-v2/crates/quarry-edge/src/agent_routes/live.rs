@@ -266,6 +266,25 @@ pub(super) fn stream_interval(query: &FrameStreamQuery) -> Duration {
     Duration::from_millis(query.interval_ms.unwrap_or(250).clamp(75, 2_000))
 }
 
+/// Pin only after the caller has passed the run-owner check. Never select the
+/// tab: observers must not change the active tab used by the human or agent.
+pub(super) async fn frame_session(
+    state: &AppState,
+    session: &BrowserSession,
+    tab_id: Option<&str>,
+    request_id: &str,
+) -> Result<BrowserSession, ApiErr> {
+    let Some(tab_id) = tab_id else { return Ok(session.clone()); };
+    if tab_id.is_empty() || tab_id.len() > 128 || !state.agent_driver.capabilities().tab_pinning {
+        return Err(status_err(StatusCode::BAD_REQUEST, request_id, "invalid or unsupported tab"));
+    }
+    let tabs = state.agent_driver.list_tabs(session).await.map_err(|e| driver_err(request_id, e))?;
+    if !tabs.iter().any(|tab| tab.tab_id == tab_id) {
+        return Err(status_err(StatusCode::NOT_FOUND, request_id, "tab not found"));
+    }
+    Ok(session.pinned_to(tab_id))
+}
+
 /// `GET /v1/agent/runs/{run_id}/frame` — return one transient live frame.
 ///
 /// This never writes an artifact. It is for live preview/human takeover only;
@@ -320,9 +339,10 @@ pub async fn live_frame(
     let options = live_frame_options(&query, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
 
+    let session = frame_session(&state, &entry.session, query.tab_id.as_deref(), &request_id).await?;
     let frame = state
         .agent_driver
-        .live_frame(&entry.session, options)
+        .live_frame(&session, options)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
     Ok(Json(Envelope::ok(
@@ -602,6 +622,34 @@ fn replay_gap_event(gap: quarry_runtime::ReplayGap) -> Event {
     )
 }
 
+/// Only an owner watching the exact still-agent-held attached tab may see
+/// pointer data. The pointer was captured with this frame by the driver.
+fn scoped_frame_cursor(
+    live: &RunLive,
+    session_run_id: &str,
+    requested_tab: Option<&str>,
+    cursor: Option<quarry_browser::LiveAgentCursor>,
+) -> Option<LiveAgentCursorData> {
+    let cursor = cursor?;
+    if requested_tab != Some(cursor.tab_id.as_str()) { return None; }
+    let attached = {
+        let registry = live.attaches();
+        registry.live().is_some_and(|a| a.attach_id == cursor.attach_id && a.tab_id == cursor.tab_id)
+    };
+    if !attached { return None; }
+    let agent_holds_tab = {
+        let tabs = live.tabs();
+        tabs.get(&cursor.tab_id).is_some_and(|tab| tab.holder == BrowserTabHolder::Agent && tab.attach_id.as_deref() == Some(cursor.attach_id.as_str()))
+    };
+    if !agent_holds_tab || cursor.viewport_width == 0 || cursor.viewport_height == 0
+        || cursor.x >= cursor.viewport_width || cursor.y >= cursor.viewport_height { return None; }
+    Some(LiveAgentCursorData {
+        x: cursor.x, y: cursor.y,
+        viewport_width: cursor.viewport_width, viewport_height: cursor.viewport_height,
+        session_run_id: session_run_id.to_owned(), tab_id: cursor.tab_id, attach_id: cursor.attach_id,
+    })
+}
+
 /// `GET /v1/agent/runs/{run_id}/frames/stream` — stream transient live frames.
 ///
 /// Frame events are never persisted. This is the read-only visual channel
@@ -649,6 +697,7 @@ pub async fn live_frame_stream(
     };
     // W3-E3.4-5: after the owner check (inside the block above).
     let scope = owner_live_scope(&headers, zdr, &request_id)?;
+    let session = frame_session(&state, &session, query.frame.tab_id.as_deref(), &request_id).await?;
     let options = live_frame_options(&query.frame, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
     let interval = stream_interval(&query);
@@ -670,6 +719,7 @@ pub async fn live_frame_stream(
         //
         // W3-E3.4-5: a view-only stream sends only a read-only kind (see
         // `scoped_live_view_ref`).
+        if query.frame.tab_id.is_none() {
         if let Some(ref lv) =
             scoped_live_view_ref(scope, driver.live_view(&session).await.ok().flatten())
         {
@@ -681,6 +731,7 @@ pub async fn live_frame_stream(
                     // just falls back to the screenshot frames.
                 }
             }
+        }
         }
         loop {
             if crate::drain::streams_are_closing() {
@@ -700,6 +751,7 @@ pub async fn live_frame_stream(
                         mime_type: frame.mime_type,
                         data_base64: frame.data_base64,
                         zdr: zdr_active,
+                        agent_cursor: scoped_frame_cursor(&handle.live, &run_id, query.frame.tab_id.as_deref(), frame.agent_cursor),
                     };
                     match Event::default()
                         .event("frame")
@@ -752,6 +804,37 @@ mod live_scope_tests {
             kind,
             expires_at: None,
         })
+    }
+
+    #[test]
+    fn cursor_requires_the_same_live_attached_agent_held_tab() {
+        let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);
+        live.tabs().open_agent_tab("tab", "attach");
+        live.attaches().begin(AttachState {
+            borrowed: None,
+            attach_id: "attach".into(), grant_id: "grant".into(),
+            delegate_actor: "agent".into(), tab_id: "tab".into(),
+            allowed_domains: vec!["example.com".into()], policy_ask: None,
+            budget: AttachBudget::new(10, 60), lane: LaneRef::new(LaneState::default()),
+            phase: BrowserAttachState::Attached, started_ms: 0, last_activity_ms: 0,
+        }).unwrap();
+        let cursor = quarry_browser::LiveAgentCursor {
+            x: 25, y: 40, viewport_width: 800, viewport_height: 600,
+            tab_id: "tab".into(), attach_id: "attach".into(),
+        };
+        let shown = scoped_frame_cursor(&live, "run", Some("tab"), Some(cursor.clone())).unwrap();
+        let json = serde_json::to_value(shown).unwrap();
+        assert_eq!(json["sessionRunId"], "run");
+        assert_eq!(json["viewportWidth"], 800);
+        assert_eq!(json["attachId"], "attach");
+        assert!(scoped_frame_cursor(&live, "run", Some("other"), Some(cursor.clone())).is_none());
+        let mut wrong_attach = cursor.clone();
+        wrong_attach.attach_id = "other".into();
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(wrong_attach)).is_none());
+        let mut out_of_bounds = cursor.clone(); out_of_bounds.x = 800;
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(out_of_bounds)).is_none());
+        live.tabs().set_holder("tab", BrowserTabHolder::Human, None).unwrap();
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(cursor)).is_none());
     }
 
     #[test]

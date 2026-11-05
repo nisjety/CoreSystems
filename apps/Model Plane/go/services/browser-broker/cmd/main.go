@@ -217,24 +217,29 @@ func purgeOnce(ctx context.Context, purger grant.Purger, now time.Time) {
 
 // Environment variables read by serverOptionsFromEnv.
 const (
-	envSitePolicy      = "BROWSER_BROKER_SITE_POLICY"
-	envGrantMaxTTL     = "BROWSER_GRANT_MAX_TTL"
-	envOrgCoreURL      = "ORG_CORE_URL"
-	envOrgCoreToken    = "BROWSER_BROKER_ORG_CORE_TOKEN"
-	browserBrokerSvcID = "browser-broker"
+	envSitePolicy          = "BROWSER_BROKER_SITE_POLICY"
+	envAssistantTaskGrants = "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED"
+	envGrantMaxTTL         = "BROWSER_GRANT_MAX_TTL"
+	envOrgCoreURL          = "ORG_CORE_URL"
+	envOrgCoreToken        = "BROWSER_BROKER_ORG_CORE_TOKEN"
+	browserBrokerSvcID     = "browser-broker"
 )
 
 // serverOptionsFromEnv reads the site-policy mode, the lifetime cap and, when the
 // policy is on, the org-core client. Enforce and shadow both refuse to start
 // without the client: a broker that cannot ask org-core must not run as if it had.
 func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
-	options := bbserver.Options{SitePolicy: sitepolicy.ParseMode(getenv(envSitePolicy))}
+	assistantTaskGrants := strings.ToLower(strings.TrimSpace(getenv(envAssistantTaskGrants)))
+	options := bbserver.Options{
+		SitePolicy:                 sitepolicy.ParseMode(getenv(envSitePolicy)),
+		AssistantTaskGrantsEnabled: assistantTaskGrants == "1" || assistantTaskGrants == "true" || assistantTaskGrants == "on",
+	}
 	maxTTL, err := grantMaxTTLFromEnv(getenv)
 	if err != nil {
 		return bbserver.Options{}, err
 	}
 	options.MaxRequestTTL = maxTTL
-	if options.SitePolicy == sitepolicy.ModeOff {
+	if options.SitePolicy == sitepolicy.ModeOff && !options.AssistantTaskGrantsEnabled {
 		return options, nil
 	}
 	resolver, err := sitepolicy.NewClient(getenv(envOrgCoreURL), browserBrokerSvcID, getenv(envOrgCoreToken))

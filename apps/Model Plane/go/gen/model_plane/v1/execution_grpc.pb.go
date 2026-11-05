@@ -19,12 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ExecutionCore_ExecuteStep_FullMethodName          = "/model_plane.v1.ExecutionCore/ExecuteStep"
-	ExecutionCore_ResumeRun_FullMethodName            = "/model_plane.v1.ExecutionCore/ResumeRun"
-	ExecutionCore_CancelRun_FullMethodName            = "/model_plane.v1.ExecutionCore/CancelRun"
-	ExecutionCore_PauseRun_FullMethodName             = "/model_plane.v1.ExecutionCore/PauseRun"
-	ExecutionCore_RunAgent_FullMethodName             = "/model_plane.v1.ExecutionCore/RunAgent"
-	ExecutionCore_ExecuteScheduledStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteScheduledStep"
+	ExecutionCore_BrowserAgentCapabilities_FullMethodName     = "/model_plane.v1.ExecutionCore/BrowserAgentCapabilities"
+	ExecutionCore_ExecuteRestrictedBrowserStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteRestrictedBrowserStep"
+	ExecutionCore_ExecuteStep_FullMethodName                  = "/model_plane.v1.ExecutionCore/ExecuteStep"
+	ExecutionCore_ResumeRun_FullMethodName                    = "/model_plane.v1.ExecutionCore/ResumeRun"
+	ExecutionCore_CancelRun_FullMethodName                    = "/model_plane.v1.ExecutionCore/CancelRun"
+	ExecutionCore_PauseRun_FullMethodName                     = "/model_plane.v1.ExecutionCore/PauseRun"
+	ExecutionCore_RunAgent_FullMethodName                     = "/model_plane.v1.ExecutionCore/RunAgent"
+	ExecutionCore_ExecuteScheduledStep_FullMethodName         = "/model_plane.v1.ExecutionCore/ExecuteScheduledStep"
 )
 
 // ExecutionCoreClient is the client API for ExecutionCore service.
@@ -36,7 +38,19 @@ const (
 //
 //	artifacts, subagents, step transitions, compaction triggers.
 type ExecutionCoreClient interface {
-	// Execute a single step within a run.
+	// Authenticated execution-protocol handshake. This says only what this
+	// deployment implements; Quarry must still acknowledge every attachment.
+	BrowserAgentCapabilities(ctx context.Context, in *BrowserAgentCapabilitiesRequest, opts ...grpc.CallOption) (*BrowserAgentCapabilitiesResponse, error)
+	// Restricted attached browser runs use a distinct RPC so mixed-version
+	// deployments fail closed: an older execution instance cannot accidentally
+	// accept and drop a restriction it does not understand. It takes the ExecuteStep
+	// request and response on purpose: the payload is the same step, only the route differs.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	ExecuteRestrictedBrowserStep(ctx context.Context, in *ExecuteStepRequest, opts ...grpc.CallOption) (*ExecuteStepResponse, error)
+	// Execute a single step within a run. ExecuteRestrictedBrowserStep shares its types.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	ExecuteStep(ctx context.Context, in *ExecuteStepRequest, opts ...grpc.CallOption) (*ExecuteStepResponse, error)
 	// Resume a paused or checkpointed run.
 	ResumeRun(ctx context.Context, in *ResumeRunRequest, opts ...grpc.CallOption) (*ResumeRunResponse, error)
@@ -66,6 +80,26 @@ type executionCoreClient struct {
 
 func NewExecutionCoreClient(cc grpc.ClientConnInterface) ExecutionCoreClient {
 	return &executionCoreClient{cc}
+}
+
+func (c *executionCoreClient) BrowserAgentCapabilities(ctx context.Context, in *BrowserAgentCapabilitiesRequest, opts ...grpc.CallOption) (*BrowserAgentCapabilitiesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BrowserAgentCapabilitiesResponse)
+	err := c.cc.Invoke(ctx, ExecutionCore_BrowserAgentCapabilities_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executionCoreClient) ExecuteRestrictedBrowserStep(ctx context.Context, in *ExecuteStepRequest, opts ...grpc.CallOption) (*ExecuteStepResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecuteStepResponse)
+	err := c.cc.Invoke(ctx, ExecutionCore_ExecuteRestrictedBrowserStep_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *executionCoreClient) ExecuteStep(ctx context.Context, in *ExecuteStepRequest, opts ...grpc.CallOption) (*ExecuteStepResponse, error) {
@@ -137,7 +171,19 @@ func (c *executionCoreClient) ExecuteScheduledStep(ctx context.Context, in *Exec
 //
 //	artifacts, subagents, step transitions, compaction triggers.
 type ExecutionCoreServer interface {
-	// Execute a single step within a run.
+	// Authenticated execution-protocol handshake. This says only what this
+	// deployment implements; Quarry must still acknowledge every attachment.
+	BrowserAgentCapabilities(context.Context, *BrowserAgentCapabilitiesRequest) (*BrowserAgentCapabilitiesResponse, error)
+	// Restricted attached browser runs use a distinct RPC so mixed-version
+	// deployments fail closed: an older execution instance cannot accidentally
+	// accept and drop a restriction it does not understand. It takes the ExecuteStep
+	// request and response on purpose: the payload is the same step, only the route differs.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	ExecuteRestrictedBrowserStep(context.Context, *ExecuteStepRequest) (*ExecuteStepResponse, error)
+	// Execute a single step within a run. ExecuteRestrictedBrowserStep shares its types.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	ExecuteStep(context.Context, *ExecuteStepRequest) (*ExecuteStepResponse, error)
 	// Resume a paused or checkpointed run.
 	ResumeRun(context.Context, *ResumeRunRequest) (*ResumeRunResponse, error)
@@ -169,6 +215,12 @@ type ExecutionCoreServer interface {
 // pointer dereference when methods are called.
 type UnimplementedExecutionCoreServer struct{}
 
+func (UnimplementedExecutionCoreServer) BrowserAgentCapabilities(context.Context, *BrowserAgentCapabilitiesRequest) (*BrowserAgentCapabilitiesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BrowserAgentCapabilities not implemented")
+}
+func (UnimplementedExecutionCoreServer) ExecuteRestrictedBrowserStep(context.Context, *ExecuteStepRequest) (*ExecuteStepResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecuteRestrictedBrowserStep not implemented")
+}
 func (UnimplementedExecutionCoreServer) ExecuteStep(context.Context, *ExecuteStepRequest) (*ExecuteStepResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExecuteStep not implemented")
 }
@@ -206,6 +258,42 @@ func RegisterExecutionCoreServer(s grpc.ServiceRegistrar, srv ExecutionCoreServe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&ExecutionCore_ServiceDesc, srv)
+}
+
+func _ExecutionCore_BrowserAgentCapabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BrowserAgentCapabilitiesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionCoreServer).BrowserAgentCapabilities(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutionCore_BrowserAgentCapabilities_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionCoreServer).BrowserAgentCapabilities(ctx, req.(*BrowserAgentCapabilitiesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutionCore_ExecuteRestrictedBrowserStep_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteStepRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionCoreServer).ExecuteRestrictedBrowserStep(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutionCore_ExecuteRestrictedBrowserStep_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionCoreServer).ExecuteRestrictedBrowserStep(ctx, req.(*ExecuteStepRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _ExecutionCore_ExecuteStep_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -323,6 +411,14 @@ var ExecutionCore_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "model_plane.v1.ExecutionCore",
 	HandlerType: (*ExecutionCoreServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "BrowserAgentCapabilities",
+			Handler:    _ExecutionCore_BrowserAgentCapabilities_Handler,
+		},
+		{
+			MethodName: "ExecuteRestrictedBrowserStep",
+			Handler:    _ExecutionCore_ExecuteRestrictedBrowserStep_Handler,
+		},
 		{
 			MethodName: "ExecuteStep",
 			Handler:    _ExecutionCore_ExecuteStep_Handler,
