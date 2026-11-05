@@ -1,4 +1,5 @@
 import { ForkAction, threadForkEnabled } from './ForkAction'
+import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
@@ -253,6 +254,11 @@ export function MessageBlock(props: {
    * attest zero data retention.
    */
   temporaryChat?: boolean
+  /**
+   * The thread is scoped to a Space. Its history has its own surface and authority, so the conversation export
+   * is not offered there (EP-12 D8).
+   */
+  spaceScoped?: boolean
   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
   docked?: DockedNodes
   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
@@ -573,6 +579,8 @@ export function AssistantMessage(props: {
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
   temporaryChat?: boolean
+  /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
+  spaceScoped?: boolean
   /** See `MessageBlock`'s doc. */
   docked?: DockedNodes
   /** See `MessageBlock`'s doc. */
@@ -916,6 +924,14 @@ export function AssistantMessage(props: {
             </MessageAction>
             <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
               <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
+            </Show>
+            {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
+            <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
+              <ExportConversationAction
+                threadId={props.threadId ?? ''}
+                temporaryChat={props.temporaryChat}
+                spaceScoped={props.spaceScoped}
+              />
             </Show>
             <Show when={canRemember()}>
               <MessageAction

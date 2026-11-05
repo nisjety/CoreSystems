@@ -1,4 +1,5 @@
-import { ApiError, requestJson } from './http'
+import { ApiError, apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
+import { gatewayBaseUrl } from './config'
 import {
   normalizePlan,
   planStepEditToWire,
@@ -22,7 +23,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
-import { parseChatHistoryAction } from '@/shared/actions/chat-history'
+import { parseChatHistoryAction, threadExportInput } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
@@ -3760,6 +3761,55 @@ export async function forkChatThread(
   )
   applyRetentionFrom(raw)
   return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/** The file formats a conversation is exported in (EP-12 S11). The person picks one; there is no default. */
+export type ThreadExportFormat = 'json' | 'markdown'
+
+/** `redacted` leaves out tool payloads, connector data and attachment names (EP-12 D7). The person picks one. */
+export type ThreadExportProfile = 'full' | 'redacted'
+
+/** One export as the gateway wrote it: the file's text, its media type and the name it asks to be saved under. */
+export type ChatThreadExport = {
+  body: string
+  mediaType: string
+  fileName: string
+}
+
+/**
+ * Export one of the owner's conversations as a file (EP-12 S12). The choices are checked against the action
+ * contract before anything is sent. The file is read whole as text: `requestJson` parses JSON, and a Markdown
+ * export is not JSON. Rejects with the server's typed refusal: `thread_export_disabled` while exporting is off,
+ * `thread_not_exportable` (with `details.reason`) for a thread that may not leave in full, and the zero-retention
+ * code for a zero-retention caller.
+ */
+export async function exportThread(
+  threadId: string,
+  format: ThreadExportFormat,
+  profile: ThreadExportProfile,
+): Promise<ChatThreadExport> {
+  const request = threadExportInput.parse({ threadId, format, profile })
+  const path = `/api/v1/chat/threads/${encodeURIComponent(request.threadId)}/export`
+  const response = await fetch(
+    `${gatewayBaseUrl()}${path}?format=${request.format}&profile=${request.profile}`,
+    { credentials: 'include' },
+  )
+  if (!response.ok) {
+    const failure = apiErrorFromResponse(await response.json().catch(() => null), response)
+    signalSessionExpiry(failure, path)
+    throw failure
+  }
+  const extension = request.format === 'json' ? 'json' : 'md'
+  return {
+    body: await response.text(),
+    mediaType: response.headers.get('Content-Type') ?? 'application/octet-stream',
+    fileName: downloadNameOf(response.headers.get('Content-Disposition')) ?? `verevon-thread.${extension}`,
+  }
+}
+
+/** The save name the gateway gave the file (`filename="..."`), or null when the header names none. */
+function downloadNameOf(disposition: string | null): string | null {
+  return disposition?.match(/filename="([^"]+)"/)?.[1] ?? null
 }
 
 /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
