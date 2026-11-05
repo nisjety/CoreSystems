@@ -59,6 +59,8 @@ import {
 } from '@/shared/chat/support-chat-thread'
 import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import { announceAttentionChanged } from '@/shared/api/attention-client'
+import { clearIntent, readIntent, type ConnectIntent } from '@/shared/integrations/connect-intent'
+import { getActionDescriptor } from '@/shared/actions/action-registry'
 import {
   toggleBrowserDockPosition,
   useBrowserDock,
@@ -189,6 +191,7 @@ import {
   appendInlinedAttachments,
   inlineTextAttachments,
   contentWithPreparedSources,
+  normalizeConnectorSuggestion,
   toStreamAttachments,
   toolNameForResult,
   transcriptStepToTaskStep,
@@ -3876,6 +3879,16 @@ export function useChatController() {
             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
             setPendingQuestion(question)
           },
+          onConnectorSuggestion: (event) => {
+            // EP-10 S8: one card per turn. A temporary chat never shows one (the gateway never offers the tool there).
+            if (isTemporaryThread(state.threadId ?? activeThreadId)) return
+            const suggestion = normalizeConnectorSuggestion(event)
+            if (!suggestion) return
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.connectorSuggestion = suggestion
+            })
+          },
           onRunParked: () => {
             // EP-7 S4: a parked run stops the goal pump; the pump never resumes a park.
             setParkedTurnId(assistantId)
@@ -4847,6 +4860,79 @@ export function useChatController() {
       && current.outgoingAssistant?.id === exchange.outgoingAssistant?.id
   }
 
+  // EP-10 S9: a connect started from a connector suggestion card resumes the question that suggestion answers. The
+  // saved connect lives in this tab's sessionStorage (`connect-intent.ts`) and is read per thread, so a reload shows
+  // "Finish connecting" and nothing is resent until the person clicks.
+  const [connectIntentVersion, setConnectIntentVersion] = createSignal(0)
+
+  // No connect starts or resumes on a temporary (zero-retention), Space-scoped or foreign-origin thread. `sendContent`
+  // already drops a send to a foreign-origin thread without a word, so the refusal has to be made here, first.
+  const connectResumable = (threadId: string): boolean => (
+    !isTemporaryThread(threadId) && !isForeignOriginThread(threadId) && !scopedThreadRefs.get(threadId)
+  )
+
+  /** The thread and the question a new connect resumes: the latest question, which the suggestion answers. */
+  const connectTurn = (): { threadId: string; prompt: string } | null => {
+    const threadId = state.threadId
+    const exchange = latestExchange()
+    if (!threadId || !exchange || !connectResumable(threadId)) return null
+    return { threadId, prompt: exchange.lastUser.content }
+  }
+
+  /** The saved connect of the thread on screen while it is unexpired. Reactive to the thread and to a resume or a dismissal. */
+  const pendingConnectIntent = (): ConnectIntent | null => {
+    connectIntentVersion()
+    const threadId = state.threadId
+    if (!threadId || !connectResumable(threadId)) return null
+    return readIntent(threadId)
+  }
+
+  /**
+   * Resends a connect's saved question on its new connection. `appendUser: false`: the question is already in the
+   * transcript, so only the answer is appended. The connection is this turn's connected-apps choice and nothing more,
+   * never remembered between turns (`chat.set_connector_scope`). Returns false, and changes nothing, when the turn
+   * cannot go out now: another thread is open, a run is streaming, or the transcript is not loaded.
+   */
+  const resumeConnectIntent = (intent: ConnectIntent, connectionId: string, providerLabel: string): boolean => {
+    if (state.threadId !== intent.threadId || !intent.prompt.trim()) return false
+    if (isStreaming() || !hasMessages() || !connectResumable(intent.threadId)) return false
+    // The gateway refuses connected apps on a web-only, knowledge-only or conversation-only turn (`connectorScopeBlock`),
+    // so the resend waits for the composer's default scope; the saved connect stays until then.
+    if (retrievalScope() !== 'auto' || sourceScope() === 'conversation') return false
+    setConnectIntentVersion((version) => version + 1)
+    showFeedbackNotice(i18n.tr(
+      `Fortsetter med ${providerLabel} koblet til`,
+      `Continuing with ${providerLabel} connected`,
+    ))
+    void sendContent(intent.prompt, undefined, { appendUser: false, connectorScope: [connectionId] })
+    return true
+  }
+
+  /**
+   * "Use it for this question" on a connector suggestion card (EP-10 S8): the account becomes this turn's
+   * connected-apps choice (`chat.set_connector_scope`) and the latest question goes again once, with no new user
+   * message. Returns false, and sends nothing, when the contract refuses the input or the turn cannot go out now.
+   */
+  const acceptConnectorSuggestion = (
+    suggestion: { suggestionId: string; provider: string },
+    connectionId: string,
+  ): boolean => {
+    const input = { path: 'use', suggestionId: suggestion.suggestionId, provider: suggestion.provider, connectionId }
+    if (!getActionDescriptor('chat.accept_connector_suggestion')?.inputSchema.safeParse(input).success) return false
+    const threadId = state.threadId
+    const exchange = latestExchange()
+    if (!threadId || !exchange || !connectResumable(threadId) || isStreaming()) return false
+    void sendContent(exchange.lastUser.content, undefined, { appendUser: false, connectorScope: [connectionId] })
+    return true
+  }
+
+  /** "Not now" on a saved connect: the question is not resent and the record is removed. */
+  const dismissConnectIntent = () => {
+    const threadId = state.threadId
+    if (threadId) clearIntent(threadId)
+    setConnectIntentVersion((version) => version + 1)
+  }
+
   const regenerateLatest = () => {
     const exchange = latestExchange()
     if (!exchange) return
@@ -5324,5 +5410,13 @@ export function useChatController() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    // EP-10 S9: the question and thread a suggestion card's connect resumes, the saved connect of the thread on
+    // screen, its resend on the new connection and its dismissal.
+    connectTurn,
+    pendingConnectIntent,
+    resumeConnectIntent,
+    dismissConnectIntent,
+    // EP-10 S8: a suggestion card's "Use it for this question".
+    acceptConnectorSuggestion,
   }
 }
