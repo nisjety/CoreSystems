@@ -22,6 +22,12 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-05 - A goal continues unattended only read-only, in service identity (EP-7 S7)
+
+**Status: deferred (design-only slice; trigger: an owner ruling on DEC-02 / OD8 plus a Control Plane security review).** EP-7 S6 (a goal-bound WS20 schedule under a DEC-16 stored-consent contract, service identity, writes withheld as drafts) is the only unattended goal mode. A goal does not continue unattended in the user's delegated identity (connected apps, browser grants, or writes approved while the user is away): that needs a renewable delegated credential, which DEC-02 (b) does not allow, and no bearer is stored in a goal, a fold or a schedule (`assert_no_credentials`). Not chosen: a stored or renewable user bearer, and a service-principal mint that acts as the user (DEC-16 (c), rejected). Wave 3 builds nothing for S7: no code, no switch, no migration or proto number. Design: docs/plans/wave3/EP-7-persistent-goals.md (S7, decision D6). Supersedes nothing.
+
+---
+
 ## 2026-11-04 - Wave 3 owner decisions taken at their recommended options
 
 **Status: decided by the owner ("run the recomended and continue"); no switch flipped.** The 105 open decision rows listed in docs/plans/wave3/OWNER-DECISIONS.md (depth register D0-036 and later, D3-261 and later) are decided at each design's recommended option. For the rows built dark on an assumed default, that default stands. Switches stay off until each feature's live proof; the remaining blocked-decision slices become buildable. Supersedes nothing.
