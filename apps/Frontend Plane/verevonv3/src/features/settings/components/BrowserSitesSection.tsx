@@ -211,6 +211,43 @@ export function BrowserSitesSection() {
           )}
         />
 
+        {/*
+          Capability overview (the settings hub). Browsing is the only
+          user-settable level; the other capabilities are governed by the
+          session, the run grants or approvals — never set here.
+        */}
+        <div data-testid="browser-sites-capabilities">
+          <SectionHeader
+            title={tr('Hva agenten kan gjøre', 'What the agent may do')}
+            description={tr(
+              'Nye nettsider krever at du blir spurt først, med mindre du allerede har valgt. Valget varer inntil 90 dager.',
+              'New sites ask you first unless you already chose. A choice lasts up to 90 days.',
+            )}
+          />
+          <ul data-testid="browser-sites-capability-list">
+            <li>
+              <span>{tr('Nettlesing', 'Browsing')}</span>
+              <span>{tr('Spør først for nye nettsider', 'Ask first for new sites')}</span>
+            </li>
+            <li>
+              <span>{tr('Nedlastinger', 'Downloads')}</span>
+              <span>{tr('Krever godkjenning hver gang', 'Asks every time')}</span>
+            </li>
+            <li>
+              <span>{tr('Opplastinger', 'Uploads')}</span>
+              <span>{tr('Ikke tillatt for assistentkjøringer', 'Not allowed for assistant runs')}</span>
+            </li>
+            <li>
+              <span>{tr('Opptak', 'Recording')}</span>
+              <span>{tr('Aldri', 'Never')}</span>
+            </li>
+            <li>
+              <span>{tr('Lagret profil', 'Saved profile')}</span>
+              <span>{tr('Krever godkjenning', 'Asks for approval')}</span>
+            </li>
+          </ul>
+        </div>
+
         <Show when={problem()}>
           {(message) => (
             <p role="alert" class="verevon-settings-label">
