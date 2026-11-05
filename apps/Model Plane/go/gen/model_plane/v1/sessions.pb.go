@@ -4136,7 +4136,15 @@ type ListAgentSkillsRequest struct {
 	// Empty lists skills only, so every caller that predates templates and
 	// presets (the gateway's match cache, recovery, the learning review) can
 	// never see one. An unknown kind is refused as invalid_argument.
-	Kinds         []string `protobuf:"bytes,4,rep,name=kinds,proto3" json:"kinds,omitempty"`
+	Kinds []string `protobuf:"bytes,4,rep,name=kinds,proto3" json:"kinds,omitempty"`
+	// EP-11 S9. The thread the turn runs in. While session-core's
+	// SKILL_SPACE_SCOPE is on and the caller owns this thread, session-core reads
+	// the thread's own Space (threads.space_id, never a Space the caller names)
+	// and adds that Space's skills to the answer. Empty, unknown, not the
+	// caller's, or not in a Space: no Space skill is returned. Ignored while the
+	// switch is off. (Round B reserved field 5 as `space_id`; it carries the
+	// thread instead, so the Space is always resolved server-side.)
+	ThreadId      string `protobuf:"bytes,5,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4197,6 +4205,13 @@ func (x *ListAgentSkillsRequest) GetKinds() []string {
 		return x.Kinds
 	}
 	return nil
+}
+
+func (x *ListAgentSkillsRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
 }
 
 type AgentSkill struct {
@@ -4435,8 +4450,13 @@ func (x *AgentSkill) GetSettingsJson() string {
 }
 
 type ListAgentSkillsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Skills        []*AgentSkill          `protobuf:"bytes,1,rep,name=skills,proto3" json:"skills,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Skills []*AgentSkill          `protobuf:"bytes,1,rep,name=skills,proto3" json:"skills,omitempty"`
+	// EP-11 S9. The Space session-core resolved `thread_id` to, set whenever it
+	// did so and listed that Space's skills (rows with scope "space"; possibly
+	// none). The gateway caches those rows under this Space alone, apart from the
+	// org's and the caller's own. Empty: no Space was resolved.
+	SpaceId       string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4476,6 +4496,13 @@ func (x *ListAgentSkillsResponse) GetSkills() []*AgentSkill {
 		return x.Skills
 	}
 	return nil
+}
+
+func (x *ListAgentSkillsResponse) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
 }
 
 type ListConversationRequest struct {
@@ -10510,12 +10537,13 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\x12\x1f\n" +
 	"\vskip_reason\x18\x04 \x01(\tR\n" +
 	"skipReason\x12\x1a\n" +
-	"\brevision\x18\x05 \x01(\x03R\brevision\"\x88\x01\n" +
+	"\brevision\x18\x05 \x01(\x03R\brevision\"\xa5\x01\n" +
 	"\x16ListAgentSkillsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
 	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\x12\x1e\n" +
 	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\x12\x14\n" +
-	"\x05kinds\x18\x04 \x03(\tR\x05kinds\"\xc5\x05\n" +
+	"\x05kinds\x18\x04 \x03(\tR\x05kinds\x12\x1b\n" +
+	"\tthread_id\x18\x05 \x01(\tR\bthreadId\"\xc5\x05\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -10542,9 +10570,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\aversion\x18\x13 \x01(\x05R\aversion\x12\x16\n" +
 	"\x06digest\x18\x14 \x01(\tR\x06digest\x12\x12\n" +
 	"\x04kind\x18\x15 \x01(\tR\x04kind\x12#\n" +
-	"\rsettings_json\x18\x16 \x01(\tR\fsettingsJson\"M\n" +
+	"\rsettings_json\x18\x16 \x01(\tR\fsettingsJson\"h\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
-	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc6\x03\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\x12\x19\n" +
+	"\bspace_id\x18\x02 \x01(\tR\aspaceId\"\xc6\x03\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +

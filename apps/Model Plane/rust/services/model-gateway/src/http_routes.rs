@@ -670,6 +670,12 @@ fn proxy_routes() -> Router<AppState> {
                 .delete(delete_skill_proxy),
         )
         .route("/v1/skills/:id/versions", get(list_skill_versions_proxy))
+        .route("/v1/skills/:id/publish", post(publish_skill_proxy))
+        .route("/v1/skills/:id/draft", delete(discard_skill_draft_proxy))
+        .route(
+            "/v1/skills/:id/versions/:version/restore",
+            post(restore_skill_version_proxy),
+        )
         // Plugins
         .route(
             "/v1/plugins",
@@ -8430,6 +8436,52 @@ async fn delete_skill_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
+}
+/// EP-11 S5: publish a skill's pending draft as its next version
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn publish_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}/publish"), "POST", None).await
+}
+/// EP-11 S5: discard a skill's pending draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn discard_skill_draft_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/draft"),
+        "DELETE",
+        None,
+    )
+    .await
+}
+/// EP-11 S5: restore an earlier version as the skill's draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn restore_skill_version_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, version)): Path<(String, u32)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/versions/{version}/restore"),
+        "POST",
+        None,
+    )
+    .await
 }
 /// EP-11 S2: a skill's immutable versions (capability-core
 /// `GET /api/v1/skills/{id}/versions`, 404 while SKILL_VERSIONS_API is off).

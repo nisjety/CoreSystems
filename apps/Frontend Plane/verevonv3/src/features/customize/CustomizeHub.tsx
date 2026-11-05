@@ -1,4 +1,4 @@
-import { Match, Switch } from 'solid-js'
+import { Match, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
 import { SettingsHero, SettingsSurface } from '@/features/settings/components/settings-ui'
@@ -6,6 +6,7 @@ import { McpServersSection } from '@/features/settings/components/McpServersSect
 import { OrgInstructionsSection } from '@/features/settings/components/OrgInstructionsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
+import { SkillLibrary } from '@/features/skills/components/SkillLibrary'
 import { AgentModesSection, orgAgentPolicyAvailable } from '@/features/customize/AgentModesSection'
 import { HooksSection } from '@/features/customize/HooksSection'
 import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
@@ -16,6 +17,9 @@ import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
  * behind ORG_AGENT_POLICY_API. While the deployment has that API off, the hub says so and offers no editor, so
  * nothing in it can look configurable when nothing enforces it.
  */
+/** EP-11 S9: the Space-scoped skill library, off unless the build sets VITE_SKILL_LIBRARY to the literal `true`. */
+const skillLibraryEnabled = () => import.meta.env.VITE_SKILL_LIBRARY === 'true'
+
 export default function CustomizeHub() {
   const i18n = useI18n()
   const [available] = createResource(() => orgAgentPolicyAvailable())
@@ -55,6 +59,9 @@ export default function CustomizeHub() {
           <HooksSection />
           <McpServersSection />
           <SkillsSection />
+          <Show when={skillLibraryEnabled()}>
+            <SkillLibrary />
+          </Show>
           <OrgInstructionsSection />
           <PluginsSection />
         </Match>

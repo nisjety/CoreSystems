@@ -282,6 +282,7 @@ async fn template_for_skill(state: &AppState, bearer: &str, skill_id: &str) -> O
         .get_skill_bundle_manifest(crate::tool_loop::with_authorization(
             GetSkillBundleManifestRequest {
                 skill_id: skill_id.to_owned(),
+                manifest_sha256: String::new(),
             },
             bearer,
         ))

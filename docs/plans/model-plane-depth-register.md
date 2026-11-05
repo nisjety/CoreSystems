@@ -3888,6 +3888,11 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1169 | EP-12-S4 | decision | P2 | The allow-list omits ResolveRunOwner, StartManagedRun and every terminal RPC (gateway terminalizes with its own service token); S5/S7 must add any further RPC they call with the key bearer to API_KEY_METHODS explicitly. | open |
 | D3-1170 | EP-12-S4 | test-gap | P2 | The DB tests api_key_owner_reads_only_its_own_thread and person_cannot_read_a_key_thread were not written; ownership is covered by unit tests on authorize_owner_row, and a DB-harness test through CreateThread/StartRun/GetRun with a key identity is still owed. | open |
 | D3-1171 | EP-12-S4 | cleanup | P3 | A key's user turns are stored with an empty author_subject_id (append_message passes caller.user_id(), which is None for a key); acceptable since a key is not a human author, but it could carry the key principal if attribution on messages is wanted. | open |
+| D3-1172 | W3-22 guard | follow-up | P2 | guard skipped: EP-11-S5 renumbering bookkeeping: round B table and EP-11 design section S5 docs (the lead books these; files are already 0110/0037, and S9 took 0111) | open |
+| D3-1173 | W3-22 guard | follow-up | P2 | guard skipped: EP-11-S9 S10 flip of ext.skills to enforced (a future step, not this batch) | open |
+| D3-1174 | W3-22 guard | follow-up | P2 | guard skipped: DB proof of 0111 apply/revert and the ignored space_skill_* tests (no docker or tests in the guard) | open |
+| D3-1175 | W3-22 guard | follow-up | P2 | guard skipped: EP-12-S4: no zdr-posture-matrix row added, as the builder instructed | open |
+| D3-1176 | W3-22 guard | follow-up | P2 | guard skipped: Prompt-tool manifest and SSE golden were not regenerated: no tool definition or SSE event payload changed | open |
 
 ## Cross-wave
 

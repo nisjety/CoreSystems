@@ -356,6 +356,9 @@ services:
       # EP-11 S3: a run records the skill versions it injected and recovery inside the run reads the pinned version. Off
       # by default; only the literal `true` turns it on. Needs SKILL_VERSIONS_API on in session-core for recovery reads.
       MODEL_GATEWAY_SKILL_PINS: ${MODEL_GATEWAY_SKILL_PINS:-false}
+      # EP-11 S9: only the literal `true` turns it on; SKILL_EXT_POLICY_ENFORCED needs ORG_AGENT_POLICY_MODE=enforce or every authored skill is withheld (fail closed).
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
+      SKILL_EXT_POLICY_ENFORCED: ${SKILL_EXT_POLICY_ENFORCED:-false}
       # WS19-S8: name a turn's skill bundles to execution-core so code_interpreter sees them read-only at /skills. Off by
       # default; only the literal `true`.
       SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}
@@ -1205,6 +1208,8 @@ services:
       SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}
       # EP-12 S1: a child run inherits its parent's origin token. Only the literal true turns it on.
       SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}
+      # EP-12 S4: admit the api_key principal on its closed method list. Only the literal true.
+      SESSION_CORE_API_KEY_PRINCIPAL: ${SESSION_CORE_API_KEY_PRINCIPAL:-false}
       # EP-14 S7: the request inspector read (GetRequestSnapshot). Only the literal true.
       SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
       # EP-3 S2: the ArtifactRevisionService store. Only the literal true.
@@ -1216,6 +1221,8 @@ services:
       # EP-11 S2: the SkillVersionService read of immutable skill versions. Only the literal true;
       # set it together with SKILL_VERSIONS_API on capability-core.
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
+      # EP-11 S9: only the literal `true` turns it on.
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -2192,6 +2199,12 @@ services:
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
       # EP-11 S6: skill routes read and write templates and presets (authored-behaviour kinds). Only the literal true.
       AUTHORED_KINDS_ENABLED: ${AUTHORED_KINDS_ENABLED:-false}
+      # EP-11 S5: edits of accepted skills go through a draft (publish/discard/restore routes). Needs session-core 0110. Only the literal true enables.
+      SKILL_DRAFT_PUBLISH: ${SKILL_DRAFT_PUBLISH:-false}
+      # EP-11 S5: keep replaced skill bundles per version. Keep off until D2-379/D2-383 (bundle read authz) are fixed. Needs session-core 0108+0110 and capability-core 0037.
+      SKILL_BUNDLE_RETENTION: ${SKILL_BUNDLE_RETENTION:-false}
+      # EP-11 S9: only the literal `true` turns it on.
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

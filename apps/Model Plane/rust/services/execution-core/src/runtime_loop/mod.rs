@@ -3797,6 +3797,7 @@ async fn execute_reattach_skill(
             enabled_only: false,
             for_user_id: String::new(),
             kinds: Vec::new(),
+            thread_id: String::new(),
         },
         bearer,
     ) {

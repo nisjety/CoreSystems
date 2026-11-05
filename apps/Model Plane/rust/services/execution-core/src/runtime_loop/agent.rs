@@ -2487,6 +2487,7 @@ async fn fetch_skill_context(
         enabled_only: true,
         for_user_id: String::new(),
         kinds: Vec::new(),
+        thread_id: String::new(),
     });
     let Ok(header) = format!("Bearer {bearer}").parse() else {
         return Vec::new();
@@ -12907,6 +12908,7 @@ mod tests {
         ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
             Ok(Response::new(pb::ListAgentSkillsResponse {
                 skills: self.rec.lock().unwrap().agent_skills.clone(),
+                space_id: String::new(),
             }))
         }
 

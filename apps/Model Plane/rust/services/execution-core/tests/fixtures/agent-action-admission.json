@@ -709,6 +709,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.open_mcp_app",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:adeb1eeee849ee5841ff79b27ce1731c4260ad13ee9d647db7345d0179a18f88",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.open_widget_link",
       "registry": true,
       "access": "none",
@@ -914,6 +927,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:99e70a79698568f447a3b61916fbad61d12e7c8a360cff76befa052c4ce4832d",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.stage_mcp_app_message",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8ffe6d51d37f38d72ceb577e8f3bb1ee6f30239d59e5eb47075a9cbd1accbfc0",
       "zdr_allowed": false
     },
     {
@@ -2976,6 +3002,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "skills.draft.discard",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8b4bed72934170f91cfda2221e3095593b86e41b9cfa840e0771f5852bd10773",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.draft.save",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9ed1ec72eaecb4de23ae97fbacee1906c76c8c2aaf6cb006cf36756524c5c363",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.publish",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1e74480604c4011b80d1c2b8eb63fb214432d704c0addef2b6d0cd44adf421dd",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "skills.save_from_message",
       "registry": true,
       "access": "none",
@@ -2986,6 +3051,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:f7671a1c385b07ff3ffbf9933f3dae8bb5d8762e4cf82c7e953f071fbc8c122c",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.version.restore",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:291aad53bcaa8bbedf77f4a594b8e6de232c6da69fa84776b655a8ee3feea139",
       "zdr_allowed": false
     },
     {

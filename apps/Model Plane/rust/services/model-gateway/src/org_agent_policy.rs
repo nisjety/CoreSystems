@@ -121,6 +121,9 @@ pub struct OrgPolicy {
     pub max_fan_out_items: u32,
     /// The org's web switches (`web.mode`, `web.paid_providers`, Wave 3 EP-9 W2).
     pub web: WebCaps,
+    /// The org's `ext.skills` token (EP-11 S9): `none`, `approved_only` or `any`, or the schema's fail-closed `none` for a
+    /// value this build cannot read. Read by `skills::held_ext_skills` only while SKILL_EXT_POLICY_ENFORCED is on.
+    pub ext_skills: String,
 }
 
 impl OrgPolicy {
@@ -154,6 +157,7 @@ impl OrgPolicy {
                 live: token("web.mode") == "live",
                 paid: token("web.paid_providers") == "on",
             },
+            ext_skills: token("ext.skills"),
         }
     }
 }

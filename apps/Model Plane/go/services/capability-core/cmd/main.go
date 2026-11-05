@@ -499,7 +499,8 @@ func main() {
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
 		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
-		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv))
+		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
+		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}

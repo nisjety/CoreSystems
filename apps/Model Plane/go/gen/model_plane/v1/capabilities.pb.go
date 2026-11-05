@@ -1455,10 +1455,15 @@ func (x *SkillBundleSummary) GetDeckTemplate() bool {
 
 // Request to read one skill bundle manifest, by skill ID.
 type GetSkillBundleManifestRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SkillId       string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	SkillId string                 `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// SHA-256 manifest digest of the bundle to read (EP-11 S5): a run pinned to an older skill
+	// version names that version's bundle_sha256 and reads its own files. Empty reads the live
+	// bundle, as before. Honoured only while capability-core's SKILL_BUNDLE_RETENTION is on;
+	// otherwise ignored and the live bundle is read. Additive.
+	ManifestSha256 string `protobuf:"bytes,2,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GetSkillBundleManifestRequest) Reset() {
@@ -1494,6 +1499,13 @@ func (*GetSkillBundleManifestRequest) Descriptor() ([]byte, []int) {
 func (x *GetSkillBundleManifestRequest) GetSkillId() string {
 	if x != nil {
 		return x.SkillId
+	}
+	return ""
+}
+
+func (x *GetSkillBundleManifestRequest) GetManifestSha256() string {
+	if x != nil {
+		return x.ManifestSha256
 	}
 	return ""
 }
@@ -1868,9 +1880,10 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"created_by\x18\x05 \x01(\tR\tcreatedBy\x12\x1d\n" +
 	"\n" +
 	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12#\n" +
-	"\rdeck_template\x18\a \x01(\bR\fdeckTemplate\":\n" +
+	"\rdeck_template\x18\a \x01(\bR\fdeckTemplate\"c\n" +
 	"\x1dGetSkillBundleManifestRequest\x12\x19\n" +
-	"\bskill_id\x18\x01 \x01(\tR\askillId\"\x90\x01\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12'\n" +
+	"\x0fmanifest_sha256\x18\x02 \x01(\tR\x0emanifestSha256\"\x90\x01\n" +
 	"\x13SkillBundleManifest\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12'\n" +
 	"\x0fmanifest_sha256\x18\x02 \x01(\tR\x0emanifestSha256\x125\n" +

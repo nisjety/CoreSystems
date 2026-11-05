@@ -2074,6 +2074,7 @@ impl ModelGateway for GatewayService {
                         enabled_only: true,
                         for_user_id: String::new(),
                         kinds: Vec::new(),
+                        thread_id: String::new(),
                     },
                 )?)
                 .await
