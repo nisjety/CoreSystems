@@ -1035,6 +1035,11 @@ pub(crate) mod tests {
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),
+            (
+                "agent_api_run.rs",
+                "run_ask_turn",
+                "persistent only: a ZDR key is refused in admit before any call (EP-12 D6)",
+            ),
             // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
             // the gRPC method through `zdr_for` on the request's route, the chat tool with the
             // turn's own `zdr`; the call carries it on the request and on the page scrape.

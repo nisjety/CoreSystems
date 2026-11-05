@@ -3959,6 +3959,7 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D3-1228 | EP-12-S12 | live-proof | P2 | Still owed in the depth phase: the lazy replay inside a message row (Loading fallback, Portal overlay, focus and Escape) at 1280 and 375 px in both themes, with the Norwegian copy checked in the live UI. | open |
 | D3-1229 | EP-12-S12 | risk | P3 | Refusals with codes the menu does not name, such as thread_export_unavailable, show the server's English sentence; a Norwegian mapping for them is a copy follow-up. | open |
 | D3-1230 | EP-12-S12 | cleanup | P3 | Each replay open reads the whole redacted export again (bounded server-side at 2,000 messages and 8 MiB); a per-thread cache is a later choice if long threads feel slow. | open |
+| D3-1231 | W3-24 guard | follow-up | P2 | guard skipped: EP-12-S7 needs_other_files (session-core auth.rs, grpc.rs, terminalization.rs): not shared-edit items, left for the lead | open |
 
 ## Cross-wave
 

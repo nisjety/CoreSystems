@@ -1284,6 +1284,7 @@ export default function ChatPage() {
         editLocked={row().editLocked}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
+        spaceScoped={spaceScoped()}
       />
     </>
   )
