@@ -352,6 +352,23 @@ export type LifecycleNotice =
 /** The most notices one turn keeps. The oldest go first. */
 export const LIFECYCLE_NOTICE_CAP = 20
 
+/** The providers a connected-app suggestion may name: mp-contracts `connector_suggest`'s closed list. */
+export const CONNECTOR_SUGGESTION_PROVIDERS = ['google', 'microsoft'] as const
+export type ConnectorSuggestionProvider = (typeof CONNECTOR_SUGGESTION_PROVIDERS)[number]
+
+/**
+ * One connected-app suggestion (`connector_suggestion`, EP-10 S8). The reason is the gateway's scrubbed line,
+ * rendered as text. `restored` marks a suggestion read back from the cache after a reload: the moment it
+ * answered has passed, so the card shows it as a note and offers nothing.
+ */
+export type ChatConnectorSuggestion = {
+  suggestionId: string
+  provider: ConnectorSuggestionProvider
+  reason: string
+  requestId?: string
+  restored?: boolean
+}
+
 /**
  * `notices` with `notice` appended. An exact repeat of a notice the turn already holds is not added again: a
  * resumed stream replays what the turn saw. The list keeps its newest `LIFECYCLE_NOTICE_CAP` entries.
@@ -576,6 +593,11 @@ export type ChatTurn = {
    * than stale suggestions for an answer the user has moved past.
    */
   followUps?: string[]
+  /**
+   * The connected-app suggestion this turn's model made (`connector_suggestion`, EP-10 S8): at most one
+   * per turn. Kept with the turn's cached metadata so a reloaded thread shows it as a resolved note.
+   */
+  connectorSuggestion?: ChatConnectorSuggestion
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   /**

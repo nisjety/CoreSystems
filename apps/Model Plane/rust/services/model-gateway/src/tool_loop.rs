@@ -39,6 +39,8 @@ use crate::{
 // Declared here, as sse.rs declares its own helpers, so this slice stays inside the files it owns.
 #[path = "connector_reads.rs"]
 pub mod connector_reads;
+#[path = "connector_suggestion.rs"]
+pub mod connector_suggestion;
 
 /// Default max tool rounds before forcing a final, tool-free answer.
 ///
@@ -4920,6 +4922,14 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // The connected-app suggestion (EP-10 S8): it reads nothing, and the loop turns the first
+        // accepted call of a turn into the card.
+        mp_contracts::connector_suggest::TOOL_NAME => connector_suggestion::outcome(
+            connector_suggestion::enabled(),
+            zdr,
+            !space_id.is_empty(),
+            call,
+        ),
         // Knowledge-base RAG — searches the org's OWN ingested documents via
         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
         // verified request org, never model input, so a tool call can't read
@@ -6296,8 +6306,11 @@ const ORG_CLASS_TOOLS: &[&str] = &[
 ];
 
 /// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
-/// DEC-26), so a source-filtered turn never sees the read.
-const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+/// DEC-26), so a source-filtered turn never sees the read, nor the suggestion that leads to it (EP-10 S8).
+const CONNECTOR_CLASS_TOOLS: &[&str] = &[
+    mp_contracts::provider_reads::READ_TOOL_NAME,
+    mp_contracts::connector_suggest::TOOL_NAME,
+];
 
 /// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
 /// retrieval scope already calls web, so the two gates never disagree about what counts as the web.
@@ -8888,6 +8901,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         .await
         .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The connected-app suggestion (EP-10 S8) is offered on a turn that selected no account, read from
+    // the same sink selection. With its switch off the list is left as it was.
+    let suggestion_offered = connector_suggestion::offered(
+        connector_suggestion::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let tools = connector_suggestion::tools_for_turn(tools, suggestion_offered);
     // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
     // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.
     let reader_offered =
@@ -8936,6 +8958,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
+    // Whether this turn has shown its one connected-app suggestion card (EP-10 S8).
+    let mut suggestion_turn = connector_suggestion::SuggestionTurn::default();
     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
     let guard_mode = loop_guard_mode();
@@ -9855,6 +9879,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         for result in dispatched {
             let mut outcome = result?;
             if outcome.name == "count_words" { count_calls += 1; }
+            // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
+            let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
+            let suggestion = suggestion_turn.settle(&mut outcome, answered_call);
             // Artifact-producing tools return their payload through `output`,
             // which would otherwise be appended to the conversation verbatim —
             // a generated .xlsx or a long document would consume the entire
@@ -9999,6 +10026,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // (WS23-S5). The parking happens off ZDR only, as it always does.
             for source in connector_reads::settle(&mut outcome, state, org_id, user_id, zdr) {
                 events.push(source).await;
+            }
+            // The suggestion card follows its tool result, as a read's sources do.
+            if let Some(card) = suggestion {
+                events.push(card).await;
             }
             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
             for notice_event in retrieval_notice_events(&outcome) {
@@ -18313,6 +18344,17 @@ mod connector_scope_tests {
             inline_tool_allowed(READ_TOOL_NAME),
             "the one connected-account read is dispatchable"
         );
+    }
+
+    /// The suggestion leads to a connected-account read, so it follows the read's source scope (EP-10 S8).
+    #[test]
+    fn connector_suggestion_is_allowed_only_under_auto_and_is_dispatchable() {
+        use crate::normalize::RetrievalScope;
+        use mp_contracts::connector_suggest::TOOL_NAME;
+        assert!(tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::Auto));
+        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::KnowledgeOnly));
+        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::WebOnly));
+        assert!(inline_tool_allowed(TOOL_NAME));
     }
 }
 

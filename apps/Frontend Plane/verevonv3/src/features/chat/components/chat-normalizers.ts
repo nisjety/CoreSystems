@@ -61,6 +61,8 @@ import {
   type AgentTaskStepEvidence,
   CHAT_BROWSE_WEB_KEY,
   type ChatArtifact,
+  type ChatConnectorSuggestion,
+  CONNECTOR_SUGGESTION_PROVIDERS,
   type ChatKnowledgeGrounding,
   type ChatToolCall,
   type ChatTurn,
@@ -838,6 +840,8 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       recalledMemories: turn.recalledMemories?.map(recalledMemoryWithoutText),
       stopReason: turn.stopReason,
       tools: turn.tools,
+      // Kept so a reload shows the suggestion as a note: a provider key and the gateway's scrubbed line.
+      connectorSuggestion: turn.connectorSuggestion,
       // `unsavedContent` is deliberately absent: it is text the server did
       // not save, and a reload must not bring it back.
       // `previewUrl` is a live data URL used by the contextual canvas. It can
@@ -902,6 +906,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory).map(recalledMemoryWithoutText),
     stopReason: turn.stopReason,
     tools: (turn.tools ?? []).filter(isComposerToolId),
+    connectorSuggestion: restoredConnectorSuggestion(turn.connectorSuggestion),
     attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
 }
@@ -915,6 +920,35 @@ function transcriptTimingToTurnTiming(value: ChatThreadTranscriptTurn['timing'])
   const { serverMs, providerMs, orchestrationMs } = value
   const valid = [serverMs, providerMs, orchestrationMs].every((ms) => typeof ms === 'number' && Number.isFinite(ms) && ms >= 0)
   return valid ? { serverMs, providerMs, orchestrationMs } : undefined
+}
+
+/** Longest reason a suggestion card shows: the gateway refuses a longer one (mp-contracts `connector_suggest`). */
+export const CONNECTOR_SUGGESTION_MAX_REASON_CHARS = 200
+
+/**
+ * A `connector_suggestion` frame as the card reads it (EP-10 S8), or `null` for a frame it cannot trust: no
+ * id, a provider outside the closed list, or no reason. The frame's keys are read in either spelling, the
+ * wire's or the stream client's. The reason is shown as one line of text and cut to the gateway's bound, so
+ * a frame from a drifted build still renders as the card the gateway means.
+ */
+export function normalizeConnectorSuggestion(event: unknown): ChatConnectorSuggestion | null {
+  const record = objectValue(event)
+  if (!record) return null
+  const suggestionId = stringValue(record.suggestionId ?? record.suggestion_id)?.trim()
+  const provider = CONNECTOR_SUGGESTION_PROVIDERS.find((known) => known === record.provider)
+  const reason = stringValue(record.reason)
+    ?.replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CONNECTOR_SUGGESTION_MAX_REASON_CHARS)
+  if (!suggestionId || !provider || !reason) return null
+  const requestId = stringValue(record.requestId ?? record.request_id)
+  return { suggestionId, provider, reason, ...(requestId ? { requestId } : {}) }
+}
+
+/** A stored suggestion read back after a reload: checked again, and marked so the card offers nothing. */
+export function restoredConnectorSuggestion(value: unknown): ChatConnectorSuggestion | undefined {
+  const suggestion = normalizeConnectorSuggestion(value)
+  return suggestion ? { ...suggestion, restored: true } : undefined
 }
 
 function visibleTurnContent(role: ChatTurn['role'], content: string): string {
@@ -1043,6 +1077,8 @@ export function mergeServerTurnsWithCachedMetadata(
       memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
+      // Stream-only too: the server's message never carries the suggestion card.
+      connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
       attachments: cachedTurn.attachments.length > 0 && serverTurn.attachments.every(a => a.id.startsWith('restored-'))
         ? cachedTurn.attachments : serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,

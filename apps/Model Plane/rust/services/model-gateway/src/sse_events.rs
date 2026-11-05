@@ -470,6 +470,18 @@ pub enum ChatEvent {
         /// The asking server's display name, set exactly when `origin` is (EP-4 S6).
         origin_label: Option<String>,
     },
+    /// The one connected-app suggestion a turn's model made (Wave 3 EP-10 S8), sent only while
+    /// `CONNECTOR_SUGGESTIONS_ENABLED` is on and never on a zero-retention or Space turn. Control event,
+    /// ungated: the card is how the person learns the answer lacked their own data. An older client
+    /// ignores the unknown event name, and the answer's prose still says what it could not see.
+    ConnectorSuggestion {
+        /// Server-made id the card is keyed by.
+        suggestion_id: String,
+        /// One entry of `mp_contracts::connector_suggest::SUGGESTABLE_PROVIDERS`.
+        provider: String,
+        /// One scrubbed line, at most 200 characters, with no address or link.
+        reason: String,
+    },
     /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
     /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
     /// point, so a client that opted into nothing still has to see it. The run turn sends the edited
@@ -749,6 +761,8 @@ impl ChatEvent {
             | ChatEvent::GoalProgress { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
             | ChatEvent::UserQuestion { .. }
+            // The connected-app suggestion card (EP-10 S8): it says the answer lacked the person's data.
+            | ChatEvent::ConnectorSuggestion { .. }
             // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
             | ChatEvent::ResearchPlan { .. } => None,
         }
@@ -796,6 +810,7 @@ impl ChatEvent {
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
             ChatEvent::UserQuestion { .. } => "user_question",
+            ChatEvent::ConnectorSuggestion { .. } => "connector_suggestion",
             ChatEvent::ResearchPlan { .. } => "research_plan",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
@@ -1084,6 +1099,16 @@ impl ChatEvent {
                 }
                 payload
             }
+            ChatEvent::ConnectorSuggestion {
+                suggestion_id,
+                provider,
+                reason,
+            } => json!({
+                "suggestion_id": suggestion_id,
+                "provider": provider,
+                "reason": reason,
+                "request_id": request_id,
+            }),
             ChatEvent::ResearchPlan {
                 sub_queries,
                 questions,
@@ -3594,6 +3619,7 @@ mod payload_contract {
         "FollowUps",
         "PlanProposed",
         "UserQuestion",
+        "ConnectorSuggestion",
         "ResearchPlan",
         "Verification",
         "MemoryRecall",
@@ -3633,6 +3659,7 @@ mod payload_contract {
             ChatEvent::FollowUps { .. } => "FollowUps",
             ChatEvent::PlanProposed { .. } => "PlanProposed",
             ChatEvent::UserQuestion { .. } => "UserQuestion",
+            ChatEvent::ConnectorSuggestion { .. } => "ConnectorSuggestion",
             ChatEvent::ResearchPlan { .. } => "ResearchPlan",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
@@ -4040,6 +4067,12 @@ mod payload_contract {
                 origin: Some(s("mcp_elicitation")),
                 origin_label: Some(s("Fixture server")),
             },
+            ChatEvent::ConnectorSuggestion { suggestion_id: s("sug_1"), provider: s("google"), reason: s("") },
+            ChatEvent::ConnectorSuggestion {
+                suggestion_id: s("sug_2"),
+                provider: s("microsoft"),
+                reason: s("Your calendar would show the meeting."),
+            },
             ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
             ChatEvent::ResearchPlan {
                 sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
@@ -4288,6 +4321,29 @@ mod payload_contract {
         assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
         assert_eq!(payload["items"][0]["id"], "carrier");
         assert_eq!(payload["request_id"], "req-4");
+    }
+
+    /// `connector_suggestion` is a control event that carries the card's three keys and nothing else
+    /// (EP-10 S8).
+    #[test]
+    fn connector_suggestion_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::ConnectorSuggestion {
+            suggestion_id: "sug_1".into(),
+            provider: "google".into(),
+            reason: "Your mail would answer this.".into(),
+        };
+        assert_eq!(event.name(), "connector_suggestion");
+        assert!(event.family().is_none(), "the card is a control event, never feature-gated");
+        assert!(event.should_emit(&[]));
+        assert_eq!(
+            event.payload("req-5"),
+            json!({
+                "suggestion_id": "sug_1",
+                "provider": "google",
+                "reason": "Your mail would answer this.",
+                "request_id": "req-5",
+            })
+        );
     }
 
     /// A model question's frame has no origin key, so an older client and today's read it the same way

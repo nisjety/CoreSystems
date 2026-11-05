@@ -1328,6 +1328,25 @@ const chatResearchPlanStartInput = z
 // Dismissing a plan card sends nothing: no research state waits on the server between the turns.
 const chatResearchPlanCancelInput = z.object({}).strict()
 
+// Accepting a connected-app suggestion card (EP-10 S8): `connect` starts the provider's connect session,
+// `use` selects one existing connection for the question and sends it again. The providers are mp-contracts
+// `connector_suggest`'s closed list, and a connection id has the bounds of `chat.set_connector_scope`.
+const connectorSuggestionProvider = z.enum(['google', 'microsoft'])
+const connectorSuggestionId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/)
+const chatAcceptConnectorSuggestionInput = z.discriminatedUnion('path', [
+  z
+    .object({ path: z.literal('connect'), suggestionId: connectorSuggestionId, provider: connectorSuggestionProvider })
+    .strict(),
+  z
+    .object({
+      path: z.literal('use'),
+      suggestionId: connectorSuggestionId,
+      provider: connectorSuggestionProvider,
+      connectionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    })
+    .strict(),
+])
+
 // The same bounds model-gateway applies before it forwards a retry (EP-2 S9): printable ASCII ids,
 // a child run id of at most 128 characters and a batch id of at most 256.
 const chatWideResearchRetryItemInput = z
@@ -4890,6 +4909,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatResearchPlanCancelInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.accept_connector_suggestion',
+    label: 'Accept a connected-app suggestion',
+    description: 'Answer the card the model shows when a question needs the person\'s own mail, calendar or files and no connected account was selected: connect the suggested provider through the existing connect session and its sign-in window (integrations.start_connect_session), or use an account already connected for this question only, which selects it (chat.set_connector_scope) and sends the question again. The card names one provider from a closed list (google, microsoft) and is never shown in a Space, a temporary chat or under zero data retention. Nothing is remembered beyond the one turn. Never model-executable: a model does not connect or select the person\'s accounts.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatAcceptConnectorSuggestionInput,
     outputSchema: envelopeStatusOutput,
   },
   {

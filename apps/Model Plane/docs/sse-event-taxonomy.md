@@ -22,6 +22,7 @@ asserted, not just reported.
 | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
 | `compaction` | — (control) | `ChatEvent::Compaction` | ✅ |
+| `connector_suggestion` | — (control) | `ChatEvent::ConnectorSuggestion` | ✅ |
 | `context_change` | — (control) | `ChatEvent::ContextChange` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
 | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |

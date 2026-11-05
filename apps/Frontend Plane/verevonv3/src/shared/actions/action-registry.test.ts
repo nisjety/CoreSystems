@@ -744,6 +744,37 @@ describe('action registry', () => {
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the connected-app suggestion card as a low-risk model-plane action the model cannot execute', () => {
+    const accept = getActionDescriptor('chat.accept_connector_suggestion')
+
+    expect(accept).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.accept_connector_suggestion')).toBe(false)
+    expect(accept?.description ?? '').toContain('Never model-executable')
+
+    const schema = accept?.inputSchema
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google' }).success).toBe(true)
+    expect(
+      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'microsoft', connectionId: 'conn_1' }).success,
+    ).toBe(true)
+    // The provider list is closed, as the gateway's is.
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'slack' }).success).toBe(false)
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'Google' }).success).toBe(false)
+    // Using an account names it; connecting does not.
+    expect(schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
+    expect(
+      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn_1' }).success,
+    ).toBe(false)
+    expect(
+      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn 1' }).success,
+    ).toBe(false)
+    expect(schema?.safeParse({ path: 'rank', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
+    expect(schema?.safeParse({ path: 'connect', suggestionId: '', provider: 'google' }).success).toBe(false)
+    // The org and the person come from the session.
+    expect(
+      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', orgId: 'org_x' }).success,
+    ).toBe(false)
+  })
+
   it('registers the context chips as model-plane actions the model cannot execute, and bounds them like the gateway', () => {
     const set = getActionDescriptor('chat.set_context_refs')
     expect(set).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
@@ -1745,7 +1776,8 @@ describe('action registry', () => {
     // +1 after EP-4-S10 registered chat.mcp_app_tool_call, an app's read tool call on its own server.
     // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
     // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
-    expect(ids).toHaveLength(319)
+    // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
+    expect(ids).toHaveLength(320)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.
