@@ -585,6 +585,219 @@ pub fn public_summary(output: &str) -> String {
     }
 }
 
+/// Most items one deep-research search asks one connected account for (EP-2-S7). A report cites a
+/// handful of items per account; more would only spend the corpus budget the web shares.
+const RESEARCH_MAX_RESULTS: u64 = 5;
+/// Longest search text a deep-research run sends a provider.
+const RESEARCH_QUERY_CHARS: usize = 200;
+/// Longest text of one item a deep-research report is written from.
+const RESEARCH_ITEM_CHARS: usize = 2_000;
+/// Fields of an item that are addresses, not evidence. A link stays on the citation, where it is
+/// checked against the provider hosts.
+const RESEARCH_SKIPPED_FIELDS: &[&str] = &["id", "webLink", "webUrl", "webViewLink"];
+
+/// One connected-account item a deep-research run may cite (EP-2-S7). `snippet` is metadata only and
+/// is what the citation kept with the thread carries; `text` is the evidence the report is written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResearchItem {
+    pub provider: String,
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub text: String,
+}
+
+/// What the connected-account reads of one deep-research run came back with: the items it may cite,
+/// and counts only of the rest, since a step record never carries what an account holds (WS23-S1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResearchReads {
+    pub items: Vec<ResearchItem>,
+    /// Accounts whose search answered.
+    pub reads: usize,
+    /// Accounts whose search did not run or did not answer.
+    pub failed: usize,
+    /// Items screening flagged, or could not finish screening, and so were left out of the evidence.
+    pub withheld: usize,
+}
+
+/// The mail search a provider serves, by the provider key integration-corev2 reports. `None` for a
+/// provider this path knows no search for, whose account is then not read.
+#[must_use]
+pub fn research_operation(provider: &str) -> Option<&'static str> {
+    match provider {
+        "google" => Some("gmail.messages"),
+        "microsoft" => Some("mail.messages"),
+        _ => None,
+    }
+}
+
+/// The one search a deep-research run makes of one account: the question as the query, whitespace
+/// collapsed and cut, and a small page of results.
+#[must_use]
+pub fn research_args(connection_id: &str, operation: &str, question: &str) -> ReadArgs {
+    let query: String = question
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(RESEARCH_QUERY_CHARS)
+        .collect();
+    let mut params = Map::new();
+    params.insert("query".to_owned(), Value::from(query));
+    ReadArgs {
+        connection_id: connection_id.to_owned(),
+        operation: operation.to_owned(),
+        params,
+        max_results: Some(RESEARCH_MAX_RESULTS),
+        page_token: None,
+    }
+}
+
+/// The items of an answered search, each with the same title, link and metadata snippet the Ask loop's
+/// sources carry. A read that answered with a status alone has none.
+#[must_use]
+pub fn research_items(operation: &str, provider: &str, read: &ProviderRead) -> Vec<ResearchItem> {
+    if !matches!(
+        read.status,
+        provider_reads::ReadStatus::Ok | provider_reads::ReadStatus::TooLarge
+    ) {
+        return Vec::new();
+    }
+    read.items
+        .iter()
+        .map(|item| ResearchItem {
+            provider: provider.to_owned(),
+            title: item_title(operation, item),
+            url: item_url(operation, item),
+            snippet: metadata_snippet(operation, item),
+            text: research_item_text(item),
+        })
+        .collect()
+}
+
+/// An item's fields as `name: value` lines, links and ids left out, cut to [`RESEARCH_ITEM_CHARS`].
+fn research_item_text(item: &Value) -> String {
+    let Some(fields) = item.as_object() else {
+        return String::new();
+    };
+    let lines: Vec<String> = fields
+        .iter()
+        .filter(|(key, _)| !RESEARCH_SKIPPED_FIELDS.contains(&key.as_str()))
+        .filter_map(|(key, value)| {
+            let text = match value {
+                Value::String(text) => Some(text.split_whitespace().collect::<Vec<_>>().join(" ")),
+                other => text_of(other),
+            }?;
+            (!text.is_empty()).then(|| format!("{key}: {text}"))
+        })
+        .collect();
+    lines.join("\n").chars().take(RESEARCH_ITEM_CHARS).collect()
+}
+
+/// Whether screening keeps an item out of a report's evidence. In the Ask loop a flagged read is shown
+/// with a warning beside it; a report is written in one inference with no such frame per item, so a
+/// flagged or unfinished screening leaves the item out instead.
+fn research_withholds(provenance: &ToolProvenance) -> bool {
+    matches!(
+        provenance.screening.posture,
+        crate::moderation::ScreeningPosture::Flagged | crate::moderation::ScreeningPosture::Degraded
+    )
+}
+
+/// The connected-account reads of one deep-research run (EP-2-S7): one search per account the person
+/// selected for the turn, through integration-corev2 with the person's own ingestion bearer, each result
+/// screened as connector content. The same conditions as the Ask loop's read hold first: the switch, no
+/// zero retention, no Space, a selection, and a read level that admits the Ask loop. Nothing is read
+/// otherwise, and nothing here is stored.
+#[allow(clippy::too_many_arguments)] // request context, as `read_outcome` takes it
+pub async fn research_reads(
+    state: &AppState,
+    turn: Option<&ConnectorTurn>,
+    zdr: bool,
+    space_scoped: bool,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    capability_bearer: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    question: &str,
+) -> ResearchReads {
+    let (Some(turn), Some(bearer)) = (turn, ingestion_bearer) else {
+        return ResearchReads::default();
+    };
+    if !offered(enabled(), zdr, space_scoped, Some(turn)) {
+        return ResearchReads::default();
+    }
+    if !read_policy(state, org_id, user_id, capability_bearer)
+        .await
+        .admits_ask_loop()
+    {
+        return ResearchReads::default();
+    }
+    let base_url = integration_base_url();
+    let results = futures::future::join_all(turn.selection.iter().map(|connection_id| {
+        research_read(
+            state,
+            &base_url,
+            bearer.as_str(),
+            capability_bearer,
+            connection_id,
+            question,
+        )
+    }))
+    .await;
+    let mut reads = ResearchReads::default();
+    for result in results {
+        match result {
+            Some((items, withheld)) => {
+                reads.reads += 1;
+                reads.withheld += withheld;
+                reads.items.extend(items);
+            }
+            None => reads.failed += 1,
+        }
+    }
+    reads
+}
+
+/// One account's search. The provider decides which operation searches its mail, so the account's
+/// profile is read first to learn it. `None` when either read did not answer, or the provider has no
+/// known search; otherwise the items screening admits and how many it withheld.
+async fn research_read(
+    state: &AppState,
+    base_url: &str,
+    bearer: &str,
+    capability_bearer: Option<&str>,
+    connection_id: &str,
+    question: &str,
+) -> Option<(Vec<ResearchItem>, usize)> {
+    let profile = ReadArgs {
+        connection_id: connection_id.to_owned(),
+        operation: "profile".to_owned(),
+        params: Map::new(),
+        max_results: None,
+        page_token: None,
+    };
+    let provider = fetch(&state.http_client, base_url, bearer, &profile).await.ok()?.provider;
+    let operation = research_operation(&provider)?;
+    let args = research_args(connection_id, operation, question);
+    let fetched = fetch(&state.http_client, base_url, bearer, &args).await.ok()?;
+    // The whole rendered read is screened, as the Ask loop screens it, before any item is used.
+    let provenance = ToolProvenance::assess(
+        provider_reads::READ_TOOL_NAME,
+        &envelope(&args, &fetched),
+        &state.screening_semaphore,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer,
+    )
+    .await;
+    let items = research_items(operation, &fetched.provider, &fetched.read);
+    if research_withholds(&provenance) {
+        return Some((Vec::new(), items.len()));
+    }
+    Some((items, 0))
+}
+
 fn citation(
     connection: &str,
     operation: &str,
@@ -701,7 +914,9 @@ fn provider_url(raw: &str) -> Option<String> {
     .then(|| url.to_string())
 }
 
-fn provider_label(provider: &str) -> &'static str {
+/// The label a connected account's sources are grouped under, shared with deep research (EP-2-S7).
+#[must_use]
+pub fn provider_label(provider: &str) -> &'static str {
     match provider {
         "google" => "Google",
         "microsoft" => "Microsoft 365",
@@ -1142,5 +1357,104 @@ mod tests {
             .await
             .unwrap_or_default()
             .is_empty());
+    }
+
+    /// EP-2-S7: the deep-research search of one account.
+    mod research {
+        use super::*;
+
+        fn mail_read(items: Vec<Value>) -> ProviderRead {
+            ProviderRead {
+                status: ReadStatus::Ok,
+                items,
+                next_page_token: None,
+                more_available: false,
+            }
+        }
+
+        #[test]
+        fn only_the_known_providers_have_a_research_search() {
+            assert_eq!(research_operation("google"), Some("gmail.messages"));
+            assert_eq!(research_operation("microsoft"), Some("mail.messages"));
+            assert_eq!(research_operation(""), None);
+            assert_eq!(research_operation("dropbox"), None);
+            for provider in ["google", "microsoft"] {
+                let operation = research_operation(provider).expect("a search");
+                assert!(
+                    provider_reads::read_operation_params(operation)
+                        .is_some_and(|params| params.contains(&"query")),
+                    "{operation} is a read that takes a query"
+                );
+            }
+        }
+
+        #[test]
+        fn the_research_search_is_one_small_query() {
+            let long = format!("  what   did {}  ", "word ".repeat(100));
+            let args = research_args("conn_1", "mail.messages", &long);
+            let query = args.params["query"].as_str().expect("a query");
+            assert!(query.chars().count() <= RESEARCH_QUERY_CHARS);
+            assert!(query.starts_with("what did word"), "{query}");
+            assert_eq!(args.max_results, Some(RESEARCH_MAX_RESULTS));
+            assert_eq!(args.page_token, None);
+            assert_eq!(args.params.len(), 1, "no filter but the query");
+        }
+
+        #[test]
+        fn a_research_item_keeps_its_body_out_of_the_snippet() {
+            let read = mail_read(vec![json!({
+                "id": "m1",
+                "subject": "Quarterly numbers",
+                "from": {"name": "Kari", "address": "kari@example.com"},
+                "receivedDateTime": "2026-11-01T10:00:00Z",
+                "snippet": "Revenue grew 12 percent",
+                "webLink": "https://outlook.office.com/mail/m1",
+            })]);
+            let items = research_items("mail.messages", "microsoft", &read);
+            assert_eq!(items.len(), 1);
+            let item = &items[0];
+            assert_eq!(item.provider, "microsoft");
+            assert_eq!(item.title, "Quarterly numbers");
+            assert_eq!(item.url, "https://outlook.office.com/mail/m1");
+            assert!(!item.snippet.contains("Revenue"), "metadata only: {}", item.snippet);
+            assert!(item.text.contains("snippet: Revenue grew 12 percent"), "{}", item.text);
+            assert!(!item.text.contains("m1"), "no id or link in the evidence: {}", item.text);
+        }
+
+        #[test]
+        fn a_research_item_text_is_bounded() {
+            let read = mail_read(vec![json!({"subject": "s", "snippet": "x".repeat(10_000)})]);
+            let items = research_items("mail.messages", "microsoft", &read);
+            assert!(items[0].text.chars().count() <= RESEARCH_ITEM_CHARS);
+        }
+
+        #[test]
+        fn a_status_only_read_has_no_items() {
+            for status in [
+                ReadStatus::NoResults,
+                ReadStatus::ReconnectRequired,
+                ReadStatus::CapabilityMissing,
+                ReadStatus::UnsupportedContent,
+            ] {
+                let mut read = mail_read(vec![json!({"subject": "s"})]);
+                read.status = status;
+                assert!(research_items("mail.messages", "microsoft", &read).is_empty(), "{status:?}");
+            }
+        }
+
+        #[test]
+        fn flagged_or_unfinished_screening_withholds_an_item() {
+            let mut provenance = ToolProvenance::unscreened(provider_reads::READ_TOOL_NAME, "x");
+            assert_eq!(provenance.trust, TrustClass::ConnectorContent);
+            for (posture, withheld) in [
+                (ScreeningPosture::Clean, false),
+                (ScreeningPosture::PolicyDisabled, false),
+                (ScreeningPosture::Flagged, true),
+                (ScreeningPosture::Degraded, true),
+            ] {
+                provenance.screening.posture = posture;
+                assert_eq!(research_withholds(&provenance), withheld, "{posture:?}");
+            }
+        }
     }
 }

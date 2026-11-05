@@ -627,6 +627,8 @@ export function ConnectorSourceCard(props: { source: Citation & { kind: 'web' } 
   const body = () => (
     <>
       <div class="verevon-chat-source-card__meta">
+        {/* A deep-research report numbers the items it cites (EP-2-S7); the number is what its `[n]` names. */}
+        <Show when={props.source.number}>{(number) => <span>[{number()}]</span>}</Show>
         <span>{i18n.tr('Tilkoblet app', 'Connected app')}</span>
         <em>{citationGroupLabel(props.source)}</em>
       </div>
@@ -658,7 +660,9 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
     <>
       <div class="verevon-chat-source-card__meta">
         <span>{props.index}</span>
-        <em>{hostname(props.source.url)}</em>
+        {/* A knowledge source a research report cites (EP-2-S7) has a provider, not a host: its URL is the
+            provider's name, so the card names the group the server labelled. */}
+        <em>{props.source.origin === 'knowledge' ? citationGroupLabel(props.source) : hostname(props.source.url)}</em>
       </div>
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={snippet()}><p>{snippet()}</p></Show>

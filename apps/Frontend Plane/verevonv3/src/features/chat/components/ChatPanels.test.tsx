@@ -1425,6 +1425,49 @@ describe('SourcesPanel cited passages (EP-2-S4)', () => {
   })
 })
 
+describe('SourcesPanel knowledge and connector research sources (EP-2-S7)', () => {
+  it('labels a knowledge row by its provider, not by a host', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-1', number: 1, url: 'sharepoint', origin: 'knowledge', sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'SharePoint' }),
+          read({ id: 'dr-2', number: 2, url: 'https://example.com/a' }),
+        ]}
+      />
+    ))
+    const labels = Array.from(container.querySelectorAll('.verevon-chat-source-card__meta em')).map((node) => node.textContent)
+    expect(labels).toContain('SharePoint')
+    expect(labels).toContain('example.com')
+    unmount()
+  })
+
+  it('shows the number a research report cites a connected-app item by', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-3', number: 3, url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365', snippet: 'Kari · 2026-11-01' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).toContain('[3]')
+    unmount()
+  })
+
+  it('shows no number on an Ask-loop connected-app item, which has none', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'conn-1', url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).not.toMatch(/\[\d+\]/)
+    unmount()
+  })
+})
+
 describe('SourcesPanel research passes (EP-2-S6)', () => {
   const numbered = () => [
     read({ id: 'dr-1', number: 1, url: 'https://one.no/a' }),

@@ -119,7 +119,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
     ),
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
-    // then reads org knowledge only, and no web source was asked for.
+    // then reads org knowledge only, and no web source was asked for. A
+    // knowledge-only deep research (EP-2 S7) is still refused, through
+    // `deep_research`, which [`refusal`] decides before the scope.
     ("retrieval_scope", refused_feature("web_search")),
     ("connector_scope", refused_feature("connector_read")),
     (
@@ -513,4 +515,63 @@ pub fn identity_framing(request: &InvokeRequest) -> Option<String> {
             "You are Verevon, the AI assistant currently helping {org}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org}, not Verevon itself."
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn request(body: serde_json::Value) -> InvokeRequest {
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    /// EP-2 S7: knowledge and connector sources in deep research change nothing on a ZDR turn. Deep
+    /// research is refused before the scope or the selection is read, so neither switch can let a
+    /// knowledge-only run or a connected-account read slip past it.
+    #[test]
+    fn deep_research_with_internal_sources_is_refused_under_zdr() {
+        let deep_research = Some(Refusal::feature_not_supported("deep_research"));
+        // e_zdr_token_knowledge_only_deep_research_refused
+        assert_eq!(
+            refusal_with(
+                &request(json!({
+                    "content": "hello",
+                    "deep_research": true,
+                    "retrieval_scope": "knowledge_only",
+                })),
+                false,
+            ),
+            deep_research
+        );
+        // e_zdr_token_deep_research_connector_sources_refused
+        assert_eq!(
+            refusal_with(
+                &request(json!({
+                    "content": "hello",
+                    "deep_research": true,
+                    "connector_scope": ["conn_1"],
+                })),
+                false,
+            ),
+            deep_research
+        );
+        // Without deep research the knowledge-only scope is honoured and a selection is refused
+        // for itself, as before.
+        assert_eq!(
+            refusal_with(
+                &request(json!({"content": "hello", "retrieval_scope": "knowledge_only"})),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            refusal_with(
+                &request(json!({"content": "hello", "connector_scope": ["conn_1"]})),
+                false,
+            ),
+            Some(Refusal::feature_not_supported("connector_read"))
+        );
+    }
 }

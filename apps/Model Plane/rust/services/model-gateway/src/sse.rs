@@ -2094,7 +2094,14 @@ pub async fn invoke_stream_sse(
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only and web-only turns don't support Plan mode yet. Turn off Plan mode, or switch the source filter back to Kunnskap + nett, to continue.", false);
     }
-    if retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly && req.deep_research {
+    // EP-2-S7 (D3): with knowledge sources switched on, a knowledge-only research run reads the org's
+    // knowledge per sub-query and never the web, so the scope no longer conflicts. Read once for the
+    // turn, so the admission here and the run below agree.
+    let research_knowledge_sources = crate::deep_research::knowledge_sources_enabled();
+    if retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly
+        && req.deep_research
+        && !research_knowledge_sources
+    {
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only turns can't run web research. Switch to Kunnskap + nett or Kun nett to use Dyp research.", false);
     }
@@ -2268,8 +2275,11 @@ pub async fn invoke_stream_sse(
     )
     .is_some_and(|caps| !caps.live);
     // Deep research is a web turn by definition: it searches outside the tool loop, so an organisation that turned web
-    // access off refuses it here, before any plan or search runs.
-    if req.deep_research && org_web_off {
+    // access off refuses it here, before any plan or search runs. A knowledge-only run with knowledge sources on
+    // (EP-2-S7) searches no web, so the org's web switch does not bind it.
+    let knowledge_only_research = research_knowledge_sources
+        && retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly;
+    if req.deep_research && org_web_off && !knowledge_only_research {
         return error_stream(
             &request_id,
             "org_web_off",
@@ -4161,6 +4171,13 @@ pub async fn invoke_stream_sse(
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
+    // Whether the turn runs in a Space room: a deep-research run there never reads connected accounts
+    // (EP-2-S7), as the selection check above already refuses a selection there.
+    let research_space_scoped = req
+        .space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .is_some_and(|context| !context.space_id.is_empty());
     // Provider-bound copy for the title inference: `user_content` already has
     // the opt-in PII redaction applied, and the title call reaches the same
     // external provider the answer did.
@@ -4474,6 +4491,39 @@ pub async fn invoke_stream_sse(
             deep_research_ran = true;
         } else if deep_research_requested {
             seq = sink.sync_cursor(seq).await;
+            // The sources the run reads (EP-2-S7). With both switches off the plan is the web alone, as
+            // before. Knowledge is read with the viewer's own Data Plane bearer and the turn's Space scope;
+            // connected accounts only as the person selected them, through the Ask loop's read path.
+            let research_connector_turn = crate::tool_loop::connector_reads::ConnectorTurn::new(
+                connector_ids.clone(),
+                retrieval_scope.is_auto() && !conversation_only,
+            );
+            let research_sources = crate::deep_research::ResearchSources {
+                plan: crate::deep_research::SourcePlan::for_turn(
+                    research_knowledge_sources,
+                    crate::deep_research::connector_sources_enabled(),
+                    retrieval_scope,
+                    effective_zdr,
+                    research_space_scoped,
+                    !connector_ids.is_empty(),
+                ),
+                knowledge: verify_bearer
+                    .as_ref()
+                    .map(|bearer| crate::deep_research::KnowledgeAccess {
+                        bearer,
+                        zdr_mode: data_plane_mode.clone(),
+                        sovereign_required: verify_sovereign,
+                        space_decision: verify_space_decision.as_deref(),
+                    }),
+                connectors: Some(crate::deep_research::ConnectorAccess {
+                    turn: &research_connector_turn,
+                    ingestion_bearer: ingestion_bearer.as_ref(),
+                    capability_bearer: capability_bearer
+                        .as_ref()
+                        .map(VerifiedCapabilityBearer::as_str),
+                    space_scoped: research_space_scoped,
+                }),
+            };
             let research = crate::deep_research::run_deep_research(
                 &session_state,
                 &req_id,
@@ -4489,6 +4539,7 @@ pub async fn invoke_stream_sse(
                 messages,
                 &tool_phase_query,
                 research_phase.client_plan(),
+                &research_sources,
                 cancel_flag.as_ref(),
                 Some(&sink),
             )
