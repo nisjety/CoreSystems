@@ -1,10 +1,11 @@
 //! `/v1/agent/*`: the Agent API read and control routes (Wave 3 EP-12 S5, decisions D4, D6, D12).
 //!
-//! An API key reads and controls its own runs here: one run, its live events, a cancel, and a
-//! key-owned thread's runs and messages. Every route forwards the key's own `aud=session-core`
-//! bearer (`VerifiedApiKeySessionBearer`, verified by `auth::require_auth`) and never a header the
-//! caller chose; Session Core binds every call to the threads and runs the key owns (EP-12 S4),
-//! so a run or thread of anyone else reads as not found.
+//! An API key starts (EP-12 S7, `agent_api_run`), reads and controls its own runs here: one run,
+//! its live events, a cancel, and a key-owned thread's runs and messages. Every route forwards
+//! the key's own `aud=session-core` bearer (`VerifiedApiKeySessionBearer`, verified by
+//! `auth::require_auth`) and never a header the caller chose; Session Core binds every call to
+//! the threads and runs the key owns (EP-12 S4), so a run or thread of anyone else reads as not
+//! found.
 //!
 //! The routes are for keys only (D4: people use the chat routes). The route policy admits a key
 //! here only while `MODEL_GATEWAY_AGENT_API` is on and only with scope `agent:runs`; the handlers
@@ -62,12 +63,14 @@ pub fn enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
-/// The five routes, merged into the authed router only while `enabled` (the switch) is on.
+/// The six routes, merged into the authed router only while `enabled` (the switch) is on.
 pub(crate) fn router(enabled: bool) -> Router<AppState> {
     if !enabled {
         return Router::new();
     }
     Router::new()
+        // EP-12 S7: start an Ask run.
+        .route("/v1/agent/runs", post(crate::agent_api_run::start_run))
         .route("/v1/agent/runs/:run_id", get(get_run))
         .route("/v1/agent/runs/:run_id/events", get(run_events))
         .route("/v1/agent/runs/:run_id/cancel", post(cancel_run))
@@ -128,7 +131,9 @@ async fn run_events(
 }
 
 /// `POST /v1/agent/runs/:run_id/cancel`: Session Core's authoritative cancel. Its transaction
-/// decides ownership and terminal state, and its `RUN_CANCELLED` event id is the receipt.
+/// decides ownership and terminal state, and its `RUN_CANCELLED` event id is the receipt. A run
+/// this replica is still answering (EP-12 S7) is then told to stop, so a cancelled run spends no
+/// more on its model call.
 async fn cancel_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -150,6 +155,9 @@ async fn cancel_run(
         .await
         .map_err(|error| upstream_error(&error, Missing::Run))?
         .into_inner();
+    if cancellation.cancelled {
+        crate::agent_api_run::stop_live_turn(&state, &claims, &run_id);
+    }
     let status = if cancellation.cancelled {
         "cancelled"
     } else {
@@ -278,7 +286,7 @@ async fn list_thread_messages(
 /// `agent:runs`, its retention posture is persistent (D6), and its own session bearer came with
 /// it. The ZDR refusal comes before the bearer check, so no upstream call is ever made for a ZDR
 /// key whatever else it sent.
-fn admit(
+pub(crate) fn admit(
     claims: &Claims,
     bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
 ) -> Result<VerifiedApiKeySessionBearer, HttpJsonError> {
@@ -316,7 +324,7 @@ fn zdr_refused() -> HttpJsonError {
 }
 
 /// A credential that is not a usable key: not a key at all, or a key without its session bearer.
-fn api_key_invalid() -> HttpJsonError {
+pub(crate) fn api_key_invalid() -> HttpJsonError {
     envelope(
         StatusCode::UNAUTHORIZED,
         "api_key_invalid",
@@ -335,7 +343,7 @@ fn path_id(raw: &str, field: &str) -> Result<String, HttpJsonError> {
     }
 }
 
-fn is_id(raw: &str) -> bool {
+pub(crate) fn is_id(raw: &str) -> bool {
     (1..=MAX_ID_CHARS).contains(&raw.len())
         && raw
             .bytes()
@@ -467,14 +475,14 @@ fn session_request<T>(
 
 /// Which id a not-found answer names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Missing {
+pub(crate) enum Missing {
     Run,
     Thread,
 }
 
 /// Session Core's refusals in the Agent API's vocabulary. A run or thread the key does not own
 /// reads as one that does not exist. A ZDR refusal from upstream is the `agent_api` refusal.
-fn upstream_error(error: &tonic::Status, missing: Missing) -> HttpJsonError {
+pub(crate) fn upstream_error(error: &tonic::Status, missing: Missing) -> HttpJsonError {
     if Refusal::from_status(error).is_some() {
         return zdr_refused();
     }
@@ -510,7 +518,7 @@ fn upstream_error(error: &tonic::Status, missing: Missing) -> HttpJsonError {
     }
 }
 
-fn invalid_request(field: &str) -> HttpJsonError {
+pub(crate) fn invalid_request(field: &str) -> HttpJsonError {
     envelope(
         StatusCode::BAD_REQUEST,
         "invalid_request",
@@ -519,7 +527,7 @@ fn invalid_request(field: &str) -> HttpJsonError {
     )
 }
 
-fn internal_error() -> HttpJsonError {
+pub(crate) fn internal_error() -> HttpJsonError {
     envelope(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
@@ -529,7 +537,12 @@ fn internal_error() -> HttpJsonError {
 }
 
 /// A typed error body: `{error:{code,message,details}}`, with `details` always an object.
-fn envelope(status: StatusCode, code: &str, message: &str, details: Value) -> HttpJsonError {
+pub(crate) fn envelope(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: Value,
+) -> HttpJsonError {
     (
         status,
         Json(json!({ "error": { "code": code, "message": message, "details": details } })),
@@ -578,6 +591,7 @@ mod tests {
 
     /// Every route's concrete path and method, as a caller sends them.
     const ROUTES: &[(&str, &str)] = &[
+        ("POST", "/v1/agent/runs"),
         ("GET", "/v1/agent/runs/run-1"),
         ("GET", "/v1/agent/runs/run-1/events"),
         ("POST", "/v1/agent/runs/run-1/cancel"),

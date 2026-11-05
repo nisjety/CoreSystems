@@ -1,6 +1,7 @@
 //! model-gateway library crate — exposes modules for integration tests.
 
 pub mod agent_api_routes;
+pub mod agent_api_run;
 pub mod approvals;
 pub mod attachment_policy;
 pub mod artifact_edit_routes;
