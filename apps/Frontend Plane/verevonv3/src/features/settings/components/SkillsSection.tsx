@@ -6,6 +6,7 @@ import {
   createSkill,
   deleteSkill,
   discardSkillDraft,
+  importSkillFile,
   listSkills,
   listSkillVersions,
   memberSkillAuthoring,
@@ -274,14 +275,21 @@ export function SkillsSection() {
   // EP-11 S5: the server says in the listing whether edits go through a draft; off, nothing here
   // shows a draft, a publish or a restore.
   const [draftsEnabled, setDraftsEnabled] = createSignal(false)
+  // EP-11 S8: the same listing says whether a skill may be imported from a file; off, no import shows.
+  const [importEnabled, setImportEnabled] = createSignal(false)
   const [skills, { refetch }] = createResource(
     () => orgId() || undefined,
     (id) =>
       listSkills(id).then((result) => {
         setDraftsEnabled(result.drafts_enabled === true)
+        setImportEnabled(result.import_enabled === true)
         return result.skills
       }),
   )
+  const [importing, setImporting] = createSignal(false)
+  const [importError, setImportError] = createSignal<string | null>(null)
+  const [importNote, setImportNote] = createSignal<string | null>(null)
+  let importInput: HTMLInputElement | undefined
 
   const [name, setName] = createSignal('')
   const [description, setDescription] = createSignal('')
@@ -512,6 +520,49 @@ export function SkillsSection() {
           en: 'Could not restore the version.',
         }),
       )
+    }
+  }
+
+  // EP-11 S8: an imported skill arrives switched off with its text as a draft, so the person reads
+  // it, publishes it and switches it on before it steers a conversation.
+  const handleImportFile = async (file: File) => {
+    const id = orgId()
+    if (!id || importing()) return
+    setImporting(true)
+    setImportError(null)
+    setImportNote(null)
+    try {
+      const imported = await importSkillFile(id, file, isAdmin() ? 'org' : 'user')
+      const warnings = skillLintWarnings(imported)
+      setImportNote(
+        [
+          i18n.tr(
+            `«${imported.name}» er importert som et utkast og er av. Les det, publiser det og slå det på.`,
+            `“${imported.name}” is imported as a draft and switched off. Read it, publish it and switch it on.`,
+          ),
+          warnings.length > 0 ? lintSummary(warnings) : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
+      )
+      await refetch()
+    } catch (err) {
+      const refused = skillLintRefusal(err)
+      if (refused.length > 0) {
+        setImportError(lintSummary(refused))
+      } else if (err instanceof RangeError) {
+        setImportError(i18n.tr('Filen er større enn 8 MB.', 'The file is larger than 8 MB.'))
+      } else {
+        setImportError(
+          translateApiError(err, i18n.tr, {
+            no: 'Kunne ikke importere ferdigheten. Bruk en SKILL.md eller en zip med SKILL.md øverst.',
+            en: 'Could not import the skill. Use a SKILL.md or a zip with SKILL.md at the top.',
+          }),
+        )
+      }
+    } finally {
+      setImporting(false)
+      if (importInput) importInput.value = ''
     }
   }
 
@@ -812,6 +863,48 @@ export function SkillsSection() {
             </SettingsButton>
           </div>
         </form>
+      </Show>
+
+      <Show when={canAuthor() && importEnabled()}>
+        <div>
+          <input
+            ref={(element) => (importInput = element)}
+            type="file"
+            accept=".md,.zip,text/markdown,application/zip"
+            hidden
+            aria-label={i18n.tr('Velg en SKILL.md eller zip', 'Choose a SKILL.md or zip')}
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0]
+              if (file) void handleImportFile(file)
+            }}
+          />
+          <SettingsButton settingsSize="sm" disabled={importing()} onClick={() => importInput?.click()}>
+            <Show when={importing()} fallback={<>{i18n.tr('Importer fra fil', 'Import from file')}</>}>
+              <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Importerer…', 'Importing…')}
+            </Show>
+          </SettingsButton>
+          <span class="verevon-settings-help">
+            {' '}
+            {i18n.tr(
+              'En SKILL.md, eller en zip med SKILL.md og filene den bruker.',
+              'A SKILL.md, or a zip with SKILL.md and the files it uses.',
+            )}
+          </span>
+          <Show when={importError()}>
+            {(message) => (
+              <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
+          <Show when={importNote()}>
+            {(note) => (
+              <p class="verevon-settings-help" role="status">
+                {note()}
+              </p>
+            )}
+          </Show>
+        </div>
       </Show>
 
       <Show when={canAuthor() && kindsEnabled() === true}>

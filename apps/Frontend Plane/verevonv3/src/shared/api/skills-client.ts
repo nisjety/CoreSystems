@@ -102,9 +102,64 @@ export async function listAvailableSkills(signal?: AbortSignal): Promise<Skill[]
 /**
  * The org's skills as the Skills page lists them. `drafts_enabled` (EP-11 S5) is true only while
  * the server saves edits of published skills as drafts; absent, the page offers no draft controls.
+ * `import_enabled` (EP-11 S8) is true only while the server imports skills from a file; absent,
+ * the page offers no import.
  */
-export function listSkills(orgId: string): Promise<{ skills: Skill[]; drafts_enabled?: boolean }> {
-  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean }>('/api/v1/skills', {
+export function listSkills(
+  orgId: string,
+): Promise<{ skills: Skill[]; drafts_enabled?: boolean; import_enabled?: boolean }> {
+  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean; import_enabled?: boolean }>('/api/v1/skills', {
+    headers: { 'x-verevon-org-id': orgId },
+  })
+}
+
+/**
+ * Mirrors capability-core's bound on an uploaded bundle (`maxSkillBundleBodyBytes`: the 8 MiB of
+ * files and room for the zip headers); the server checks again.
+ */
+export const MAX_SKILL_IMPORT_BYTES = 8 * 1024 * 1024 + 256 * 1024
+
+/** What an import created: a switched-off skill whose text and files wait as a draft. */
+export interface SkillImportResult {
+  id: string
+  name: string
+  scope: 'org' | 'user'
+  enabled: false
+  draft: true
+  /** The draft bundle, present when the zip held files beside SKILL.md. */
+  bundle?: { manifest_sha256: string; file_count: number; total_bytes: number }
+  /** Skill lint warnings of an import that went ahead. */
+  warnings?: Array<{ code: string; field: string; severity: string }>
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  // Chunked, so a large file never overflows the argument list of String.fromCharCode.
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
+}
+
+/**
+ * Import a skill from a `SKILL.md` or a zip with `SKILL.md` and its files (EP-11 S8, action
+ * `skills.import`). The server checks the file, creates the skill switched off and keeps its text
+ * and files as a draft: nothing is used until the draft is published and the skill switched on.
+ * Files beside `SKILL.md` are an admin's to import. A file over the bundle cap is refused here
+ * before it is read.
+ */
+export async function importSkillFile(
+  orgId: string,
+  file: Blob,
+  scope: 'org' | 'user' = 'user',
+): Promise<SkillImportResult> {
+  if (file.size > MAX_SKILL_IMPORT_BYTES) {
+    throw new RangeError('skill_import_too_large')
+  }
+  const content = bytesToBase64(new Uint8Array(await file.arrayBuffer()))
+  return requestJson<SkillImportResult>('/api/v1/skills/import', {
+    method: 'POST',
+    body: JSON.stringify({ content_base64: content, scope }),
     headers: { 'x-verevon-org-id': orgId },
   })
 }

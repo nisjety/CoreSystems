@@ -260,6 +260,53 @@ func TestParseMarksNonTextFilesBinary(t *testing.T) {
 	}
 }
 
+// EP-11 S8: an imported SKILL.md gives the skill its name, description and instructions.
+func TestParseSkillFileSplitsFrontMatterFromBody(t *testing.T) {
+	document, err := ParseSkillFile([]byte("---\r\nname: xlsx\r\ndescription: Build spreadsheets\r\n---\r\n\r\n# Steps\r\nUse the template.\r\n"))
+	if err != nil {
+		t.Fatalf("ParseSkillFile: %v", err)
+	}
+	if document.Name != "xlsx" || document.Description != "Build spreadsheets" {
+		t.Fatalf("front matter = %q, %q", document.Name, document.Description)
+	}
+	if document.Body != "# Steps\r\nUse the template." {
+		t.Fatalf("body = %q", document.Body)
+	}
+}
+
+// A lone SKILL.md is held to the bundle's rules, with the bundle's codes.
+func TestParseSkillFileRefusesWhatABundleWouldRefuse(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"no front matter":   []byte("# Just a body\n"),
+		"unclosed block":    []byte("---\nname: x\ndescription: y\n"),
+		"missing describe":  []byte("---\nname: x\n---\nBody\n"),
+		"indented name key": []byte("---\n name: x\ndescription: y\n---\nBody\n"),
+		"not text":          append([]byte("---\nname: x\ndescription: y\n---\n"), 0x00, 0xff),
+	} {
+		if _, err := ParseSkillFile(body); refusalCode(t, err) != "skill_md_front_matter" {
+			t.Errorf("%s: code = %q, want skill_md_front_matter", name, refusalCode(t, err))
+		}
+	}
+	big := append([]byte(validSkillMD), bytes.Repeat([]byte("a"), MaxFileBytes)...)
+	if _, err := ParseSkillFile(big); refusalCode(t, err) != "file_too_large" {
+		t.Errorf("an over-cap SKILL.md: code = %q, want file_too_large", refusalCode(t, err))
+	}
+}
+
+func TestBundleSkillDocumentReadsTheBundlesSkillFile(t *testing.T) {
+	bundle, err := Parse(buildZip(t,
+		zipEntry{name: "references/notes.md", body: []byte("---\nname: other\ndescription: no\n---\nNot this.\n")},
+		zipEntry{name: "SKILL.md", body: []byte(validSkillMD)},
+	))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	document := BundleSkillDocument(bundle)
+	if document.Name != "xlsx" || document.Description != "Build spreadsheets" || document.Body != "Body." {
+		t.Fatalf("document = %#v", document)
+	}
+}
+
 // pngLogo and minimalMaster are the smallest bodies the deck template checks accept.
 var pngLogo = []byte("\x89PNG\r\n\x1a\nrest-of-image")
 

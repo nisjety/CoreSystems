@@ -187,6 +187,57 @@ func FrontMatterName(bundle Bundle) string {
 	return ""
 }
 
+// SkillDocument is what an imported skill is made from (EP-11 S8): the name and description in
+// SKILL.md's front matter and the instructions below the block.
+type SkillDocument struct {
+	Name        string
+	Description string
+	Body        string
+}
+
+// ParseSkillFile checks a lone SKILL.md by the rules Parse holds a bundle's SKILL.md to: within
+// the per-file cap, UTF-8 text, and a closed front matter block naming the skill and saying when
+// to use it. A refusal carries the same closed codes as a bundle's.
+func ParseSkillFile(body []byte) (SkillDocument, error) {
+	if len(body) > MaxFileBytes {
+		return SkillDocument{}, refuse("file_too_large")
+	}
+	if isBinary(body) || !validFrontMatter(body) {
+		return SkillDocument{}, refuse("skill_md_front_matter")
+	}
+	return skillDocument(body), nil
+}
+
+// BundleSkillDocument reads the SKILL.md of a bundle Parse accepted, which always holds one.
+func BundleSkillDocument(bundle Bundle) SkillDocument {
+	for _, file := range bundle.Files {
+		if file.Path == SkillFileName {
+			return skillDocument(file.Body)
+		}
+	}
+	return SkillDocument{}
+}
+
+func skillDocument(body []byte) SkillDocument {
+	fields, _ := frontMatter(body)
+	return SkillDocument{Name: fields["name"], Description: fields["description"], Body: strings.TrimSpace(frontMatterRest(body))}
+}
+
+// frontMatterRest is the text after the line that closes the front matter block, found by the
+// rule frontMatter reads the block with; "" when the block is not closed.
+func frontMatterRest(body []byte) string {
+	text := string(body)
+	lines := strings.SplitAfter(text, "\n")
+	offset := len(lines[0])
+	for _, line := range lines[1:] {
+		offset += len(line)
+		if strings.TrimRight(line, "\r\n") == "---" {
+			return text[offset:]
+		}
+	}
+	return ""
+}
+
 // DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
 // turns it on; off, an upload is checked exactly as before and no listing reports a template.
 const DeckTemplatesEnv = "SKILL_DECK_TEMPLATES_ENABLED"

@@ -18,7 +18,7 @@ use std::{
 };
 
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -62,6 +62,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/skills/{skill_id}/versions/{version}/restore",
             post(restore_skill_version),
+        )
+        // EP-11 S8: import a skill from a SKILL.md or a zip, sent as base64 inside JSON. capability-core
+        // mounts the route only while SKILL_IMPORT_ENABLED is on and answers 404 otherwise.
+        .route(
+            "/api/v1/skills/import",
+            post(import_skill).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)),
         )
         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
         .route(
@@ -560,6 +566,70 @@ async fn restore_skill_version(
 ) -> impl IntoResponse {
     let action = format!("versions/{version}/restore");
     proxy_skill_draft_call(&state, &user, &headers, &skill_id, &action, Method::POST).await
+}
+
+/// Request body ceiling for the skill import route, and only for it. The file arrives as base64
+/// inside JSON, a third bigger than the file, so axum's 2 MiB default would cap an import at about
+/// 1.5 MiB. 12 MiB carries the largest bundle (8 MiB and its zip headers); capability-core bounds the
+/// body again.
+pub(crate) const SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+
+/// The body an import is forwarded with (EP-11 S8), or `None` when the caller may not import it.
+/// Only the file and the scope pass, so an org id, an owner or a review state sent by the client
+/// never reaches capability-core. An admin imports any scope; a member imports a private skill of
+/// their own only, and only while `SKILL_MEMBER_AUTHORING` is on. No scope is sent as `user`, so a
+/// member's import can never be read as org-wide.
+fn skill_import_body(body: &Value, admin: bool, member_switch_on: bool) -> Option<Value> {
+    let scope = match body.get("scope") {
+        None | Some(Value::Null) => "user",
+        Some(Value::String(scope)) => scope.as_str(),
+        Some(_) => return None,
+    };
+    if !admin && (!member_switch_on || scope != "user") {
+        return None;
+    }
+    let content = body.get("content_base64").cloned().unwrap_or(Value::Null);
+    Some(json!({"content_base64": content, "scope": scope}))
+}
+
+/// Import a skill from a file (EP-11 S8). Proxied to model-gateway `/v1/skills/import`
+/// (→ capability-core), which checks the file, refuses files beside SKILL.md from anyone but an
+/// admin, and creates the skill switched off as a draft. Org id is derived from the verified
+/// capability token, never from the body.
+async fn import_skill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let admin = can_author_skills(&state, &user).await;
+    let Some(forwarded) = skill_import_body(&body, admin, skill_member_authoring_enabled()) else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only organization admins can import skills for the organization.",
+            )),
+        )
+            .into_response();
+    };
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!("{}/v1/skills/import", state.model_gateway_url);
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(forwarded),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
 }
 
 /// List the org's plugin packages (open to members so the UI can show them).
@@ -1770,8 +1840,8 @@ mod tests {
     use super::{
         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
-        draft_from_request, member_private_skill_body, parse_builder_definition, version_to_api,
-        BuilderDefinition,
+        draft_from_request, member_private_skill_body, parse_builder_definition, skill_import_body,
+        version_to_api, BuilderDefinition, SKILL_IMPORT_BODY_LIMIT_BYTES,
     };
     use crate::middleware::AuthenticatedUser;
     use axum::{body::Body, http::Request};
@@ -2782,5 +2852,150 @@ mod tests {
             .map(|request| request.url.query().unwrap_or_default().to_owned())
             .collect();
         assert_eq!(forwarded, ["limit=5"]);
+    }
+
+    // Skill import (EP-11 S8).
+
+    #[test]
+    fn skill_import_body_keeps_only_the_file_and_scope() {
+        let body = json!({
+            "content_base64": "LS0t", "scope": "user",
+            "org_id": "org-forged", "owner_user_id": "user-2", "review_state": "accepted"
+        });
+        assert_eq!(
+            skill_import_body(&body, false, true),
+            Some(json!({"content_base64": "LS0t", "scope": "user"}))
+        );
+        // No scope is sent as a private import, never left for the upstream to default.
+        assert_eq!(
+            skill_import_body(&json!({"content_base64": "LS0t"}), false, true),
+            Some(json!({"content_base64": "LS0t", "scope": "user"}))
+        );
+    }
+
+    #[test]
+    fn skill_import_body_keeps_org_imports_for_admins() {
+        let org = json!({"content_base64": "LS0t", "scope": "org"});
+        assert_eq!(skill_import_body(&org, false, true), None);
+        assert_eq!(
+            skill_import_body(&org, true, false),
+            Some(json!({"content_base64": "LS0t", "scope": "org"}))
+        );
+        // With the member switch off a member imports nothing, as they author nothing.
+        assert_eq!(
+            skill_import_body(
+                &json!({"content_base64": "LS0t", "scope": "user"}),
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            skill_import_body(&json!({"content_base64": "LS0t", "scope": 7}), true, true),
+            None
+        );
+    }
+
+    async fn mount_skill_import(model: &MockServer) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/skills/import"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({"id": "skill_imported", "draft": true})),
+            )
+            .mount(model)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn member_imports_a_private_skill_when_switch_on() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        mount_skill_import(&servers.2).await;
+        let (status, body) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/import",
+            Some(json!({"content_base64": "LS0t", "org_id": "org-forged"})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(body["draft"], true);
+        assert_eq!(
+            skill_calls(&servers.2, "POST", "/v1/skills/import").await,
+            vec![json!({"content_base64": "LS0t", "scope": "user"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn member_cannot_import_an_org_skill_or_with_the_switch_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("member", "user", "user-1").await;
+        mount_skill_import(&servers.2).await;
+        let (status, body) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/import",
+            Some(json!({"content_base64": "LS0t", "scope": "org"})),
+            Some("true"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/import",
+            Some(json!({"content_base64": "LS0t", "scope": "user"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert!(skill_calls(&servers.2, "POST", "/v1/skills/import")
+            .await
+            .is_empty());
+    }
+
+    /// A file larger than axum's 2 MiB default still reaches the upstream; the route's own ceiling
+    /// is what bounds it.
+    #[tokio::test]
+    async fn admin_import_carries_a_body_above_the_default_limit() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = skill_test_servers("owner", "org", "").await;
+        mount_skill_import(&servers.2).await;
+        let file = "A".repeat(3 * 1024 * 1024);
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/import",
+            Some(json!({"content_base64": file, "scope": "org"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(
+            skill_calls(&servers.2, "POST", "/v1/skills/import")
+                .await
+                .len(),
+            1
+        );
+
+        let too_large = "A".repeat(SKILL_IMPORT_BODY_LIMIT_BYTES);
+        let (status, _) = skill_request(
+            &servers,
+            "POST",
+            "/api/v1/skills/import",
+            Some(json!({"content_base64": too_large, "scope": "org"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            skill_calls(&servers.2, "POST", "/v1/skills/import")
+                .await
+                .len(),
+            1
+        );
     }
 }

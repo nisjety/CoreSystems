@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 import { spaceActions } from '@/shared/actions/domains/spaces'
+import { threadExportInput } from '@/shared/actions/chat-history'
 import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
@@ -794,6 +795,22 @@ const skillsVersionRestoreOutput = z.object({
   bundle_restored: z.boolean(),
 })
 
+// Import a skill from a file (EP-11 S8). The file itself travels to the server; the contract names
+// what the person picked and bounds it by the server's bundle cap (8 MiB and zip headers).
+const skillsImportInput = z
+  .object({
+    fileName: z.string().trim().min(1).max(255),
+    sizeBytes: z.number().int().min(1).max(8 * 1024 * 1024 + 256 * 1024),
+    scope: z.enum(['user', 'org']).optional(),
+  })
+  .strict()
+
+const skillsImportOutput = z.object({
+  id: z.string(),
+  draft: z.literal(true),
+  enabled: z.literal(false),
+})
+
 // Authored templates and presets (EP-11 S6): rows of the skills registry with a kind. A template
 // is text the composer inserts before the person sends, with `{{input}}` as its only placeholder;
 // a preset is a closed set of visible controls. The server lints both and binds the owner to the
@@ -1490,6 +1507,18 @@ const chatStageMcpAppMessageInput = z
   })
   .strict()
 
+// A tool an MCP App calls on its own server (EP-4 S10). The run and server are the frame's and the nonce
+// is the frame's own; the org and the viewer are the session's, so none of them is an input here.
+const chatMcpAppToolCallInput = z
+  .object({
+    runId: z.string().trim().min(1).max(256),
+    serverId: z.string().trim().min(1).max(256).refine((value) => !value.includes('__')),
+    tool: z.string().trim().min(1).max(256),
+    arguments: z.record(z.string(), z.unknown()),
+    frameNonce: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -1971,6 +2000,13 @@ const chatSaveThreadSnapshotInput = z.object({
   title: z.string().trim().optional(),
   pinned: z.boolean().optional(),
   preview: z.string().trim().optional(),
+})
+
+// The export's answer is the file itself, which the browser saves: the contract names its media
+// type and the name it carries, not a JSON envelope (EP-12 S11).
+const threadExportOutput = z.object({
+  contentType: z.string().min(1),
+  filename: z.string().min(1),
 })
 
 const chatUploadDocumentInput = z.object({
@@ -3591,6 +3627,17 @@ export const actionRegistry = [
     outputSchema: skillsVersionRestoreOutput,
   },
   {
+    id: 'skills.import',
+    label: 'Import a skill from a file',
+    description: 'Bring in a SKILL.md, or a zip with SKILL.md and the files it uses. The server checks the file (size caps, safe paths, no links, scripts only under scripts/), lints its text and creates the skill switched off, with its text and files as a draft: nothing steers a turn until the draft is published and the skill switched on. A person imports a private skill; an org-wide skill, or a zip with files beside SKILL.md, is an admin\'s. Refused under zero data retention. Never fetches anything and never model-executable.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: skillsImportInput,
+    outputSchema: skillsImportOutput,
+  },
+  {
     id: 'templates.create',
     label: 'Create a slash template',
     description: 'Save a private `/` template of the person\'s own: text the composer puts in the draft when the template is picked, with `{{input}}` filled from the rest of the line. Nothing is sent until the person sends. A template is never injected into a turn as a skill. Answers kind_not_enabled while the server\'s authored kinds are off. Never model-executable.',
@@ -4637,6 +4684,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'thread.export',
+    label: 'Export chat thread',
+    description: 'Download one of the caller\'s own chat conversations as a file, JSON (verevon.thread-export.v1) or Markdown, in full or redacted; redacted leaves out tool payloads, connector data and attachment names. Owner only, and read only: nothing is changed or stored. Refused under zero data retention, for a thread with a run kept outside retention, and for a Space conversation; the route answers 404 while the export is off. Never model-executable: a model does not take a copy of a person\'s conversation off the platform.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadExportInput,
+    outputSchema: threadExportOutput,
+  },
+  {
     id: 'chat.save_artifact_revision',
     label: 'Save an edit of an artifact',
     description: 'Save the person\'s own text of a document, code or HTML artifact in the Output panel as its newest version, under a compare-and-set on the version the panel showed: a moved head is refused with revision_mismatch and the head now stored, and nothing is overwritten unless the person chooses to. Owner only. Refused under zero data retention, in a thread that holds a waived run, in a Space thread, while a run in the thread is still working, and for any other kind (a deck is never edited as text). Off until artifact editing is switched on. Reversible: every earlier version stays and can be restored. Never model-executable: the model revises artifacts through its own tools.',
@@ -4986,6 +5044,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatStageMcpAppMessageInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.mcp_app_tool_call',
+    label: 'Run a read tool an MCP App asked for',
+    description: 'Run a tool an MCP App in a chat answer asked its host to call, on the app\'s own server, as the person viewing it, and hand the app the result. The gateway runs it only for the owner of the run that drew the app, only for a tool the server\'s allowlist names and the registry classes as a read with no approval floor, and through the same execution step and policy check a Do run uses; anything else is refused with app_call_requires_chat and the app may stage a message instead. At most ten calls per app per minute; the output is scrubbed and capped at 64 KiB, and the arguments are never logged. Refused in a temporary chat (zero data retention). Never model-executable: an app is a server\'s content, not the model\'s.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatMcpAppToolCallInput,
     outputSchema: envelopeStatusOutput,
   },
   {

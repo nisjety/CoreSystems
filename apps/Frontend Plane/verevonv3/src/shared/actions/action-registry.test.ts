@@ -846,6 +846,35 @@ describe('action registry', () => {
     expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the thread export as a low-risk, owner-only model-plane read the model cannot execute (EP-12-S11)', () => {
+    const exportThread = getActionDescriptor('thread.export')
+
+    expect(exportThread).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('thread.export')).toBe(false)
+    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain('thread.export')
+    expect(MODEL_ACCESS['thread.export']).toMatchObject({ access: 'none', eligible: false, sideEffectClass: 'read' })
+    expect(exportThread?.description ?? '').toContain('Never model-executable')
+    expect(exportThread?.description ?? '').toContain('redacted')
+
+    // Both choices are named, the thread is named, and nothing else: the owner is the session's.
+    const schema = exportThread?.inputSchema
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'markdown', profile: 'redacted' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json' }).success).toBe(false)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'csv', profile: 'full' }).success).toBe(false)
+    expect(schema?.safeParse({ threadId: '', format: 'json', profile: 'full' }).success).toBe(false)
+    for (const forged of [{ userId: 'user_x' }, { orgId: 'org_x' }]) {
+      expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full', ...forged }).success).toBe(false)
+    }
+
+    // The answer is the file: its media type and download name, not a JSON envelope.
+    expect(exportThread?.outputSchema.safeParse({
+      contentType: 'text/markdown; charset=utf-8',
+      filename: 'verevon-thread-thread-1.md',
+    }).success).toBe(true)
+    expect(exportThread?.outputSchema.safeParse({ status: 'ok' }).success).toBe(false)
+  })
+
   it('registers the thread goal actions as person-only writes with the server bounds (EP-7-S1)', () => {
     for (const id of ['chat.set_goal', 'chat.update_goal', 'chat.clear_goal'] as const) {
       expect(getActionDescriptor(id)).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
@@ -1139,6 +1168,29 @@ describe('action registry', () => {
     expect(stage?.inputSchema.safeParse({ text: 'Vis som tabell' }).success).toBe(true)
     for (const input of [{ text: '' }, { text: 'x'.repeat(501) }, { text: 'Neste', send: true }]) {
       expect(stage?.inputSchema.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the app-initiated MCP tool call as a medium-risk action the model cannot execute (EP-4-S10)', () => {
+    const call = getActionDescriptor('chat.mcp_app_tool_call')
+    expect(call).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('chat.mcp_app_tool_call')).toBe(false)
+    expect(call?.description ?? '').toContain('Never model-executable')
+    expect(call?.description ?? '').toContain('app_call_requires_chat')
+    const valid = { runId: 'run-1', serverId: 'srv-1', tool: 'echo_read', arguments: { q: 'x' }, frameNonce: 'frame-0123456789abcdef' }
+    expect(call?.inputSchema.safeParse(valid).success).toBe(true)
+    for (const input of [
+      { ...valid, runId: '' },
+      { ...valid, tool: '' },
+      // A server id with `__` would name another server's tool.
+      { ...valid, serverId: 'srv__other' },
+      { ...valid, arguments: [1] },
+      { ...valid, frameNonce: 'short' },
+      // The org, the viewer and the permission posture are never the caller's to name.
+      { ...valid, orgId: 'org-2' },
+      { ...valid, permissionMode: 'auto' },
+    ]) {
+      expect(call?.inputSchema.safeParse(input).success).toBe(false)
     }
   })
 
@@ -1603,6 +1655,17 @@ describe('action registry', () => {
     expect(getActionDescriptor('skills.publish')?.outputSchema.safeParse({ id: 'sk-1', version: 3, published: true }).success).toBe(true)
   })
 
+  it('registers skill import as a person-only write bounded by the bundle cap (EP-11-S8)', () => {
+    const importAction = getActionDescriptor('skills.import')
+    expect(importAction?.ownerPlane).toBe('model')
+    expect(importAction?.requiresApproval).toBe(false)
+    expect(MODEL_ACCESS['skills.import'].access).toBe('none')
+    expect(importAction?.inputSchema.safeParse({ fileName: 'SKILL.md', sizeBytes: 120 }).success).toBe(true)
+    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 9 * 1024 * 1024 }).success).toBe(false)
+    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 10, orgId: 'org-2' }).success).toBe(false)
+    expect(importAction?.outputSchema.safeParse({ id: 'skill_1', draft: true, enabled: false }).success).toBe(true)
+  })
+
   it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
     const save = getActionDescriptor('skills.save_from_message')
     expect(save?.ownerPlane).toBe('model')
@@ -1679,7 +1742,10 @@ describe('action registry', () => {
     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
     // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
     // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
-    expect(ids).toHaveLength(316)
+    // +1 after EP-4-S10 registered chat.mcp_app_tool_call, an app's read tool call on its own server.
+    // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
+    // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
+    expect(ids).toHaveLength(319)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.
