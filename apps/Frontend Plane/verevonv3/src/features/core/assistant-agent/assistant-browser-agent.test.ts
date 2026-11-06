@@ -26,6 +26,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     capability: vi.fn(async () => ({ available: true, policySupported: true, canAttach: true })),
     createSession: vi.fn(async () => ({ session: { id: 'session-1' } })),
     closeSession: vi.fn(async () => ({ closed: true })),
+    listTabs: vi.fn(async () => ({ tabs: [] })),
     explainSite: vi.fn(async () => null),
     setSiteChoice: vi.fn(async () => null),
     startRun: vi.fn(async () => ({ runId: 'run-1', planId: 'plan-1', threadId: 'thread-1' })),
@@ -224,6 +225,18 @@ describe('assistant browser task', () => {
     expect(f.view().error).toContain('browser service could not open')
   })
 
+  it('keeps a timed-out navigation distinct from a site challenge', async () => {
+    const createSession = vi.fn().mockRejectedValue(new ApiError('Navigation timed out', 504, 'TIMEOUT', { details: { op: 'navigate' } }))
+    const f = fixture({ createSession })
+    const target = 'https://example.com/search?location=oslo'
+    await expect(f.controller.send('Open the listings', target)).rejects.toThrow('Navigation timed out')
+    expect(f.api.startRun).not.toHaveBeenCalled()
+    expect(f.view()).toMatchObject({
+      status: 'failed', siteHandoffUrl: target, errorCode: 'browser_start_unavailable',
+      error: expect.stringContaining('did not load in time'),
+    })
+  })
+
   it('offers the actual same-origin page when replay confirms an agent run hit a challenge', async () => {
     const url = 'https://example.com/listings?location=oslo'
     const f = fixture({ replay: vi.fn(async () => ({ runId: 'run-1', events: [
@@ -235,6 +248,29 @@ describe('assistant browser task', () => {
       await Promise.resolve()
       expect(f.view()).toMatchObject({ status: 'failed', siteHandoffUrl: url })
       expect(f.view().error).toContain('open the page yourself')
+    } finally { f.controller.dispose() }
+  })
+
+  it.each(['human', 'agent'] as const)('offers takeover only when Quarry returned the exact challenged tab (%s)', async (holder) => {
+    const url = 'https://example.com/listings'
+    const receipt = { runId: 'run-1', planId: 'plan-1', attachId: 'a', sessionRunId: 'session-1', tabId: 't' }
+    const f = fixture({
+      listTabs: vi.fn(async () => ({ session: { id: 'session-1', status: 'live' }, tabs: [{ tabId: 't', holder }] })),
+      replay: vi.fn(async () => ({ runId: 'run-1', events: [
+        { eventId: '1', eventType: 'EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR', payload: { run_id: receipt.runId, plan_id: receipt.planId, attach_id: receipt.attachId, session_run_id: receipt.sessionRunId, tab_id: receipt.tabId } },
+        { eventId: '2', eventType: 'EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED', payload: { run_id: receipt.runId, plan_id: receipt.planId, status: 'site_blocked', page_url: url } },
+        { eventId: '3', eventType: 'EVENT_TYPE_RUN_FAILED', payload: { run_id: receipt.runId, terminal: true, status: 'failed' } },
+      ], truncated: false })),
+    })
+
+    try {
+      await f.controller.send('Find the listings', 'https://example.com')
+      await vi.waitFor(() => {
+        expect(f.view()).toMatchObject({ status: 'failed', siteHandoffUrl: url, siteHandoffReady: holder === 'human' })
+        if (holder === 'agent') expect(f.api.closeSession).toHaveBeenCalledWith('org-1', 'session-1')
+      })
+      expect(f.controller.claimRetained('session-1')).toBe(holder === 'human')
+      if (holder === 'human') expect(f.api.closeSession).not.toHaveBeenCalled()
     } finally { f.controller.dispose() }
   })
 

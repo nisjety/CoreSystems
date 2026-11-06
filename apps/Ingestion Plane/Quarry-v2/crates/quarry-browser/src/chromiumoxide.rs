@@ -31,7 +31,7 @@ use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::page::{GetLayoutMetricsParams, Viewport as CdpViewport};
 use ::chromiumoxide::cdp::browser_protocol::network::{
     ErrorReason, EventRequestWillBeSent, EventResponseReceived, EventResponseReceivedExtraInfo,
-    ResourceType,
+    LoaderId, ResourceType,
 };
 use ::chromiumoxide::cdp::browser_protocol::target::TargetId;
 use ::chromiumoxide::cdp::browser_protocol::target::{
@@ -1601,12 +1601,10 @@ impl ChromiumoxideDriver {
         // the caller gets the tab's id with the typed timeout. Any other failure closes the
         // tab, as before.
         let mut timed_out: Option<QuarryError> = None;
+        let mut document_ready = false;
         let mut stopped = false;
         if committed_url != "about:blank" {
-            // No recovery here: a tab whose first navigation fails is closed by the
-            // attach guard, abandoned navigation and all. A refused one fails at once
-            // (SC4 D3), not at the navigate deadline.
-            if let Err(error) = goto_watched(
+            match goto_watched(
                 &self.navigation_watches,
                 &page,
                 committed_url,
@@ -1614,13 +1612,16 @@ impl ChromiumoxideDriver {
             )
             .await
             {
-                if first_navigation != FirstNavigation::InAttach
-                    || !keeps_tab_on_navigation_failure(error.code)
-                {
-                    return Err(error);
+                Ok(outcome) => document_ready = outcome == NavigationOutcome::DocumentReady,
+                Err(error) => {
+                    if first_navigation != FirstNavigation::InAttach
+                        || !keeps_tab_on_navigation_failure(error.code)
+                    {
+                        return Err(error);
+                    }
+                    stopped = stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
+                    timed_out = Some(error);
                 }
-                stopped = stop_abandoned_navigation(&page, deadline(Op::NavigateRecovery)).await;
-                timed_out = Some(error);
             }
         }
         // The bridge is per document: the caller's navigation installs it on its own. A
@@ -1659,7 +1660,7 @@ impl ChromiumoxideDriver {
         if activate || session_pages.active_tab_id.is_none() {
             session_pages.active_tab_id = Some(tab_id.clone());
         }
-        if timed_out.is_some() {
+        if timed_out.is_some() || document_ready {
             // Marked in the same step as the tab, so no `goto` finds the tab unmarked. The
             // mark goes with the tab (`forget_abandoned_navigations`, when it closes).
             self.abandoned_navigations
@@ -1793,9 +1794,10 @@ impl ChromiumoxideDriver {
                 let sequence = self.devtools_sequence.clone();
                 let session_key = session_key.clone();
                 let tab_id = tab_id.clone();
+                let target_id = page.target_id().clone();
                 tokio::spawn(async move {
                     while let Some(event) = events.next().await {
-                        let event = normalize_request_event(&tab_id, &event);
+                        let event = normalize_request_event(&tab_id, &target_id, &event);
                         push_devtools_event(&event_buffer, &sequence, &session_key, event).await;
                     }
                 });
@@ -1819,8 +1821,9 @@ impl ChromiumoxideDriver {
                                 event.request_id.inner(),
                                 event.response.status,
                             );
+                            navigation_watches.successful_document_response(&target_id, &event);
                         }
-                        let event = normalize_response_event(&tab_id, &event);
+                        let event = normalize_response_event(&tab_id, &target_id, &event);
                         push_devtools_event(&event_buffer, &sequence, &session_key, event).await;
                     }
                 });
@@ -1851,8 +1854,11 @@ impl ChromiumoxideDriver {
             Ok(mut events) => {
                 let event_buffer = self.devtools_events.clone();
                 let sequence = self.devtools_sequence.clone();
+                let navigation_watches = self.navigation_watches.clone();
+                let target_id = page.target_id().clone();
                 tokio::spawn(async move {
                     while let Some(event) = events.next().await {
+                        navigation_watches.document_lifecycle(&target_id, &event);
                         let event = normalize_lifecycle_event(&tab_id, &event);
                         push_devtools_event(&event_buffer, &sequence, &session_key, event).await;
                     }
@@ -2852,9 +2858,17 @@ struct NavigationWatch {
     last_network: Option<String>,
     last_document_allowed: bool,
     http_status: Option<u16>,
+    successful_document: Option<NavigationDocumentResponse>,
+    interactive_loader: Option<LoaderId>,
     status_ready: Arc<tokio::sync::Notify>,
     /// Taken by the first refusal.
     refused: Option<tokio::sync::oneshot::Sender<&'static str>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct NavigationDocumentResponse {
+    loader: LoaderId,
+    url: String,
 }
 
 impl NavigationWatch {
@@ -2924,6 +2938,8 @@ impl NavigationWatches {
                     last_network: None,
                     last_document_allowed: false,
                     http_status: None,
+                    successful_document: None,
+                    interactive_loader: None,
                     status_ready: status_ready.clone(),
                     refused: Some(refused),
                 },
@@ -2970,6 +2986,7 @@ impl NavigationWatches {
             watch.last_network = network.map(str::to_owned);
             watch.last_document_allowed = false;
             watch.http_status = None;
+            watch.successful_document = None;
         }
         if let Some(network) = network {
             watch.networks.insert(network.to_owned());
@@ -3012,6 +3029,36 @@ impl NavigationWatches {
         }
     }
 
+    fn successful_document_response(&self, tab: &TargetId, event: &EventResponseReceived) {
+        if !(200..=299).contains(&event.response.status)
+            || event.loader_id.inner().is_empty()
+            || !event.frame_id.as_ref().is_some_and(|id| id.inner() == tab.inner())
+        {
+            return;
+        }
+        let mut by_tab = self.by_tab.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(watch) = by_tab.get_mut(tab) {
+            if watch.last_document_allowed
+                && watch.last_network.as_deref() == Some(event.request_id.inner())
+            {
+                watch.successful_document = Some(NavigationDocumentResponse {
+                    loader: event.loader_id.clone(),
+                    url: event.response.url.clone(),
+                });
+            }
+        }
+    }
+
+    fn document_lifecycle(&self, tab: &TargetId, event: &EventLifecycleEvent) {
+        if event.name != "DOMContentLoaded" || event.frame_id.inner() != tab.inner() {
+            return;
+        }
+        let mut by_tab = self.by_tab.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(watch) = by_tab.get_mut(tab) {
+            watch.interactive_loader = Some(event.loader_id.clone());
+        }
+    }
+
     /// The guard's URL and DNS check of a request the policy allows.
     async fn guard_request_target(&self, raw: &str) -> QuarryResult<()> {
         #[cfg(test)]
@@ -3038,6 +3085,17 @@ struct WatchedNavigation {
 }
 
 impl WatchedNavigation {
+    fn ready_document(&self) -> Option<NavigationDocumentResponse> {
+        let by_tab = self.watches.by_tab.lock().unwrap_or_else(|p| p.into_inner());
+        let watch = by_tab.get(&self.tab)?;
+        let document = watch.successful_document.as_ref()?;
+        (watch.id == self.id
+            && watch.last_document_allowed
+            && watch.http_status.is_none()
+            && watch.interactive_loader.as_ref() == Some(&document.loader))
+            .then(|| document.clone())
+    }
+
     fn http_failure_details(&self) -> Option<(Option<u16>, usize)> {
         let by_tab = self
             .watches
@@ -3081,6 +3139,14 @@ fn navigation_refused(policy: &'static str) -> QuarryError {
         .with_details(json!({ "reason": policy, "op": "navigate" }))
 }
 
+#[derive(PartialEq, Eq)]
+enum NavigationOutcome {
+    Loaded,
+    // An admitted document became interactive but its full load never finished.
+    // The caller must mark Chromiumoxide's outstanding navigation for draining.
+    DocumentReady,
+}
+
 /// [`goto_within`], ended at once with a typed `SECURITY_BLOCKED` when the tab's Fetch
 /// guard refuses the navigation's document request or a redirect hop of it (SC4 D3).
 /// The refused navigation is then still the library's current one, as a timed-out one
@@ -3090,19 +3156,31 @@ async fn goto_watched(
     page: &Page,
     url: &str,
     limit: Duration,
-) -> QuarryResult<()> {
+) -> QuarryResult<NavigationOutcome> {
     let mut watched = watches.watch(page.target_id().clone(), url);
     let error = tokio::select! {
         biased;
         Ok(policy) = &mut watched.refused => return Err(navigation_refused(policy)),
         navigated = goto_within(page, url, limit) => match navigated {
             Err(error) => error,
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(NavigationOutcome::Loaded),
         },
     };
     // A refusal that came with the failure is its cause.
     if let Ok(policy) = watched.refused.try_recv() {
         return Err(navigation_refused(policy));
+    }
+    if error.code == ErrorCode::Timeout {
+        if let Some(document) = watched.ready_document() {
+            let recovered = stop_abandoned_navigation(page, deadline(Op::NavigateRecovery)).await
+                && committed_navigation_matches(page, &document).await;
+            if let Ok(policy) = watched.refused.try_recv() {
+                return Err(navigation_refused(policy));
+            }
+            if recovered && watched.ready_document().as_ref() == Some(&document) {
+                return Ok(NavigationOutcome::DocumentReady);
+            }
+        }
     }
     let chromium_http_error = error.code == ErrorCode::DriverFailed
         && error
@@ -3136,6 +3214,20 @@ async fn goto_watched(
         }
     }
     Err(error)
+}
+
+/// Stopping the load can keep the old page or a different document. The actual
+/// main-frame loader and URL must still be the ones admitted by Fetch and made
+/// interactive by Chromium before the timeout.
+async fn committed_navigation_matches(page: &Page, document: &NavigationDocumentResponse) -> bool {
+    tokio::time::timeout(deadline(Op::NavigateRecovery), page.execute(GetFrameTreeParams::default()))
+        .await
+        .is_ok_and(|result| result.is_ok_and(|response| {
+            let frame = response.result.frame_tree.frame;
+            frame.id.inner() == page.target_id().inner()
+                && frame.loader_id == document.loader
+                && frame.url == document.url
+        }))
 }
 
 /// `page.goto(url)` within `limit` (the `Op::Navigate` entry in production). A
@@ -4049,7 +4141,20 @@ fn normalize_log_event(tab_id: &str, event: &EventEntryAdded) -> BrowserDevtools
     }
 }
 
-fn normalize_request_event(tab_id: &str, event: &EventRequestWillBeSent) -> BrowserDevtoolsEvent {
+fn is_top_level_document(
+    target_id: &TargetId,
+    frame_id: Option<&FrameId>,
+    resource_type: Option<&ResourceType>,
+) -> bool {
+    resource_type == Some(&ResourceType::Document)
+        && frame_id.is_some_and(|frame| frame.inner() == target_id.inner())
+}
+
+fn normalize_request_event(
+    tab_id: &str,
+    target_id: &TargetId,
+    event: &EventRequestWillBeSent,
+) -> BrowserDevtoolsEvent {
     let raw_payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     let request = raw_payload
         .get("request")
@@ -4082,11 +4187,18 @@ fn normalize_request_event(tab_id: &str, event: &EventRequestWillBeSent) -> Brow
         // Do not forward DevTools' raw request payload: it can contain query
         // secrets, headers, cookies, and POST bodies. Observability needs only
         // the redacted request identity and method.
-        payload: json!({ "request": { "method": method.clone(), "url": url.clone() } }),
+        payload: json!({
+            "request": { "method": method.clone(), "url": url.clone() },
+            "topLevelDocument": is_top_level_document(target_id, event.frame_id.as_ref(), event.r#type.as_ref()),
+        }),
     }
 }
 
-fn normalize_response_event(tab_id: &str, event: &EventResponseReceived) -> BrowserDevtoolsEvent {
+fn normalize_response_event(
+    tab_id: &str,
+    target_id: &TargetId,
+    event: &EventResponseReceived,
+) -> BrowserDevtoolsEvent {
     let raw_payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     let response = raw_payload
         .get("response")
@@ -4123,11 +4235,10 @@ fn normalize_response_event(tab_id: &str, event: &EventResponseReceived) -> Brow
         // The full response object includes request/response headers and
         // timing internals. Keep only the fields required for a compact
         // network summary and redact the URL first.
-        payload: json!({ "response": {
-            "url": url.clone(),
-            "status": status,
-            "mimeType": mime_type.clone(),
-        } }),
+        payload: json!({
+            "response": { "url": url.clone(), "status": status, "mimeType": mime_type.clone() },
+            "topLevelDocument": is_top_level_document(target_id, event.frame_id.as_ref(), Some(&event.r#type)),
+        }),
     }
 }
 
@@ -5095,6 +5206,12 @@ impl BrowserDriver for ChromiumoxideDriver {
             let dropped = MarkAbandonedOnDrop::new(&self.abandoned_navigations, &page);
             let navigated = goto_watched(&self.navigation_watches, &page, target, limit).await;
             dropped.disarm();
+            if navigated.as_ref().is_ok_and(|outcome| *outcome == NavigationOutcome::DocumentReady) {
+                self.abandoned_navigations
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(page.target_id().clone());
+            }
             if let Err(error) = navigated {
                 // SC4 T3: the abandoned navigation still loads (no read answers until
                 // it stops) and still holds the library's queue. Stop it before the
@@ -10251,6 +10368,64 @@ mod tests {
         let error = driver.goto(&session, "about:blank").await.unwrap_err();
         assert_refused_at_once("CDN navigation", &error, started.elapsed(), Duration::from_secs(10));
         assert!(page_html(&driver, &session).await.contains("sc4-public-assets"));
+        driver.release(session).await.expect("release");
+        driver.shutdown().await;
+        proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn admitted_interactive_document_survives_a_stalled_image() {
+        if !live_enabled() {
+            return;
+        }
+        let (endpoint, proxy_task) = fixture_proxy().await;
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FixtureProxyProvider(endpoint)))
+            .with_pool_config(quiet_pool());
+        driver.navigation_watches.fixture_hosts_resolve.store(true, Ordering::SeqCst);
+        driver.hooks.goto_detour_keeps_guard.store(true, Ordering::SeqCst);
+        let session = live_session_sized(&driver, "sc4-interactive-document", None, "sc4-before").await;
+        driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&["sc4.fixture.test".to_owned()]),
+            )
+            .await
+            .expect("allow only the fixture host");
+        let detour = |path: &str, limit: Duration| {
+            *driver.hooks.goto_detour.lock().unwrap() =
+                Some((format!("http://sc4.fixture.test{path}"), limit));
+        };
+
+        let limit = Duration::from_millis(1500);
+        detour("/loaded.html", limit);
+        let started = Instant::now();
+        let result = driver.goto(&session, "about:blank").await;
+        if let Err(error) = result {
+            let events = driver.devtools_events(&session, 0, 128).await.expect("network events");
+            panic!("failed to use the admitted interactive page: {error:?}; events: {events:?}");
+        }
+        assert!(started.elapsed() >= limit, "the image keeps the full load from finishing");
+        assert!(page_html(&driver, &session).await.contains("sc4-loaded"));
+        let tab_id = driver.active_tab_id(&session).await.expect("active tab");
+        let events = driver.devtools_events(&session, 0, 128).await.expect("network events");
+        assert!(events.iter().any(|event| event.name == "Network.responseReceived"
+            && event.payload["response"]["url"] == "http://sc4.fixture.test/loaded.html"
+            && event.payload["topLevelDocument"] == true));
+        assert!(events.iter().any(|event| event.name == "Network.requestWillBeSent"
+            && event.payload["request"]["url"] == "http://sc4.fixture.test/held.png"
+            && event.payload["topLevelDocument"] == false));
+
+        detour("/next.html", Duration::from_secs(5));
+        driver.goto(&session, "about:blank").await.expect("drain before the next navigation");
+        assert_eq!(driver.active_tab_id(&session).await.expect("tab after navigation"), tab_id);
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+
+        detour("/slow.html", limit);
+        let error = driver.goto(&session, "about:blank").await.expect_err("no new document committed");
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(page_html(&driver, &session).await.contains("sc4-next-page"));
+
         driver.release(session).await.expect("release");
         driver.shutdown().await;
         proxy_task.abort();

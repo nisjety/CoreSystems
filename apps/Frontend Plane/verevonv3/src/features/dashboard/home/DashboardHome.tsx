@@ -56,7 +56,8 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   const browserView = () => {
     const view = assistantBrowser.view()
     return view?.kind === 'browser' && !view.localBrowser && view.sessionId && view.runId &&
-      (['starting', 'running', 'stopping', 'disconnected'].includes(view.status) || (!view.usesExistingTab && view.status === 'completed')) ? view : null
+      (['starting', 'running', 'stopping', 'disconnected'].includes(view.status) ||
+        (!view.usesExistingTab && (view.status === 'completed' || view.siteHandoffReady))) ? view : null
   }
   createEffect(() => browserView()?.runId, (runId) => {
     if (runId) {
@@ -270,8 +271,8 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             />
           </div>}</Show>
           <Show when={agentBrowserVisible() && !desktopWorkspace() && browserView()}>{view => <div class="home-agent-browser-view">
-            <Show when={view().status === 'completed' && view().receipt && getSession().activeOrg?.id}>{orgId => <AssistantRetainedBrowser orgId={orgId()} sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} claimed={view().browserClaimed} onClaim={id => assistantBrowser.claimRetained?.(id) ?? false} />}</Show>
-            <Show when={!view().browserClaimed}><AssistantLiveBrowser surface="workspace" sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} action={view().action} finished={view().status === 'completed'} onStop={assistantBrowser.stop} stopping={view().status === 'stopping'} stopLabel={view().usesExistingTab ? i18n.tr('Stopp og ta over fanen', 'Stop and take over tab') : undefined} /></Show>
+            <Show when={(view().status === 'completed' || view().siteHandoffReady) && view().receipt && getSession().activeOrg?.id}>{orgId => <AssistantRetainedBrowser orgId={orgId()} sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} claimed={view().browserClaimed} requiresManualAccess={view().siteHandoffReady} onClaim={id => assistantBrowser.claimRetained?.(id) ?? false} />}</Show>
+            <Show when={!view().browserClaimed}><AssistantLiveBrowser surface="workspace" sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} action={view().action} finished={view().status === 'completed' || view().siteHandoffReady === true} onStop={assistantBrowser.stop} stopping={view().status === 'stopping'} stopLabel={view().usesExistingTab ? i18n.tr('Stopp og ta over fanen', 'Stop and take over tab') : undefined} /></Show>
           </div>}</Show>
           <Show when={!agentBrowserVisible() && overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview tab={activeTab()} onPrompt={applyCardPrompt} /></Show>
           <Show when={workSection()}>{(selected) => <DashboardSectionOverview section={selected()} />}</Show>

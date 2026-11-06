@@ -1504,6 +1504,7 @@ pub async fn run_browser_agent_loop(
     let mut abort_reason = None;
     let mut resource_limit = None;
     let mut failure_kind = None;
+    let mut needs_manual_handoff = false;
     // WS12.S4: the missing-stamp warning is logged once per run.
     let mut stamp_warned = false;
     let summary = loop {
@@ -1795,6 +1796,11 @@ pub async fn run_browser_agent_loop(
                 pending = last;
             }
             PlanStepResult::Stopped { reason, kind } => {
+                needs_manual_handoff = kind == BrowserFailureKind::Blocked
+                    && last
+                        .as_ref()
+                        .and_then(|observation| observation.challenge.as_ref())
+                        .is_some_and(BrowserChallenge::requires_user);
                 failure_kind = Some(kind);
                 break reason;
             }
@@ -1823,34 +1829,48 @@ pub async fn run_browser_agent_loop(
             attach,
             ..
         } => {
-            // WS8.J: a run that completed marks its tab (`deliverable` by
-            // default) so the release keeps it open for the person. Every other
-            // exit marks nothing. A failed mark is logged and never blocks the
-            // release.
-            if plan.status == PlanStatus::Completed
-                && !attach.attached_existing_tab
-                && plan.config.tab_mark_on_complete != crate::quarry_agent::TabMark::None
+            use crate::quarry_agent::{AttachDisposition, TabMark};
+
+            // A confirmed terminal challenge can hand the exact agent-created
+            // tab to its owner without completing the Model run. A borrowed
+            // tab is returned by Quarry on either disposition.
+            let handoff = needs_manual_handoff
+                && plan.status == PlanStatus::Failed
+                && !plan.config.zdr;
+            let mark = if attach.attached_existing_tab
+                || plan.config.tab_mark_on_complete == TabMark::None
             {
-                if let Err(e) = client
+                TabMark::None
+            } else if handoff {
+                TabMark::Handoff
+            } else if plan.status == PlanStatus::Completed {
+                plan.config.tab_mark_on_complete
+            } else {
+                TabMark::None
+            };
+            let mut disposition = attach_disposition(&plan.status);
+            if mark != TabMark::None {
+                match client
                     .mark_tab(crate::quarry_agent::MarkTabParams {
                         org_id: &plan.config.org_id,
                         run_id: session_run_id,
                         tab_id: &attach.tab_id,
                         grant_id: &plan.config.grant_id,
-                        mark: plan.config.tab_mark_on_complete,
+                        mark,
                         request_id: plan.config.request_id.as_deref(),
                     })
                     .await
                 {
-                    warn!(
+                    Ok(()) if handoff => disposition = AttachDisposition::Release,
+                    Ok(()) => {}
+                    Err(e) => warn!(
                         plan_id = %plan.config.plan_id,
                         error = %e,
-                        mark = plan.config.tab_mark_on_complete.as_str(),
-                        "browser-agent mark_tab failed; releasing anyway"
-                    );
+                        mark = mark.as_str(),
+                        "browser-agent mark_tab failed; ending attachment without handoff"
+                    ),
                 }
             }
-            let disposition = attach_disposition(&plan.status);
             if let Err(e) = client
                 .release_attach(
                     &plan.config.org_id,
@@ -1923,8 +1943,8 @@ impl QuarryRun {
     }
 }
 
-/// D6b: an attachment is released when the run completed and aborted on every
-/// other exit (failure, cancel, a limit, an approval stop, a plan error).
+/// Default attachment disposition. A successful manual handoff explicitly
+/// overrides the default abort for a failed run.
 #[must_use]
 pub(crate) fn attach_disposition(status: &PlanStatus) -> crate::quarry_agent::AttachDisposition {
     if *status == PlanStatus::Completed {
@@ -3883,6 +3903,81 @@ mod tests {
             last.challenge.as_ref().map(|c| (c.is_strong(), c.block_reason)),
             Some((true, Some(BlockReason::ChallengeLoop)))
         );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_challenge_releases_an_owned_tab_only_after_handoff_mark() {
+        use crate::quarry_agent::AttachTabTarget;
+        use wiremock::matchers::{body_json, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (borrowed, mark_status, disposition) in [
+            (false, 200, "release"),
+            (false, 403, "abort"),
+            (true, 200, "abort"),
+        ] {
+            let server = MockServer::start().await;
+            let attach_path = if borrowed {
+                "/v1/agent/runs/run_user/attach-current-tab"
+            } else {
+                "/v1/agent/runs/run_user/attach"
+            };
+            Mock::given(method("POST"))
+                .and(path(attach_path))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"attach_id": "att_1", "tab_id": "tab_1", "attached_existing_tab": borrowed}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/agent/runs/run_user/step"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "error": {"code": "CHALLENGE_DETECTED", "details": {"reason": "challenge_loop"}}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/agent/runs/run_user/tabs/tab_1/mark"))
+                .and(body_json(serde_json::json!({"mark": "handoff", "grant_id": "grant_001"})))
+                .respond_with(ResponseTemplate::new(mark_status))
+                .expect(if borrowed { 0 } else { 1 })
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path("/v1/agent/runs/run_user/attach/att_1"))
+                .and(query_param("disposition", disposition))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"attach_id": "att_1"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = PlanConfig {
+                attach: Some(AttachConfig {
+                    session_run_id: "run_user".to_owned(),
+                    target_tab: borrowed.then(|| AttachTabTarget {
+                        tab_id: "tab_1".to_owned(),
+                        expected_epoch: 3,
+                        expected_origin: "https://example.com".to_owned(),
+                    }),
+                }),
+                start_url: (!borrowed).then(|| "https://example.com/".to_owned()),
+                ..test_config()
+            };
+            let client = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok").unwrap();
+            let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+
+            assert_eq!(result.status, PlanStatus::Failed);
+            assert_eq!(result.failure_kind, Some(BrowserFailureKind::Blocked));
+            if !borrowed {
+                let requests = server.received_requests().await.unwrap();
+                assert!(requests[2].url.path().ends_with("/tabs/tab_1/mark"));
+                assert!(requests[3].url.path().ends_with("/attach/att_1"));
+            }
+        }
     }
 
     // ── WS11.S1: planner meter, credential deadline, typed Quarry limits ──

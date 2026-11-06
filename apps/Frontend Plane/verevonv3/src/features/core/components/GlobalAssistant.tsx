@@ -21,6 +21,8 @@ export type AssistantAgentView = {
   errorCode?: 'browser_grant_denied' | 'browser_redirect_access_denied' | 'browser_start_unavailable' | null
   siteAccessRequest?: { host: string } | null
   siteHandoffUrl?: string | null
+  /** The owner projection confirms that the challenged tab was returned. */
+  siteHandoffReady?: boolean
   action: string | null
   sessionId: string | null
   runId: string | null
@@ -132,7 +134,8 @@ export function GlobalAssistant(props: {
     const task = props.agentView
     if (task?.localBrowser) return Boolean(task.runId)
     return task?.kind === 'browser' && task.sessionId && task.runId &&
-      (['starting', 'running', 'stopping', 'disconnected'].includes(task.status) || (!task.usesExistingTab && task.status === 'completed' && task.receipt))
+      (['starting', 'running', 'stopping', 'disconnected'].includes(task.status) ||
+        (!task.usesExistingTab && task.receipt && (task.status === 'completed' || task.siteHandoffReady)))
   }
   const send = async (allowSiteAccess = false) => {
     const draft = props.message
@@ -222,7 +225,9 @@ export function GlobalAssistant(props: {
               </a>}
             </Show>
             <Show when={props.onOpenAgentBrowser && !props.browserPresentedInWorkspace && canOpenBrowser()}>
-              <button type="button" class="global-assistant__open-chat" onClick={() => props.onOpenAgentBrowser?.()}>{props.agentView?.status === 'completed'
+              <button type="button" class="global-assistant__open-chat" onClick={() => props.onOpenAgentBrowser?.()}>{props.agentView?.siteHandoffReady
+                ? i18n.tr('Gå til fanen i Nett', 'Go to tab in Web')
+                : props.agentView?.status === 'completed'
                 ? i18n.tr('Åpne nettleseren i Nett', 'Open browser in Web')
                 : i18n.tr('Følg agenten i Nett', 'Watch agent in Web')}</button>
             </Show>

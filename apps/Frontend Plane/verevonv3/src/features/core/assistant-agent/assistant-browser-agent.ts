@@ -1,7 +1,7 @@
 import { ApiError, hasErrorCode, requestJson } from '@/shared/api/http'
 import { getRun } from '@/shared/api/runs-client'
 import { decideApproval } from '@/shared/api/orchestration-client'
-import { closeBrowserSession, createBrowserSession } from '@/shared/api/browser-client'
+import { closeBrowserSession, createBrowserSession, listBrowserTabs } from '@/shared/api/browser-client'
 import { explainBrowserSite, setMyBrowserSiteChoice } from '@/shared/api/browser-sites-client'
 import { controlBrowserAiRun, createAiRunStartKeyring, isAmbiguousAiRunStartFailure, startBrowserAiRun, type BrowserTabContinuation } from '@/shared/api/browser-run-client'
 import { listRunEventReplay, streamRunEvents, type BrowserActionApprovalRequiredEvent, type BrowserActionDecidedEvent, type BrowserAttachSharedJarEvent, type BrowserObservationReceivedEvent, type RunEventHandlers } from '@/shared/api/run-console-client'
@@ -13,6 +13,7 @@ type Dependencies = {
   capability: () => Promise<Capability>
   createSession: typeof createBrowserSession
   closeSession: typeof closeBrowserSession
+  listTabs: typeof listBrowserTabs
   explainSite: typeof explainBrowserSite
   setSiteChoice: typeof setMyBrowserSiteChoice
   startRun: typeof startBrowserAiRun
@@ -26,6 +27,7 @@ const defaults: Dependencies = {
   capability: () => requestJson('/api/v1/browser/assistant/capabilities'),
   createSession: createBrowserSession,
   closeSession: closeBrowserSession,
+  listTabs: listBrowserTabs,
   explainSite: explainBrowserSite,
   setSiteChoice: setMyBrowserSiteChoice,
   startRun: startBrowserAiRun,
@@ -35,7 +37,7 @@ const defaults: Dependencies = {
   getRun,
   decideApproval,
 }
-const empty = (): AssistantAgentView => ({ available: false, kind: 'browser', status: 'idle', goal: '', error: null, errorCode: null, siteAccessRequest: null, siteHandoffUrl: null, action: null, sessionId: null, runId: null, receipt: null, browserClaimed: false, result: null, resultLoading: false, approval: null })
+const empty = (): AssistantAgentView => ({ available: false, kind: 'browser', status: 'idle', goal: '', error: null, errorCode: null, siteAccessRequest: null, siteHandoffUrl: null, siteHandoffReady: false, action: null, sessionId: null, runId: null, receipt: null, browserClaimed: false, result: null, resultLoading: false, approval: null })
 type BorrowedTab = BrowserTabContinuation & { sessionId: string }
 type Active = { scope: Scope; goal: string; target: string; borrowedTab?: BorrowedTab; redirected: boolean; cancelled: boolean; uncertain: boolean; startKey: string | null; sessionId: string | null; runId: string | null; planId: string | null; abort: AbortController; stopSent: boolean; replayTimer?: ReturnType<typeof setTimeout> }
 type SiteAccessRequest = { scope: Scope; goal: string; target: string; host: string }
@@ -148,7 +150,8 @@ export function createAssistantBrowserAgent(options: {
   // human session and its keepalive, not the short snapshot timer.
   const claimRetained = (sessionId: string) => {
     const scope = options.scope()
-    if (!retained || retained.sessionId !== sessionId || scope?.userId !== retained.scope.userId || scope.orgId !== retained.scope.orgId) return false
+    if (!retained || retained.sessionId !== sessionId || scope?.userId !== retained.scope.userId ||
+      scope.orgId !== retained.scope.orgId || (view.status !== 'completed' && !view.siteHandoffReady)) return false
     clearTimeout(retained.timer)
     if (!view.browserClaimed) emit({ browserClaimed: true })
     return true
@@ -311,14 +314,43 @@ export function createAssistantBrowserAgent(options: {
         active = null
         run.abort.abort()
         if (run.replayTimer) clearTimeout(run.replayTimer)
-        if (!run.borrowedTab && run.sessionId && status === 'completed' && view.receipt) {
+        const receipt = view.receipt
+        const checkHandoff = status === 'failed' && Boolean(siteHandoffUrl) && !run.cancelled && !run.scope.zdr
+        if (!run.borrowedTab && run.sessionId && receipt && (status === 'completed' || checkHandoff)) {
           const sessionId = run.sessionId
+          const clearBrowser = () => emit({ sessionId: null, receipt: null, siteHandoffReady: false })
           const timer = setTimeout(() => {
             if (!retained || retained.sessionId !== sessionId) return
             releaseRetained()
-            if (!disposed && generation === gen && view.runId === started.runId && view.status === 'completed') emit({ sessionId: null, receipt: null })
+            if (!disposed && generation === gen && view.runId === started.runId) clearBrowser()
           }, 120000)
           retained = { scope: run.scope, sessionId, timer }
+          if (checkHandoff) {
+            const stillRetained = () => {
+              const scope = options.scope()
+              return !disposed && generation === gen && retained?.sessionId === sessionId &&
+                scope?.userId === run.scope.userId && scope.orgId === run.scope.orgId
+            }
+            const discard = () => {
+              if (!stillRetained()) return
+              releaseRetained()
+              clearBrowser()
+            }
+            // A replay signal can explain the failure, but only Quarry's owner
+            // projection can confirm that it actually returned this tab.
+            void api.listTabs(run.scope.orgId, sessionId).then(({ session, tabs }) => {
+              if (!stillRetained()) return
+              const tab = tabs.find((candidate) => candidate.tabId === receipt.tabId)
+              if (session?.id !== sessionId || session.status !== 'live' || tab?.holder !== 'human') {
+                discard()
+                return
+              }
+              emit({
+                siteHandoffReady: true,
+                error: tr('Nettstedet ber om manuell tilgang. Ta over fanen i Nett, eller åpne siden i din egen nettleser.', 'The site requests manual access. Take over the tab in Web or open the page in your own browser.'),
+              })
+            }).catch(discard)
+          }
         } else if (!run.borrowedTab && run.sessionId) void api.closeSession(run.scope.orgId, run.sessionId).catch(() => undefined)
         if (status === 'completed') {
           // Replay deliberately carries no answer. Fetch an owner-authorized
@@ -394,7 +426,10 @@ export function createAssistantBrowserAgent(options: {
         active = null
         const siteAccessRefused = hasErrorCode(error, 'browser_grant_denied')
         const redirectAccessRefused = hasErrorCode(error, 'browser_redirect_access_denied')
-        const browserStartUnavailable = !startSent && !run.cancelled && hasErrorCode(error, 'upstream_unavailable')
+        const navigationTimedOut = error instanceof ApiError && error.status === 504 &&
+          error.code === 'TIMEOUT' && error.details?.op === 'navigate'
+        const browserStartUnavailable = !startSent && !run.cancelled &&
+          (navigationTimedOut || hasErrorCode(error, 'upstream_unavailable'))
         const siteHandoffUrl = !startSent && !run.cancelled
           ? view.siteHandoffUrl ?? (browserStartUnavailable || hasErrorCode(error, 'browser_site_blocked') ? run.target : null)
           : null
@@ -406,7 +441,9 @@ export function createAssistantBrowserAgent(options: {
           siteAccessRequest: host ? { host } : null,
           errorCode: browserStartUnavailable ? 'browser_start_unavailable' : redirectAccessRefused ? 'browser_redirect_access_denied' : siteAccessRefused ? 'browser_grant_denied' : null,
           error: browserStartUnavailable
-            ? tr('Nettlesertjenesten kunne ikke åpne siden. Du kan åpne den direkte i din egen nettleser.', 'The browser service could not open the page. You can open it directly in your own browser.')
+            ? navigationTimedOut
+              ? tr('Siden ble ikke lastet innen fristen. Prøv igjen, eller åpne den i din egen nettleser.', 'The page did not load in time. Try again or open it in your own browser.')
+              : tr('Nettlesertjenesten kunne ikke åpne siden. Du kan åpne den direkte i din egen nettleser.', 'The browser service could not open the page. You can open it directly in your own browser.')
             : siteHandoffUrl ? siteHandoffMessage(tr) : host ? null : redirectAccessRefused
             ? tr('Nettstedet sender deg videre til en adresse agenten ikke har tilgang til. Sjekk nettsidevalgene. Utkastet er beholdt.', 'The site redirects to an address the agent cannot access. Check your site choices. Your draft has been kept.')
             : siteAccessRefused

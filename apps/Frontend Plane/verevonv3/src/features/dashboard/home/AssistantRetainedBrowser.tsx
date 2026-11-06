@@ -10,13 +10,14 @@ import { useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { BrowserAttachSharedJarEvent } from '@/shared/api/run-console-client'
 
-/** Hand the completed agent's exact, owner-authorized tab back to its user. */
+/** Hand the agent's exact, owner-authorized tab back to its user. */
 export function AssistantRetainedBrowser(props: {
   orgId: string
   sessionId: string
   modelRunId: string
   receipt: BrowserAttachSharedJarEvent | null
   claimed?: boolean
+  requiresManualAccess?: boolean
   onClaim: (sessionId: string) => boolean
 }) {
   const i18n = useI18n()
@@ -58,8 +59,8 @@ export function AssistantRetainedBrowser(props: {
     return current && canControl() ? browserSessionFromPreview(current) : null
   })
   const message = (reason: unknown) => browserErrorMessage(reason, i18n.tr, {
-    no: 'Kunne ikke åpne den fullførte nettleserøkten. Prøv igjen.',
-    en: 'Could not open the completed browser session. Try again.',
+    no: 'Kunne ikke åpne nettleserøkten fra oppgaven. Prøv igjen.',
+    en: 'Could not open the browser session from the task. Try again.',
   })
   const open = async () => {
     const receipt = props.receipt
@@ -146,7 +147,7 @@ export function AssistantRetainedBrowser(props: {
   return <div class="home-agent-browser-handoff">
     <Show when={!preview()}>
       <button type="button" class="assistant-live-browser__stop" disabled={busy() || !props.receipt} onClick={() => void open()}>
-        {busy() ? i18n.tr('Åpner …', 'Opening…') : props.claimed ? i18n.tr('Fortsett i nettleseren', 'Continue browsing') : i18n.tr('Bruk nettleseren', 'Use browser')}
+        {busy() ? i18n.tr('Åpner …', 'Opening…') : props.claimed ? i18n.tr('Fortsett i nettleseren', 'Continue browsing') : props.requiresManualAccess ? i18n.tr('Ta over fanen', 'Take over tab') : i18n.tr('Bruk nettleseren', 'Use browser')}
       </button>
     </Show>
     <Show when={error()}>{text => <p role="alert">{text()}</p>}</Show>
