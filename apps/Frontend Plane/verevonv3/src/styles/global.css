@@ -11510,6 +11510,10 @@ h3 {
   white-space: nowrap;
 }
 .knowledge-browser-bookmarks__item:hover:not(:disabled) { background: rgb(23 23 23 / 5%); }
+.knowledge-browser-newtab { display: grid; gap: 8px; padding: 24px; text-align: center; }
+.knowledge-browser-newtab label { font-weight: 600; }
+.knowledge-browser-newtab input { padding: 8px 10px; border: 1px solid rgb(23 23 23 / 12%); border-radius: 8px; }
+.knowledge-browser-live-dom__filter { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; margin: 4px 0; }
 
 .knowledge-browser-tab {
   display: inline-flex;

@@ -332,11 +332,25 @@ function liveNetworkRows(sessionRows: BrowserNetworkEntry[], devtools: BrowserDe
 }
 
 /** DOM-nodeliste delt mellom sidevisningens fallback og DevTools-panelet. */
+/** Interactive kinds for selective observation (slice 8). */
+const interactiveElementKinds = new Set(['button', 'link', 'input', 'checkbox', 'radio', 'select', 'textarea', 'menuitem'])
+
 function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
+  const [interactiveOnly, setInteractiveOnly] = createSignal(false)
+  const nodes = () => {
+    const filterOn = import.meta.env.VITE_BROWSER_ELEMENT_FILTER === 'true' && interactiveOnly()
+    return filterOn ? props.nodes.filter((node) => interactiveElementKinds.has(node.kind)) : props.nodes
+  }
   return (
     <div class="knowledge-browser-live-dom">
+      <Show when={import.meta.env.VITE_BROWSER_ELEMENT_FILTER === 'true'}>
+        <label class="knowledge-browser-live-dom__filter">
+          <input type="checkbox" checked={interactiveOnly()} onChange={(event) => setInteractiveOnly(event.currentTarget.checked)} />
+          Kun interaktive (valgobservasjon)
+        </label>
+      </Show>
       <For
-        each={props.nodes}
+        each={nodes()}
         fallback={<p class="knowledge-browser-empty">Ingen DOM-noder returnert ennå.</p>}
       >
         {(node) => (
@@ -576,6 +590,13 @@ export function BrowserChrome(props: {
   // Bookmarks (F-t2-068 local slice, behind VITE_BROWSER_BOOKMARKS=true).
   const bookmarks = useBrowserBookmarks()
   const bookmarksEnabled = () => import.meta.env.VITE_BROWSER_BOOKMARKS === 'true'
+  // Page zoom (F-t2-069 presentation slice, behind VITE_BROWSER_ZOOM=true).
+  // Scales the live view only; no browser action and no stored state.
+  const zoomEnabled = () => import.meta.env.VITE_BROWSER_ZOOM === 'true'
+  const [frameZoom, setFrameZoom] = createSignal(100)
+  const zoomFrame = (delta: number) => setFrameZoom((value) => Math.min(150, Math.max(50, value + delta)))
+  // Browser keyboard commands (F-t2-070, behind VITE_BROWSER_KEYMAP=true).
+  const keymapEnabled = () => import.meta.env.VITE_BROWSER_KEYMAP === 'true'
   const tabMenuTab = () => {
     const menu = tabMenu()
     return menu ? session().tabs.find((tab) => tab.tabId === menu.tabId) ?? null : null
@@ -649,6 +670,33 @@ export function BrowserChrome(props: {
   const visibleConsoleEntries = () =>
     hasEvidence() ? filterConsoleEntries(liveConsoleEntries(), consoleFilter()) : liveConsoleEntries()
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
+  // Keyboard commands (behind the flag): Ctrl/Cmd+T new tab, Ctrl/Cmd+L focus
+  // the address field, Ctrl/Cmd+W close the current tab when there are several.
+  // Typing in fields is never intercepted.
+  createEffect(() => keymapEnabled(), (enabled) => {
+    if (!enabled) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return
+      const key = event.key.toLowerCase()
+      if (key === 't') {
+        event.preventDefault()
+        void prepareNewTabNavigation()
+      } else if (key === 'l') {
+        event.preventDefault()
+        addressInputRef?.focus()
+        addressInputRef?.select()
+      } else if (key === 'w' && session().tabs.length > 1) {
+        event.preventDefault()
+        const active = session().tabs.find((tab) => tab.active)
+        if (active && props.onBrowserCloseTab) void props.onBrowserCloseTab(active.tabId)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
   const loopStatus = () => props.browserLoop?.status ?? 'idle'
   const loopRunning = () => isBrowserLoopRunning(loopStatus())
   // Phase 5 HITL gate: the single most recent still-pending browser-action
@@ -1575,6 +1623,12 @@ export function BrowserChrome(props: {
               <Star class="size-3.5" />
             </button>
           </Show>
+          <Show when={zoomEnabled()}>
+            <button type="button" aria-label="Zoom ut" title="Zoom ut" disabled={controlsDisabled() || frameZoom() <= 50} onClick={() => zoomFrame(-10)}>−</button>
+            <span aria-label="Zoomnivå" aria-live="polite">{frameZoom()}%</span>
+            <button type="button" aria-label="Zoom inn" title="Zoom inn" disabled={controlsDisabled() || frameZoom() >= 150} onClick={() => zoomFrame(10)}>+</button>
+            <button type="button" aria-label="Nullstill zoom" title="Nullstill zoom" disabled={controlsDisabled() || frameZoom() === 100} onClick={() => setFrameZoom(100)}>100%</button>
+          </Show>
         </div>
 
         <div class="knowledge-browser-chrome__address" onFocusOut={(event) => {
@@ -2330,6 +2384,14 @@ export function BrowserChrome(props: {
                 </div>
               )}
             </Show>
+            <Show when={import.meta.env.VITE_BROWSER_NEWTAB === 'true' && !frameUrl() && !searchQuery() && session().tabs.length === 0}>
+              <form class="knowledge-browser-newtab" onSubmit={(event) => { event.preventDefault(); const value = addressInput().trim(); if (value) runAction({ type: 'navigate', url: value }) }}>
+                <label>Ny fane</label>
+                <input aria-label="Søk eller skriv nettadresse" placeholder="Søk eller skriv nettadresse" value={addressInput()} onInput={(event) => setAddressInput(event.currentTarget.value)} disabled={controlsDisabled()} type="text" inputmode="url" />
+                <button type="submit" disabled={controlsDisabled() || !addressInput().trim()}>Åpne</button>
+                <p>Start her: ingen åpen fane.</p>
+              </form>
+            </Show>
             <Show
               when={searchQuery() ? null : frameUrl()}
               keyed
@@ -2338,11 +2400,10 @@ export function BrowserChrome(props: {
                   <DomNodeList nodes={session().domNodes} />
                 </div>
               }
-            >
-              {(src) => (
+            >              {(src: string) => (
                 <div
                   class="knowledge-browser-screenshot knowledge-browser-screenshot--interactive"
-                  style={{ position: 'relative' }}
+                  style={{ position: 'relative', transform: zoomEnabled() ? `scale(${frameZoom() / 100})` : undefined, 'transform-origin': 'top center' }}
                   aria-label="Interaktiv Chromium-side. Klikk, scroll eller fokuser for tastatur."
                   role="application"
                   tabindex={0}
