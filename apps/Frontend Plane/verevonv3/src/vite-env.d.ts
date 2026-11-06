@@ -34,6 +34,8 @@ interface ImportMetaEnv {
 	readonly VITE_ASSISTANT_REDACT?: string;
 	/** "true" shows interactive-only element filtering. Default off. */
 	readonly VITE_BROWSER_ELEMENT_FILTER?: string;
+	/** "true" shows the in-page find overlay (searches loaded DOM text). Default off. */
+	readonly VITE_BROWSER_FIND?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;

@@ -23,6 +23,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
@@ -95,6 +96,7 @@ import { OmniboxField } from '@/features/browser/omnibox/OmniboxField'
 import { BrowserNavigationError } from '@/features/browser/omnibox/BrowserNavigationError'
 import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { BrowserSearchResults } from '@/features/browser/omnibox/BrowserSearchResults'
+import { findInDomNodes, stepFindIndex } from '@/features/browser/find/page-find'
 import { currentOmniboxHistoryKey, recordOmniboxVisit } from '@/features/browser/omnibox/omnibox-history'
 import {
   isBookmarked,
@@ -595,6 +597,19 @@ export function BrowserChrome(props: {
   const zoomEnabled = () => import.meta.env.VITE_BROWSER_ZOOM === 'true'
   const [frameZoom, setFrameZoom] = createSignal(100)
   const zoomFrame = (delta: number) => setFrameZoom((value) => Math.min(150, Math.max(50, value + delta)))
+  // Page find (F-t2-069 presentation slice, behind VITE_BROWSER_FIND=true).
+  // Client-side search over already-loaded DOM text only: no server call,
+  // no persistence, no ZDR effect. Matches are listed (kind + text); the
+  // frame itself is an image and is never highlighted in-image.
+  const findEnabled = () => import.meta.env.VITE_BROWSER_FIND === 'true'
+  const [findOpen, setFindOpen] = createSignal(false)
+  const [findQuery, setFindQuery] = createSignal('')
+  const [findIndex, setFindIndex] = createSignal(0)
+  const findMatches = () => (findEnabled() && findOpen() ? findInDomNodes(session().domNodes, findQuery()) : [])
+  const currentFindMatch = () => findMatches()[findIndex()] ?? null
+  const stepFind = (direction: 1 | -1) =>
+    setFindIndex((current) => stepFindIndex(current, findMatches().length, direction))
+  let findInputRef: HTMLInputElement | undefined
   // Browser keyboard commands (F-t2-070, behind VITE_BROWSER_KEYMAP=true).
   const keymapEnabled = () => import.meta.env.VITE_BROWSER_KEYMAP === 'true'
   const tabMenuTab = () => {
@@ -692,6 +707,28 @@ export function BrowserChrome(props: {
         event.preventDefault()
         const active = session().tabs.find((tab) => tab.active)
         if (active && props.onBrowserCloseTab) void props.onBrowserCloseTab(active.tabId)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+  // Page find (behind VITE_BROWSER_FIND): Ctrl/Cmd+F toggles the find bar and
+  // focuses it. Works even while typing in fields (unlike the keymap), and
+  // Esc closes it. Prevents the browser's own find UI while the bar is open.
+  createEffect(() => findEnabled(), (enabled) => {
+    if (!enabled) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.ctrlKey || event.metaKey
+      if (modifier && !event.altKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        setFindOpen(true)
+        window.requestAnimationFrame(() => findInputRef?.focus())
+        return
+      }
+      if (event.key === 'Escape' && findOpen()) {
+        setFindOpen(false)
+        setFindQuery('')
+        setFindIndex(0)
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -1629,6 +1666,21 @@ export function BrowserChrome(props: {
             <button type="button" aria-label="Zoom inn" title="Zoom inn" disabled={controlsDisabled() || frameZoom() >= 150} onClick={() => zoomFrame(10)}>+</button>
             <button type="button" aria-label="Nullstill zoom" title="Nullstill zoom" disabled={controlsDisabled() || frameZoom() === 100} onClick={() => setFrameZoom(100)}>100%</button>
           </Show>
+          <Show when={findEnabled()}>
+            <button
+              type="button"
+              aria-label="Finn på siden"
+              aria-pressed={findOpen() ? 'true' : 'false'}
+              title="Finn på siden (Ctrl+F)"
+              disabled={!isLive()}
+              onClick={() => {
+                setFindOpen(!findOpen())
+                if (!findOpen()) window.requestAnimationFrame(() => findInputRef?.focus())
+              }}
+            >
+              <Search class="size-3.5" />
+            </button>
+          </Show>
         </div>
 
         <div class="knowledge-browser-chrome__address" onFocusOut={(event) => {
@@ -1853,6 +1905,78 @@ export function BrowserChrome(props: {
             <MoreVertical class="size-3.5" />
           </button>
         </div>
+
+        <Show when={findEnabled() && findOpen()}>
+          <div class="knowledge-browser-find" role="search" aria-label="Finn på siden">
+            <input
+              ref={(element) => { findInputRef = element }}
+              type="search"
+              value={findQuery()}
+              aria-label="Finn på siden"
+              placeholder="Finn på siden…"
+              onInput={(event) => {
+                setFindQuery(event.currentTarget.value)
+                setFindIndex(0)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  stepFind(event.shiftKey ? -1 : 1)
+                }
+                if (event.key === 'Escape') {
+                  event.stopPropagation()
+                  setFindOpen(false)
+                  setFindQuery('')
+                  setFindIndex(0)
+                }
+              }}
+            />
+            <span aria-live="polite">
+              {findQuery().trim()
+                ? findMatches().length > 0
+                  ? `${Math.min(findIndex() + 1, findMatches().length)}/${findMatches().length}`
+                  : 'Ingen treff'
+                : ''}
+            </span>
+            <button
+              type="button"
+              aria-label="Forrige treff"
+              title="Forrige treff (Shift+Enter)"
+              disabled={findMatches().length === 0}
+              onClick={() => stepFind(-1)}
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              aria-label="Neste treff"
+              title="Neste treff (Enter)"
+              disabled={findMatches().length === 0}
+              onClick={() => stepFind(1)}
+            >
+              ▼
+            </button>
+            <button
+              type="button"
+              aria-label="Lukk søk"
+              title="Lukk (Esc)"
+              onClick={() => {
+                setFindOpen(false)
+                setFindQuery('')
+                setFindIndex(0)
+              }}
+            >
+              <X class="size-3.5" />
+            </button>
+          </div>
+          <Show when={currentFindMatch()}>
+            {(match) => (
+              <p class="knowledge-browser-find__current" aria-live="polite">
+                <span>{match().kind}</span> — {match().text}
+              </p>
+            )}
+          </Show>
+        </Show>
 
         <Show when={chrome().popover === 'profile'}>
           <>
