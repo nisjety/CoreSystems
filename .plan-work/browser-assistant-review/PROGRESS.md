@@ -19,6 +19,7 @@
   - `487627f60` `docs: add Phase 0 decision proposals gating the agent-first browser plan` (ADR §0.1–0.8, proposed; live-view flags `VITE_AGENT_BROWSER_WORKSPACE`/`VITE_AGENT_BROWSER_LIVE_WS` were orphan env declarations with no implementation and were removed — re-add only when session-reuse/WS code lands per ADR §0.8).
   - `3425e9447` `test(browser): mock org posture in ai_run_upstreams so real-grant tests do not fail closed` (post-approval test-helper fix; `domains::browser` 221 ✓ / 0 ✗).
   - `0c19eef15` `feat(web): add in-page find overlay to BrowserChrome behind a flag` (slice 6 remainder, SPA-only client-side search over loaded DOM text; `VITE_BROWSER_FIND` default off).
+  - `da72223e4` `merge: browser assistant slices into main` (merged after `main` cleaned/advanced to `275d9f13e`; auto-merge, no conflicts; post-merge `tsc -b` 0 ✓, vitest 22 ✓, gateway `domains::ai` 13 ✓ — see verification below).
 - **Full ordered parity plan:** `.plan-work/browser-assistant-review/PARITY-PLAN.md` (phases 0–9, design calls D1–D8 in order, Codex/Aside/T3-Chat parity matrix, SC1–SC7 gates, merge gate, one-flag-at-a-time rollout).
 - **D1–D8 sign-off packages + SC1–SC7 ledger + triage:** `.plan-work/browser-assistant-review/SIGNOFF-PACKAGES.md` (started this turn; all D items still proposed/not ratified; non-container SC evidence re-verified, stack SC still pending approval).
 - **Post-approval evidence + rollout runbook:** `.plan-work/browser-assistant-review/POST-APPROVAL.md` (3-test fix + 221 ✓, compose parse, merge dry-run clean, waivers staying flagged-off, one-flag rollout env flips).
@@ -38,8 +39,8 @@
 
 ## Verification (ran here)
 
-- `cargo test -p model-gateway --lib assistant_navigation` 2 ✓ (re-run at `487627f60`); gateway `domains::ai` 13 ✓, `domains::browser` 221 ✓ / 0 ✗ (after `3425e9447` org-posture mock; was 218 ✓ + 3 ✗).
-- `pnpm exec tsc -b` in `verevonv3`: **0 errors** (re-run at `487627f60`; re-verified this turn: TSC_EXIT 0). This turn (at `0c19eef15`): `page-find` vitest 6 ✓, `tsc -b` 0 ✓, ESLint 0 errors, `BrowserChrome.reload` 7 ✓.
+- `cargo test -p model-gateway --lib assistant_navigation` 2 ✓ (re-run at `487627f60`); gateway `domains::ai` 13 ✓, `domains::browser` 221 ✓ / 0 ✗ (after `3425e9447` org-posture mock; was 218 ✓ + 3 ✗). Post-merge (`da72223e4`): gateway `domains::ai` 13 ✓. Full `domains::browser` not re-run post-merge (timed out on cold target; canary covers compile + ai lane).
+- `pnpm exec tsc -b` in `verevonv3`: **0 errors** (re-run at `487627f60`; re-verified this turn: TSC_EXIT 0). This turn (at `0c19eef15`): `page-find` vitest 6 ✓, `tsc -b` 0 ✓, ESLint 0 errors, `BrowserChrome.reload` 7 ✓. Post-merge (`da72223e4`): `tsc -b` 0 ✓ (exit 0), vitest (find/bookmarks/replay/desktop-agent/reload) 22 ✓.
 - `vitest`: assistant-agent + replay + bookmarks 81 ✓; AssistantLiveBrowser/GlobalAssistant/BrowserChrome.reload 33 ✓; re-run at `487627f60` of the three slice modules (replay, bookmarks, sensitive-redact) 9 ✓; re-run this turn: slice modules + GlobalAssistant.agent 28 ✓, `BrowserChrome.reload` 7 ✓ (previously reported stale-heading failure no longer reproduces), gateway content-type tests 2 ✓ (incl. `%PDF-` cases). `domains::browser` triaged this turn: 218 ✓ / 3 ✗ with root cause + unapplied fix in SIGNOFF-PACKAGES.md. Final `/goal` run this turn: model-gateway `assistant_navigation` 2 ✓, gateway `domains::ai` 13 ✓, content-type 5 ✓, vitest 5 files 35 ✓, `tsc -b` 0 errors, compose flags verified `false` by default. This turn (at `3425e9447`): `tsc -b` 0 errors, vitest 35 ✓, ESLint 0 errors / 2 pre-existing warnings in `BrowserChrome.tsx` (601 `tabMenu`, 728 `selectedTimelineStep`) — not fixed (no code changes without a confirmed leak); post-approval `domains::browser` 221 ✓.
 - **Only read, not run:** SPA full suite/lint, Playwright, stack evidence (SC1–SC7), Quarry lanes, live flag/container checks. Unit passes above are not stack evidence; SC1–SC7 per PARITY-PLAN.md §6 remain pending before any merge.
 
@@ -50,7 +51,7 @@
 
 ## Flags (all default off)
 
-`ASSISTANT_NAVIGATION_ENABLED=false`, `MODEL_GATEWAY_ASSISTANT_NAVIGATION=false`, `VITE_ASSISTANT_DOCK_POSITION`, `VITE_BROWSER_TAB_MENU`, `VITE_BROWSER_BOOKMARKS`, `VITE_BROWSER_ANNOTATE`, `VITE_BROWSER_ZOOM`, `VITE_BROWSER_KEYMAP`, `VITE_BROWSER_NEWTAB`, `VITE_WORKSPACE_SPLIT`, `VITE_ASSISTANT_FLOATING`, `VITE_ASSISTANT_REDACT`, `VITE_BROWSER_ELEMENT_FILTER` — all unset/false. No live flag or container was changed.
+`ASSISTANT_NAVIGATION_ENABLED=false`, `MODEL_GATEWAY_ASSISTANT_NAVIGATION=false`, `VITE_ASSISTANT_DOCK_POSITION`, `VITE_BROWSER_TAB_MENU`, `VITE_BROWSER_BOOKMARKS`, `VITE_BROWSER_ANNOTATE`, `VITE_BROWSER_ZOOM`, `VITE_BROWSER_KEYMAP`, `VITE_BROWSER_NEWTAB`, `VITE_BROWSER_FIND`, `VITE_WORKSPACE_SPLIT`, `VITE_ASSISTANT_FLOATING`, `VITE_ASSISTANT_REDACT`, `VITE_BROWSER_ELEMENT_FILTER` — all unset/false. No live flag or container was changed.
 
 ## Still needs owners (not built, by design)
 
