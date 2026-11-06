@@ -13,11 +13,11 @@ vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: st
 } }))
 vi.mock('./DashboardSearchPanel', async () => {
   const { createEffect, onCleanup } = await import('solid-js')
-  return { SearchPanel: (props: { rememberSearches?: boolean }) => {
+  return { SearchPanel: (props: { rememberSearches?: boolean; onOpenBrowser?: (url: string) => void }) => {
     searchPanel.mounts += 1
     createEffect(() => props.rememberSearches, (remember) => { searchPanel.remember = remember })
     onCleanup(() => { searchPanel.unmounts += 1 })
-    return <p>Search tool</p>
+    return <><p>Search tool</p><button type="button" onClick={() => props.onOpenBrowser?.('https://www.finn.no/')}>Open test result</button></>
   } }
 })
 vi.mock('./KnowledgeComposer', () => ({ KnowledgeComposer: () => <p>Crawl tool</p> }))
@@ -25,6 +25,15 @@ import { DashboardComposerPanel, DashboardTabs } from './DashboardHomeChrome'
 import { AssistantNavigationContext } from '@/features/core/assistant-navigation/assistant-navigation-context'
 
 describe('Home tool switching', () => {
+  it('opens Nett results in the desktop browser when the host is available', () => {
+    const open = vi.fn()
+    const noop = () => undefined
+    render(() => <DashboardComposerPanel activeTab="Søk" message="" onMessageChange={noop} onKnowledgePreviewActiveChange={noop} onLaunchStart={noop} onSearchExpandedChange={noop} onSearchPreviewActiveChange={noop} previewCollapsed={false} searchExpanded={false} onOpenDesktopBrowser={open} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open test result' }))
+    expect(open).toHaveBeenCalledExactlyOnceWith('https://www.finn.no/')
+    expect(screen.queryByText('Crawl tool')).toBeNull()
+  })
+
   it('sends Home navigation requests to the shared assistant instead of the scripted guide', () => {
     const start = vi.fn(() => true)
     const submit = vi.fn(async () => undefined)

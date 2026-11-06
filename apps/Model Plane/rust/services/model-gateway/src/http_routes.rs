@@ -3926,6 +3926,8 @@ struct AiImagesRequest {
 #[derive(Debug, Default, Deserialize)]
 struct BrowserSuggestActionRequest {
     #[serde(default)]
+    mode: BrowserSuggestionMode,
+    #[serde(default)]
     goal: String,
     #[serde(default)]
     url: String,
@@ -3933,6 +3935,10 @@ struct BrowserSuggestActionRequest {
     title: String,
     #[serde(default)]
     observation: Value,
+    #[serde(default)]
+    history: Value,
+    #[serde(default)]
+    zdr: bool,
     #[serde(default)]
     visual_observation: Value,
     #[serde(default)]
@@ -3946,6 +3952,16 @@ struct BrowserSuggestActionRequest {
     #[serde(default)]
     provider: Option<String>,
 }
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BrowserSuggestionMode {
+    #[default]
+    Quarry,
+    Desktop,
+}
+
+mod desktop_browser_planner;
 
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
@@ -4102,17 +4118,28 @@ async fn browser_suggest_action(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<BrowserSuggestActionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolDefinition};
 
     let request_id = new_ulid();
+    let desktop = req.mode == BrowserSuggestionMode::Desktop;
     // A waived token names one connection, so it is refused here as a route mismatch (see `zdr_posture`).
-    crate::zdr_posture::zdr_or_refuse(
+    let effective_zdr = crate::zdr_posture::zdr_or_refuse(
         &claims,
-        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, desktop && req.zdr),
     )?;
-    let visual_summary =
-        browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
-    let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+    let (visual_summary, evidence, instructions, schema) = if desktop {
+        (
+            None,
+            desktop_browser_planner::evidence(&req)?,
+            desktop_browser_planner::instructions(),
+            desktop_browser_planner::ACTION_SCHEMA,
+        )
+    } else {
+        let visual_summary =
+            browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
+        let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+        (visual_summary, evidence, browser_suggest_system_prompt(), BROWSER_ACTION_SCHEMA)
+    };
 
     let resp = state
         .inference_client
@@ -4122,13 +4149,15 @@ async fn browser_suggest_action(
                 purpose: InferPurpose::BrowserPlanner as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
-                model: req.model.clone().unwrap_or_default(),
+                model: req.model.clone().unwrap_or_else(|| {
+                    if desktop { "verevon-balance".to_owned() } else { String::new() }
+                }),
                 provider_hint: req.provider.clone().unwrap_or_default(),
                 messages: vec![
                     ChatMessage {
                         compaction_summary: String::new(),
                         role: "system".to_owned(),
-                        content: browser_suggest_system_prompt(),
+                        content: instructions,
                         name: String::new(),
                     },
                     ChatMessage {
@@ -4140,8 +4169,18 @@ async fn browser_suggest_action(
                 ],
                 temperature: 0.2,
                 max_tokens: 700,
-                structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
-                zdr: true,
+                structured_output_schema: if desktop { String::new() } else { schema.to_owned() },
+                tools: if desktop {
+                    vec![ToolDefinition {
+                        name: desktop_browser_planner::TOOL_NAME.to_owned(),
+                        description: "Propose one bounded desktop browser step from the current evidence.".to_owned(),
+                        parameters_json: schema.to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                tool_choice: if desktop { desktop_browser_planner::TOOL_NAME.to_owned() } else { String::new() },
+                zdr: !desktop || effective_zdr,
                 ..Default::default()
             },
             &inference_bearer,
@@ -4150,15 +4189,23 @@ async fn browser_suggest_action(
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
-    let parsed: Value = serde_json::from_str(resp.content.trim()).map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "error": format!("browser planner returned invalid JSON: {e}")
-            })),
-        )
-    })?;
-    let suggestion = browser_suggestion_value(&parsed);
+    let parsed = if desktop {
+        desktop_browser_planner::parse_reply(&resp)?
+    } else {
+        serde_json::from_str(resp.content.trim()).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("browser planner returned invalid JSON: {e}")
+                })),
+            )
+        })?
+    };
+    let suggestion = if desktop {
+        desktop_browser_planner::suggestion(&parsed, &req.observation)?
+    } else {
+        browser_suggestion_value(&parsed)
+    };
 
     Ok(Json(json!({
         "id": request_id,

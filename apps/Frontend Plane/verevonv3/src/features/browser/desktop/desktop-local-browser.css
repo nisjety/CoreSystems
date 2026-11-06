@@ -1,0 +1,46 @@
+.desktop-local-browser {
+  overflow: hidden;
+  border: 1px solid var(--verevon-border, #deddda);
+  border-radius: 12px;
+  background: var(--verevon-surface, #fff);
+}
+
+.desktop-local-browser__toolbar,
+.desktop-local-browser__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--verevon-border, #deddda);
+}
+
+.desktop-local-browser__toolbar input {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--verevon-border, #deddda);
+  border-radius: 8px;
+  background: var(--verevon-surface-muted, #f5f4f2);
+  color: inherit;
+  font: inherit;
+}
+
+.desktop-local-browser button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--verevon-border, #deddda);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.desktop-local-browser button:disabled { opacity: .45; cursor: default; }
+.desktop-local-browser button:not(:disabled):hover { background: var(--verevon-surface-muted, #f5f4f2); }
+.desktop-local-browser button:focus-visible,
+.desktop-local-browser input:focus-visible { outline: 2px solid var(--verevon-coral, #d76d47); outline-offset: 1px; }
+.desktop-local-browser__status { justify-content: space-between; min-height: 42px; font-size: 12px; }
+.desktop-local-browser__error { margin: 0; padding: 8px 10px; color: var(--verevon-danger, #a43725); font-size: 12px; }
+.desktop-local-browser__viewport { height: max(300px, calc(100dvh - 170px)); }

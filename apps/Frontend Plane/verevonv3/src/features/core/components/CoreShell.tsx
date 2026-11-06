@@ -11,7 +11,9 @@ import { AssistantNavigationContext } from '@/features/core/assistant-navigation
 import { createInlineAssistantController, type InlineAssistantState } from '@/features/core/lib/inline-assistant'
 import { createAssistantNavigationAgent, type AssistantNavigationAgentState } from '@/features/core/assistant-agent/assistant-navigation-agent'
 import { assistantBrowserTarget, createAssistantBrowserAgent } from '@/features/core/assistant-agent/assistant-browser-agent'
+import { createAssistantDesktopAgent } from '@/features/core/assistant-agent/assistant-desktop-agent'
 import { AssistantBrowserContext, type NettBrowserOwner, type NettTabSelection } from '@/features/core/assistant-agent/assistant-browser-context'
+import { getDesktopBrowser } from '@/features/browser/desktop/desktop-browser'
 import { isAssistantTaskBusy, submitAssistantTask } from '@/features/core/assistant-agent/assistant-task-routing'
 import { clearAssistantChatDraft, queueAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
@@ -71,6 +73,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
     return () => { nettBrowsers.delete(readOwner) }
   }
   const onNett = () => location.pathname === '/dashboard' && new URLSearchParams(location.search).get('tab') === 'web'
+  const desktopBrowser = getDesktopBrowser()
   const currentOwnedTab = async (signal: AbortSignal, sessionId?: string) => {
     if (signal.aborted || !onNett()) return null
     const ownedByUser = (owner: NettBrowserOwner | null): owner is NettBrowserOwner =>
@@ -97,8 +100,13 @@ export function CoreShell(props: { children?: JSX.Element }) {
     }
     return null
   }
-  const currentBrowserTarget = async (signal: AbortSignal): Promise<string | null> =>
-    (await currentOwnedTab(signal))?.url.href ?? null
+  const currentBrowserTarget = async (signal: AbortSignal): Promise<string | null> => {
+    if (desktopBrowser && onNett()) {
+      const browser = await desktopBrowser.getState()
+      return !signal.aborted && onNett() ? assistantBrowserTarget(browser.url)?.href ?? null : null
+    }
+    return (await currentOwnedTab(signal))?.url.href ?? null
+  }
   onCleanup(clearAssistantChatDraft)
   const assistantController = createInlineAssistantController({ scope: assistantScope, onChange: setAssistantState, tr: (no, en) => i18n.tr(no, en) })
   onCleanup(assistantController.dispose)
@@ -117,7 +125,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
     },
   })
   const startAssistantNavigation = (prompt: string, origin?: HTMLElement | null) => {
-    if (isAssistantTaskBusy(browserAgent.state().status, navigationAgent.state().status, Boolean(assistantGuide.destination()))) return false
+    if (assistantTaskBusy()) return false
     if (!assistantGuide.start(prompt, origin)) return false
     setAssistantMessage('')
     assistantAutomaticallyOpened = false
@@ -130,10 +138,10 @@ export function CoreShell(props: { children?: JSX.Element }) {
     onChange: setNavigationAgentState,
     tr: (no, en) => i18n.tr(no, en),
     currentBrowserTarget,
-    onBrowserTask: (goal, target) => browserAgent.send(goal, target),
+    onBrowserTask: (goal, target) => sendBrowserTask(goal, target),
     onAction: (action) => {
       if (!assistantGuide.startAction(action, document.querySelector<HTMLElement>('.global-assistant'))) return false
-      browserAgent.reset()
+      resetBrowserTask()
       assistantAutomaticallyOpened = false
       setAssistantOpen(false)
       return true
@@ -149,7 +157,29 @@ export function CoreShell(props: { children?: JSX.Element }) {
     tr: (no, en) => i18n.tr(no, en),
   })
   onCleanup(browserAgent.dispose)
-  const assistantTaskBusy = () => isAssistantTaskBusy(browserAgent.state().status, navigationAgent.state().status, Boolean(assistantGuide.destination()))
+  const localAgent = desktopBrowser ? createAssistantDesktopAgent({
+    bridge: desktopBrowser,
+    scope: assistantScope,
+    onChange: setBrowserAgentState,
+    tr: (no, en) => i18n.tr(no, en),
+  }) : null
+  const sendBrowserTask = (goal: string, target: string) => localAgent
+    ? localAgent.send(goal, target)
+    : browserAgent.send(goal, target)
+  const stopBrowserTask = () => {
+    if (browserAgentState().localBrowser) localAgent?.stop()
+    else browserAgent.stop()
+  }
+  const resetBrowserTask = () => { localAgent?.reset(); browserAgent.reset() }
+  const unsubscribeDesktopBrowser = desktopBrowser?.subscribe(event => {
+    if (event.type === 'handoff') localAgent?.stop()
+  })
+  onCleanup(() => {
+    unsubscribeDesktopBrowser?.()
+    localAgent?.reset()
+    void desktopBrowser?.reset().catch(() => undefined)
+  })
+  const assistantTaskBusy = () => isAssistantTaskBusy(browserAgentState().status, navigationAgent.state().status, Boolean(assistantGuide.destination()))
   const prepareContinuation = (tab: NettTabSelection) => {
     if (!onNett() || assistantTaskBusy()) return
     setContinueTab(tab)
@@ -169,7 +199,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
   let lastRevealedRunId: string | null = null
   createEffect(() => {
     const task = browserAgentState()
-    return task.kind === 'browser' && task.sessionId && ['starting', 'running', 'disconnected', 'completed'].includes(task.status)
+    return task.kind === 'browser' && (task.sessionId || task.localBrowser) && ['starting', 'running', 'disconnected', 'completed'].includes(task.status)
       ? task.runId : null
   }, (runId) => {
     if (!runId || runId === lastRevealedRunId) return
@@ -177,11 +207,11 @@ export function CoreShell(props: { children?: JSX.Element }) {
     revealAgentBrowser()
   })
   const submitOrdinaryAssistant = (payload: DashboardComposerSubmitPayload | string) => submitAssistantTask(payload, {
-    browserStatus: () => browserAgent.state().status,
+    browserStatus: () => browserAgentState().status,
     navigationStatus: () => navigationAgent.state().status,
     guiding: () => Boolean(assistantGuide.destination()),
     resetNavigation: navigationAgent.reset,
-    sendBrowser: browserAgent.send,
+    sendBrowser: sendBrowserTask,
     sendNavigation: navigationAgent.send,
     openChatDraft: (action) => {
       if (!queueAssistantChatDraft(action)) return false
@@ -216,11 +246,14 @@ export function CoreShell(props: { children?: JSX.Element }) {
   let assistantOrgId = untrack(assistantScope)
   createEffect(assistantScope, (currentOrgId) => {
     if (currentOrgId === assistantOrgId) return
+    const previousScope = assistantOrgId
     assistantOrgId = currentOrgId
+    if (!previousScope) return
     clearAssistantChatDraft()
     assistantGuide.stop()
     navigationAgent.reset()
-    browserAgent.reset()
+    resetBrowserTask()
+    void desktopBrowser?.reset().catch(() => undefined)
     assistantController.reset()
     setContinueTab(null)
     setAssistantMessage('')
@@ -418,7 +451,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
         <main class="core-main">
           <div class="verevon-workspace-panel dashboard-main-panel core-main__panel">
             <CoreWorkspaceContext value={workspace}>
-              <AssistantBrowserContext value={{ view: browserAgentState, stop: browserAgent.stop, claimRetained: browserAgent.claimRetained, setSurfaceVisible: setAgentBrowserSurfaceVisible, revealVersion: agentBrowserRevealVersion, registerNettBrowser, prepareContinuation, taskBusy: assistantTaskBusy }}>
+              <AssistantBrowserContext value={{ view: browserAgentState, stop: stopBrowserTask, claimRetained: browserAgent.claimRetained, setSurfaceVisible: setAgentBrowserSurfaceVisible, revealVersion: agentBrowserRevealVersion, registerNettBrowser, prepareContinuation, taskBusy: assistantTaskBusy }}>
               <RegionBoundary region="outlet" resetKey={() => location.pathname}>
                 {props.children}
               </RegionBoundary>
@@ -441,7 +474,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
               state={assistantState()}
               agentView={browserAgentState()}
               browserPresentedInWorkspace={agentBrowserSurfaceVisible()}
-              onStopAgent={browserAgent.stop}
+              onStopAgent={stopBrowserTask}
               onOpenAgentBrowser={revealAgentBrowser}
               onApprovalDecision={(decision) => { void browserAgent.decide(decision) }}
               onRetryAgent={() => {
@@ -460,7 +493,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
               onStop={assistantController.stop}
               sourceScope={assistantSourceScope()}
               onSourceScopeChange={setAssistantSourceScope}
-              onNewChat={() => { navigationAgent.reset(); browserAgent.reset(); assistantGuide.stop(); assistantController.reset(); setContinueTab(null); setAssistantMessage(''); setAssistantSourceScope('workspace') }}
+              onNewChat={() => { navigationAgent.reset(); resetBrowserTask(); assistantGuide.stop(); assistantController.reset(); setContinueTab(null); setAssistantMessage(''); setAssistantSourceScope('workspace') }}
               onOpenChat={() => { const threadId = assistantState().threadId; if (threadId) { setAssistantOpen(false); navigate(chatThreadHref(threadId)) } }}
               onSubmit={submitAssistant}
             />

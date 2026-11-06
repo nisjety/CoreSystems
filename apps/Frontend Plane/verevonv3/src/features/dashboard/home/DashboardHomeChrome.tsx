@@ -93,6 +93,7 @@ export function DashboardComposerPanel(props: {
   onSearchExpandedChange: (expanded: boolean) => void
   onSearchPreviewActiveChange: (active: boolean) => void
   onWebBrowserActiveChange?: (active: boolean) => void
+  onOpenDesktopBrowser?: (url: string) => void
   onMessageChange: (value: string) => void
   previewCollapsed: boolean
   /** Whether searches and opened pages may go in the Nett history: on only while the composer says the next turn is not zero-retention. */
@@ -105,6 +106,10 @@ export function DashboardComposerPanel(props: {
   const i18n = useI18n()
   const [browserUrl, setBrowserUrl] = createSignal<string | null>(null)
   const openBrowser = (url: string) => {
+    if (props.onOpenDesktopBrowser) {
+      props.onOpenDesktopBrowser(url)
+      return
+    }
     setBrowserUrl(url)
     props.onWebBrowserActiveChange?.(true)
   }

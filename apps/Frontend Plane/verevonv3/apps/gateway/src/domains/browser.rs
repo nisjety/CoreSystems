@@ -35,7 +35,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
-        Extension, Path, Query, State,
+        DefaultBodyLimit, Extension, Path, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -60,8 +60,9 @@ use crate::{
     },
     config::{AppState, BrowserGrantMode},
     domains::chat::shared::{
-        data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
-        proxy_model_json, proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        apply_org_zdr_posture, data_plane_authorization_value, data_plane_token,
+        delegated_auth_unavailable, model_token, proxy_model_json, proxy_model_json_with_data_plane,
+        proxy_model_json_with_inference, proxy_model_json_with_session,
         required_execution_token, required_inference_token, required_session_token,
     },
     envelope::{error, ok, unwrap_data},
@@ -390,6 +391,19 @@ pub(crate) struct SuggestActionBody {
     pub(crate) include_screenshot: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopSuggestionBody {
+    goal: String,
+    url: String,
+    title: String,
+    observation: Value,
+    #[serde(default)]
+    history: Vec<String>,
+    #[serde(default)]
+    zdr: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct RestoreProbeBody {
     pub(crate) url: String,
@@ -499,6 +513,10 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
         .route(
             "/api/v1/browser/assistant/capabilities",
             get(assistant_browser_capabilities),
+        )
+        .route(
+            "/api/v1/browser/assistant/desktop/suggestions",
+            post(suggest_desktop_action).layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route("/api/v1/browser/sessions/{session_id}", get(get_session))
         .route(
@@ -1802,6 +1820,67 @@ pub(crate) async fn suggest_action(
     }
 
     (StatusCode::OK, Json(ok(response_body))).into_response()
+}
+
+/// Stateless reasoning only. The local Quarry adapter owns the live guest,
+/// verifies its targets, and decides which proposed operations can execute.
+async fn suggest_desktop_action(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<DesktopSuggestionBody>,
+) -> (StatusCode, Json<Value>) {
+    let goal = body.goal.trim();
+    let url = normalize_public_http_url(&body.url);
+    if goal.is_empty()
+        || goal.chars().count() > 2_000
+        || body.url.len() > 4_096
+        || body.title.chars().count() > 500
+        || !body.observation.is_object()
+        || body.history.len() > 20
+        || body.history.iter().any(|entry| entry.chars().count() > 350)
+        || url.is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_desktop_observation", "The desktop observation is invalid.")),
+        );
+    }
+    let (model, inference) = tokio::join!(
+        model_token(&state, &user, &headers),
+        required_inference_token(&state, &user, &headers),
+    );
+    let (Some(model), Ok(inference)) = (model, inference) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error("delegated_auth_unavailable", "Model authentication is temporarily unavailable.")),
+        );
+    };
+    let mut request = json!({
+        "mode": "desktop",
+        "goal": goal,
+        "url": body.url,
+        "title": body.title,
+        "observation": body.observation,
+        "history": body.history,
+        "zdr": body.zdr,
+    });
+    apply_org_zdr_posture(&state, &user, &mut request).await;
+    let endpoint = format!("{}/v1/browser/suggest-action", state.model_gateway_url);
+    let (status, Json(response)) = proxy_model_json_with_inference(
+        &state, Method::POST, &endpoint, Some(request), Some(&model), Some(&inference), &user,
+    ).await;
+    if !status.is_success() {
+        return (
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                status
+            },
+            Json(error("desktop_browser_planner_unavailable", "The desktop browser planner could not complete the step.")),
+        );
+    }
+    (StatusCode::OK, Json(ok(response)))
 }
 
 trait BrowserSessionRunState {

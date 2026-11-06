@@ -14,6 +14,8 @@ import {
 import { useCoreWorkspace } from '@/features/core/lib/workspace-context'
 import { useAssistantNavigation } from '@/features/core/assistant-navigation/assistant-navigation-context'
 import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
+import { DesktopLocalBrowser } from '@/features/browser/desktop/DesktopLocalBrowser'
+import { getDesktopBrowser } from '@/features/browser/desktop/desktop-browser'
 import { AssistantLiveBrowser } from '@/features/core/components/AssistantLiveBrowser'
 import { AssistantRetainedBrowser } from './AssistantRetainedBrowser'
 import { getSession } from '@/shared/session/session-store'
@@ -36,13 +38,39 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   const shellWorkspace = useCoreWorkspace()
   const assistantNavigation = useAssistantNavigation()
   const assistantBrowser = useAssistantBrowser()
+  const desktopBrowser = getDesktopBrowser()
+  const [desktopPageOpen, setDesktopPageOpen] = createSignal(false)
+  const [desktopNavigationError, setDesktopNavigationError] = createSignal<string | null>(null)
+  let desktopNavigation = 0
+  const clearDesktopNavigationError = () => {
+    desktopNavigation += 1
+    setDesktopNavigationError(null)
+  }
   const [showAgentBrowser, setShowAgentBrowser] = createSignal(true)
+  const localAgentView = () => {
+    const view = assistantBrowser.view()
+    return desktopBrowser && view?.localBrowser && view.status !== 'idle' ? view : null
+  }
+  const localAgentBusy = () => ['starting', 'running', 'stopping'].includes(localAgentView()?.status ?? '')
+  const desktopWorkspace = () => Boolean(desktopBrowser && (desktopPageOpen() || localAgentView()))
   const browserView = () => {
     const view = assistantBrowser.view()
-    return view?.kind === 'browser' && view.sessionId && view.runId &&
+    return view?.kind === 'browser' && !view.localBrowser && view.sessionId && view.runId &&
       (['starting', 'running', 'stopping', 'disconnected'].includes(view.status) || (!view.usesExistingTab && view.status === 'completed')) ? view : null
   }
-  createEffect(() => browserView()?.runId, (runId) => { if (runId) setShowAgentBrowser(true) })
+  createEffect(() => browserView()?.runId, (runId) => {
+    if (runId) {
+      setDesktopPageOpen(false)
+      setShowAgentBrowser(true)
+    }
+  })
+  createEffect(() => localAgentView()?.runId, (runId) => {
+    if (runId) {
+      setDesktopPageOpen(true)
+      clearDesktopNavigationError()
+      setShowAgentBrowser(true)
+    }
+  })
   createEffect(() => assistantBrowser.revealVersion?.() ?? 0, (version) => { if (version > 0) setShowAgentBrowser(true) })
   const [searchParams, setSearchParams] = useSearchParams()
   const [isLaunching, setIsLaunching] = createSignal(false)
@@ -62,7 +90,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   // shared links land on the same tool. ?overview= sections still win.
   const homeTool = () => parseHomeTab(searchParams.tab)
   const activeTab = () => workSection() ? 'Chat' : homeTool()
-  const agentBrowserVisible = (): boolean => !workSection() && activeTab() === 'Søk' && Boolean(browserView()) && showAgentBrowser()
+  const agentBrowserVisible = (): boolean => !workSection() && activeTab() === 'Søk' && (desktopWorkspace() || Boolean(browserView())) && showAgentBrowser()
   createEffect(agentBrowserVisible, (visible) => {
     assistantBrowser.setSurfaceVisible?.(visible)
     return () => assistantBrowser.setSurfaceVisible?.(false)
@@ -163,6 +191,20 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
     setTimeout(() => document.getElementById('verevon-assistant-input')?.focus(), 0)
   }
 
+  const openDesktopBrowser = (url: string) => {
+    if (!desktopBrowser) return
+    setDesktopPageOpen(true)
+    setShowAgentBrowser(true)
+    if (localAgentBusy()) return
+    clearDesktopNavigationError()
+    const attempt = desktopNavigation
+    void desktopBrowser.navigate(url).catch(() => {
+      if (attempt === desktopNavigation) {
+        setDesktopNavigationError(i18n.tr('Kunne ikke åpne nettadressen.', 'Could not open the web address.'))
+      }
+    })
+  }
+
   const changeActiveTab = (tab: DashboardTab) => {
     if (tab === 'Chat') assistantNavigation.open?.()
     // Re-clicking the active tab changes no URL but still returns to the result.
@@ -181,7 +223,10 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   }
 
   const handleActiveTabDoubleClick = (tab: DashboardTab) => {
-    if (tab === 'Søk') resetSearch()
+    if (tab === 'Søk') {
+      if (desktopWorkspace()) setShowAgentBrowser(false)
+      resetSearch()
+    }
   }
 
   const showNextCards = () => {
@@ -206,13 +251,25 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
           </Show>
 
-          <Show when={activeTab() === 'Søk' && !workSection() && browserView() && !browserView()?.usesExistingTab}>
+          <Show when={activeTab() === 'Søk' && !workSection() && (desktopWorkspace() || (browserView() && !browserView()?.usesExistingTab))}>
             <div class="home-agent-browser-switch" role="group" aria-label={i18n.tr('Nettvisning', 'Web view')}>
-              <button type="button" aria-pressed={showAgentBrowser() ? 'true' : 'false'} onClick={() => setShowAgentBrowser(true)}>{browserView()?.browserClaimed ? i18n.tr('Nettleser fra oppgaven', 'Task browser') : i18n.tr('Agentens nettleser', 'Agent browser')}</button>
+              <button type="button" aria-pressed={showAgentBrowser() ? 'true' : 'false'} onClick={() => setShowAgentBrowser(true)}>{desktopWorkspace()
+                ? i18n.tr('Lokal nettleser', 'Local browser')
+                : browserView()?.browserClaimed ? i18n.tr('Nettleser fra oppgaven', 'Task browser') : i18n.tr('Agentens nettleser', 'Agent browser')}</button>
               <button type="button" aria-pressed={showAgentBrowser() ? 'false' : 'true'} onClick={() => setShowAgentBrowser(false)}>{i18n.tr('Ditt nettsøk', 'Your web search')}</button>
             </div>
           </Show>
-          <Show when={agentBrowserVisible() && browserView()}>{view => <div class="home-agent-browser-view">
+          <Show when={agentBrowserVisible() && desktopWorkspace() && desktopBrowser}>{bridge => <div class="home-agent-browser-view">
+            <DesktopLocalBrowser
+              bridge={bridge()}
+              agentBusy={localAgentBusy()}
+              stopping={localAgentView()?.status === 'stopping'}
+              navigationError={desktopNavigationError()}
+              onManualCommand={clearDesktopNavigationError}
+              onStop={assistantBrowser.stop}
+            />
+          </div>}</Show>
+          <Show when={agentBrowserVisible() && !desktopWorkspace() && browserView()}>{view => <div class="home-agent-browser-view">
             <Show when={view().status === 'completed' && view().receipt && getSession().activeOrg?.id}>{orgId => <AssistantRetainedBrowser orgId={orgId()} sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} claimed={view().browserClaimed} onClaim={id => assistantBrowser.claimRetained?.(id) ?? false} />}</Show>
             <Show when={!view().browserClaimed}><AssistantLiveBrowser surface="workspace" sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} action={view().action} finished={view().status === 'completed'} onStop={assistantBrowser.stop} stopping={view().status === 'stopping'} stopLabel={view().usesExistingTab ? i18n.tr('Stopp og ta over fanen', 'Stop and take over tab') : undefined} /></Show>
           </div>}</Show>
@@ -235,6 +292,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
               onSearchExpandedChange={setSearchExpanded}
               onSearchPreviewActiveChange={setSearchPreviewActive}
               onWebBrowserActiveChange={setWebBrowserActive}
+              onOpenDesktopBrowser={desktopBrowser ? openDesktopBrowser : undefined}
               previewCollapsed={cardsRevealed()}
               rememberSearches={assistantNavigation.zeroRetention?.() === false}
               searchResetKey={searchResetKey()}

@@ -14,6 +14,7 @@ export type AssistantAgentView = {
   available: boolean
   /** In-app navigation operates on this page; browser work has a separate view. */
   kind?: 'navigation' | 'browser'
+  localBrowser?: boolean
   status: 'idle' | 'starting' | 'running' | 'stopping' | 'stopped' | 'completed' | 'disconnected' | 'failed'
   goal: string
   error: string | null
@@ -129,6 +130,7 @@ export function GlobalAssistant(props: {
   }
   const canOpenBrowser = () => {
     const task = props.agentView
+    if (task?.localBrowser) return Boolean(task.runId)
     return task?.kind === 'browser' && task.sessionId && task.runId &&
       (['starting', 'running', 'stopping', 'disconnected'].includes(task.status) || (!task.usesExistingTab && task.status === 'completed' && task.receipt))
   }
