@@ -10177,7 +10177,7 @@ pub(crate) mod tests {
         AppState,
     ) {
         use wiremock::{
-            matchers::{method as wm_method, path as wm_path},
+            matchers::{method as wm_method, path as wm_path, path_regex},
             Mock, MockServer, ResponseTemplate,
         };
 
@@ -10217,10 +10217,24 @@ pub(crate) mod tests {
             .mount(&quarry)
             .await;
 
+        // org-core posture: the handler derives `effective_zdr` from the live
+        // posture and fails closed (`Unknown` = assume ZDR). Without this mock
+        // the unreachable default URL pins every `zdr=false` session to ZDR and
+        // the real-grant arm is skipped. The session flag stays authoritative:
+        // `zdr=true` sessions still refuse via `metadata.zdr()`.
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/v1/organizations/[^/]+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "metadata": { "interactiveRetention": { "zdr": false } } }
+            })))
+            .mount(&quarry)
+            .await;
+
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
         state.auth_core_url = auth_core.uri();
         state.model_gateway_url = model_gateway.uri();
+        state.org_core_url = quarry.uri();
         (quarry, auth_core, model_gateway, state)
     }
 
