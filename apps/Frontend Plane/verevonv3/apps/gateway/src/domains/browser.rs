@@ -5905,6 +5905,12 @@ fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> Head
         "image/webp" => HeaderValue::from_static("image/webp"),
         "application/json" => HeaderValue::from_static("application/json"),
         "application/problem+json" => HeaderValue::from_static("application/json"),
+        // Page utilities (F-t2-069): a PDF capture serves as itself only when
+        // the bytes really are a PDF; anything else keeps today's image
+        // fallback so a mislabelled artifact is never served as a PDF.
+        "application/pdf" if bytes.starts_with(b"%PDF-") => {
+            HeaderValue::from_static("application/pdf")
+        }
         _ if looks_like_json_payload(bytes) => HeaderValue::from_static("application/json"),
         _ => HeaderValue::from_static("image/png"),
     }
@@ -11375,6 +11381,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             safe_browser_artifact_content_type(Some("text/html"), b"<html></html>"),
+            "image/png"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"%PDF-1.7 body"),
+            "application/pdf"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"not a pdf"),
             "image/png"
         );
     }
