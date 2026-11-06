@@ -720,6 +720,20 @@ pub(crate) async fn create_session(
     if let Some((code, message)) = reject_zdr_persistent_profile(zdr, profile_scope) {
         return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response();
     }
+    // The assistant browser cannot attach under ZDR (start_ai_run and
+    // capabilities both refuse it). Refuse here, before any grant is issued
+    // or any Quarry session is created, so a ZDR caller never holds an
+    // issuable-but-unusable assistant_task grant.
+    if body.purpose == Some(BrowserSessionPurpose::AssistantTask) && zdr {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_attach_zdr_unsupported",
+                "The assistant browser is not available under zero data retention.",
+            )),
+        )
+            .into_response();
+    }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let resolved_start_url = if body.purpose == Some(BrowserSessionPurpose::AssistantTask)
@@ -5970,6 +5984,12 @@ fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> Head
         "image/webp" => HeaderValue::from_static("image/webp"),
         "application/json" => HeaderValue::from_static("application/json"),
         "application/problem+json" => HeaderValue::from_static("application/json"),
+        // Page utilities (F-t2-069): a PDF capture serves as itself only when
+        // the bytes really are a PDF; anything else keeps today's image
+        // fallback so a mislabelled artifact is never served as a PDF.
+        "application/pdf" if bytes.starts_with(b"%PDF-") => {
+            HeaderValue::from_static("application/pdf")
+        }
         _ if looks_like_json_payload(bytes) => HeaderValue::from_static("application/json"),
         _ => HeaderValue::from_static("image/png"),
     }
@@ -8291,6 +8311,34 @@ pub(crate) mod tests {
         }
 
         #[tokio::test]
+        async fn assistant_task_session_is_refused_under_zdr_before_any_grant() {
+            for org_zdr in [false, true] {
+                let up = upstreams().await;
+                if org_zdr {
+                    Mock::given(wm_method("GET"))
+                        .and(wm_path("/api/v1/organizations/org-a"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                            "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                        })))
+                        .with_priority(1).mount(&up.org).await;
+                }
+                let (status, body) = create_with_body(
+                    state(&up, BrowserGrantMode::Strict),
+                    json!({
+                        "url": "https://example.com/",
+                        "purpose": "assistant_task",
+                        "zdr": !org_zdr,
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"]["code"], "browser_attach_zdr_unsupported");
+                assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+                assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+            }
+        }
+
+        #[tokio::test]
         async fn org_zdr_is_carried_to_the_grant_and_browser_even_if_caller_omits_it() {
             let up = upstreams().await;
             Mock::given(wm_method("GET"))
@@ -10208,7 +10256,7 @@ pub(crate) mod tests {
         AppState,
     ) {
         use wiremock::{
-            matchers::{method as wm_method, path as wm_path},
+            matchers::{method as wm_method, path as wm_path, path_regex},
             Mock, MockServer, ResponseTemplate,
         };
 
@@ -10248,10 +10296,24 @@ pub(crate) mod tests {
             .mount(&quarry)
             .await;
 
+        // org-core posture: the handler derives `effective_zdr` from the live
+        // posture and fails closed (`Unknown` = assume ZDR). Without this mock
+        // the unreachable default URL pins every `zdr=false` session to ZDR and
+        // the real-grant arm is skipped. The session flag stays authoritative:
+        // `zdr=true` sessions still refuse via `metadata.zdr()`.
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/v1/organizations/[^/]+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "metadata": { "interactiveRetention": { "zdr": false } } }
+            })))
+            .mount(&quarry)
+            .await;
+
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
         state.auth_core_url = auth_core.uri();
         state.model_gateway_url = model_gateway.uri();
+        state.org_core_url = quarry.uri();
         (quarry, auth_core, model_gateway, state)
     }
 
@@ -11412,6 +11474,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             safe_browser_artifact_content_type(Some("text/html"), b"<html></html>"),
+            "image/png"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"%PDF-1.7 body"),
+            "application/pdf"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"not a pdf"),
             "image/png"
         );
     }

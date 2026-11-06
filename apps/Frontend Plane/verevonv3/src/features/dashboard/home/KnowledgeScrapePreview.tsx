@@ -285,6 +285,7 @@ function BrowserSessionSurface(props: {
   onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onBrowserTryOtherSource?: () => void
@@ -361,6 +362,7 @@ function BrowserSessionSurface(props: {
         onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
+        onBrowserCloseTab={props.onBrowserCloseTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
         onBrowserTryOtherSource={props.onBrowserTryOtherSource}
@@ -498,6 +500,7 @@ export function ScrapePreviewPanel(props: {
   onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onBrowserTryOtherSource?: () => void
@@ -562,6 +565,7 @@ export function ScrapePreviewPanel(props: {
         onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
+        onBrowserCloseTab={props.onBrowserCloseTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
         onBrowserTryOtherSource={props.onBrowserTryOtherSource}

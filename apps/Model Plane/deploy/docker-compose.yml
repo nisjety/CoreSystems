@@ -476,6 +476,8 @@ services:
       MODEL_GATEWAY_THREAD_SHARES: ${MODEL_GATEWAY_THREAD_SHARES:-false}
       # EP-12 S5: the Agent API read and control routes (/v1/agent/*) for API keys with agent:runs. Only the literal true.
       MODEL_GATEWAY_AGENT_API: ${MODEL_GATEWAY_AGENT_API:-false}
+      # Assistant navigation durable runs (POST /v1/ai/assistant-navigation). Only the literal true.
+      MODEL_GATEWAY_ASSISTANT_NAVIGATION: ${MODEL_GATEWAY_ASSISTANT_NAVIGATION:-false}
       # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the
       # literal true.
       MODEL_GATEWAY_GOAL_AUTO_CONTINUE: ${MODEL_GATEWAY_GOAL_AUTO_CONTINUE:-false}

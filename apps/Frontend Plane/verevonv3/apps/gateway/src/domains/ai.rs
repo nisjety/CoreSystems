@@ -78,12 +78,52 @@ fn routes() -> Router<AppState> {
 /// Stateless model reasoning for the app's bounded navigation assistant.
 /// Only the user's prompt crosses from the client; tools, credentials, scope,
 /// destinations and system instructions remain server controlled.
+///
+/// Gated by `ASSISTANT_NAVIGATION_ENABLED` (exact `true` only, default off):
+/// an operator kill switch that needs no rebuild. The SPA renders the 503 as
+/// "temporarily unavailable" and keeps the draft.
 pub(crate) async fn assistant_navigation(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(request): Json<AssistantNavigationRequest>,
 ) -> (StatusCode, Json<Value>) {
+    assistant_navigation_with_switch(
+        state,
+        user,
+        headers,
+        request,
+        assistant_navigation_enabled(),
+    )
+    .await
+}
+
+fn assistant_navigation_enabled_for(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+fn assistant_navigation_enabled() -> bool {
+    assistant_navigation_enabled_for(
+        std::env::var("ASSISTANT_NAVIGATION_ENABLED").ok().as_deref(),
+    )
+}
+
+pub(crate) async fn assistant_navigation_with_switch(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    request: AssistantNavigationRequest,
+    enabled: bool,
+) -> (StatusCode, Json<Value>) {
+    if !enabled {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "assistant_navigation_unavailable",
+                "Assistant navigation is temporarily unavailable.",
+            )),
+        );
+    }
     let prompt = request.prompt.trim();
     if prompt.is_empty() || prompt.len() > ASSISTANT_NAVIGATION_PROMPT_LIMIT {
         return shared::invalid_chat_request("The assistant prompt must contain 1 to 4096 bytes.");
@@ -113,19 +153,10 @@ pub(crate) async fn assistant_navigation(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    let mut body = shared::normalized_model_body(
-        serde_json::json!({
-            "messages": [
-                { "role": "system", "content": ASSISTANT_NAVIGATION_INSTRUCTIONS },
-                { "role": "user", "content": prompt }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 200
-        }),
-        &headers,
-    );
-    shared::apply_org_zdr_posture(&state, &user, &mut body).await;
-    let url = format!("{}/v1/ai/chat", state.model_gateway_url);
+    // The durable route owns the system instructions, sampling and ZDR
+    // posture; the gateway sends the prompt only and forwards the run ids.
+    let body = serde_json::json!({ "prompt": prompt });
+    let url = format!("{}/v1/ai/assistant-navigation", state.model_gateway_url);
     let (status, Json(response)) = shared::proxy_model_json_with_inference(
         &state,
         Method::POST,
@@ -152,10 +183,16 @@ pub(crate) async fn assistant_navigation(
             )),
         );
     }
-    match response.get("content").and_then(Value::as_str) {
+    match response.pointer("/data/content").and_then(Value::as_str) {
         Some(content) if !content.is_empty() && content.len() <= 16 * 1024 => (
             status,
-            Json(serde_json::json!({"data": {"content": content}})),
+            Json(serde_json::json!({
+                "data": {
+                    "content": content,
+                    "run_id": response.pointer("/data/run_id"),
+                    "thread_id": response.pointer("/data/thread_id"),
+                }
+            })),
         ),
         _ => (
             StatusCode::BAD_GATEWAY,
@@ -303,7 +340,7 @@ fn govern_speech_body(body: &mut Value) -> Result<(), ()> {
 mod tests {
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{HeaderMap, Request, StatusCode},
         response::IntoResponse,
         Extension, Json,
     };
@@ -314,7 +351,10 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
     };
 
-    use super::{proxy_dictate, proxy_speech, router, routes, AI_AUDIO_BODY_LIMIT_BYTES};
+    use super::{
+        assistant_navigation_enabled_for, proxy_dictate, proxy_speech, router, routes,
+        AI_AUDIO_BODY_LIMIT_BYTES,
+    };
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
 
     fn member_of(org_id: &str) -> AuthenticatedUser {
@@ -367,11 +407,10 @@ mod tests {
                 .await;
         }
         Mock::given(method("POST"))
-            .and(path("/v1/ai/chat"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({ "content": "{\"type\":\"unsupported\"}" })),
-            )
+            .and(path("/v1/ai/assistant-navigation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "content": "{\"type\":\"unsupported\"}", "run_id": "run-nav-1", "thread_id": "thread-nav-1" }
+            })))
             .mount(&model_gateway)
             .await;
         (auth_core, org_core, model_gateway)
@@ -632,8 +671,45 @@ mod tests {
             .expect("request")
     }
 
+    fn enable_navigation() {
+        // Process-global on purpose: the handler reads the env var per call,
+        // like the other gateway feature switches. Tests run serially in this
+        // repo's gateway lane, so this cannot race the "disabled" case.
+        std::env::set_var("ASSISTANT_NAVIGATION_ENABLED", "true");
+    }
+
+    #[test]
+    fn navigation_switch_is_the_literal_true_and_nothing_else() {
+        assert!(assistant_navigation_enabled_for(Some("true")));
+        assert!(!assistant_navigation_enabled_for(None));
+        assert!(!assistant_navigation_enabled_for(Some("false")));
+        assert!(!assistant_navigation_enabled_for(Some("TRUE")));
+        assert!(!assistant_navigation_enabled_for(Some("1")));
+    }
+
+    #[tokio::test]
+    async fn navigation_disabled_does_not_call_upstream() {
+        enable_navigation();
+        let (auth, org, model) = upstreams().await;
+        let state = state_for(&auth, &org, &model);
+        let (status, body) = super::assistant_navigation_with_switch(
+            state,
+            member_of("org-open"),
+            HeaderMap::new(),
+            super::AssistantNavigationRequest {
+                prompt: "Finn kunnskap".to_owned(),
+            },
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "assistant_navigation_unavailable");
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
+    }
+
     #[tokio::test]
     async fn navigation_requires_session_and_rejects_extra_input() {
+        enable_navigation();
         let (auth, org, model) = upstreams().await;
         let state = state_for(&auth, &org, &model);
         let unauthenticated = router(state.clone())
@@ -657,11 +733,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(forwarded_bodies(&model, "/v1/ai/chat").await.is_empty());
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
     }
 
     #[tokio::test]
     async fn navigation_sends_verified_credentials_and_fail_closed_zdr() {
+        enable_navigation();
         let (auth, org, model) = upstreams().await;
         let state = state_for(&auth, &org, &model);
         // A known ZDR org and an unknown org (lookup failure) must both raise ZDR.
@@ -679,19 +756,23 @@ mod tests {
                 .unwrap();
             let response: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(response["data"]["content"], "{\"type\":\"unsupported\"}");
+            assert_eq!(response["data"]["run_id"], "run-nav-1");
+            assert_eq!(response["data"]["thread_id"], "thread-nav-1");
         }
         let requests = model.received_requests().await.unwrap();
         let requests: Vec<_> = requests
             .iter()
-            .filter(|r| r.url.path() == "/v1/ai/chat")
+            .filter(|r| r.url.path() == "/v1/ai/assistant-navigation")
             .collect();
         assert_eq!(requests.len(), 2);
+        // The durable route owns the system prompt, sampling and ZDR posture:
+        // the gateway forwards the prompt only (ZDR is decided from the
+        // verified claims downstream, never from a gateway body flag).
         for request in requests {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
-            assert_eq!(body["zdr"], true);
-            assert_eq!(body["messages"][0]["role"], "system");
-            assert_eq!(body["messages"][1]["content"], "Åpne kunnskap");
+            assert_eq!(body["prompt"], "Åpne kunnskap");
             assert!(body.get("tools").is_none());
+            assert!(body.get("zdr").is_none());
             assert_eq!(
                 request
                     .headers
@@ -715,6 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn navigation_refuses_without_delegated_inference_credential() {
+        enable_navigation();
         let (_, org, model) = upstreams().await;
         let auth = MockServer::start().await;
         Mock::given(method("GET"))
@@ -732,7 +814,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(forwarded_bodies(&model, "/v1/ai/chat").await.is_empty());
+        assert!(forwarded_bodies(&model, "/v1/ai/assistant-navigation").await.is_empty());
     }
 
     #[tokio::test]

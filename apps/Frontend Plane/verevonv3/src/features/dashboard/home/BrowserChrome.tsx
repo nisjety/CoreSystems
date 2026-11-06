@@ -23,11 +23,13 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
   Square,
   SquareMousePointer,
+  Star,
   Terminal,
   TextCursorInput,
   Timer,
@@ -94,7 +96,13 @@ import { OmniboxField } from '@/features/browser/omnibox/OmniboxField'
 import { BrowserNavigationError } from '@/features/browser/omnibox/BrowserNavigationError'
 import type { BrowserNavigationFailure } from '@/features/browser/session/browser-navigation-error'
 import { BrowserSearchResults } from '@/features/browser/omnibox/BrowserSearchResults'
+import { findInDomNodes, stepFindIndex } from '@/features/browser/find/page-find'
 import { currentOmniboxHistoryKey, recordOmniboxVisit } from '@/features/browser/omnibox/omnibox-history'
+import {
+  isBookmarked,
+  toggleBrowserBookmark,
+  useBrowserBookmarks,
+} from '@/features/browser/bookmarks/browser-bookmarks'
 import {
   browserOmniboxSearchEnabled,
   resolveOmniboxIntent,
@@ -326,11 +334,25 @@ function liveNetworkRows(sessionRows: BrowserNetworkEntry[], devtools: BrowserDe
 }
 
 /** DOM-nodeliste delt mellom sidevisningens fallback og DevTools-panelet. */
+/** Interactive kinds for selective observation (slice 8). */
+const interactiveElementKinds = new Set(['button', 'link', 'input', 'checkbox', 'radio', 'select', 'textarea', 'menuitem'])
+
 function DomNodeList(props: { nodes: BrowserSessionViewModel['domNodes'] }) {
+  const [interactiveOnly, setInteractiveOnly] = createSignal(false)
+  const nodes = () => {
+    const filterOn = import.meta.env.VITE_BROWSER_ELEMENT_FILTER === 'true' && interactiveOnly()
+    return filterOn ? props.nodes.filter((node) => interactiveElementKinds.has(node.kind)) : props.nodes
+  }
   return (
     <div class="knowledge-browser-live-dom">
+      <Show when={import.meta.env.VITE_BROWSER_ELEMENT_FILTER === 'true'}>
+        <label class="knowledge-browser-live-dom__filter">
+          <input type="checkbox" checked={interactiveOnly()} onChange={(event) => setInteractiveOnly(event.currentTarget.checked)} />
+          Kun interaktive (valgobservasjon)
+        </label>
+      </Show>
       <For
-        each={props.nodes}
+        each={nodes()}
         fallback={<p class="knowledge-browser-empty">Ingen DOM-noder returnert ennå.</p>}
       >
         {(node) => (
@@ -518,6 +540,8 @@ export function BrowserChrome(props: {
   /** Omnibox search (WS9.A). Defaults to the build flag VITE_BROWSER_OMNIBOX_SEARCH. */
   searchEnabled?: boolean
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  /** Tab context menu (WS9 tab strip): close the named tab. Omit it and Close is not offered. */
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation, session?: BrowserSession) => void
   /** "Try another source" in the blocked notice: leave the site the observation says blocks automation. */
@@ -562,6 +586,55 @@ export function BrowserChrome(props: {
   const [liveFrameTick, setLiveFrameTick] = createSignal(0)
   const [actionTarget, setActionTarget] = createSignal<BrowserActionTarget | null>(null)
   const [frameAspectMatches, setFrameAspectMatches] = createSignal(false)
+  // Tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
+  const [tabMenu, setTabMenu] = createSignal<{ tabId: string } | null>(null)
+  const tabMenuEnabled = () => import.meta.env.VITE_BROWSER_TAB_MENU === 'true'
+  // Bookmarks (F-t2-068 local slice, behind VITE_BROWSER_BOOKMARKS=true).
+  const bookmarks = useBrowserBookmarks()
+  const bookmarksEnabled = () => import.meta.env.VITE_BROWSER_BOOKMARKS === 'true'
+  // Page zoom (F-t2-069 presentation slice, behind VITE_BROWSER_ZOOM=true).
+  // Scales the live view only; no browser action and no stored state.
+  const zoomEnabled = () => import.meta.env.VITE_BROWSER_ZOOM === 'true'
+  const [frameZoom, setFrameZoom] = createSignal(100)
+  const zoomFrame = (delta: number) => setFrameZoom((value) => Math.min(150, Math.max(50, value + delta)))
+  // Page find (F-t2-069 presentation slice, behind VITE_BROWSER_FIND=true).
+  // Client-side search over already-loaded DOM text only: no server call,
+  // no persistence, no ZDR effect. Matches are listed (kind + text); the
+  // frame itself is an image and is never highlighted in-image.
+  const findEnabled = () => import.meta.env.VITE_BROWSER_FIND === 'true'
+  const [findOpen, setFindOpen] = createSignal(false)
+  const [findQuery, setFindQuery] = createSignal('')
+  const [findIndex, setFindIndex] = createSignal(0)
+  const findMatches = () => (findEnabled() && findOpen() ? findInDomNodes(session().domNodes, findQuery()) : [])
+  const currentFindMatch = () => findMatches()[findIndex()] ?? null
+  const stepFind = (direction: 1 | -1) =>
+    setFindIndex((current) => stepFindIndex(current, findMatches().length, direction))
+  let findInputRef: HTMLInputElement | undefined
+  // Browser keyboard commands (F-t2-070, behind VITE_BROWSER_KEYMAP=true).
+  const keymapEnabled = () => import.meta.env.VITE_BROWSER_KEYMAP === 'true'
+  const tabMenuTab = () => {
+    const menu = tabMenu()
+    return menu ? session().tabs.find((tab) => tab.tabId === menu.tabId) ?? null : null
+  }
+  const tabOutsideUrl = (tab: BrowserTab): string | null => {
+    if (!tab.url) return null
+    try {
+      const url = new URL(tab.url)
+      return url.protocol === 'https:' || url.protocol === 'http:'
+        ? url.href
+        : null
+    } catch {
+      return null
+    }
+  }
+  const closeTabMenu = () => setTabMenu(null)
+  const currentPageUrl = () => session().url ?? ''
+  const toggleBookmark = () => {
+    if (!bookmarksEnabled()) return
+    const url = tabOutsideUrl({ tabId: '', active: true, url: currentPageUrl() })
+    if (!url) return
+    toggleBrowserBookmark({ url, label: session().title ?? '' })
+  }
   let addressInputRef: HTMLInputElement | undefined
   let pendingObservedAddress: string | null = null
   let lastWheelDispatchMs = 0
@@ -612,6 +685,55 @@ export function BrowserChrome(props: {
   const visibleConsoleEntries = () =>
     hasEvidence() ? filterConsoleEntries(liveConsoleEntries(), consoleFilter()) : liveConsoleEntries()
   const controlsDisabled = () => !isLive() || props.browserBusy || wsActionPending() || !session().sessionId
+  // Keyboard commands (behind the flag): Ctrl/Cmd+T new tab, Ctrl/Cmd+L focus
+  // the address field, Ctrl/Cmd+W close the current tab when there are several.
+  // Typing in fields is never intercepted.
+  createEffect(() => keymapEnabled(), (enabled) => {
+    if (!enabled) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return
+      const key = event.key.toLowerCase()
+      if (key === 't') {
+        event.preventDefault()
+        void prepareNewTabNavigation()
+      } else if (key === 'l') {
+        event.preventDefault()
+        addressInputRef?.focus()
+        addressInputRef?.select()
+      } else if (key === 'w' && session().tabs.length > 1) {
+        event.preventDefault()
+        const active = session().tabs.find((tab) => tab.active)
+        if (active && props.onBrowserCloseTab) void props.onBrowserCloseTab(active.tabId)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+  // Page find (behind VITE_BROWSER_FIND): Ctrl/Cmd+F toggles the find bar and
+  // focuses it. Works even while typing in fields (unlike the keymap), and
+  // Esc closes it. Prevents the browser's own find UI while the bar is open.
+  createEffect(() => findEnabled(), (enabled) => {
+    if (!enabled) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.ctrlKey || event.metaKey
+      if (modifier && !event.altKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        setFindOpen(true)
+        window.requestAnimationFrame(() => findInputRef?.focus())
+        return
+      }
+      if (event.key === 'Escape' && findOpen()) {
+        setFindOpen(false)
+        setFindQuery('')
+        setFindIndex(0)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
   const loopStatus = () => props.browserLoop?.status ?? 'idle'
   const loopRunning = () => isBrowserLoopRunning(loopStatus())
   // Phase 5 HITL gate: the single most recent still-pending browser-action
@@ -1334,11 +1456,18 @@ export function BrowserChrome(props: {
                     role="tab"
                     disabled={props.browserBusy}
                     aria-selected={selectedTimelineStep() === null && tab.active ? 'true' : 'false'}
+                    aria-haspopup="menu"
+                    aria-expanded={tabMenu()?.tabId === tab.tabId ? 'true' : 'false'}
                     class={['knowledge-browser-tab', { 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }]}
                     title={`Live · ${liveTabLabel(tab)}`}
                     onClick={() => {
                       setSelectedTimelineStep(null)
                       if (!tab.active) void props.onBrowserSelectTab?.(tab.tabId)
+                    }}
+                    onContextMenu={(event) => {
+                      if (!tabMenuEnabled()) return
+                      event.preventDefault()
+                      setTabMenu({ tabId: tab.tabId })
                     }}
                   >
                     <Show when={tab.openedBy === 'agent'}>
@@ -1406,9 +1535,70 @@ export function BrowserChrome(props: {
               </button>
             </div>
           </Show>
+          <Show when={tabMenuEnabled() && tabMenuTab()}>
+            {(tab) => (
+              <div
+                class="knowledge-browser-tab-menu"
+                role="menu"
+                aria-label={`Fanealternativ for ${liveTabLabel(tab())}`}
+                onKeyDown={(event) => { if (event.key === 'Escape') closeTabMenu() }}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={tab().active || props.browserBusy}
+                  onClick={() => { closeTabMenu(); setSelectedTimelineStep(null); void props.onBrowserSelectTab?.(tab().tabId) }}
+                >
+                  Vis fane
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={controlsDisabled()}
+                  onClick={() => { closeTabMenu(); void prepareNewTabNavigation() }}
+                >
+                  Ny fane
+                </button>
+                <Show when={props.onBrowserCloseTab && session().tabs.length > 1}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={controlsDisabled()}
+                    onClick={() => { closeTabMenu(); void props.onBrowserCloseTab?.(tab().tabId) }}
+                  >
+                    Lukk fane
+                  </button>
+                </Show>
+                <Show when={tabOutsideUrl(tab())}>
+                  {(url) => (
+                    <a role="menuitem" href={url()} target="_blank" rel="noopener noreferrer" onClick={closeTabMenu}>
+                      Åpne utenfor Verevon
+                    </a>
+                  )}
+                </Show>
+              </div>
+            )}
+          </Show>
         </div>
         {props.frameControls}
       </div>
+      <Show when={bookmarksEnabled() && bookmarks().length > 0}>
+        <div class="knowledge-browser-bookmarks" aria-label="Bokmerker">
+          <For each={bookmarks()}>
+            {(bookmark) => (
+              <button
+                type="button"
+                class="knowledge-browser-bookmarks__item"
+                title={bookmark.url}
+                disabled={controlsDisabled()}
+                onClick={() => runAction({ type: 'navigate', url: bookmark.url })}
+              >
+                <Star class="size-3" aria-hidden="true" /> {bookmark.label}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
 
       <Show when={props.browserNavigationError}>
         <BrowserNavigationError
@@ -1456,6 +1646,39 @@ export function BrowserChrome(props: {
               onClick={() => reloadFromChrome(true)}
             >
               <RefreshCw class="size-3.5" />
+            </button>
+          </Show>
+          <Show when={bookmarksEnabled()}>
+            <button
+              type="button"
+              aria-label={isBookmarked(currentPageUrl()) ? 'Fjern bokmerke' : 'Legg til bokmerke'}
+              aria-pressed={isBookmarked(currentPageUrl()) ? 'true' : 'false'}
+              title={isBookmarked(currentPageUrl()) ? 'Fjern bokmerke' : 'Legg til bokmerke'}
+              disabled={controlsDisabled() || !currentPageUrl()}
+              onClick={toggleBookmark}
+            >
+              <Star class="size-3.5" />
+            </button>
+          </Show>
+          <Show when={zoomEnabled()}>
+            <button type="button" aria-label="Zoom ut" title="Zoom ut" disabled={controlsDisabled() || frameZoom() <= 50} onClick={() => zoomFrame(-10)}>−</button>
+            <span aria-label="Zoomnivå" aria-live="polite">{frameZoom()}%</span>
+            <button type="button" aria-label="Zoom inn" title="Zoom inn" disabled={controlsDisabled() || frameZoom() >= 150} onClick={() => zoomFrame(10)}>+</button>
+            <button type="button" aria-label="Nullstill zoom" title="Nullstill zoom" disabled={controlsDisabled() || frameZoom() === 100} onClick={() => setFrameZoom(100)}>100%</button>
+          </Show>
+          <Show when={findEnabled()}>
+            <button
+              type="button"
+              aria-label="Finn på siden"
+              aria-pressed={findOpen() ? 'true' : 'false'}
+              title="Finn på siden (Ctrl+F)"
+              disabled={!isLive()}
+              onClick={() => {
+                setFindOpen(!findOpen())
+                if (!findOpen()) window.requestAnimationFrame(() => findInputRef?.focus())
+              }}
+            >
+              <Search class="size-3.5" />
             </button>
           </Show>
         </div>
@@ -1682,6 +1905,78 @@ export function BrowserChrome(props: {
             <MoreVertical class="size-3.5" />
           </button>
         </div>
+
+        <Show when={findEnabled() && findOpen()}>
+          <div class="knowledge-browser-find" role="search" aria-label="Finn på siden">
+            <input
+              ref={(element) => { findInputRef = element }}
+              type="search"
+              value={findQuery()}
+              aria-label="Finn på siden"
+              placeholder="Finn på siden…"
+              onInput={(event) => {
+                setFindQuery(event.currentTarget.value)
+                setFindIndex(0)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  stepFind(event.shiftKey ? -1 : 1)
+                }
+                if (event.key === 'Escape') {
+                  event.stopPropagation()
+                  setFindOpen(false)
+                  setFindQuery('')
+                  setFindIndex(0)
+                }
+              }}
+            />
+            <span aria-live="polite">
+              {findQuery().trim()
+                ? findMatches().length > 0
+                  ? `${Math.min(findIndex() + 1, findMatches().length)}/${findMatches().length}`
+                  : 'Ingen treff'
+                : ''}
+            </span>
+            <button
+              type="button"
+              aria-label="Forrige treff"
+              title="Forrige treff (Shift+Enter)"
+              disabled={findMatches().length === 0}
+              onClick={() => stepFind(-1)}
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              aria-label="Neste treff"
+              title="Neste treff (Enter)"
+              disabled={findMatches().length === 0}
+              onClick={() => stepFind(1)}
+            >
+              ▼
+            </button>
+            <button
+              type="button"
+              aria-label="Lukk søk"
+              title="Lukk (Esc)"
+              onClick={() => {
+                setFindOpen(false)
+                setFindQuery('')
+                setFindIndex(0)
+              }}
+            >
+              <X class="size-3.5" />
+            </button>
+          </div>
+          <Show when={currentFindMatch()}>
+            {(match) => (
+              <p class="knowledge-browser-find__current" aria-live="polite">
+                <span>{match().kind}</span> — {match().text}
+              </p>
+            )}
+          </Show>
+        </Show>
 
         <Show when={chrome().popover === 'profile'}>
           <>
@@ -2213,6 +2508,14 @@ export function BrowserChrome(props: {
                 </div>
               )}
             </Show>
+            <Show when={import.meta.env.VITE_BROWSER_NEWTAB === 'true' && !frameUrl() && !searchQuery() && session().tabs.length === 0}>
+              <form class="knowledge-browser-newtab" onSubmit={(event) => { event.preventDefault(); const value = addressInput().trim(); if (value) runAction({ type: 'navigate', url: value }) }}>
+                <label>Ny fane</label>
+                <input aria-label="Søk eller skriv nettadresse" placeholder="Søk eller skriv nettadresse" value={addressInput()} onInput={(event) => setAddressInput(event.currentTarget.value)} disabled={controlsDisabled()} type="text" inputmode="url" />
+                <button type="submit" disabled={controlsDisabled() || !addressInput().trim()}>Åpne</button>
+                <p>Start her: ingen åpen fane.</p>
+              </form>
+            </Show>
             <Show
               when={searchQuery() ? null : frameUrl()}
               keyed
@@ -2221,11 +2524,10 @@ export function BrowserChrome(props: {
                   <DomNodeList nodes={session().domNodes} />
                 </div>
               }
-            >
-              {(src) => (
+            >              {(src: string) => (
                 <div
                   class="knowledge-browser-screenshot knowledge-browser-screenshot--interactive"
-                  style={{ position: 'relative' }}
+                  style={{ position: 'relative', transform: zoomEnabled() ? `scale(${frameZoom() / 100})` : undefined, 'transform-origin': 'top center' }}
                   aria-label="Interaktiv Chromium-side. Klikk, scroll eller fokuser for tastatur."
                   role="application"
                   tabindex={0}

@@ -112,6 +112,10 @@ describe('BrowserSitesSection', () => {
     signIn('member')
     render(() => <BrowserSitesSection />)
     await waitFor(() => expect(screen.getByText('shop.example.com')).toBeTruthy())
+    // The hub names what is governed (browsing only is user-settable).
+    const capabilities = screen.getByTestId('browser-sites-capability-list')
+    expect(capabilities.textContent).toContain('Nettlesing')
+    expect(capabilities.textContent).toContain('Opplastinger')
     click(screen.getByRole('button', { name: /Glem/ }))
     await waitFor(() =>
       expect(

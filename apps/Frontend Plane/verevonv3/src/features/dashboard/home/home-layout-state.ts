@@ -19,6 +19,9 @@ import { getSession } from '@/shared/session/session-store'
 const fields = {
   dockMinimized: z.boolean(),
   dockExpanded: z.boolean(),
+  // Presentation only (WS9.G): where the assistant dock sits. It never grants
+  // access or changes what the assistant may do.
+  dockPosition: z.enum(['bottom', 'right', 'left']),
   feed: homeUpdatesFeedSchema,
   // The value goes straight into the news query, so it must be a known topic.
   category: z.string().refine((value) => newsCategoryOptions.some((option) => option.value === value)),
@@ -31,6 +34,7 @@ export type HomeLayoutPatch = Partial<HomeLayoutState>
 export const HOME_LAYOUT_DEFAULTS: Readonly<HomeLayoutState> = {
   dockMinimized: false,
   dockExpanded: false,
+  dockPosition: 'bottom',
   feed: 'news',
   category: 'all',
   pinnedOnly: false,
@@ -41,6 +45,7 @@ export const HOME_LAYOUT_DEFAULTS: Readonly<HomeLayoutState> = {
 export const homeLayoutSchema = z.object({
   dockMinimized: fields.dockMinimized.catch(HOME_LAYOUT_DEFAULTS.dockMinimized),
   dockExpanded: fields.dockExpanded.catch(HOME_LAYOUT_DEFAULTS.dockExpanded),
+  dockPosition: fields.dockPosition.catch(HOME_LAYOUT_DEFAULTS.dockPosition),
   feed: fields.feed.catch(HOME_LAYOUT_DEFAULTS.feed),
   category: fields.category.catch(HOME_LAYOUT_DEFAULTS.category),
   pinnedOnly: fields.pinnedOnly.catch(HOME_LAYOUT_DEFAULTS.pinnedOnly),

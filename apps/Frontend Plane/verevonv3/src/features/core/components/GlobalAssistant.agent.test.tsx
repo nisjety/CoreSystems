@@ -34,6 +34,25 @@ describe('GlobalAssistant browser agent', () => {
     expect(screen.getByRole('alert').textContent).toContain('The browser returned an error.')
   })
 
+  it('keeps the dock at the bottom with the flag off', () => {
+    setup(base)
+    expect(screen.getByRole('region', { name: 'Ask Verevon' }).className).toContain('global-assistant--dock-bottom')
+    expect(screen.queryByRole('button', { name: 'Change dock position' })).toBeNull()
+  })
+
+  it('moves the dock right and left behind the flag', () => {
+    vi.stubEnv('VITE_ASSISTANT_DOCK_POSITION', 'true')
+    setup(base)
+    const dock = screen.getByRole('region', { name: 'Ask Verevon' })
+    expect(dock.className).toContain('global-assistant--dock-bottom')
+    fireEvent.click(screen.getByRole('button', { name: 'Change dock position' }))
+    flush()
+    expect(screen.getByRole('region', { name: 'Ask Verevon' }).className).toContain('global-assistant--dock-right')
+    fireEvent.click(screen.getByRole('button', { name: 'Change dock position' }))
+    flush()
+    expect(screen.getByRole('region', { name: 'Ask Verevon' }).className).toContain('global-assistant--dock-left')
+  })
+
   it('keeps a refused draft and opens site choices in a separate tab', async () => {
     vi.stubEnv('VITE_BROWSER_SITES', 'true')
     const { setAgent, setMessage, send } = setup(base)

@@ -166,6 +166,8 @@ services:
       BROWSER_AI_RUN_ATTACH_SESSION: ${BROWSER_AI_RUN_ATTACH_SESSION:-false}
       # Use task-scoped, public-site grants. Enable after deploying the matching browser broker.
       BROWSER_ASSISTANT_TASK_GRANTS: ${BROWSER_ASSISTANT_TASK_GRANTS:-false}
+      # Kill switch for the assistant navigation model call. Off by default; only the literal true.
+      ASSISTANT_NAVIGATION_ENABLED: ${ASSISTANT_NAVIGATION_ENABLED:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.

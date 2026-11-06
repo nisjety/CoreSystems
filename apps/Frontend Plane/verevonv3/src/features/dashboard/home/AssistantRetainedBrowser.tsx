@@ -4,7 +4,7 @@ import { attachBrowserSession, attachBrowserTabs, browserSessionFromPreview } fr
 import type { ScrapePreview } from '@/features/dashboard/home/knowledge-preview'
 import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
 import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
-import { browserErrorMessage, createBrowserTab, getBrowserSession, keepAliveBrowserSession, listBrowserTabs, runBrowserAction, selectBrowserTab, type BrowserAction } from '@/shared/api/browser-client'
+import { browserErrorMessage, closeBrowserTab, createBrowserTab, getBrowserSession, keepAliveBrowserSession, listBrowserTabs, runBrowserAction, selectBrowserTab, type BrowserAction } from '@/shared/api/browser-client'
 import { ApiError } from '@/shared/api/http'
 import { useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
@@ -139,6 +139,15 @@ export function AssistantRetainedBrowser(props: {
     } catch (reason) { if (!disposed) setError(message(reason)) }
     finally { if (!disposed) setBusy(false) }
   }
+  const closeTab = async (tabId: string) => {
+    if (busy() || !canControl()) return
+    setBusy(true); setError(null); cancelRefresh()
+    try {
+      const tabs = await closeBrowserTab(props.orgId, props.sessionId, tabId)
+      if (canControl()) setPreview(previous => previous ? attachBrowserTabs(previous, tabs) : previous)
+    } catch (reason) { if (!disposed) setError(message(reason)) }
+    finally { if (!disposed) setBusy(false) }
+  }
   const keepAlive = async () => {
     if (!canControl()) return 'expired' as const
     try { await keepAliveBrowserSession(props.orgId, props.sessionId); return 'alive' as const }
@@ -151,7 +160,7 @@ export function AssistantRetainedBrowser(props: {
       </button>
     </Show>
     <Show when={error()}>{text => <p role="alert">{text()}</p>}</Show>
-    <Show when={session()}>{current => <BrowserChrome personalBrowsing session={current()} browserBusy={busy()} onBrowserAction={act} onBrowserSelectTab={select} onBrowserNewTab={newTab} onKeepAlive={keepAlive} />}</Show>
+    <Show when={session()}>{current => <BrowserChrome personalBrowsing session={current()} browserBusy={busy()} onBrowserAction={act} onBrowserSelectTab={select} onBrowserNewTab={newTab} onBrowserCloseTab={closeTab} onKeepAlive={keepAlive} />}</Show>
   </div>
 }
 
