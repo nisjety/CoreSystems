@@ -18,6 +18,22 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_TAB_MENU?: string;
 	/** "true" shows the bookmarks star and bar in BrowserChrome. Default off. */
 	readonly VITE_BROWSER_BOOKMARKS?: string;
+	/** "true" enables annotation mode on the live browser view. Default off. */
+	readonly VITE_BROWSER_ANNOTATE?: string;
+	/** "true" shows zoom controls and a zoom-scaled live view. Default off. */
+	readonly VITE_BROWSER_ZOOM?: string;
+	/** "true" enables browser keyboard commands (new/close/focus/run). Default off. */
+	readonly VITE_BROWSER_KEYMAP?: string;
+	/** "true" shows the new-tab start page. Default off. */
+	readonly VITE_BROWSER_NEWTAB?: string;
+	/** "true" offers the split chat/browser workspace view. Default off. */
+	readonly VITE_WORKSPACE_SPLIT?: string;
+	/** "true" offers a floating assistant composer. Default off. */
+	readonly VITE_ASSISTANT_FLOATING?: string;
+	/** "true" redacts secret-looking text in assistant submissions. Default off. */
+	readonly VITE_ASSISTANT_REDACT?: string;
+	/** "true" shows interactive-only element filtering. Default off. */
+	readonly VITE_BROWSER_ELEMENT_FILTER?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;

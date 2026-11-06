@@ -139,3 +139,42 @@
   .assistant-live-browser__privacy { overflow: hidden; text-overflow: ellipsis; }
   .assistant-live-browser__toolbar { gap: 8px; padding-inline: 8px; }
 }
+.assistant-live-browser__annotate {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid #dfddda;
+  border-radius: 7px;
+  background: #fff;
+  color: #373633;
+  font: inherit;
+  cursor: pointer;
+}
+.assistant-live-browser__annotate-panel {
+  position: absolute;
+  z-index: 3;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  gap: 6px;
+  width: min(280px, calc(100% - 20px));
+  padding: 10px;
+  border: 1px solid #dfddda;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 6px 20px rgb(22 22 22 / 12%);
+}
+.assistant-live-browser__annotate-panel textarea {
+  width: 100%;
+  font: inherit;
+}
+.assistant-live-browser__annotate-mark {
+  position: absolute;
+  z-index: 2;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #a84a2a;
+  border-radius: 50%;
+  pointer-events: none;
+}
