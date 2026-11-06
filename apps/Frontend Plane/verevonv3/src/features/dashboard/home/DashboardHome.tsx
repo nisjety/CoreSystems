@@ -51,6 +51,9 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   const [searchExpanded, setSearchExpanded] = createSignal(false)
   const [searchPreviewActive, setSearchPreviewActive] = createSignal(false)
   const [webBrowserActive, setWebBrowserActive] = createSignal(false)
+  // Split chat/browser view (slice 7, behind VITE_WORKSPACE_SPLIT=true): the
+  // composer stays visible next to the agent browser instead of being hidden.
+  const [splitView, setSplitView] = createSignal(false)
   const [knowledgePreviewActive, setKnowledgePreviewActive] = createSignal(false)
   const [cardsRevealed, setCardsRevealed] = createSignal(false)
   // Bumped to remount the search panel, which drops its ~30 local signals at once.
@@ -210,6 +213,9 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             <div class="home-agent-browser-switch" role="group" aria-label={i18n.tr('Nettvisning', 'Web view')}>
               <button type="button" aria-pressed={showAgentBrowser() ? 'true' : 'false'} onClick={() => setShowAgentBrowser(true)}>{browserView()?.browserClaimed ? i18n.tr('Nettleser fra oppgaven', 'Task browser') : i18n.tr('Agentens nettleser', 'Agent browser')}</button>
               <button type="button" aria-pressed={showAgentBrowser() ? 'false' : 'true'} onClick={() => setShowAgentBrowser(false)}>{i18n.tr('Ditt nettsøk', 'Your web search')}</button>
+              <Show when={import.meta.env.VITE_WORKSPACE_SPLIT === 'true'}>
+                <button type="button" aria-pressed={splitView() ? 'true' : 'false'} onClick={() => setSplitView((value) => !value)}>{splitView() ? i18n.tr('Del visning av', 'Split view on') : i18n.tr('Del visning', 'Split view')}</button>
+              </Show>
             </div>
           </Show>
           <Show when={agentBrowserVisible() && browserView()}>{view => <div class="home-agent-browser-view">
@@ -220,7 +226,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
           <Show when={workSection()}>{(selected) => <DashboardSectionOverview section={selected()} />}</Show>
 
           <Show when={activeTab() !== 'Chat'}>
-          <section class={composerSectionClass()} hidden={agentBrowserVisible()}>
+          <section class={composerSectionClass()} hidden={agentBrowserVisible() && !splitView()}>
             <DashboardComposerPanel
               activeTab={activeTab()}
               browserContextVisible={!agentBrowserVisible()}

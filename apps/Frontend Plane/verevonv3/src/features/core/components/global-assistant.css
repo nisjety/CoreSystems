@@ -90,6 +90,19 @@ a.global-assistant__open-chat { align-self: flex-start; display: inline-flex; te
 @media (max-width: 640px) {
   .global-assistant--dock-right, .global-assistant--dock-left { left: 12px; right: 12px; width: auto; }
 }
+.global-assistant--dock-floating {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  left: auto;
+  transform: none;
+  z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(70dvh, 560px);
+  border-radius: 14px;
+  box-shadow: 0 14px 40px rgb(22 22 22 / 18%);
+}
+.global-assistant--dock-floating .global-assistant__conversation { overflow: auto; }
 .global-assistant .dashboard-composer-model-menu {
   top: auto;
   bottom: calc(100% + 8px);

@@ -85,7 +85,10 @@ export function GlobalAssistant(props: {
   // WS9.G dock positions. Off unless VITE_ASSISTANT_DOCK_POSITION=true; when off
   // the dock stays at its bottom position and the saved preference is ignored.
   const dockPositionEnabled = () => import.meta.env.VITE_ASSISTANT_DOCK_POSITION === 'true'
-  const dockPosition = () => (dockPositionEnabled() ? layout().dockPosition : 'bottom')
+  // Floating composer (slice 7, behind VITE_ASSISTANT_FLOATING=true): a
+  // free-floating card over the page instead of a docked strip.
+  const floatingEnabled = () => import.meta.env.VITE_ASSISTANT_FLOATING === 'true'
+  const dockPosition = () => floatingEnabled() ? 'floating' : dockPositionEnabled() ? layout().dockPosition : 'bottom'
   const dockClass = () => `global-assistant global-assistant--dock-${dockPosition()}`
   const cycleDockPosition = () => {
     const order = ['bottom', 'right', 'left'] as const
