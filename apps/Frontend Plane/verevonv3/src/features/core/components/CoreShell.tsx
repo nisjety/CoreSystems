@@ -13,6 +13,7 @@ import { createAssistantNavigationAgent, type AssistantNavigationAgentState } fr
 import { assistantBrowserTarget, createAssistantBrowserAgent } from '@/features/core/assistant-agent/assistant-browser-agent'
 import { AssistantBrowserContext, type NettBrowserOwner, type NettTabSelection } from '@/features/core/assistant-agent/assistant-browser-context'
 import { isAssistantTaskBusy, submitAssistantTask } from '@/features/core/assistant-agent/assistant-task-routing'
+import { maybeRedact } from '@/features/core/assistant-agent/sensitive-redact'
 import { clearAssistantChatDraft, queueAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
 import type { ChatSourceScope } from '@/shared/actions/chat-source-scope'
@@ -194,7 +195,8 @@ export function CoreShell(props: { children?: JSX.Element }) {
   })
   const submitAssistant = async (goal: string) => {
     const selection = continueTab()
-    if (!selection) return submitOrdinaryAssistant(goal)
+    if (!selection) return submitOrdinaryAssistant(maybeRedact(goal))
+    const redactedGoal = maybeRedact(goal)
     const current = await currentOwnedTab(AbortSignal.timeout(5000), selection.sessionId)
     if (continueTab() !== selection) throw new Error(i18n.tr('Fanevalget er avbrutt. Utkastet er beholdt.', 'The tab selection was cancelled. Your draft has been kept.'))
     if (assistantTaskBusy()) throw new Error(i18n.tr('En oppgave er allerede i gang.', 'A task is already running.'))
@@ -203,7 +205,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
       throw new Error(i18n.tr('Fanen er endret. Velg fanen på nytt for å fortsette.', 'The tab has changed. Select it again to continue.'))
     }
     navigationAgent.reset()
-    await browserAgent.send(goal, selection.origin, {
+    await browserAgent.send(redactedGoal, selection.origin, {
       sessionId: selection.sessionId,
       tabId: selection.tabId,
       expectedEpoch: selection.tabEpoch,
