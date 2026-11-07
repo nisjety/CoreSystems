@@ -838,6 +838,7 @@ pub(crate) mod tests {
             ("http_routes.rs", "analyze_language_with_operation"),
             ("http_routes.rs", "ai_realtime"),
             ("http_routes.rs", "ai_video_generate"),
+            ("review_run_routes.rs", "review_run_with"),
             ("dataplane.rs", "reject_zdr_durable_mutation"),
             ("dataplane.rs", "retrieve"),
             ("finetune_routes.rs", "require_non_zdr_finetune_mutation"),
@@ -1073,6 +1074,11 @@ pub(crate) mod tests {
                 "http_routes.rs",
                 "recommend_plan",
                 "no route (zdr_or_refuse)",
+            ),
+            (
+                "review_run_routes.rs",
+                "review_run_with",
+                "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
             ),
             (
                 "http_routes.rs",
