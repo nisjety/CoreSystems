@@ -112,6 +112,13 @@ import { hostnameOf } from './knowledge-preview'
 import { ConsoleFilterBar, emptyConsoleFilter, filterConsoleEntries, type ConsoleFilter } from '@/features/browser/evidence/ConsoleFilterBar'
 import { EgressReceiptsPanel } from '@/features/browser/evidence/EgressReceiptsPanel'
 import { ProcedurePanel } from '@/features/browser/evidence/ProcedurePanel'
+import { BrowserReplayScrubber } from '@/features/browser/replay/BrowserReplayScrubber'
+import {
+  replayFallbackFrame,
+  replayScrubberAvailable,
+  replayScrubberEnabled,
+  replayScrubSteps,
+} from '@/features/browser/replay/browser-replay-scrubber'
 import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
 import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
 import { assistantBrowserTarget } from '@/features/core/assistant-agent/assistant-browser-agent'
@@ -759,6 +766,10 @@ export function BrowserChrome(props: {
         url: session().url,
       }]
   const timelineTabs = () => session().timeline.filter((entry) => entry.step > 0).slice(-8)
+  // Replay scrubber (F-t3-050 R1, behind VITE_BROWSER_REPLAY_SCRUBBER=true). It covers every recorded
+  // step, and while one is on screen the frame never falls back to a later frame.
+  const replaySteps = () => replayScrubSteps(session().timeline)
+  const replayScrubbing = () => replayScrubberEnabled() && selectedTimelineStep() !== null
   const replayEvents = () => session().replayEvents.slice(-12)
   const ownerTimeline = () => session().ownerTimeline?.slice(-24) ?? []
   const selectedTimelineEntry = () => {
@@ -801,7 +812,7 @@ export function BrowserChrome(props: {
       selectedTimelineEntry()?.screenshotUrl,
       selectedTimelineStep() === null ? streamFrameSrc() : null,
       liveFrameSrc(),
-      session().frameUrl,
+      replayFallbackFrame(replayScrubbing(), session().frameUrl),
     ].filter((url): url is string => Boolean(url))
     return candidates.find((url) => brokenFrameUrl() !== url) ?? null
   }
@@ -2520,7 +2531,9 @@ export function BrowserChrome(props: {
               when={searchQuery() ? null : frameUrl()}
               keyed
               fallback={
-                searchQuery() ? null : <div class="knowledge-browser-chrome__domlist">
+                searchQuery() ? null : replayScrubbing() ? (
+                  <p class="knowledge-browser-empty">{i18n.tr('Ingen skjermbilde for dette steget.', 'No screenshot for this step.')}</p>
+                ) : <div class="knowledge-browser-chrome__domlist">
                   <DomNodeList nodes={session().domNodes} />
                 </div>
               }
@@ -2828,6 +2841,13 @@ export function BrowserChrome(props: {
                   )}
                 </For>
               </div>
+            </Show>
+            <Show when={replayScrubberEnabled() && replayScrubberAvailable(replaySteps())}>
+              <BrowserReplayScrubber
+                steps={replaySteps()}
+                selectedStep={selectedTimelineStep()}
+                onSeek={(step) => setSelectedTimelineStep(step)}
+              />
             </Show>
             <div class="knowledge-browser-timeline" aria-label="Nettleserhistorikk">
               <button
