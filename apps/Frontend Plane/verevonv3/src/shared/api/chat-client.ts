@@ -3885,7 +3885,7 @@ export type SavedArtifactRevision = {
   kind: string
   title: string
   content: string
-  editorKind: string
+  editorKind: ArtifactEditorKind
   restoredFromVersion?: number
   createdAt: string
 }
@@ -3953,7 +3953,7 @@ function normalizeSavedArtifactRevision(raw: unknown): SavedArtifactRevision {
     kind: str(record.kind) ?? '',
     title: typeof record.title === 'string' ? record.title : '',
     content: typeof record.content === 'string' ? record.content : '',
-    editorKind: str(record.editor_kind) ?? 'user',
+    editorKind: isArtifactEditorKind(record.editor_kind) ? record.editor_kind : 'user',
     ...(restored != null && restored > 0 ? { restoredFromVersion: restored } : {}),
     createdAt: str(record.created_at) ?? '',
   }

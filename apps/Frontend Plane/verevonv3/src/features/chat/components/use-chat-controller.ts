@@ -142,6 +142,9 @@ import {
 } from '@/shared/api/thread-goal-client'
 import {
   findArtifactById,
+  foldSavedRevision,
+  newestTurnCarrying,
+  type SavedRevision,
 } from './chat-artifacts'
 import {
   collectArtifactItems,
@@ -5376,6 +5379,19 @@ export function useChatController() {
     })
   }
 
+  /**
+   * Folds a revision the person saved or restored in the Output panel (EP-3 S4) into the newest turn that carries its
+   * artifact, so the panel and the message chips show it as the newest version. The fold stays in memory: the revision
+   * store is the record, and the panel reads it back when it opens.
+   */
+  const foldSavedArtifactRevision = (revision: SavedRevision) => {
+    setState((s) => {
+      const turn = s.turns[newestTurnCarrying(s.turns, revision.artifactId)]
+      if (!turn?.artifacts) return
+      turn.artifacts = foldSavedRevision(turn.artifacts, revision)
+    })
+  }
+
   return {
     hasMessages,
     isStreaming,
@@ -5384,6 +5400,7 @@ export function useChatController() {
     latestGrounding,
     artifactItems,
     artifacts,
+    foldSavedArtifactRevision,
     latestScreen,
     liveRunId,
     runPanelCollapsed,

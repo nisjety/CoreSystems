@@ -554,6 +554,47 @@ export function mergeServerRevisions(artifact: ChatArtifact, revisions: ChatArti
   return merged
 }
 
+/** A revision the person saved or restored in the Output panel (EP-3 S4), as the conversation folds it in. */
+export type SavedRevision = {
+  artifactId: string
+  content: string
+  title: string
+  version: number
+  editorKind: NonNullable<ChatArtifactVersion['editorKind']>
+  restoredFromVersion?: number
+}
+
+/** A saved revision as one more revision of its artifact, so the stepper labels it "you" or "restored". */
+export function savedRevisionVersion(revision: SavedRevision): ChatArtifactVersion {
+  return {
+    content: revision.content,
+    title: revision.title,
+    version: revision.version,
+    editorKind: revision.editorKind,
+    ...(revision.restoredFromVersion ? { restoredFromVersion: revision.restoredFromVersion } : {}),
+  }
+}
+
+/**
+ * The position of the newest turn that carries an artifact with this id, or -1. A saved revision is folded into that
+ * turn, so the newest version of the artifact is the one the person saved.
+ */
+export function newestTurnCarrying(turns: ReadonlyArray<{ artifacts?: ChatArtifact[] }>, artifactId: string): number {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (turns[index]?.artifacts?.some((artifact) => artifact.id === artifactId)) return index
+  }
+  return -1
+}
+
+/** The artifacts with a saved revision folded into the one it belongs to; the others are returned as they are. */
+export function foldSavedRevision(artifacts: ChatArtifact[], revision: SavedRevision): ChatArtifact[] {
+  return artifacts.map((artifact) => (
+    artifact.id === revision.artifactId
+      ? mergeServerRevisions(artifact, [savedRevisionVersion(revision)])
+      : artifact
+  ))
+}
+
 /** Finds the artifact with this id anywhere in a set of per-turn artifact lists. */
 export function findArtifactById(lists: Array<ChatArtifact[] | undefined>, id: string): ChatArtifact | undefined {
   let found: ChatArtifact | undefined

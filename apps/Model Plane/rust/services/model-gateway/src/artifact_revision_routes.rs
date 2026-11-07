@@ -248,11 +248,13 @@ pub(crate) struct ComposerCapabilities {
     selection_edit: bool,
 }
 
-fn capabilities_for(mode: ArtifactRevisionsMode, zdr: bool) -> ComposerCapabilities {
+fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
     ComposerCapabilities {
         // A ZDR caller would only be refused the read, so the panel is told not to ask.
         artifact_history: mode == ArtifactRevisionsMode::On && !zdr,
-        artifact_editing: false,
+        // The edit routes need the revision table on (startup refuses editing otherwise) and refuse
+        // ZDR at the write, so the panel offers nothing a write would refuse.
+        artifact_editing: editing && mode == ArtifactRevisionsMode::On && !zdr,
         context_refs: false,
         thread_references: false,
         selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
@@ -269,7 +271,9 @@ pub(crate) async fn composer_capabilities(
         &crate::zdr_posture::Route::plain(false),
     )
     .unwrap_or(true);
-    Json(json!({ "data": capabilities_for(state.artifact_revisions_mode, zdr) }))
+    Json(json!({
+        "data": capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr)
+    }))
 }
 
 #[cfg(test)]
@@ -588,12 +592,51 @@ mod tests {
 
     #[test]
     fn capabilities_reflect_switches() {
-        assert!(!capabilities_for(ArtifactRevisionsMode::Off, false).artifact_history);
-        assert!(!capabilities_for(ArtifactRevisionsMode::Shadow, false).artifact_history);
-        assert!(capabilities_for(ArtifactRevisionsMode::On, false).artifact_history);
-        assert!(!capabilities_for(ArtifactRevisionsMode::On, true).artifact_history);
-        let on = capabilities_for(ArtifactRevisionsMode::On, false);
+        assert!(!capabilities_for(ArtifactRevisionsMode::Off, false, false).artifact_history);
+        assert!(!capabilities_for(ArtifactRevisionsMode::Shadow, false, false).artifact_history);
+        assert!(capabilities_for(ArtifactRevisionsMode::On, false, false).artifact_history);
+        assert!(!capabilities_for(ArtifactRevisionsMode::On, false, true).artifact_history);
+        let on = capabilities_for(ArtifactRevisionsMode::On, false, false);
         assert!(!on.artifact_editing && !on.context_refs && !on.thread_references && !on.selection_edit);
+    }
+
+    #[test]
+    fn artifact_editing_is_offered_only_with_its_switch_revisions_on_and_no_zdr() {
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::On, false, false).artifact_editing,
+            "off by default"
+        );
+        assert!(capabilities_for(ArtifactRevisionsMode::On, true, false).artifact_editing);
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::On, true, true).artifact_editing,
+            "a ZDR write is refused, so nothing is offered"
+        );
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::Shadow, true, false).artifact_editing,
+            "no table to edit over"
+        );
+        assert!(!capabilities_for(ArtifactRevisionsMode::Off, true, false).artifact_editing);
+    }
+
+    #[tokio::test]
+    async fn the_capabilities_route_reports_the_editing_switch() {
+        let mut state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;
+        let Json(off) = composer_capabilities(
+            State(state.clone()),
+            Extension(claims("org-1", OWNER, false)),
+        )
+        .await;
+        assert_eq!(off["data"]["artifact_editing"], false);
+        state.artifact_editing_enabled = true;
+        let Json(on) = composer_capabilities(
+            State(state.clone()),
+            Extension(claims("org-1", OWNER, false)),
+        )
+        .await;
+        assert_eq!(on["data"]["artifact_editing"], true);
+        let Json(zdr) =
+            composer_capabilities(State(state), Extension(claims("org-1", OWNER, true))).await;
+        assert_eq!(zdr["data"]["artifact_editing"], false);
     }
 
     #[tokio::test]

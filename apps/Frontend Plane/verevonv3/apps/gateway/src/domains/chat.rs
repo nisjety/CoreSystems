@@ -66,6 +66,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions",
             get(artifacts::list_artifact_revisions),
         )
+        // The person's edit and restore in the Output panel (EP-3 S4); the gateway refuses what it may not.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}",
+            put(artifacts::save_artifact_revision),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/restore",
+            post(artifacts::restore_artifact_revision),
+        )
         .route(
             "/api/v1/chat/composer-capabilities",
             get(artifacts::get_composer_capabilities),

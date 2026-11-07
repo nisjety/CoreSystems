@@ -28,7 +28,7 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
-import { getThreadContext } from '@/shared/api/chat-client'
+import { getComposerCapabilities, getThreadContext } from '@/shared/api/chat-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
 import {
@@ -111,6 +111,7 @@ export default function ChatPage() {
     evidenceSources,
     latestGrounding,
     artifactItems,
+    foldSavedArtifactRevision,
     latestScreen,
     liveRunId,
     runPanelCollapsed,
@@ -218,6 +219,9 @@ export default function ChatPage() {
   const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
   // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
   const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
+  // EP-3 S4. The gateway's own answer on whether the Output panel may edit an artifact; `artifactEditing` is false until it says otherwise.
+  const [composerCapabilities] = createResource(() => getComposerCapabilities())
+  const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
   const transcriptDensity = createTranscriptDensity()
@@ -1097,7 +1101,18 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} onAskAboutSelection={askAboutArtifactSelection} />
+            <ArtifactsPanel
+              items={artifactItems()}
+              history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
+              editing={{
+                enabled: composerCapabilities()?.artifactEditing === true,
+                threadId: state.threadId ?? '',
+                temporary: artifactTemporary(),
+                spaceThread: spaceScoped(),
+                onSaved: foldSavedArtifactRevision,
+              }}
+              onAskAboutSelection={askAboutArtifactSelection}
+            />
           </Show>
         </Show>
       </Match>
