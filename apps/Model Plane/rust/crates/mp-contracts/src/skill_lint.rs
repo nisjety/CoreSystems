@@ -391,7 +391,10 @@ mod tests {
     /// changed in the file without both readers being retested fails here and there.
     #[test]
     fn skill_lint_contract_digest_is_the_pinned_one() {
-        let pinned = PIN.split_whitespace().next().expect("the pin names a digest");
+        let pinned = PIN
+            .split_whitespace()
+            .next()
+            .expect("the pin names a digest");
         assert_eq!(
             pin_digest(CONTRACT),
             pinned,
@@ -403,7 +406,10 @@ mod tests {
     /// one of them fails here and in the Go test.
     #[test]
     fn skill_lint_golden_digest_is_the_pinned_one() {
-        let pinned = GOLDEN_PIN.split_whitespace().next().expect("the pin names a digest");
+        let pinned = GOLDEN_PIN
+            .split_whitespace()
+            .next()
+            .expect("the pin names a digest");
         assert_eq!(
             pin_digest(GOLDEN),
             pinned,
