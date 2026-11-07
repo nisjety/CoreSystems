@@ -1,0 +1,472 @@
+{
+  "schema": "verevon.flag-registry/v1",
+  "flags": [
+    {
+      "name": "AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Second Do-mode switch. Lets subscription runs take effects. It grants nothing while AGENTIC_SUBSCRIPTION_ENABLED is off.",
+      "declarations": [
+        { "service": "execution-core", "env": "AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", "default": "false" },
+        { "service": "model-gateway", "env": "AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", "default": "false" }
+      ]
+    },
+    {
+      "name": "AGENTIC_SUBSCRIPTION_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Do-mode master switch for ChatGPT-subscription runs, the agentic loop.",
+      "declarations": [
+        { "service": "execution-core", "env": "AGENTIC_SUBSCRIPTION_ENABLED", "default": "false" },
+        { "service": "inference-core", "env": "AGENTIC_SUBSCRIPTION_ENABLED", "default": "false" },
+        { "service": "model-gateway", "env": "AGENTIC_SUBSCRIPTION_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "ALLOWED_MODELS",
+      "kind": "text",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "",
+      "purpose": "Comma-separated model allowlist for the gateway. Unset or empty allows every model.",
+      "codePath": "apps/Model Plane/rust/services/model-gateway/src/normalize.rs"
+    },
+    {
+      "name": "ALLOW_DEV_ACTOR_HEADERS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "devOnly": true,
+      "purpose": "Dev actor headers for the BFF. Refused, with a log line, when APP_ENV is production or prod.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "ALLOW_DEV_AUTH_BYPASS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "devOnly": true,
+      "purpose": "Dev auth bypass for the BFF. Refused, with a log line, when APP_ENV is production or prod.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "ALLOW_INSECURE_DEV_DEFAULTS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "devOnly": true,
+      "purpose": "Lets a release build boot with placeholder dev keys. Development only, and APP_ENV does not refuse it. Several planes read this name; Model Plane compose forwards it blank.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+      "declarations": [
+        { "service": "model-gateway", "env": "ALLOW_INSECURE_DEV_DEFAULTS", "default": "" }
+      ]
+    },
+    {
+      "name": "AZURE_ANTHROPIC_ZDR_CONFIRMED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Legacy ZDR boolean for the Azure Anthropic surface. An unattested true fails boot, because ZDR now needs the attestation fields. Leave false.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "inference-core", "env": "AZURE_ANTHROPIC_ZDR_CONFIRMED", "default": "false" }
+      ]
+    },
+    {
+      "name": "AZURE_OPENAI_ZDR_CONFIRMED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Legacy ZDR boolean for the Azure OpenAI surface. An unattested true fails boot, because ZDR now needs the attestation fields. Leave false.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "inference-core", "env": "AZURE_OPENAI_ZDR_CONFIRMED", "default": "false" }
+      ]
+    },
+    {
+      "name": "CONTROL_PLANE_ENFORCEMENT",
+      "kind": "choice",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "off",
+      "values": ["off", "permissive", "strict"],
+      "purpose": "Control-plane enforcement mode for the BFF. Unknown values fall back to off.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CRON_SWEEPER_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Background cron sweeper in capability-core. Only the exact value false turns it off.",
+      "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "DREAMING_LLM_EXTRACTION",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "0",
+      "purpose": "Dreaming LLM extraction, which sends chat transcripts to a model to propose memories.",
+      "codeDefault": "true",
+      "driftReason": "Code is on when unset (env_flag default true). Compose ships 0 because extraction would send user chats to a paid model on this stack. Owner decision: keep one side or the other.",
+      "declarations": [
+        { "service": "session-core", "env": "DREAMING_LLM_EXTRACTION", "default": "0" }
+      ]
+    },
+    {
+      "name": "EXECUTION_POST_MUTATION_VERIFY_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Reads each write back in the loop and records the result. Read on every write, so a change needs a restart.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_POST_MUTATION_VERIFY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "FINETUNE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "0",
+      "purpose": "Fine-tuning routes master switch. Only the exact value 1 enables it.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "FINETUNE_ENABLED", "default": "0" }
+      ]
+    },
+    {
+      "name": "INFERENCE_LOGPROBS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Master switch for the logprobs request parameter on every provider. 0, false, no or off turns it off.",
+      "onDefaultReason": "On by default. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/rust/services/inference-core/src/provider/logprobs.rs"
+    },
+    {
+      "name": "LEARNING_REVIEW_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Kill switch for the learning review, which sends session transcripts to LEARNING_REVIEW_MODEL.",
+      "codeDefault": "true",
+      "driftReason": "Code is on when unset (parseLearningReviewSwitch). Compose ships false so a stack can keep every model call on one route. Owner decision: keep one side or the other.",
+      "declarations": [
+        { "service": "capability-core", "env": "LEARNING_REVIEW_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "LEARNING_RUN_EVENTS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Writes the run-completed outbox row that feeds the learning loop. false, 0, off or no skips the insert, so no review runs.",
+      "onDefaultReason": "On by default so the learning loop is live. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/rust/services/session-core/src/learning_events.rs"
+    },
+    {
+      "name": "LETTA_TOOL_SEARCH_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Turns on Letta tool search. Parsed strictly: any value other than true or false is a configuration error.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "capability-core", "env": "LETTA_TOOL_SEARCH_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "LETTA_TOOL_SEARCH_MODE",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "hybrid",
+      "values": ["vector", "fts", "hybrid"],
+      "purpose": "Letta tool-search retrieval mode. The client rejects any other value.",
+      "declarations": [
+        { "service": "capability-core", "env": "LETTA_TOOL_SEARCH_MODE", "default": "hybrid" }
+      ]
+    },
+    {
+      "name": "MCP_DNS_REVALIDATOR_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Background DNS revalidator for MCP servers in capability-core. Only the exact value false turns it off.",
+      "onDefaultReason": "Background revalidator on by default. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "MEMORY_GROUNDING_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "0",
+      "purpose": "Memory grounding pass that lets Dreaming classify candidates. Off by default because it flips is_latest on existing rows.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "session-core", "env": "MEMORY_GROUNDING_ENABLED", "default": "0" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "purpose": "Stable prompt ordering for cache hits on OpenAI-API chat routes. Blank means off.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER", "default": "" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET",
+      "kind": "text",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "purpose": "Token budget for history compaction. Blank keeps message-count compaction.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET", "default": "" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "purpose": "Deduplicates the context history on OpenAI-API chat routes. Blank means off.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY", "default": "" }
+      ]
+    },
+    {
+      "name": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Admits Azure deployments of type Global or Worldwide. Without it such a deployment fails startup, because it cannot honour the EU claim. Deny by default.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "inference-core", "env": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Admits providers that declare no residency commitment, such as the direct vendor APIs. Deny by default.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "inference-core", "env": "MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_PLANE_ALLOW_NON_EU_EMBEDDING",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Allows embedding calls outside the EU residency boundary. Deny by default: without it a non-EU embedding fails startup and is refused.",
+      "codePath": "apps/Model Plane/rust/services/inference-core/src/config.rs"
+    },
+    {
+      "name": "PROCESS_SWEEPER_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Process sweeper in sandbox-manager. Only the value false, after trimming, turns it off.",
+      "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/go/services/sandbox-manager/internal/process/sweeper.go"
+    },
+    {
+      "name": "PROMOTE_ON_USE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Counts promote-on-use candidates and logs them. Only the exact lowercase value true enables it.",
+      "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
+    },
+    {
+      "name": "QUARRY_BROWSER_AGENT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "1",
+      "purpose": "Enables the Quarry browser agent in execution-core. It also needs QUARRY_EDGE_URL.",
+      "onDefaultReason": "Compose enables the browser agent on this stack. The code default is off, see driftReason.",
+      "codeDefault": "false",
+      "driftReason": "Code is off unless the value is 1, true, TRUE or yes (quarry_agent from_env). Compose ships 1. Owner decision: keep one side or the other.",
+      "declarations": [
+        { "service": "execution-core", "env": "QUARRY_BROWSER_AGENT_ENABLED", "default": "1" }
+      ]
+    },
+    {
+      "name": "TASK_EXECUTOR_ENABLED",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "values": ["", "false", "true"],
+      "purpose": "Task executor. false turns it off. true turns it on even without a workflow dispatcher. Blank runs it only when workflow-backed.",
+      "declarations": [
+        { "service": "capability-core", "env": "TASK_EXECUTOR_ENABLED", "default": "" }
+      ]
+    },
+    {
+      "name": "VEREVON_INTENT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "1",
+      "purpose": "Verevon intent layer. On unless set to a falsey value.",
+      "onDefaultReason": "A product feature on by default in code and on this stack.",
+      "codeDefault": "true",
+      "declarations": [
+        { "service": "inference-core", "env": "VEREVON_INTENT_ENABLED", "default": "1" }
+      ]
+    },
+    {
+      "name": "WATCH_SWEEPER_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Background watch sweeper in capability-core. Only the exact value false turns it off.",
+      "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
+      "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "WIDE_RESEARCH_FAN_OUT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "true",
+      "purpose": "Kill switch for the wide-research fan-out tool. 0, false, off, no or disabled stops offering and dispatching it.",
+      "onDefaultReason": "A kill switch, on by design, for the subscription route's rate limits.",
+      "codeDefault": "true",
+      "declarations": [
+        { "service": "execution-core", "env": "WIDE_RESEARCH_FAN_OUT_ENABLED", "default": "true" }
+      ]
+    }
+  ],
+  "unregistered": [
+    "AGENTIC_SPACE_RETRIEVAL_ENABLED",
+    "AGENT_ASK_USER_ENABLED",
+    "AGENT_ASK_USER_RESUME_ENABLED",
+    "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED",
+    "AGENT_MEMORY_AUTH_MODE",
+    "APPROVAL_AUDIT_EVENTS_ENABLED",
+    "APPROVAL_DENIAL_MEMORY_ENABLED",
+    "APPROVAL_EDIT_ENABLED",
+    "APPROVAL_RULE_PROPOSALS_ENABLED",
+    "APPROVAL_SHELL_RULE_PROPOSALS_ENABLED",
+    "APPROVAL_WRITE_PREVIEW_ENABLED",
+    "AUTHORED_KINDS_ENABLED",
+    "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED",
+    "BROWSER_BROKER_HUMAN_BROWSE_ENABLED",
+    "BROWSER_BROKER_KEY_GRANTS_ENABLED",
+    "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED",
+    "BUILTIN_OFFICE_SKILLS_ENABLED",
+    "CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED",
+    "CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED",
+    "CHAT_ATTACHMENT_POLICY_ENABLED",
+    "CHAT_DO_ATTACHMENTS_ENABLED",
+    "CHAT_VISION_AS_PARTS_ENABLED",
+    "CONNECTOR_ASK_READS_ENABLED",
+    "CONNECTOR_SUGGESTIONS_ENABLED",
+    "CONTENT_SAFETY_SHADOW_SAMPLE_RATE",
+    "CRON_CONTRACT_GUARDS_ENABLED",
+    "CRON_RUN_NOW_ENABLED",
+    "EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK",
+    "EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK",
+    "EXECUTION_CORE_QUARANTINE_MODE",
+    "EXECUTION_DO_BROWSER_ACT_ENABLED",
+    "EXECUTION_DO_BROWSER_ENABLED",
+    "EXECUTION_EFFECT_LEDGER_ENABLED",
+    "EXECUTION_LOOP_CHECKPOINT_ENABLED",
+    "EXECUTION_LOOP_PARKING_ENABLED",
+    "EXECUTION_LOOP_RESUME_ENABLED",
+    "EXECUTION_SCHEDULED_AGENT_ENABLED",
+    "LEARN_COMMAND_ENABLED",
+    "LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK",
+    "LOOP_GUARD_MODE",
+    "MCP_APPS_ENABLED",
+    "MCP_ELICITATION_ENABLED",
+    "MCP_TOOL_OBSERVATION_ENABLED",
+    "MEMORY_CONTROLS_ENABLED",
+    "MODEL_ENTITLEMENT_MODE",
+    "MODEL_GATEWAY_CONTEXT_REFS_ENABLED",
+    "MODEL_GATEWAY_LOOP_PARKING_ENABLED",
+    "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED",
+    "MODEL_GATEWAY_PLAN_EXECUTE_ENABLED",
+    "MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED",
+    "MODEL_GATEWAY_SELECTION_EDIT_ENABLED",
+    "MODEL_GATEWAY_THREAD_GOALS_ENABLED",
+    "MODEL_GATEWAY_THREAD_REFERENCES_ENABLED",
+    "MODEL_PLANE_ALLOW_NON_EU_TTS",
+    "ORG_AGENT_POLICY_MODE",
+    "QUARRY_BROWSER_AGENT_PLANNER_MODE",
+    "SANDBOX_THREAD_WORKSPACE_ENABLED",
+    "SCHEDULE_CONTRACT_ENABLED",
+    "SESSION_AGENT_MEMORY_ENABLED",
+    "SESSION_CORE_ARTIFACT_REVISIONS_ENABLED",
+    "SESSION_CORE_ATTENTION_ENABLED",
+    "SESSION_CORE_ATTENTION_EVENTS_ENABLED",
+    "SESSION_CORE_ATTENTION_STREAM_ENABLED",
+    "SESSION_CORE_CRASH_PARK_ENABLED",
+    "SESSION_CORE_LOOP_CHECKPOINT_ENABLED",
+    "SESSION_CORE_MESSAGE_SEARCH_ENABLED",
+    "SESSION_CORE_MESSAGE_VERSIONS_ENABLED",
+    "SESSION_CORE_PARK_RECOVERY_ENABLED",
+    "SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED",
+    "SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED",
+    "SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED",
+    "SESSION_CORE_ROUTING_CANDIDATES_ENABLED",
+    "SESSION_CORE_THREAD_FORK_ENABLED",
+    "SESSION_CORE_THREAD_GOALS_ENABLED",
+    "SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED",
+    "SESSION_SPACE_MEMORY_ENABLED",
+    "SESSION_THREAD_EXPORT_ENABLED",
+    "SESSION_THREAD_IMPORT_ENABLED",
+    "SESSION_THREAD_SHARES_ENABLED",
+    "SESSION_USER_PROFILE_ENABLED",
+    "SKILL_BUNDLES_ENABLED",
+    "SKILL_BUNDLE_MOUNT_ENABLED",
+    "SKILL_BUNDLE_READ_RULE_ENABLED",
+    "SKILL_DECK_TEMPLATES_ENABLED",
+    "SKILL_FILE_TOOL_ENABLED",
+    "SKILL_IMPORT_ENABLED",
+    "SKILL_LINT_MODE",
+    "WEB_DOMAIN_POLICY_MODE",
+    "WIDE_RESEARCH_ENTRY_ENABLED"
+  ]
+}
