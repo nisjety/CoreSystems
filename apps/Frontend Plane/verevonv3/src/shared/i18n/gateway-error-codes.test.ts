@@ -145,6 +145,11 @@ const CALLER_WORDS_IT: Record<string, string> = {
   space_policy_admin_disabled: 'a 404 that hides the org Space policy console; OrgSpacePolicySection draws its own "not switched on for this installation" notice',
   browser_policy_admin_disabled: 'a 404 that hides the organization browser policy section; BrowserPolicySection is not mounted unless VITE_BROWSER_POLICY_SETTINGS is on, and a failed load hides it too, so no person sees this code',
   space_room_artifacts_disabled: 'a 404 that turns the room Artifacts tab into its disabled state; SpaceArtifactsTab draws its own notice',
+  edit_requires_grant: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  edit_requires_once: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  edit_too_large: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, which names the message as too long',
+  invalid_patch: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  invalid_base_fingerprint: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
 }
 
 // Strings the scan meets that are not error codes at all.
@@ -224,6 +229,9 @@ const INTERNAL_ONLY: Record<string, string> = {
   space_role_insufficient: 'Control Plane names it as the reason of a Space denial; the gateway sends it inside details.reason of a typed refusal and the denial presenter words it',
   mail_task_pipeline_failed: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
   mail_task_pipeline_not_configured: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
+  capabilities_unavailable: 'the composer capabilities read (EP-3 S8) runs in the background; getComposerCapabilities reads any failure as nothing offered and no person reads the code',
+  invalid_origin: 'the promote-to-document body (EP-3 S8) is built by the SPA with a fixed origin; any other origin is a hand-made request',
+  invalid_source_ref: 'the promote-to-document source reference (EP-3 S8) is built by the SPA from the artifact on screen; a malformed one is a client bug',
 }
 
 // A model-entitlement refusal reads its copy from the model-entitlement catalogue, which

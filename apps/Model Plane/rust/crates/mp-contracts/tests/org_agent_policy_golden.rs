@@ -42,6 +42,13 @@ fn org_agent_policy_schema_matches_the_golden_key_by_key() {
             def.key
         );
         assert_eq!(row["status"], def.status.as_str(), "status of {}", def.key);
+        // A row without the field reserves no value; with it, the golden lists the values the key refuses.
+        let reserved: Vec<&str> = row["reserved_values"].as_array().map_or_else(Vec::new, |list| {
+            list.iter()
+                .map(|token| token.as_str().expect("a reserved value is text"))
+                .collect()
+        });
+        assert_eq!(reserved, def.reserved_values, "reserved values of {}", def.key);
     }
 }
 
@@ -64,7 +71,13 @@ fn org_agent_policy_golden_defaults_are_the_documented_document() {
         let key = row["key"].as_str().expect("key is text");
         let default = row["default"].as_str().expect("default is text");
         let value = &settings[key];
+        // An integer key's default is a number; its token is the decimal form the golden holds.
+        let number;
         let in_force = match value {
+            Value::Number(count) => {
+                number = count.to_string();
+                number.as_str()
+            }
             Value::String(text) => text.as_str(),
             Value::Bool(flag) => {
                 if *flag {

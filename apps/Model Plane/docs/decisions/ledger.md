@@ -22,6 +22,18 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-05 - A goal continues unattended only read-only, in service identity (EP-7 S7)
+
+**Status: deferred (design-only slice; trigger: an owner ruling on DEC-02 / OD8 plus a Control Plane security review).** EP-7 S6 (a goal-bound WS20 schedule under a DEC-16 stored-consent contract, service identity, writes withheld as drafts) is the only unattended goal mode. A goal does not continue unattended in the user's delegated identity (connected apps, browser grants, or writes approved while the user is away): that needs a renewable delegated credential, which DEC-02 (b) does not allow, and no bearer is stored in a goal, a fold or a schedule (`assert_no_credentials`). Not chosen: a stored or renewable user bearer, and a service-principal mint that acts as the user (DEC-16 (c), rejected). Wave 3 builds nothing for S7: no code, no switch, no migration or proto number. Design: docs/plans/wave3/EP-7-persistent-goals.md (S7, decision D6). Supersedes nothing.
+
+---
+
+## 2026-11-04 - Wave 3 owner decisions taken at their recommended options
+
+**Status: decided by the owner ("run the recomended and continue"); no switch flipped.** The 105 open decision rows listed in docs/plans/wave3/OWNER-DECISIONS.md (depth register D0-036 and later, D3-261 and later) are decided at each design's recommended option. For the rows built dark on an assumed default, that default stands. Switches stay off until each feature's live proof; the remaining blocked-decision slices become buildable. Supersedes nothing.
+
+---
+
 ## 2026-11-03 - mp-w2w3 (Model Plane rows of Quarry W2/W3) merged into model-plane; host_class moves to field 11
 
 **Status: merged on model-plane (local merge commit), compile-checked only (cargo check of the workspace, go build of every Model Plane Go module); no test run, not deployed.** On the coordinator's order (2026-11-03) the 177 mp-w2w3 commits come into the Model Plane line, so main takes one Model Plane branch. Decisions: `ApprovalCause.host_class` (mp-w2w3, E3.2-a) moves from field 10 to 11, because model-plane's WS13 S7 `tool_digest` holds 10 and neither is on main; code uses the field by name. The event oneof keeps both `run_usage_progress = 29` and `browser_attach_shared_jar = 30`. Python bindings are regenerated through buf managed mode with the remote plugin (the raw-protoc output of two earlier model-plane regenerations is replaced). Model-plane's Do-loop browser session now calls the C0 Quarry client through `StartRunParams` and `StepParams`; a typed 404/410 from Quarry still ends the session, and a policy denial is a refusal (`GRANT_REFUSED` on open, `ACT_REFUSED` on act). The dreaming candidate query applies both model-plane's memory containment and mp-w2w3's external-content skip. `browser.console` rides the Do browser offer behind the same switch, served by the grant-bound MCP path. Supersedes nothing.
@@ -580,6 +592,94 @@ Open and logged in the depth register: with the switch off the gRPC `ExitPlanMod
 **Status: built in wave mode (unit tests only; depth in the register).**
 
 **EP-12-S13.** add newest-first entry (CRLF) after the '---' following the header: '## 2026-11-03 - Share model: org-only immutable snapshots on a new ownable type (EP-12 D10, DEC-40)' / blank / '**Status: proposed.** ADR `docs/decisions/conversation-share-model.md` (awaits owner OD-5). A conversation is shared as an immutable redacted snapshot in session-core, granted per org member through Control `resource_grants` on the new ownable type `conversation_snapshot` (added to the taxonomy, inert: no owner service). Rejected: a live link (viewer would see later turns and act through the owner's connectors) and a Data Plane document copy (chat state crossing into retrieval). Supersedes nothing.' / blank / '---'
+
+## 2026-11-04 - Wave-mode batch W3-12: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-14-S7.** newest-first entry "Request inspector shows platform prompt sections as label + digest + length only; org, user and memory sections as text; owner only, filtered in session-core (EP-14 D3, assumed default pending PROD + OWN)"
+
+## 2026-11-04 - Wave-mode batch W3-13: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-6-S9.** "Agent definitions stay in Convex and are versioned there; the allowlist and autonomy cap apply tighten-only at invoke; capability-core keeps policy only (EP-6 S9, OD-4 (b), OD-5 (a), DEC-14) - proposed until the owner rules".
+
+**EP-3-S2.** add the entry 'Artifact revisions are thread-owned in session-core; the Space canvas is Data-owned; they link only by promote (EP-3 OD-1, OD-2; OD-8..OD-11 taken by recommendation, owner sign-off pending)'.
+
+## 2026-11-04 - Wave-mode batch W3-14: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-2-S8.** '2026-11-04 - Wide research: org item cap in agent policy (EP-2 S8, D5). research.max_fan_out_items is a capability-core org agent-policy key (integer, tighten-only, default 8, hard max 16, fail-closed 0 = wide research off), stored in the existing JSONB, no migration. The gateway reads it (ORG_AGENT_POLICY_MODE=enforce, otherwise the platform default of 8 applies), clamps the person's ask, and sends WideResearchRequest.item_cap (RunAgentRequest field 25); execution-core uses it as the run's org child ceiling and names items past it in the answer. The entry is behind WIDE_RESEARCH_ENTRY_ENABLED (default off). No confirm gate in v1 (D4); the estimate card is shown before Start.'
+
+## 2026-11-04 - Wave-mode batch W3-15: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-2-S5.** add newest-first entry `## 2026-11-04 - Deep research state lives in the stream and in message metadata, not on a durable run (EP-2 S5, D1, D2, D7, D12, OD-1)` with body `**Status: implemented dark (DEEP_RESEARCH_PLAN_TURN, default off), compile-only.** The plan turn and the run turn are two ordinary turns: the plan reaches the client in a research_plan control event and comes back in the run request (research_phase run, research_plan), where model-gateway re-clamps it like a model plan (length 200, plausibility, case-insensitive de-dup, count <= DEEP_RESEARCH_MAX_SUB_QUERIES; an emptied plan falls back to the model plan). Clarifying questions (<= 3) live in the plan card, not the WS14 question store, because no run exists to pause (D7). The plan is kept as message metadata research_plan on persistent turns only (D12). No table, no migration, no proto. Supersedes nothing.`
+
+**EP-2-S9.** add at the top of the entries (newest first, after the first '---'): '## 2026-11-04 - Wide research: separate child token budget, no confirm gate; per-item retry reads the item back from the child run (EP-2 S9, D4)' / '**Status: built behind `WIDE_RESEARCH_CHILD_BUDGET_ENFORCED` (default off: logged only); not deployed, no live proof.** One fan-out call holds its children to `WIDE_RESEARCH_CHILD_TOKEN_BUDGET` metered tokens (default 400,000; subscription rounds count 0 but still count rounds). Before each item starts, the metered tokens of the call's FINISHED children are compared to the budget; items not started end `budget_reached` and the digest says how many. A started item is never stopped, so in-flight children can overshoot the budget. A retry (`wide_research.retry_of_child_run_id`) is a one-item wide-research run in the same batch; execution-core reads the item from the child run under the person's session bearer (session-core run-owner check) and only from a fan-out item of the same thread. `LineageEdge` reads back goal_summary=5, batch_id=6, status=7 from data session-core already stores, so the grid survives reload. No migration. Supersedes nothing.'
+
+**EP-2-S6.** '2026-11-04 Deep research state lives in the stream and in message metadata, not on a durable run (EP-2 D1, D2; assumed under OD-1 pending owner): the closed research_ledger v1 {version:1, claims[<=24]{id,text<=300,status supported|single_source|conflict|unsupported,sources[n]}, gaps[<=4], pass_count} rides the report artifact provenance stamp (provenance.research_ledger + ledger_digest + claims_by_status + passes), is stored only on non-ZDR non-waived turns, erased with the message, never indexed or fed to memory/learning; the second pass is behind DEEP_RESEARCH_SECOND_PASS (default off) and its D11 guard starts it only if min(wall clock, earliest bearer exp - 30 s) leaves room for a ledger call, a search round, a read batch and synthesis.'
+
+**EP-3-S5.** 'Context tokens use a picker and a slash command, never @' (EP-3 OD-4, assumed default 2026-11-04, pending owner confirmation)
+
+## 2026-11-04 - Wave-mode batch W3-16: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-3-S6.** shared-edit apps/Model Plane/docs/decisions/ledger.md, CRLF: insert above the first `## 2026-11-03` heading (about line 25) a newest-first entry: `## 2026-11-04 - Selection edits are model rewrites with an outside-selection guard; no range-patch API (EP-3 S6, OD-3)` and one bullet: phase 1 only; built dark behind MODEL_GATEWAY_SELECTION_EDIT_ENABLED (needs context refs and artifact revisions on); the selected text is never stored, and only its SHA-256 is sent in the request.
+
+## 2026-11-04 - Wave-mode batch W3-18: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-9-C1.** the design's entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2 last-activity clock, 30..3650 bounds, unset = keep; D-C4 org_compliance.data_retention_days ignored). Also record migration 031 instead of 030, and holds placed by owner or compliance only.
+
+## 2026-11-04 - Wave-mode batch W3-19: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-9-C2.** entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2, D-C4). It must say: SESSION_RETENTION_SWEEP treats an unknown value as dry_run, a deliberate deviation from K3-26 because this switch deletes data; enforce runs dry until EP-9 C3; the retention clock is last activity (newest message, or latest run change if later), with 30..3650-day bounds; org-core unreachable means no candidates.
+
+**EP-9-C4.** add the entry 'D-C1 Legal hold versus erasure (EP-9 C4): a hold blocks thread delete, bulk history delete, org hard and soft delete and the session-core org purge with erasure_blocked_legal_hold; a check outage refuses with the retryable erasure_hold_check_unavailable; org-core 404 means the org and its holds are gone; release happens in Control (legal-hold routes), no override in Model Plane; switch ERASURE_HOLD_CHECK on session-core and org-core, default off. Decided by the owner at the recommended option 2026-11-04; counsel input outstanding.'
+
+## 2026-11-04 - Wave-mode batch W3-20: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-9-C3.** newest-first entry 'EP-9 C3 retention sweeper delete mode (2026-11-04)': SESSION_RETENTION_SWEEP=enforce deletes through grpc::delete_thread_rows plus residual scheduled_step_receipts/cron_fires/skill_revisions, one transaction per thread with a lock and an idle re-check; letta and workspace propagation after commit, counted, never retried; batches of 100 with a hold re-check before each; per-org cap 10000 per rolling 24h (env SESSION_RETENTION_SWEEP_DAILY_CAP can only lower it); a pass that stops after deleting records its counts with audit details.stopped; Data Plane inventory found no thread-bound chat content, so no Data Plane deletion; sandbox workspace erasure is not reachable (DeleteThreadWorkspace is user-only) and is reported as workspace_unconfirmed=workspace_erasure_unavailable; enforce is turned on per environment only after one dry-run week the owner reviewed.
+
+**EP-11-S2.** add the newest-first entry 'Skill versions are immutable, cut by digest change of an accepted row; the session-core trigger is their single writer (EP-11 D2, D10; owner 2026-11-04)'.
+
+**EP-12-S1.** under the `## 2026-11-04 - Wave 3 owner decisions taken at their recommended options` entry, newest first, add: `Run origin is derived from the verified caller and inherited by child runs; never a request field (EP-12 D1, S1). A child run takes its parent's token behind SESSION_RUN_ORIGIN_INHERIT; the top-level origin projection is behind MODEL_GATEWAY_RUN_ORIGIN_FIELD. Both implemented dark.`
+
+## 2026-11-04 - Wave-mode batch W3-21: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-11-S6.** 'Authored behaviours are one table with a kind; skill_packages is retired (EP-11 D1)' and 'Templates are text, presets are visible composer defaults; agents are EP-6 (EP-11 D6)'.
+
+## 2026-11-05 - Wave-mode batch W3-22: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-11-S9.** 'EP-11 S9: Space skills are one scope of agent_skills (scope_id names the Space, no owner); listed only for the caller's own thread resolved server-side; writes need a Control-signed Space skill-write decision (D7), refused until Control defines one; ext.skills enforced at the gateway behind SKILL_EXT_POLICY_ENFORCED, fail closed to none.'
+
+## 2026-11-05 - Wave-mode batch W3-23: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-11-S8.** add entry 'EP-11 D9 (2026-11-04, owner, recommended option): skill bundle upload and skill import are org configuration, not conversation content; allowed for non-ZDR principals, refused for a ZDR principal (authz.go:81 plus a typed zdr_feature_not_supported/skill_authoring in the import handler); SKILL_IMPORT_ENABLED stays off until D2-379/D2-383 are fixed (register D2-384).'
+
+## 2026-11-05 - Wave-mode batch W3-25: decisions recorded by its slices
+
+**Status: built in wave mode (unit tests only; depth in the register).**
+
+**EP-2-S7.** add a newest-first entry '## 2026-11-05 - Deep research may run knowledge-only (EP-2 S7, D3)'. Content: behind DEEP_RESEARCH_KNOWLEDGE_SOURCES, knowledge_only means a KB retrieval per sub-query with the viewer bearer and no web phase; auto means KB first, then web; web_only is unchanged. KB sources take [1..k] and web pages are numbered after them. Connected accounts come in behind DEEP_RESEARCH_CONNECTOR_SOURCES: auto only, never in a Space, only the selected accounts, one mail search per account, screened as ConnectorContent, flagged items withheld, metadata-only citations. ZDR is still refused through deep_research. Supersedes nothing.
+
+**EP-9-E3.** add the entry 'Sandbox egress: tier enum, lease granted at off, boundary is netns plus socket proxy' (D-E1 netns + Unix-socket CONNECT proxy + mp-netbridge; D-E2 grant at off and record, behind SANDBOX_MANAGER_EGRESS_TIERS, amends :4440-4450; D-E3 closed enum off|registries|allowlist|all, all not storable, unknown=off, off for ZDR/waived/plan/tainted/read-only runs).
 
 ## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)
 

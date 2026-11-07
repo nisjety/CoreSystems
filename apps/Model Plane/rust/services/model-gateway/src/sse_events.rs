@@ -162,6 +162,73 @@ pub struct AttachmentPreview {
     pub thumbs: Vec<String>,
 }
 
+/// Environment switch for cited passages and the research provenance stamp (EP-2-S4). Off, no
+/// citation or artifact frame carries `quote`, `locator` or `provenance`, and nothing new is
+/// persisted with the message. The one exception is a deep-research report from a run with
+/// `deep_research::SECOND_PASS_ENV` on (EP-2-S6): its stamp carries the claim ledger, so it is
+/// stamped whichever way this switch is set.
+pub const CITATION_PASSAGES_ENV: &str = "MODEL_GATEWAY_CITATION_PASSAGES";
+
+/// Whether cited passages are switched on in this process.
+#[must_use]
+pub fn citation_passages_enabled() -> bool {
+    parse_citation_passages(std::env::var(CITATION_PASSAGES_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn parse_citation_passages(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Longest quote a citation carries. A quote is the passage the source contributed, not the
+/// source: the viewer reads more through Data Plane's own ACL'd chunk read.
+pub const MAX_QUOTE_CHARS: usize = 400;
+
+/// Where a knowledge source's passage sits in Data Plane, so the viewer can ask Data Plane for it
+/// again under the viewer's own grants. Ids only: no text, no score.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CitationLocator {
+    pub document_id: String,
+    pub chunk_index: i32,
+}
+
+/// The passage a citation points at (EP-2-S4): the quoted text and, for a knowledge source, its
+/// locator. Each half is written only when set, so a frame without one is unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CitationPassage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<CitationLocator>,
+}
+
+impl CitationPassage {
+    /// A passage from a quote and an optional locator, the quote whitespace-collapsed and bounded
+    /// to [`MAX_QUOTE_CHARS`]. `None` when there is neither, so an empty object is never sent.
+    #[must_use]
+    pub fn new(quote: &str, locator: Option<CitationLocator>) -> Option<Self> {
+        let collapsed = quote.split_whitespace().collect::<Vec<_>>().join(" ");
+        let quote: String = collapsed.chars().take(MAX_QUOTE_CHARS).collect();
+        let quote = Some(quote.trim_end().to_owned()).filter(|text| !text.is_empty());
+        (quote.is_some() || locator.is_some()).then_some(Self { quote, locator })
+    }
+
+    /// The passage of a knowledge citation: the first grounding fact of its document, which is the
+    /// chunk the context block numbered it from. `None` when no fact names the document.
+    #[must_use]
+    pub fn knowledge(facts: &[crate::retrieval::GroundingFact], document_id: &str) -> Option<Self> {
+        let fact = facts.iter().find(|fact| fact.document_id == document_id)?;
+        Self::new(
+            &fact.text,
+            Some(CitationLocator {
+                document_id: fact.document_id.clone(),
+                chunk_index: fact.chunk_index,
+            }),
+        )
+    }
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -251,6 +318,10 @@ pub enum ChatEvent {
         /// turn's active retrieval scope. `"connector"` marks a connected account's read (WS23-S5): listed
         /// as a source, never numbered, and carrying metadata only.
         origin: String,
+        /// The passage this source contributed and, for knowledge, where it sits (EP-2-S4). Set
+        /// only behind [`CITATION_PASSAGES_ENV`]; `None` writes neither `quote` nor `locator`, so
+        /// a frame is byte-identical to before.
+        passage: Option<CitationPassage>,
     },
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
     /// spec §2.2/§2.3's "shown in the receipt" requirement). Emitted at most
@@ -271,6 +342,16 @@ pub enum ChatEvent {
         /// What the Space's knowledge did for this turn (WS18-S3). Absent for a turn no Space
         /// scopes, so those frames stay byte-identical to before.
         knowledge: Option<KnowledgeReceipt>,
+        /// Why tools were withheld for a reason the person did not ask for (Wave 3 EP-9 W2): `"org_web_off"` when
+        /// the organisation turned web access off. Absent otherwise, so those frames stay byte-identical to before.
+        reason: Option<String>,
+    },
+    /// The search providers that served this turn's web searches, and the route its entitlement allowed (EP-9 W1).
+    /// Sent once, after the tool phase, and only while `MODEL_GATEWAY_SEARCH_PROVENANCE` is on and a search ran.
+    /// Provider ids, labels and counts only: no query, URL or hit text rides it. It is a `citations`-family frame,
+    /// so it arrives beside the source-scope frame it explains.
+    SearchProvenance {
+        provenance: crate::search_provenance::SearchProvenance,
     },
     /// Structured internal grounding payload rendered by the chat UI.
     Grounding {
@@ -283,6 +364,13 @@ pub enum ChatEvent {
         title: String,
         content: String,
         version: u32,
+        /// What a research report was built from (EP-2-S4), set only on a deep-research report
+        /// behind [`CITATION_PASSAGES_ENV`]. `None` writes no `provenance` key.
+        provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
+        /// Who made this revision, `model`, `user` or `restore` (EP-3 S3). Set only on a stored
+        /// revision's frame while `MODEL_GATEWAY_ARTIFACT_REVISIONS` is `on`; `None` writes no
+        /// `editor` key, so older clients see the frame unchanged.
+        editor: Option<String>,
     },
     /// A generated file/image attachment.
     Attachment {
@@ -376,6 +464,35 @@ pub enum ChatEvent {
         delivery: String,
         expires_at: Option<String>,
         items: Value,
+        /// `mcp_elicitation` for a form an MCP server sent through the run (EP-4 S6). `None` is the run's
+        /// model, and the key is then left off the frame, so a model question reads as it always did.
+        origin: Option<String>,
+        /// The asking server's display name, set exactly when `origin` is (EP-4 S6).
+        origin_label: Option<String>,
+    },
+    /// The one connected-app suggestion a turn's model made (Wave 3 EP-10 S8), sent only while
+    /// `CONNECTOR_SUGGESTIONS_ENABLED` is on and never on a zero-retention or Space turn. Control event,
+    /// ungated: the card is how the person learns the answer lacked their own data. An older client
+    /// ignores the unknown event name, and the answer's prose still says what it could not see.
+    ConnectorSuggestion {
+        /// Server-made id the card is keyed by.
+        suggestion_id: String,
+        /// One entry of `mp_contracts::connector_suggest::SUGGESTABLE_PROVIDERS`.
+        provider: String,
+        /// One scrubbed line, at most 200 characters, with no address or link.
+        reason: String,
+    },
+    /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
+    /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
+    /// point, so a client that opted into nothing still has to see it. The run turn sends the edited
+    /// plan back and the gateway re-clamps it, so nothing here is trusted on the way back.
+    ResearchPlan {
+        /// The planned search phrases, already normalized and capped.
+        sub_queries: Vec<String>,
+        /// Up to three clarifying questions the plan inference asked; answers travel in the run turn.
+        questions: Vec<String>,
+        /// The most sub-queries a run turn keeps, so the card can stop the user adding past it.
+        max_sub_queries: usize,
     },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
@@ -497,6 +614,25 @@ pub enum ChatEvent {
         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
         resume_after: Option<String>,
     },
+    /// A goal turn was settled (EP-7 S2): the goal's spend against its caps and its status after
+    /// the turn. A control event, ungated: the goal bar needs it whatever the client opted into.
+    /// Ids, counts and closed tokens only; the objective never rides it.
+    GoalProgress {
+        goal_id: String,
+        turn_no: u32,
+        tokens_used: u64,
+        /// The metered-token budget; `None` when the goal sets none.
+        token_budget: Option<u64>,
+        cost_used_usd_micros: u64,
+        /// The cost budget in micro-USD; `None` when the goal sets none.
+        cost_budget_usd_micros: Option<u64>,
+        turns_used: u32,
+        max_turns: u32,
+        /// A goal status token (`active`, `budget_reached`, `turns_reached`, ...).
+        status: &'static str,
+        /// The closed reason beside the status; empty when none.
+        status_reason: &'static str,
+    },
     /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
     /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
     /// lease recorded one. A `steps` family frame, so only a client that asked for step detail sees it.
@@ -543,6 +679,18 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
+    /// An `artifact` frame naming who made the revision (EP-3 S3); `None`, and every other
+    /// variant, is returned unchanged.
+    #[must_use]
+    pub fn with_editor(self, editor: Option<&str>) -> Self {
+        match (self, editor) {
+            (ChatEvent::Artifact { id, kind, title, content, version, provenance, .. }, Some(editor)) => {
+                ChatEvent::Artifact { id, kind, title, content, version, provenance, editor: Some(editor.to_owned()) }
+            }
+            (event, _) => event,
+        }
+    }
+
     /// The `sandbox_state` frame for a workspace result a tool call produced (WS22-S6). Each token must be a
     /// member of its closed list, so a result that carries free text or a path yields `None` rather than a
     /// frame that could show it.
@@ -571,7 +719,8 @@ impl ChatEvent {
             ChatEvent::Citation { .. }
             | ChatEvent::Grounding { .. }
             | ChatEvent::Verification { .. }
-            | ChatEvent::SourceScopeApplied { .. } => Some("citations"),
+            | ChatEvent::SourceScopeApplied { .. }
+            | ChatEvent::SearchProvenance { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. }
             | ChatEvent::ResultReceipt { .. }
@@ -608,8 +757,14 @@ impl ChatEvent {
             | ChatEvent::Compaction { .. }
             | ChatEvent::ContextChange { .. }
             | ChatEvent::RunParked { .. }
+            // A goal's spend after a turn (EP-7 S2): the goal bar shows it on every client.
+            | ChatEvent::GoalProgress { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
-            | ChatEvent::UserQuestion { .. } => None,
+            | ChatEvent::UserQuestion { .. }
+            // The connected-app suggestion card (EP-10 S8): it says the answer lacked the person's data.
+            | ChatEvent::ConnectorSuggestion { .. }
+            // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
+            | ChatEvent::ResearchPlan { .. } => None,
         }
     }
 
@@ -636,6 +791,7 @@ impl ChatEvent {
             ChatEvent::ToolResult { .. } => "tool_result",
             ChatEvent::Citation { .. } => "citation",
             ChatEvent::SourceScopeApplied { .. } => "source_scope_applied",
+            ChatEvent::SearchProvenance { .. } => "search_provenance",
             ChatEvent::Grounding { .. } => "grounding",
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
@@ -649,10 +805,13 @@ impl ChatEvent {
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::RunParked { .. } => "run_parked",
+            ChatEvent::GoalProgress { .. } => "goal_progress",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
             ChatEvent::UserQuestion { .. } => "user_question",
+            ChatEvent::ConnectorSuggestion { .. } => "connector_suggestion",
+            ChatEvent::ResearchPlan { .. } => "research_plan",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             // ---- usage progress (WS27) ----
@@ -704,6 +863,7 @@ impl ChatEvent {
                 start,
                 end,
                 origin,
+                passage,
             } => {
                 let mut payload = json!({
                     "id": id,
@@ -713,6 +873,14 @@ impl ChatEvent {
                     "source_group_id": source_group_id,
                     "origin": origin,
                 });
+                if let Some(passage) = passage {
+                    if let Some(quote) = &passage.quote {
+                        payload["quote"] = json!(quote);
+                    }
+                    if let Some(locator) = &passage.locator {
+                        payload["locator"] = json!(locator);
+                    }
+                }
                 // Kept out of the object entirely (not even `null`) when
                 // absent, so the common "no anchor yet" frame stays small —
                 // see the field docs on `ChatEvent::Citation`.
@@ -733,13 +901,22 @@ impl ChatEvent {
                 }
                 payload
             }
-            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge } => {
+            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge, reason } => {
                 let mut payload = json!({ "scope": scope, "excluded_tools": excluded_tools });
                 if let Some(receipt) = knowledge {
                     payload["knowledge"] = serde_json::to_value(receipt).unwrap_or_else(|_| json!({}));
                 }
+                if let Some(reason) = reason {
+                    payload["reason"] = json!(reason);
+                }
                 payload
             }
+            // Closed ids, labels and counts, and the route: nothing a query, a URL or a hit carries.
+            ChatEvent::SearchProvenance { provenance } => json!({
+                "providers": provenance.providers,
+                "route": provenance.route,
+                "request_id": request_id,
+            }),
             ChatEvent::Grounding { grounding } => {
                 serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
             }
@@ -749,8 +926,17 @@ impl ChatEvent {
                 title,
                 content,
                 version,
+                provenance,
+                editor,
             } => {
-                json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version })
+                let mut payload = json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version });
+                if let Some(provenance) = provenance {
+                    payload["provenance"] = serde_json::to_value(provenance).unwrap_or_else(|_| json!({}));
+                }
+                if let Some(editor) = editor {
+                    payload["editor"] = json!(editor);
+                }
+                payload
             }
             ChatEvent::Attachment {
                 id,
@@ -894,11 +1080,43 @@ impl ChatEvent {
                 delivery,
                 expires_at,
                 items,
+                origin,
+                origin_label,
+            } => {
+                let mut payload = json!({
+                    "question_id": question_id,
+                    "delivery": delivery,
+                    "expires_at": expires_at,
+                    "items": items,
+                    "request_id": request_id,
+                });
+                // The origin keys come only with a server's question, so a model question's frame is unchanged.
+                if let Some(origin) = origin {
+                    payload["origin"] = json!(origin);
+                }
+                if let Some(origin_label) = origin_label {
+                    payload["origin_label"] = json!(origin_label);
+                }
+                payload
+            }
+            ChatEvent::ConnectorSuggestion {
+                suggestion_id,
+                provider,
+                reason,
             } => json!({
-                "question_id": question_id,
-                "delivery": delivery,
-                "expires_at": expires_at,
-                "items": items,
+                "suggestion_id": suggestion_id,
+                "provider": provider,
+                "reason": reason,
+                "request_id": request_id,
+            }),
+            ChatEvent::ResearchPlan {
+                sub_queries,
+                questions,
+                max_sub_queries,
+            } => json!({
+                "sub_queries": sub_queries,
+                "questions": questions,
+                "caps": { "max_sub_queries": max_sub_queries },
                 "request_id": request_id,
             }),
             ChatEvent::QueuedInput { messages } => {
@@ -1043,6 +1261,31 @@ impl ChatEvent {
                 "reason": reason.as_str(),
                 "resume_after": resume_after,
             }),
+            // A budget the goal does not set is `null`, so a client reads "none" without a guess.
+            ChatEvent::GoalProgress {
+                goal_id,
+                turn_no,
+                tokens_used,
+                token_budget,
+                cost_used_usd_micros,
+                cost_budget_usd_micros,
+                turns_used,
+                max_turns,
+                status,
+                status_reason,
+            } => json!({
+                "goal_id": goal_id,
+                "turn_no": turn_no,
+                "tokens_used": tokens_used,
+                "token_budget": token_budget,
+                "cost_used_usd_micros": cost_used_usd_micros,
+                "cost_budget_usd_micros": cost_budget_usd_micros,
+                "turns_used": turns_used,
+                "max_turns": max_turns,
+                "status": status,
+                "status_reason": status_reason,
+                "request_id": request_id,
+            }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -1173,6 +1416,9 @@ pub struct RichEventSink {
     /// The connected accounts the person selected for this turn (WS23-S5), read by the Ask loop's
     /// connected-app read. It rides here as the clock does, so the loop takes no new parameter.
     connector_turn: Option<crate::tool_loop::connector_reads::ConnectorTurn>,
+    /// The turn's web-search provenance record (EP-9 W1), attached only while the line is switched on. Every
+    /// answered search records on it, forced or looped, so the one frame after the tool phase names them all.
+    search_provenance: Option<crate::search_provenance::SearchProvenanceTurn>,
     /// The stream's resume buffer and its shared frame cursor, when the caller
     /// attached them. Tool calls, tool results and steps used to go out on the
     /// live channel only, so a reload during the tool phase, source review or
@@ -1258,6 +1504,19 @@ pub struct RecordedCitation {
     pub number: Option<u32>,
     /// See `ChatEvent::Citation::origin`.
     pub origin: String,
+    /// See `ChatEvent::Citation::passage`. Flattened, so history carries `quote` and `locator`
+    /// under the same keys the stream does, and nothing when it is `None`.
+    #[serde(flatten)]
+    pub passage: Option<CitationPassage>,
+}
+
+impl RecordedCitation {
+    /// The citation without its passage, for a turn that may not persist one (D12: a ZDR or
+    /// waived turn streams the passage but never stores it).
+    #[must_use]
+    pub fn without_passage(self) -> Self {
+        Self { passage: None, ..self }
+    }
 }
 
 /// An authored artifact observed on the wire, in the shape the SPA's
@@ -1269,6 +1528,9 @@ pub struct RecordedArtifact {
     pub title: String,
     pub content: String,
     pub version: u32,
+    /// See `ChatEvent::Artifact::provenance`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
 }
 
 impl RecordedArtifact {
@@ -1277,10 +1539,15 @@ impl RecordedArtifact {
     /// write is ever too big to keep.
     pub const MAX_PERSISTED_CHARS: usize = 200_000;
 
-    /// `Some` for a model-authored text artifact (document/code/html);
-    /// `None` for generated files and images, whose `content` is a base64
-    /// `data:` URI far too large for a metadata column and already
-    /// downloadable from the message's attachment.
+    /// `Some` for a model-authored text artifact (document/code/html) and for a
+    /// deck manifest (EP-5 S3); `None` for generated files and images, whose
+    /// `content` is a base64 `data:` URI far too large for a metadata column and
+    /// already downloadable from the message's attachment.
+    ///
+    /// A deck is kept only as a manifest that reads back under the deck's own
+    /// cap and names the id it is kept under: its pptx is never stored, it is
+    /// rebuilt from this manifest. A `deck` frame only the `deck` tool emits,
+    /// and only while `MODEL_GATEWAY_DECK_TOOL` is on.
     #[must_use]
     pub fn from_event(event: &ChatEvent) -> Option<Self> {
         let ChatEvent::Artifact {
@@ -1289,12 +1556,17 @@ impl RecordedArtifact {
             title,
             content,
             version,
+            provenance,
+            // The editor is a property of the stored revision, not of the message metadata.
+            editor: _,
         } = event
         else {
             return None;
         };
-        if !matches!(kind.as_str(), "document" | "code" | "html") {
-            return None;
+        match kind.as_str() {
+            "document" | "code" | "html" => {}
+            "deck" if is_storable_deck(id, content) => {}
+            _ => return None,
         }
         if content.starts_with("data:") || content.chars().count() > Self::MAX_PERSISTED_CHARS {
             return None;
@@ -1305,8 +1577,37 @@ impl RecordedArtifact {
             title: title.clone(),
             content: content.clone(),
             version: *version,
+            provenance: provenance.clone(),
         })
     }
+
+    /// The artifact without its provenance stamp, for a turn that may not persist one (D12).
+    #[must_use]
+    pub fn without_provenance(self) -> Self {
+        Self { provenance: None, ..self }
+    }
+
+    /// The live frame for this artifact, as the staged publish re-emits it after persisting.
+    #[must_use]
+    pub fn into_event(self) -> ChatEvent {
+        ChatEvent::Artifact {
+            id: self.id,
+            kind: self.kind,
+            title: self.title,
+            content: self.content,
+            version: self.version,
+            provenance: self.provenance,
+            editor: None,
+        }
+    }
+}
+
+/// Whether `content` is a deck manifest fit to keep under `id`: JSON that reads as a manifest
+/// (which also holds it to `MAX_MANIFEST_CHARS`) and names the same deck. A frame that does not is
+/// streamed but never stored, so a reload cannot hand the `deck` tool a manifest it would refuse.
+fn is_storable_deck(id: &str, content: &str) -> bool {
+    mp_contracts::deck_manifest::DeckManifest::from_untrusted_json(content)
+        .is_ok_and(|manifest| manifest.deck_id == id)
 }
 
 impl RichEventSink {
@@ -1329,6 +1630,7 @@ impl RichEventSink {
             tally: std::sync::Mutex::new(RunTally::default()),
             timing: None,
             connector_turn: None,
+            search_provenance: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
         }
@@ -1395,6 +1697,35 @@ impl RichEventSink {
     #[must_use]
     pub fn connector_turn(&self) -> Option<&crate::tool_loop::connector_reads::ConnectorTurn> {
         self.connector_turn.as_ref()
+    }
+
+    /// Attach the turn's web-search provenance record (EP-9 W1). The caller attaches one only while the line is
+    /// switched on, so with the switch off the sink never records or sends anything for it.
+    #[must_use]
+    pub fn with_search_provenance(
+        mut self,
+        turn: Option<crate::search_provenance::SearchProvenanceTurn>,
+    ) -> Self {
+        self.search_provenance = turn;
+        self
+    }
+
+    /// The turn's web-search provenance record, when the caller attached one.
+    #[must_use]
+    pub fn search_provenance(&self) -> Option<&crate::search_provenance::SearchProvenanceTurn> {
+        self.search_provenance.as_ref()
+    }
+
+    /// Send the turn's search-provenance frame, once. The caller invokes it after the tool phase, so every
+    /// search of the turn is on the record. Sends nothing while no record is attached or no search ran.
+    pub async fn emit_search_provenance(&self) {
+        if let Some(provenance) = self
+            .search_provenance
+            .as_ref()
+            .and_then(crate::search_provenance::SearchProvenanceTurn::take_provenance)
+        {
+            self.emit(ChatEvent::SearchProvenance { provenance }).await;
+        }
     }
 
     /// Buffer every frame this sink sends for resume, under the stream's own
@@ -1474,6 +1805,7 @@ impl RichEventSink {
             source_group_label,
             number,
             origin,
+            passage,
             ..
         } = &event
         {
@@ -1487,6 +1819,7 @@ impl RichEventSink {
                     source_group_label: source_group_label.clone(),
                     number: *number,
                     origin: origin.clone(),
+                    passage: passage.clone(),
                 });
             }
         }
@@ -1695,7 +2028,7 @@ mod tests {
         let sink = RichEventSink::staging_artifacts(tx, families(&["artifacts", "steps"]), "r".into());
         for version in [3, 4] {
             sink.emit(ChatEvent::Artifact { id: "doc".into(), kind: "document".into(),
-                title: "Draft".into(), content: format!("private {version}"), version }).await;
+                title: "Draft".into(), content: format!("private {version}"), version, provenance: None, editor: None }).await;
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(sink.recorded_artifacts()[0].version, 4);
@@ -1832,6 +2165,8 @@ mod tests {
             title: "T".into(),
             content: content.into(),
             version: 1,
+            provenance: None,
+            editor: None,
         };
         sink.emit(artifact("doc", "document", "private draft"))
             .await;
@@ -1891,6 +2226,7 @@ mod tests {
             start: None,
             end: None,
             origin: "knowledge".into(),
+            passage: None,
         };
         let anchored = ChatEvent::Citation {
             id: "c1".into(),
@@ -1904,6 +2240,7 @@ mod tests {
             start: Some(4),
             end: Some(7),
             origin: "knowledge".into(),
+            passage: None,
         };
         sink.emit(first).await;
         sink.emit(anchored).await;
@@ -1949,6 +2286,7 @@ mod tests {
             source_group_label: Some("Microsoft 365".into()),
             number: Some(1),
             origin: "knowledge".into(),
+            passage: None,
         }]);
         let recorded = sink.recorded_citations();
         assert_eq!(recorded.len(), 1, "the seeded citation must be visible to recorded_citations()");
@@ -1986,6 +2324,8 @@ mod tests {
             title: format!("T {id}"),
             content: content.into(),
             version,
+            provenance: None,
+            editor: None,
         };
         sink.emit(artifact("rapport", "document", "v1 body", 1)).await;
         sink.emit(artifact("notat", "document", "memo", 1)).await;
@@ -2213,6 +2553,7 @@ mod tests {
             start: None,
             end: None,
             origin: "web".into(),
+            passage: None,
         }
         .should_emit(&feats));
         assert!(!ChatEvent::StepUpdate {
@@ -2572,6 +2913,7 @@ mod tests {
             start: None,
             end: None,
             origin: "knowledge".into(),
+            passage: None,
         };
         assert_eq!(cite.name(), "citation");
         let cite_payload = cite.payload("r");
@@ -2585,6 +2927,9 @@ mod tests {
         assert!(cite_payload.get("claim_id").is_none());
         assert!(cite_payload.get("start").is_none());
         assert!(cite_payload.get("end").is_none());
+        // No passage, no keys: the frame is the one sent before EP-2-S4.
+        assert!(cite_payload.get("quote").is_none());
+        assert!(cite_payload.get("locator").is_none());
 
         let anchored = ChatEvent::Citation {
             id: "c1".into(),
@@ -2598,6 +2943,7 @@ mod tests {
             start: Some(12),
             end: Some(15),
             origin: "knowledge".into(),
+            passage: None,
         };
         let anchored_payload = anchored.payload("r");
         assert_eq!(anchored_payload["claim_id"], "turn-1:claim-0");
@@ -3239,6 +3585,7 @@ mod payload_contract {
 
     use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
     use crate::knowledge_receipt::{KnowledgeMode, KnowledgeReceipt};
+    use crate::search_provenance::{ProviderUse, Route, SearchProvenance};
 
     const REQUEST_ID: &str = "req-sample";
 
@@ -3261,6 +3608,7 @@ mod payload_contract {
         "ToolResult",
         "Citation",
         "SourceScopeApplied",
+        "SearchProvenance",
         "Grounding",
         "Artifact",
         "Attachment",
@@ -3271,6 +3619,8 @@ mod payload_contract {
         "FollowUps",
         "PlanProposed",
         "UserQuestion",
+        "ConnectorSuggestion",
+        "ResearchPlan",
         "Verification",
         "MemoryRecall",
         "QueuedInput",
@@ -3284,6 +3634,7 @@ mod payload_contract {
         "Compaction",
         "ContextChange",
         "RunParked",
+        "GoalProgress",
         "SandboxState",
     ];
 
@@ -3297,6 +3648,7 @@ mod payload_contract {
             ChatEvent::ToolResult { .. } => "ToolResult",
             ChatEvent::Citation { .. } => "Citation",
             ChatEvent::SourceScopeApplied { .. } => "SourceScopeApplied",
+            ChatEvent::SearchProvenance { .. } => "SearchProvenance",
             ChatEvent::Grounding { .. } => "Grounding",
             ChatEvent::Artifact { .. } => "Artifact",
             ChatEvent::Attachment { .. } => "Attachment",
@@ -3307,6 +3659,8 @@ mod payload_contract {
             ChatEvent::FollowUps { .. } => "FollowUps",
             ChatEvent::PlanProposed { .. } => "PlanProposed",
             ChatEvent::UserQuestion { .. } => "UserQuestion",
+            ChatEvent::ConnectorSuggestion { .. } => "ConnectorSuggestion",
+            ChatEvent::ResearchPlan { .. } => "ResearchPlan",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
@@ -3320,6 +3674,7 @@ mod payload_contract {
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
             ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::GoalProgress { .. } => "GoalProgress",
             ChatEvent::SandboxState { .. } => "SandboxState",
         }
     }
@@ -3362,6 +3717,10 @@ mod payload_contract {
             start: full.then_some(12),
             end: full.then_some(15),
             origin: s("knowledge"),
+            passage: full.then(|| super::CitationPassage {
+                quote: Some(s("quote")),
+                locator: Some(super::CitationLocator { document_id: s("doc-1"), chunk_index: 0 }),
+            }),
         }
     }
 
@@ -3582,26 +3941,52 @@ mod payload_contract {
             ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
             citation(false),
             citation(true),
-            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None },
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None, reason: None },
             ChatEvent::SourceScopeApplied {
                 scope: s("knowledge_only"),
                 excluded_tools: vec![s("web_search")],
                 knowledge: None,
+                reason: None,
             },
             ChatEvent::SourceScopeApplied {
                 scope: s("auto"),
                 excluded_tools: Vec::new(),
                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::NotEntitled, sources: None }),
+                reason: None,
             },
             ChatEvent::SourceScopeApplied {
                 scope: s("knowledge_only"),
                 excluded_tools: vec![s("web_search")],
                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
+                reason: None,
+            },
+            ChatEvent::SearchProvenance {
+                provenance: SearchProvenance {
+                    providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
+                    route: Route::FreeChain,
+                },
+            },
+            ChatEvent::SearchProvenance {
+                provenance: SearchProvenance {
+                    providers: vec![
+                        ProviderUse { id: "verevon", label: "Verevon search", hits: 1 },
+                        ProviderUse { id: "other", label: "other provider", hits: 0 },
+                    ],
+                    route: Route::ZdrFreeOnly,
+                },
             },
             grounding(false),
             grounding(true),
-            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
-            ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
+            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None, editor: None },
+            ChatEvent::Artifact {
+                id: s("a1"),
+                kind: s("code"),
+                title: s("T"),
+                content: s("body"),
+                version: 2,
+                provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+                editor: Some(s("model")),
+            },
             ChatEvent::Attachment {
                 id: s("f1"),
                 name: s("f.png"),
@@ -3665,6 +4050,8 @@ mod payload_contract {
                 delivery: s("next_turn"),
                 expires_at: None,
                 items: json!([]),
+                origin: None,
+                origin_label: None,
             },
             ChatEvent::UserQuestion {
                 question_id: s("q_2"),
@@ -3677,6 +4064,20 @@ mod payload_contract {
                     "options": [{ "id": "bring", "label": "Bring", "description": null }],
                     "allow_other": true,
                 }]),
+                origin: Some(s("mcp_elicitation")),
+                origin_label: Some(s("Fixture server")),
+            },
+            ChatEvent::ConnectorSuggestion { suggestion_id: s("sug_1"), provider: s("google"), reason: s("") },
+            ChatEvent::ConnectorSuggestion {
+                suggestion_id: s("sug_2"),
+                provider: s("microsoft"),
+                reason: s("Your calendar would show the meeting."),
+            },
+            ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
+            ChatEvent::ResearchPlan {
+                sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
+                questions: vec![s("Hvilken region?")],
+                max_sub_queries: 9,
             },
             ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
             ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
@@ -3755,6 +4156,30 @@ mod payload_contract {
                 run_id: s("run-1"),
                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
                 resume_after: Some(s("2026-10-20T12:00:00Z")),
+            },
+            ChatEvent::GoalProgress {
+                goal_id: s("goal_1"),
+                turn_no: 1,
+                tokens_used: 0,
+                token_budget: None,
+                cost_used_usd_micros: 0,
+                cost_budget_usd_micros: None,
+                turns_used: 1,
+                max_turns: 10,
+                status: "active",
+                status_reason: "",
+            },
+            ChatEvent::GoalProgress {
+                goal_id: s("goal_1"),
+                turn_no: 3,
+                tokens_used: 31_000,
+                token_budget: Some(30_000),
+                cost_used_usd_micros: 120_000,
+                cost_budget_usd_micros: Some(500_000),
+                turns_used: 3,
+                max_turns: 10,
+                status: "budget_reached",
+                status_reason: "token_budget",
             },
             ChatEvent::SandboxState {
                 scope: "thread",
@@ -3881,6 +4306,8 @@ mod payload_contract {
             delivery: "next_turn".into(),
             expires_at: Some("2026-11-02T10:00:00Z".into()),
             items: json!([{ "id": "carrier", "kind": "single" }]),
+            origin: None,
+            origin_label: None,
         };
         assert_eq!(event.name(), "user_question");
         assert!(
@@ -3894,6 +4321,110 @@ mod payload_contract {
         assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
         assert_eq!(payload["items"][0]["id"], "carrier");
         assert_eq!(payload["request_id"], "req-4");
+    }
+
+    /// `connector_suggestion` is a control event that carries the card's three keys and nothing else
+    /// (EP-10 S8).
+    #[test]
+    fn connector_suggestion_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::ConnectorSuggestion {
+            suggestion_id: "sug_1".into(),
+            provider: "google".into(),
+            reason: "Your mail would answer this.".into(),
+        };
+        assert_eq!(event.name(), "connector_suggestion");
+        assert!(event.family().is_none(), "the card is a control event, never feature-gated");
+        assert!(event.should_emit(&[]));
+        assert_eq!(
+            event.payload("req-5"),
+            json!({
+                "suggestion_id": "sug_1",
+                "provider": "google",
+                "reason": "Your mail would answer this.",
+                "request_id": "req-5",
+            })
+        );
+    }
+
+    /// A model question's frame has no origin key, so an older client and today's read it the same way
+    /// (EP-4 S6).
+    #[test]
+    fn user_question_without_origin_is_byte_identical() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_abc".into(),
+            delivery: "next_turn".into(),
+            expires_at: None,
+            items: json!([]),
+            origin: None,
+            origin_label: None,
+        };
+        assert_eq!(
+            event.payload("req-5"),
+            json!({
+                "question_id": "q_abc",
+                "delivery": "next_turn",
+                "expires_at": null,
+                "items": [],
+                "request_id": "req-5",
+            })
+        );
+    }
+
+    /// A server's question carries the server's name, so the card can say who asked it (EP-4 S6).
+    #[test]
+    fn user_question_with_server_origin_carries_it() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_srv".into(),
+            delivery: "resume".into(),
+            expires_at: None,
+            items: json!([]),
+            origin: Some("mcp_elicitation".into()),
+            origin_label: Some("Fixture server".into()),
+        };
+        let payload = event.payload("req-6");
+        assert_eq!(payload["question_id"], "q_srv");
+        assert_eq!(payload["origin"], "mcp_elicitation");
+        assert_eq!(payload["origin_label"], "Fixture server");
+    }
+
+    /// `research_plan` is a control event carrying the plan, the questions and the cap the card
+    /// enforces, and nothing else (EP-2 S5).
+    #[test]
+    fn research_plan_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::ResearchPlan {
+            sub_queries: vec!["a".into(), "b".into()],
+            questions: vec!["Which year?".into()],
+            max_sub_queries: 9,
+        };
+        assert_eq!(event.name(), "research_plan");
+        assert!(event.family().is_none(), "the plan card is never feature-gated");
+        assert!(event.should_emit(&[]));
+        let payload = event.payload("req-5");
+        assert_eq!(payload["sub_queries"], json!(["a", "b"]));
+        assert_eq!(payload["questions"], json!(["Which year?"]));
+        assert_eq!(payload["caps"], json!({ "max_sub_queries": 9 }));
+        assert_eq!(payload["request_id"], "req-5");
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+    }
+
+    /// `search_provenance` is a `citations`-family frame that names providers and a route, and nothing else (EP-9 W1).
+    #[test]
+    fn search_provenance_names_providers_and_a_route_only() {
+        let event = ChatEvent::SearchProvenance {
+            provenance: SearchProvenance {
+                providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
+                route: Route::PaidAllowed,
+            },
+        };
+        assert_eq!(event.name(), "search_provenance");
+        assert_eq!(event.family(), Some("citations"));
+        assert!(!event.should_emit(&[]), "a client that asked for no citations does not see it");
+        assert!(event.should_emit(&["citations".to_string()]));
+        let payload = event.payload("req-w1");
+        assert_eq!(payload["providers"], json!([{ "id": "brave", "label": "Brave Search", "hits": 2 }]));
+        assert_eq!(payload["route"], "paid_allowed");
+        assert_eq!(payload["request_id"], "req-w1");
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(3));
     }
 
     #[test]
@@ -3934,6 +4465,28 @@ mod payload_contract {
         assert_eq!(key("error", "action").unwrap()["presence"], "optional");
         assert_eq!(key("error", "feature").unwrap()["presence"], "optional");
         assert_eq!(key("retrieval_notice", "wording_key").unwrap()["presence"], "always");
+    }
+
+    #[test]
+    fn source_scope_applied_names_the_org_web_switch_only_when_it_withheld_a_tool() {
+        let withheld = ChatEvent::SourceScopeApplied {
+            scope: s("auto"),
+            excluded_tools: vec![s("web_search"), s("fetch_url")],
+            knowledge: None,
+            reason: Some(s("org_web_off")),
+        };
+        let payload = withheld.payload("req-1");
+        assert_eq!(payload["reason"], "org_web_off");
+        assert_eq!(payload["excluded_tools"], json!(["web_search", "fetch_url"]));
+
+        // A turn no organisation switch touched keeps its frame as it was: no reason key at all.
+        let plain = ChatEvent::SourceScopeApplied {
+            scope: s("web_only"),
+            excluded_tools: Vec::new(),
+            knowledge: None,
+            reason: None,
+        };
+        assert!(plain.payload("req-1").get("reason").is_none());
     }
 
     #[test]
@@ -3995,11 +4548,281 @@ mod connector_turn_tests {
             start: None,
             end: None,
             origin: "connector".to_owned(),
+            passage: None,
         })
         .await;
         let recorded = sink.recorded_citations();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].origin, "connector");
         assert_eq!(recorded[0].number, None);
+    }
+}
+
+#[cfg(test)]
+mod citation_passage_tests {
+    use super::*;
+
+    fn fact(document_id: &str, chunk_index: i32, text: &str) -> crate::retrieval::GroundingFact {
+        crate::retrieval::GroundingFact {
+            knowledge_id: "kid-1".to_owned(),
+            document_id: document_id.to_owned(),
+            text: text.to_owned(),
+            score: 0.9,
+            source_title: "Policy".to_owned(),
+            source_type: "policy".to_owned(),
+            provider: "Notion".to_owned(),
+            chunk_index,
+        }
+    }
+
+    fn citation(passage: Option<CitationPassage>) -> ChatEvent {
+        ChatEvent::Citation {
+            id: "doc-1".to_owned(),
+            title: "Policy".to_owned(),
+            url: "notion".to_owned(),
+            snippet: "Refunds within 30 days.".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: Some("Notion".to_owned()),
+            number: Some(1),
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "knowledge".to_owned(),
+            passage,
+        }
+    }
+
+    #[test]
+    fn citation_passages_switch_reads_only_the_literal_true() {
+        assert!(parse_citation_passages(Some("true")));
+        assert!(parse_citation_passages(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
+            assert!(!parse_citation_passages(raw), "{raw:?} must stay off");
+        }
+    }
+
+    #[test]
+    fn citation_passage_quote_is_collapsed_bounded_and_never_empty() {
+        let long = format!("  {}  ", "ord ".repeat(300));
+        let passage = CitationPassage::new(&long, None).expect("a quote");
+        let quote = passage.quote.expect("quote set");
+        assert!(quote.chars().count() <= MAX_QUOTE_CHARS);
+        assert!(!quote.contains("  ") && !quote.ends_with(' '));
+        assert_eq!(CitationPassage::new("   ", None), None, "neither half: no passage at all");
+        let locator = CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 };
+        let only_locator = CitationPassage::new("", Some(locator.clone())).expect("locator alone");
+        assert_eq!(only_locator.quote, None);
+        assert_eq!(only_locator.locator, Some(locator));
+    }
+
+    #[test]
+    fn citation_passage_for_knowledge_takes_the_first_fact_of_the_document() {
+        let facts = vec![
+            fact("doc-2", 0, "Other document."),
+            fact("doc-1", 4, "Refunds are accepted within 30 days."),
+            fact("doc-1", 9, "A later chunk of the same document."),
+        ];
+        let passage = CitationPassage::knowledge(&facts, "doc-1").expect("doc-1 has a fact");
+        assert_eq!(passage.quote.as_deref(), Some("Refunds are accepted within 30 days."));
+        assert_eq!(
+            passage.locator,
+            Some(CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 4 })
+        );
+        assert_eq!(CitationPassage::knowledge(&facts, "doc-3"), None);
+    }
+
+    #[test]
+    fn citation_frame_without_a_passage_is_byte_identical_and_with_one_carries_both_keys() {
+        let plain = citation(None).payload("r");
+        assert!(plain.get("quote").is_none());
+        assert!(plain.get("locator").is_none());
+
+        let passage = CitationPassage::knowledge(&[fact("doc-1", 3, "Refunds within 30 days.")], "doc-1");
+        let rich = citation(passage).payload("r");
+        assert_eq!(rich["quote"], "Refunds within 30 days.");
+        assert_eq!(rich["locator"]["document_id"], "doc-1");
+        assert_eq!(rich["locator"]["chunk_index"], 3);
+        // Every other key is the plain frame's, unchanged.
+        let mut stripped = rich.clone();
+        let object = stripped.as_object_mut().expect("an object");
+        object.remove("quote");
+        object.remove("locator");
+        assert_eq!(stripped, plain);
+    }
+
+    #[tokio::test]
+    async fn citation_passage_is_recorded_under_the_stream_keys_and_strippable() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = RichEventSink::new(tx, Vec::new(), "r".to_owned());
+        let passage = CitationPassage::new("Refunds within 30 days.", None);
+        sink.emit(citation(passage)).await;
+        let recorded = sink.recorded_citations();
+        let value = serde_json::to_value(&recorded[0]).expect("serializable");
+        assert_eq!(value["quote"], "Refunds within 30 days.");
+        assert!(value.get("passage").is_none(), "flattened, never nested");
+        assert!(value.get("locator").is_none());
+
+        let stripped = serde_json::to_value(recorded[0].clone().without_passage()).expect("serializable");
+        assert!(stripped.get("quote").is_none());
+        assert_eq!(stripped["number"], 1);
+    }
+
+    #[test]
+    fn citation_artifact_provenance_streams_records_and_strips() {
+        let event = ChatEvent::Artifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+            editor: None,
+        };
+        let payload = event.payload("r");
+        assert_eq!(payload["provenance"]["pipeline"], "deep_research_v1");
+
+        let recorded = RecordedArtifact::from_event(&event).expect("a text artifact");
+        assert!(recorded.provenance.is_some());
+        assert_eq!(recorded.clone().into_event(), event, "the staged publish streams the same frame");
+        let stripped = recorded.without_provenance();
+        let value = serde_json::to_value(&stripped).expect("serializable");
+        assert!(value.get("provenance").is_none());
+
+        let plain = ChatEvent::Artifact {
+            id: "a".to_owned(),
+            kind: "document".to_owned(),
+            title: "T".to_owned(),
+            content: "c".to_owned(),
+            version: 1,
+            provenance: None,
+            editor: None,
+        };
+        assert!(plain.payload("r").get("provenance").is_none());
+    }
+
+    /// EP-2-S6: the claim ledger streams on the report's stamp and leaves with it (D12).
+    #[test]
+    fn research_ledger_streams_on_the_stamp_and_is_stripped_with_it() {
+        let event = ChatEvent::Artifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger())),
+            editor: None,
+        };
+        let payload = event.payload("r");
+        assert_eq!(payload["provenance"]["passes"], 2);
+        assert_eq!(payload["provenance"]["research_ledger"]["version"], 1);
+        assert_eq!(payload["provenance"]["research_ledger"]["claims"][0]["status"], "single_source");
+        assert_eq!(payload["provenance"]["claims_by_status"]["single_source"], 1);
+        assert!(payload["provenance"]["ledger_digest"].is_string());
+
+        let recorded = RecordedArtifact::from_event(&event).expect("a text artifact");
+        let stored = serde_json::to_value(&recorded).expect("serializable");
+        assert_eq!(stored["provenance"]["research_ledger"]["pass_count"], 2);
+        let stripped = serde_json::to_value(recorded.without_provenance()).expect("serializable");
+        assert!(stripped.get("provenance").is_none(), "no ledger without its stamp");
+    }
+
+    #[test]
+    fn artifact_event_omits_editor_when_none() {
+        let plain = ChatEvent::Artifact {
+            id: "a".to_owned(),
+            kind: "document".to_owned(),
+            title: "T".to_owned(),
+            content: "c".to_owned(),
+            version: 3,
+            provenance: None,
+            editor: None,
+        };
+        assert!(plain.payload("r").get("editor").is_none(), "older clients see the frame unchanged");
+        assert_eq!(plain.clone().with_editor(None), plain);
+
+        let attributed = plain.clone().with_editor(Some("model"));
+        assert_eq!(attributed.payload("r")["editor"], "model");
+        assert_eq!(attributed.payload("r")["version"], 3);
+        let recorded = RecordedArtifact::from_event(&attributed).expect("a text artifact");
+        assert!(
+            serde_json::to_value(&recorded).expect("serializable").get("editor").is_none(),
+            "the message metadata never carries the editor"
+        );
+
+        let other = ChatEvent::Error { code: "x".into(), message: "y".into(), retryable: false };
+        assert!(other.clone().with_editor(Some("model")).payload("r").get("editor").is_none());
+    }
+
+    /// A deck as the `deck` tool keeps it: created, one slide, canonical JSON.
+    fn deck_manifest_json(deck_id: &str) -> String {
+        use mp_contracts::deck_manifest::{DeckManifest, DeckOp, SlideInput, SlideLayout};
+        let mut deck = DeckManifest::empty(deck_id);
+        deck.apply(DeckOp::Create {
+            title: "Kvartalstall".to_owned(),
+            locale: "nb-NO".to_owned(),
+            slides: vec![SlideInput {
+                layout: SlideLayout::TitleBullets,
+                title: "Salg".to_owned(),
+                bullets: vec!["Opp 8 %".to_owned()],
+                left: Vec::new(),
+                right: Vec::new(),
+                image: None,
+                notes: Some("Kilde: Q3-rapporten".to_owned()),
+            }],
+        })
+        .expect("a valid create");
+        deck.canonical_json()
+    }
+
+    fn deck_event(id: &str, content: String, version: u32) -> ChatEvent {
+        ChatEvent::Artifact {
+            id: id.to_owned(),
+            kind: "deck".to_owned(),
+            title: "Kvartalstall".to_owned(),
+            content,
+            version,
+            provenance: None,
+            editor: None,
+        }
+    }
+
+    /// EP-5 S3: a deck's manifest is kept with the message, with its version, so a reload and a
+    /// later turn can continue it.
+    #[test]
+    fn recorded_artifact_keeps_a_deck_manifest() {
+        let manifest = deck_manifest_json("deck-01test");
+        let recorded = RecordedArtifact::from_event(&deck_event("deck-01test", manifest.clone(), 3))
+            .expect("a deck manifest is kept");
+        assert_eq!(recorded.kind, "deck");
+        assert_eq!(recorded.version, 3);
+        assert_eq!(recorded.content, manifest);
+        let stored = serde_json::to_value(&recorded).expect("serializable");
+        assert_eq!(stored["kind"], "deck");
+        assert_eq!(stored["version"], 3);
+    }
+
+    /// A deck that would not read back is never kept: over the manifest cap, not a manifest, a
+    /// `data:` URI, or a manifest of another deck.
+    #[test]
+    fn recorded_artifact_drops_a_deck_over_the_cap() {
+        let manifest = deck_manifest_json("deck-01test");
+        let padded = format!(
+            "{manifest}{}",
+            " ".repeat(mp_contracts::deck_manifest::MAX_MANIFEST_CHARS)
+        );
+        assert!(padded.chars().count() < RecordedArtifact::MAX_PERSISTED_CHARS, "the deck's own cap decides");
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", padded, 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", "# not json".to_owned(), 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event("deck-01test", "{\"version\":1}".to_owned(), 1)).is_none());
+        assert!(RecordedArtifact::from_event(&deck_event(
+            "deck-01test",
+            "data:application/json;base64,e30=".to_owned(),
+            1
+        ))
+        .is_none());
+        assert!(
+            RecordedArtifact::from_event(&deck_event("deck-other", manifest, 1)).is_none(),
+            "a manifest is kept only under its own deck id"
+        );
     }
 }

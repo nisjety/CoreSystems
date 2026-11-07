@@ -3,6 +3,7 @@ import {
   AttachmentsNotSentError,
   approvePlan,
   buildChatWireBody,
+  callMcpAppTool,
   groupChatModels,
   listModels,
   rejectPlan,
@@ -10,10 +11,12 @@ import {
   describeFeedbackFailure,
   getChatThread,
   getChatThreadTranscript,
+  getMcpAppResource,
   getThreadContext,
   getThreadMessages,
   listChatThreads,
   listChatThreadsPage,
+  listDeckTemplates,
   modelEffortLevels,
   modelSupportsAgentic,
   pagedTranscriptEnabled,
@@ -299,6 +302,50 @@ describe('chat-client stream-event coverage', () => {
       name: 'some_future_event',
       payload: { hello: 'world' },
     })
+  })
+
+  it('reads a search_provenance frame, and reads a provider the SPA does not name as other', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({
+            providers: [
+              { id: 'brave', label: 'Brave Search', hits: 2 },
+              { id: 'zzz_new_engine', label: 'zzz_new_engine', hits: 1 },
+            ],
+            route: 'free_chain',
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).toHaveBeenCalledTimes(1)
+    expect(onSearchProvenance).toHaveBeenCalledWith({
+      providers: [
+        { id: 'brave', hits: 2 },
+        { id: 'other', hits: 1 },
+      ],
+      route: 'free_chain',
+    })
+  })
+
+  it('drops a search_provenance frame with a route the SPA does not name, or with no provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [{ id: 'brave', hits: 1 }], route: 'bogus' })}\n\n`,
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [], route: 'zdr_free_only' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).not.toHaveBeenCalled()
   })
 
   it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
@@ -1212,6 +1259,36 @@ describe('chat-client tool wiring', () => {
       ],
       requestId: 'req_2',
     })
+  })
+
+  /** EP-4 S6: a server's question names the server only with a known origin and a label of 1 to 80 characters. */
+  it('reads an origin only for a known server origin with a label of 1 to 80 characters', async () => {
+    const item = { id: 'name', kind: 'text', prompt: 'Your name?' }
+    const frame = (index: number, fields: Record<string, string>) =>
+      `event: user_question\ndata: ${JSON.stringify({ question_id: `q_${index}`, items: [item], ...fields })}\n\n`
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        frame(0, { origin: 'mcp_elicitation', origin_label: 'Fixture server' }),
+        frame(1, { origin: 'model', origin_label: 'Fixture server' }),
+        frame(2, { origin: 'mcp_elicitation' }),
+        frame(3, { origin: 'mcp_elicitation', origin_label: '   ' }),
+        frame(4, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(81) }),
+        frame(5, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(80) }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion.mock.calls.map(([event]) => [event.origin, event.originLabel])).toEqual([
+      ['mcp_elicitation', 'Fixture server'],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      ['mcp_elicitation', 'x'.repeat(80)],
+    ])
   })
 
   /** plan-gate §2.1: the model's structured plan-mode plan. */
@@ -3013,5 +3090,187 @@ describe('chat-client approve then execute (WS14 S2)', () => {
 
       expect(result.continuation, `answer ${String(answer)}`).toBe(expected)
     }
+  })
+})
+
+describe('deck templates (EP-5 S7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const listed = {
+    skill_id: 'skill-brand',
+    name: 'Aquatiq brand',
+    description: 'Blue on white.',
+    colors: { primary: '#0A3D62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26', 'red'] },
+    fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+  }
+
+  it('sends the picked template as deck_template on a turn that keeps data', () => {
+    const body = buildChatWireBody({ content: 'Lag en presentasjon', deckTemplate: '  skill-brand ' })
+    expect(body.deck_template).toBe('skill-brand')
+  })
+
+  it('leaves the body unchanged when no template, a blank one or a malformed one is picked', () => {
+    const plain = buildChatWireBody({ content: 'hi' })
+    expect(plain).not.toHaveProperty('deck_template')
+    for (const deckTemplate of [undefined, '', '   ', '../blob', 'a b']) {
+      expect(buildChatWireBody({ content: 'hi', deckTemplate })).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('never sends a template on the turns the server would refuse it', () => {
+    for (const request of [
+      { content: 'hi', deckTemplate: 'skill-brand', zdr: true },
+      { content: 'hi', deckTemplate: 'skill-brand', provider: 'openai-codex-subscription' },
+      { content: 'hi', deckTemplate: 'skill-brand', sourceScope: 'conversation' as const },
+    ]) {
+      expect(buildChatWireBody(request)).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('lists templates with display fields only and drops an entry that is not one', async () => {
+    vi.stubGlobal('fetch', json({ data: { templates: [
+      listed,
+      { ...listed, skill_id: 'skill-bad', colors: { ...listed.colors, primary: 'blue' } },
+      { ...listed, skill_id: '../escape' },
+      { ...listed, skill_id: 'skill-nofont', fonts: { heading: 'Carlito' } },
+    ] } }))
+    const templates = await listDeckTemplates()
+    expect(templates).toEqual([{
+      skillId: 'skill-brand',
+      name: 'Aquatiq brand',
+      description: 'Blue on white.',
+      colors: { primary: '#0a3d62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26'] },
+      fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+    }])
+    const fetchMock = vi.mocked(fetch)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/deck-templates')
+  })
+
+  it('reads a 404 (switch off) and a 403 (zero retention) as no picker', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await listDeckTemplates()).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'skills' } }, 403))
+    expect(await listDeckTemplates()).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(listDeckTemplates()).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S2 inline widget feature family', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('inline_widgets_feature_only_with_the_switch', () => {
+    // Off, the body is what it was before the switch existed. On, the client offers widgets, and the
+    // gateway may then add the widget notice to the prompt. Only the literal true turns it on.
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'TRUE')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', '1')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('inline_widgets')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('usage')
+  })
+})
+
+describe('EP-4 S9 MCP app resource read', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  it('reads the app document by server and tool name only', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '<p>app</p>', needs_network: true } }))
+    expect(await getMcpAppResource('srv-1', 'show&org_id=org-2')).toEqual({
+      uri: 'ui://charts/pie',
+      html: '<p>app</p>',
+      needsNetwork: true,
+    })
+    const url = String(vi.mocked(fetch).mock.calls[0]?.[0])
+    expect(url).toContain('/api/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2')
+  })
+
+  it('reads a 404 (switch off, no app) and a 403 (zero retention) as no app', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'mcp_execution' } }, 403))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('a document that is not a ui:// app is no app', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'https://evil.example/app', html: '<p>app</p>' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '   ' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S10 MCP app tool call', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const request = {
+    runId: 'run-1',
+    serverId: 'srv-1',
+    tool: 'echo_read',
+    arguments: { q: 'x' },
+    frameNonce: 'frame-0123456789abcdef',
+  }
+
+  it('posts the call with the frame nonce and nothing that scopes it', async () => {
+    vi.stubGlobal('fetch', json({ data: { output: '{"content":[]}', truncated: true } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: true, output: '{"content":[]}', truncated: true })
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? []
+    expect(String(url)).toContain('/api/v1/mcp-apps/tool-call')
+    expect((init as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      run_id: 'run-1',
+      server_id: 'srv-1',
+      tool: 'echo_read',
+      arguments: { q: 'x' },
+      frame_nonce: 'frame-0123456789abcdef',
+    })
+  })
+
+  it('answers a refusal with its typed code', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'app_call_requires_chat', message: 'ask in the chat' } }, 403))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'app_call_requires_chat' })
+    vi.stubGlobal('fetch', json({ error: { code: 'rate_limited', message: 'slow down' } }, 429))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'rate_limited' })
+    // Switched off, the route does not exist.
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'not_found' })
+  })
+
+  it('a reply without output is a failed call', async () => {
+    vi.stubGlobal('fetch', json({ data: { truncated: false } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'tool_call_failed' })
   })
 })

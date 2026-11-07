@@ -19,16 +19,22 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
-use quarry_browser::{BrowserEgressPolicy, BrowserEgressProxyProvider, PinnedEgressProxyEndpoint};
+use base64::Engine;
+use quarry_browser::{BrowserEgressPolicy, BrowserEgressProxyProvider, PinnedEgressProxyEndpoint, PublicBrowserAsset};
 use quarry_core::contracts::{BrowserEgressDecision, BrowserEgressReceipt};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-use crate::dns_guard::{resolve_public_url_via, HostLookup, ResolvedTarget, SystemHostLookup};
+use crate::dns_guard::{
+    resolve_public_url_via, HostLookup, PinnedDnsResolver, ResolvedTarget, SystemHostLookup,
+};
+use crate::fetch::{read_bounded_body, redirect_probe_target, validate_redirect_probe_url};
 
 const MAX_PROXY_HEADER_BYTES: usize = 32 * 1024;
 const RECEIPT_LIMIT: usize = 2_048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const ASSET_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_ASSET_BYTES: usize = 4 * 1024 * 1024;
 
 /// Process-local egress authority for a Chromium instance. Its endpoint is
 /// intentionally loopback-only: it is a browser transport boundary, never a
@@ -242,12 +248,115 @@ impl BrowserEgressProxyProvider for PinnedBrowserEgressProxy {
         Ok(())
     }
 
+    async fn fetch_public_asset(
+        &self,
+        session_key: &str,
+        url: &url::Url,
+    ) -> QuarryResult<PublicBrowserAsset> {
+        let (policy, shutdown) = self.inner.sessions.lock().await.get(session_key)
+            .map(|session| (session.policy.clone(), session.shutdown.clone()))
+            .ok_or_else(|| asset_error(ErrorCode::SecurityBlocked))?;
+        let permits = |policy: &BrowserEgressPolicy, url: &url::Url| {
+            policy.allows_url(url.as_str()) || policy.allows_public_asset(url.as_str())
+        };
+        if !permits(&*policy.lock().await, url) {
+            return Err(asset_error(ErrorCode::SecurityBlocked));
+        }
+        tokio::select! {
+            result = tokio::time::timeout(ASSET_TIMEOUT, fetch_public_asset(url, self.inner.lookup.as_ref())) => {
+                result.map_err(|_| asset_error(ErrorCode::Timeout))?
+            }
+            _ = shutdown.cancelled() => Err(asset_error(ErrorCode::SecurityBlocked)),
+        }
+    }
+
     async fn release_session(&self, session_key: &str) {
         if let Some(session) = self.inner.sessions.lock().await.remove(session_key) {
             session.shutdown.cancel();
             session.accept_abort.abort();
         }
     }
+}
+
+fn asset_error(code: ErrorCode) -> QuarryError {
+    QuarryError::new(code, "public browser asset could not be loaded")
+}
+
+/// A separate client sends no browser headers, cookies, credentials or body.
+/// A redirect is returned to Chromium so its next paused request is checked
+/// by the tab policy again, under Chromium's redirect limit.
+async fn fetch_public_asset(
+    url: &url::Url,
+    lookup: &dyn HostLookup,
+) -> QuarryResult<PublicBrowserAsset> {
+    validate_redirect_probe_url(url)?;
+    if url.scheme() != "https"
+        || !matches!(url.host(), Some(url::Host::Domain(_)))
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(asset_error(ErrorCode::SecurityBlocked));
+    }
+    let pinned = resolve_public_url_via(url, lookup)
+        .await
+        .map_err(|error| asset_error(error.code))?;
+    let resolver = Arc::new(PinnedDnsResolver::default());
+    resolver.pin(pinned).map_err(|error| asset_error(error.code))?;
+    let client = reqwest::Client::builder()
+        .timeout(ASSET_TIMEOUT)
+        .no_proxy()
+        .cookie_store(false)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(resolver)
+        .build()
+        .map_err(|_| asset_error(ErrorCode::DriverFailed))?;
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|_| asset_error(ErrorCode::DriverFailed))?;
+    let status = response.status();
+    let mut headers = public_asset_headers(response.headers());
+    if let Some(target) = redirect_probe_target(url, status, response.headers())? {
+        // Chromium checks CORS on each cross-origin redirect as well as on
+        // the final asset. Keep the site's own allowed headers on both.
+        headers.push(("location".into(), target.to_string()));
+        return Ok(PublicBrowserAsset {
+            status: status.as_u16(),
+            headers,
+            body_base64: String::new(),
+        });
+    }
+    if !status.is_success() {
+        return Err(asset_error(ErrorCode::DriverFailed));
+    }
+    let body = read_bounded_body(response, MAX_ASSET_BYTES).await?;
+    Ok(PublicBrowserAsset {
+        status: status.as_u16(),
+        headers,
+        body_base64: base64::engine::general_purpose::STANDARD.encode(body),
+    })
+}
+
+fn public_asset_headers(upstream: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    let mut headers: Vec<_> = upstream
+        .iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "content-type"
+                    | "access-control-allow-origin"
+                    | "cross-origin-resource-policy"
+                    | "x-content-type-options"
+            )
+        })
+        .filter_map(|(name, value)| {
+            value.to_str().ok().filter(|text| text.len() <= 4096)
+                .map(|text| (name.to_string(), text.to_owned()))
+        })
+        .collect();
+    headers.push(("cache-control".into(), "no-store".into()));
+    headers
 }
 
 async fn serve_connection(
@@ -588,6 +697,25 @@ mod tests {
     use super::*;
     use quarry_browser::BrowserEgressProxyProvider;
 
+    #[test]
+    fn public_asset_headers_preserve_site_cors_without_credentials() {
+        let mut upstream = reqwest::header::HeaderMap::new();
+        upstream.insert("access-control-allow-origin", "*".parse().unwrap());
+        upstream.insert("access-control-allow-credentials", "true".parse().unwrap());
+        upstream.insert("set-cookie", "site-token=secret".parse().unwrap());
+        upstream.insert("location", "https://cdn.example/next.css".parse().unwrap());
+        let headers = public_asset_headers(&upstream);
+        assert_eq!(
+            headers,
+            [
+                ("access-control-allow-origin".to_owned(), "*".to_owned()),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+        );
+        let no_cors = public_asset_headers(&reqwest::header::HeaderMap::new());
+        assert_eq!(no_cors, [("cache-control".to_owned(), "no-store".to_owned())]);
+    }
+
     async fn send_proxy_request(endpoint: &PinnedEgressProxyEndpoint, request: &str) -> String {
         let endpoint = url::Url::parse(endpoint.as_str()).expect("valid proxy endpoint");
         let address = SocketAddr::new(
@@ -692,6 +820,37 @@ mod tests {
         async fn lookup(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
             Ok(self.0.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
         }
+    }
+
+    #[tokio::test]
+    async fn credentialless_asset_permission_cannot_open_a_tunnel_or_reach_private_dns() {
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+        ])));
+        let session = "asset-rebind";
+        proxy
+            .configure_policy(
+                session,
+                BrowserEgressPolicy::from_allowed_domains(&["shop.example".to_owned()])
+                    .with_public_assets(),
+            )
+            .await
+            .expect("configure the asset-enabled session");
+        let endpoint = proxy.endpoint_for_session(session).await.expect("proxy endpoint");
+        let tunnel = send_proxy_request(
+            &endpoint,
+            "CONNECT cdn.example:443 HTTP/1.1\r\nHost: cdn.example:443\r\n\r\n",
+        )
+        .await;
+        assert!(tunnel.starts_with("HTTP/1.1 403"));
+
+        let url = url::Url::parse("https://cdn.example/site.css").expect("asset URL");
+        let error = proxy
+            .fetch_public_asset(session, &url)
+            .await
+            .err()
+            .expect("a public name resolving to metadata is refused");
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
     }
 
     #[tokio::test]

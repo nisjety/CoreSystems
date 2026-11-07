@@ -4,11 +4,16 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   APPROVAL_CAUSE_CODES,
+  BROWSER_ASSIST_KINDS,
   approvalFallbackLine,
   approvalHeadline,
   approvalKindLabel,
   approvalReason,
   browserApprovalStatusLabel,
+  browserAssistActionLabel,
+  browserAssistAttentionLine,
+  browserAssistKindOf,
+  browserAssistNoTakeOverLine,
   browserRiskLabel,
   causeCodeOf,
   type ApprovalCause,
@@ -82,6 +87,85 @@ describe('the copy for every cause code', () => {
     expect(approvalHeadline(gated, no)).toBe('Utsjekk/betaling')
     // No category stated: a generic browser line, not the empty label.
     expect(approvalHeadline({ cause: cause('browser_action_risk') }, en)).toBe('A browser action')
+  })
+
+  it('tells the person who took the browser how to give it back, in both languages', () => {
+    const takeover = { cause: cause('browser_human_assist') }
+    expect(approvalHeadline(takeover, en)).toBe('The browser is with you')
+    expect(approvalHeadline(takeover, no)).toBe('Nettleseren er hos deg')
+    expect(approvalReason(takeover, en)).toBe(
+      'You have control of the browser. Press Give back when you are done.',
+    )
+    expect(approvalReason(takeover, no)).toBe('Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.')
+  })
+})
+
+describe('a help request the agent raised on a wall (EP-1 S2)', () => {
+  const help = (assistKind: string, host?: string) => ({
+    cause: cause('browser_human_assist', { assistKind, assistOrigin: 'agent', host }),
+  })
+
+  it('words every assist kind in Norwegian and in English, each with its own headline', () => {
+    const headlines = new Set<string>()
+    for (const kind of BROWSER_ASSIST_KINDS) {
+      for (const read of [approvalHeadline, approvalReason] as const) {
+        const norwegian = read(help(kind, 'example.com'), no)
+        const english = read(help(kind, 'example.com'), en)
+        expect(norwegian, `${kind} nb`).toBeTruthy()
+        expect(english, `${kind} en`).toBeTruthy()
+        expect(norwegian, `${kind} nb differs from en`).not.toBe(english)
+      }
+      headlines.add(approvalHeadline(help(kind), en))
+      expect(browserAssistKindOf(help(kind).cause)).toBe(kind)
+    }
+    headlines.add(approvalHeadline({ cause: cause('browser_human_assist') }, en))
+    expect(headlines.size).toBe(BROWSER_ASSIST_KINDS.length + 1)
+  })
+
+  it('names the host from the approval record, and reads without one', () => {
+    expect(approvalReason(help('login', 'example.com'), en)).toBe(
+      'The site asks you to sign in on example.com. Take over, sign in, then give back. Signing in through another site is not supported yet.',
+    )
+    expect(approvalReason(help('login', 'example.com'), no)).toContain('example.com')
+    for (const kind of BROWSER_ASSIST_KINDS) {
+      expect(approvalReason(help(kind, 'example.com'), en), kind).toContain('example.com')
+      expect(approvalReason(help(kind, '  '), en), kind).not.toContain('undefined')
+      expect(approvalReason(help(kind), no), kind).toMatch(/^Nettstedet/)
+    }
+  })
+
+  it('says a sign-in through another site is not supported yet', () => {
+    expect(approvalReason(help('login'), en)).toContain('Signing in through another site is not supported yet.')
+    expect(approvalReason(help('login'), no)).toContain('Innlogging via et annet nettsted støttes ikke ennå.')
+  })
+
+  it('reads a takeover, a person-raised pause or an unknown wall as the takeover copy', () => {
+    const takeover = 'You have control of the browser. Press Give back when you are done.'
+    for (const odd of [
+      cause('browser_human_assist', { assistKind: 'login', assistOrigin: 'person' }),
+      cause('browser_human_assist', { assistKind: 'rate_limit', assistOrigin: 'agent' }),
+      cause('browser_human_assist', { assistKind: 'user_takeover', assistOrigin: 'person' }),
+    ]) {
+      expect(browserAssistKindOf(odd)).toBeUndefined()
+      expect(approvalReason({ cause: odd }, en)).toBe(takeover)
+    }
+    expect(browserAssistKindOf(cause('provider_write', { assistKind: 'login', assistOrigin: 'agent' }))).toBeUndefined()
+  })
+
+  it('labels Take over and Skip this site in both languages', () => {
+    expect(browserAssistActionLabel('take_over', en)).toBe('Take over')
+    expect(browserAssistActionLabel('take_over', no)).toBe('Ta over')
+    expect(browserAssistActionLabel('skip', en)).toBe('Skip this site')
+    expect(browserAssistActionLabel('skip', no)).toBe('Hopp over dette nettstedet')
+    expect(browserAssistNoTakeOverLine(en)).not.toBe(browserAssistNoTakeOverLine(no))
+  })
+
+  it('keeps the attention and push text free of any host', () => {
+    expect(browserAssistAttentionLine(en)).toBe('Verevon needs you in the browser')
+    expect(browserAssistAttentionLine(no)).toBe('Verevon trenger deg i nettleseren')
+    for (const line of [browserAssistAttentionLine(en), browserAssistAttentionLine(no)]) {
+      expect(line).not.toMatch(/example\.com|\.[a-z]{2,}\b/)
+    }
   })
 })
 

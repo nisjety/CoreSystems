@@ -578,6 +578,26 @@ async fn insert_managed_run_started(
 ) -> Result<(), Status> {
     let zdr = retention.class == RetentionClass::Zdr;
     let residency = super::grpc::configured_residency();
+    // EP-12 S1: a child run inherits its parent's origin token behind
+    // SESSION_RUN_ORIGIN_INHERIT. A managed run is not stamped at birth, so a run
+    // with no inherited origin keeps the {} it has always stored.
+    let inherited_origin = crate::run_origin_stamp::inherited_origin(
+        &mut **transaction,
+        &request.org_id,
+        &persisted.parent_run_id,
+        crate::run_origin_stamp::inherit_enabled(
+            std::env::var(crate::run_origin_stamp::INHERIT_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .await?;
+    let origin_metadata = match inherited_origin {
+        Some(origin) => {
+            serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
+        }
+        None => serde_json::json!({}),
+    };
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
     // managed-run caller to restate it. The exact tenant/owner predicate is a
@@ -595,10 +615,10 @@ async fn insert_managed_run_started(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
                           space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
                           retention_class, waiver_ack_id, waiver_connection_id,
-                          turn_origin, trigger_message_id, agent_subject_id)
+                          turn_origin, trigger_message_id, agent_subject_id, metadata)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
                 t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
-                $11, $12, $13, $14, $15, $16
+                $11, $12, $13, $14, $15, $16, $17
          FROM threads AS t
          WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
@@ -620,6 +640,7 @@ async fn insert_managed_run_started(
     .bind(wake.map(|w| w.turn_origin.as_str()))
     .bind(wake.map(|w| w.trigger_message_id.as_str()))
     .bind(wake.map(|w| w.agent_subject_id.as_str()))
+    .bind(origin_metadata)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?

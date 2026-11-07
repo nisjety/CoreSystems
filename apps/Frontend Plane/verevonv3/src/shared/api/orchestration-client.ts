@@ -1,5 +1,11 @@
-import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
+import type { z } from 'zod'
+import {
+  type integrationsConnectorPoliciesOutput,
+  integrationsSetConnectorPolicyInput,
+  orchestrationDecideApprovalInput,
+} from '@/shared/actions/action-registry'
 import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
@@ -146,6 +152,9 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
       ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
       : [],
     stepUpRequired: cause.step_up_required === true,
+    assistKind: str(cause.assist_kind),
+    assistOrigin: str(cause.assist_origin),
+    host: str(cause.host),
   }
 }
 
@@ -220,13 +229,22 @@ export async function decideApproval(
   signal?: AbortSignal,
   scope: ApprovalScope = 'once',
   promote = false,
+  edit?: ApprovalEdit,
 ): Promise<Approval | null> {
-  const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else.
+  const checked = orchestrationDecideApprovalInput.safeParse({
+    approvalId,
+    decision,
+    reason: reason ?? '',
+    ...(edit ? { edit } : {}),
+  })
+  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else. An edit
+  // (EP-10-S6, decision D1) is approved for this one call only: never with a standing scope or
+  // "Always". The server refuses both too; refusing here keeps the person from believing it went.
   if (
     !checked.success ||
     !APPROVAL_SCOPES.includes(scope) ||
-    (promote && (decision !== 'approve' || scope !== 'thread'))
+    (promote && (decision !== 'approve' || scope !== 'thread')) ||
+    (edit !== undefined && (scope !== 'once' || promote))
   ) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
@@ -234,17 +252,57 @@ export async function decideApproval(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      // The scope and "Always" are sent only when asked for: the one decision carries neither field.
+      // The scope, "Always" and an edit are sent only when asked for: the one plain decision
+      // carries none of them, so an unedited approval is byte-identical to before EP-10-S6.
       body: JSON.stringify({
         decision,
         reason: checked.data.reason ?? '',
         ...(scope === 'once' ? {} : { scope }),
         ...(promote ? { promote: true } : {}),
+        ...(checked.data.edit
+          ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
+          : {}),
       }),
       signal,
     },
   )
   return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/**
+ * "Send with my edits" (EP-10-S6): the person's changes to a drafted mail send and the fingerprint
+ * of the draft they saw (`ApprovalPreview.actionFingerprint`).
+ */
+export type ApprovalEdit = {
+  patch: MailSendPatch
+  baseFingerprint: string
+}
+
+/**
+ * The typed refusals of an edited approval (EP-10-S4 gateway and BFF): the draft changed since it
+ * was read (409 `approval_changed`), it was edited too often (409 `revision_limit`), edits are
+ * switched off or not the caller's (403), or the patch broke a limit (422, the EP-10-S3 codes).
+ */
+export const APPROVAL_EDIT_REFUSALS = [
+  'approval_changed',
+  'revision_limit',
+  'approval_edit_disabled',
+  'edit_owner_only',
+  'edit_requires_grant',
+  'edit_requires_once',
+  'invalid_patch',
+  'invalid_base_fingerprint',
+  ...APPROVAL_EDIT_CODES,
+] as const
+
+export type ApprovalEditRefusal = (typeof APPROVAL_EDIT_REFUSALS)[number]
+
+/** The edit refusal an error carries, or null when it is some other failure. */
+export function approvalEditRefusalOf(error: unknown): ApprovalEditRefusal | null {
+  if (!(error instanceof ApiError) || error.code === null) return null
+  return (APPROVAL_EDIT_REFUSALS as readonly string[]).includes(error.code)
+    ? (error.code as ApprovalEditRefusal)
+    : null
 }
 
 /**
@@ -297,6 +355,95 @@ export async function confirmApprovalRule(
   })
 }
 
+/** The capabilities whose tool policies are the connected-app levels (EP-10 S7). */
+export const PROVIDER_READ_CAPABILITY = 'cap.tool.provider.read'
+export const PROVIDER_EXECUTE_CAPABILITY = 'cap.tool.provider.execute'
+
+export type ConnectorPolicyInput = z.infer<typeof integrationsSetConnectorPolicyInput>
+export type ConnectorPolicies = z.infer<typeof integrationsConnectorPoliciesOutput>
+export type ConnectorReadLevel = ConnectorPolicies['read']
+export type ConnectorWriteLevel = ConnectorPolicies['write']
+
+/** The level a stored decision is: no row is the default level, `ask` is ask first, `never` is off. */
+function readLevelOf(decision: string | undefined): ConnectorReadLevel {
+  if (decision === 'never') return 'off'
+  if (decision === 'ask') return 'ask_first'
+  return 'use_without_asking'
+}
+
+function writeLevelOf(decision: string | undefined): ConnectorWriteLevel {
+  return decision === 'never' ? 'off' : 'always_ask'
+}
+
+/**
+ * The connected-app levels in a tool-policy list. The list holds the org's rows and the caller's own,
+ * never another person's. A list without the `enforced` bit is read as not enforced, so a level is never
+ * shown as honoured on a guess.
+ */
+export function connectorPoliciesOf(body: unknown): ConnectorPolicies {
+  const record = body && typeof body === 'object' ? (body as Record<string, unknown>) : {}
+  const rows = Array.isArray(record.policies) ? record.policies : []
+  const decisionOf = (capabilityId: string, scopeKind: 'user' | 'org') => {
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      const policy = row as Record<string, unknown>
+      if (policy.capability_id === capabilityId && policy.scope_kind === scopeKind && typeof policy.decision === 'string') {
+        return policy.decision
+      }
+    }
+    return undefined
+  }
+  return {
+    enforced: record.enforced === true,
+    read: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'user')),
+    write: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'user')),
+    orgRead: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'org')),
+    orgWrite: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'org')),
+  }
+}
+
+/** The connected-app levels of the caller and their org, and whether they are enforced yet. */
+export async function listConnectorPolicies(signal?: AbortSignal): Promise<ConnectorPolicies> {
+  const body = await requestJson<unknown>('/api/v1/tool-policies', { signal })
+  return connectorPoliciesOf(body)
+}
+
+/**
+ * The request a connected-app level is: the default level revokes the person's own row, any other writes
+ * `ask` or `never` on it. Never an allow and never the org's scope.
+ */
+export function connectorPolicyRequest(input: ConnectorPolicyInput): {
+  capabilityId: string
+  method: 'PUT' | 'DELETE'
+  body?: Record<string, unknown>
+} {
+  const capabilityId = input.kind === 'read' ? PROVIDER_READ_CAPABILITY : PROVIDER_EXECUTE_CAPABILITY
+  if (input.level === 'use_without_asking' || input.level === 'always_ask') {
+    return { capabilityId, method: 'DELETE' }
+  }
+  return {
+    capabilityId,
+    method: 'PUT',
+    body: { scope: 'user', decision: input.level === 'ask_first' ? 'ask' : 'never', reason: '' },
+  }
+}
+
+/** Set the person's own connected-app level. Returning to the default when no row exists is already done. */
+export async function setConnectorPolicy(input: ConnectorPolicyInput, signal?: AbortSignal): Promise<void> {
+  const { capabilityId, method, body } = connectorPolicyRequest(integrationsSetConnectorPolicyInput.parse(input))
+  const path = `/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`
+  if (method === 'DELETE') {
+    try {
+      await requestJson<unknown>(`${path}?scope=user`, { method, signal })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return
+      throw error
+    }
+    return
+  }
+  await requestJson<unknown>(path, { method, body: JSON.stringify(body), signal })
+}
+
 /** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
 export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
 
@@ -328,6 +475,78 @@ export async function readQuarantinePreview(
     truncated: raw.truncated === true,
     toolKey: str(raw.tool_key),
     trustClass: str(raw.trust_class),
+  }
+}
+
+/**
+ * The full draft behind a pending write approval (EP-10-S1, action `approvals.preview`). A mail
+ * send carries every recipient, the full subject and the full body; `other` names only the
+ * operation; `none` is an approval with no retained call. Plain text only: render it as text.
+ */
+export type ApprovalPreview = {
+  kind: 'mail_send' | 'other' | 'none'
+  provider: string
+  operation: string
+  connectionId: string
+  to: string[]
+  subject: string
+  bodyText: string
+  hasHtml: boolean
+  isReply: boolean
+  rawOnly: boolean
+  editableFields: string[]
+  actionFingerprint: string
+  revision: number
+  /**
+   * The gateway takes "Send with my edits" for this draft (EP-10-S6): its edit switch is on and the
+   * draft has editable fields. Server-stated, never guessed; absent reads as false.
+   */
+  canEdit?: boolean
+}
+
+const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
+
+const textList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+
+/**
+ * Read the full draft of a pending approval. Answered only to the run's owner while the approval
+ * is pending; every other case (another person, a decided or expired approval, the preview
+ * switched off) is a 404, returned here as `null` so the card says "preview not available". A
+ * zero-retention or waived refusal and every other failure throw, typed, as `ApiError`.
+ */
+export async function getApprovalPreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalPreview | null> {
+  // The `{data: {preview}}` envelope is unwrapped by `requestJson`.
+  let payload: { preview?: Record<string, unknown> }
+  try {
+    payload = await requestJson<{ preview?: Record<string, unknown> }>(
+      `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/preview`,
+      { signal },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  const raw = payload.preview
+  if (!raw || typeof raw.kind !== 'string' || !APPROVAL_PREVIEW_KINDS.has(raw.kind)) return null
+  return {
+    kind: raw.kind as ApprovalPreview['kind'],
+    provider: str(raw.provider) ?? '',
+    operation: str(raw.operation) ?? '',
+    connectionId: str(raw.connection_id) ?? '',
+    to: textList(raw.to),
+    subject: typeof raw.subject === 'string' ? raw.subject : '',
+    bodyText: typeof raw.body_text === 'string' ? raw.body_text : '',
+    hasHtml: raw.has_html === true,
+    isReply: raw.is_reply === true,
+    rawOnly: raw.raw_only === true,
+    editableFields: textList(raw.editable_fields),
+    actionFingerprint: str(raw.action_fingerprint) ?? '',
+    revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
+    canEdit: raw.can_edit === true,
   }
 }
 
@@ -641,6 +860,58 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
     `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/lineage`,
     { signal },
   )
+}
+
+/**
+ * One lineage edge as the wide-research grid reads it back after a reload (EP-2 S9). `goalSummary`
+ * and `batchId` are what the fan-out stored when the item started; `status` is the edge's own
+ * (`attached`/`detached`), not how the item ended, which is the child run's status.
+ */
+export type LineageEdgeSummary = {
+  parentRunId: string
+  childRunId: string
+  goalSummary: string
+  batchId: string
+  status: string
+}
+
+function lineageText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The edges of a lineage payload (`{ lineage: { edges } }`, or the inner object). An edge without a
+ * child run id is dropped; a missing goal, batch or status reads as empty, as an edge stored before
+ * those fields existed comes back.
+ */
+export function normalizeLineageEdges(payload: unknown): LineageEdgeSummary[] {
+  if (!payload || typeof payload !== 'object') return []
+  const root = payload as Record<string, unknown>
+  const lineage = root.lineage && typeof root.lineage === 'object'
+    ? root.lineage as Record<string, unknown>
+    : root
+  if (!Array.isArray(lineage.edges)) return []
+  return lineage.edges.flatMap((edge): LineageEdgeSummary[] => {
+    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) return []
+    const raw = edge as Record<string, unknown>
+    const childRunId = lineageText(raw.child_run_id)
+    if (!childRunId) return []
+    return [{
+      parentRunId: lineageText(raw.parent_run_id),
+      childRunId,
+      goalSummary: lineageText(raw.goal_summary),
+      batchId: lineageText(raw.batch_id),
+      status: lineageText(raw.status),
+    }]
+  })
+}
+
+/** A thread's lineage edges, parsed ({@link normalizeLineageEdges}). */
+export async function getLineageEdges(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<LineageEdgeSummary[]> {
+  return normalizeLineageEdges(await getLineage(threadId, signal))
 }
 
 // ── Run questions (build plan WS14 S3) ───────────────────────────────────────

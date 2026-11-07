@@ -29,11 +29,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use std::time::Duration;
+
 use axum::{
     body::Body,
     extract::{
         ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
-        Extension, Path, Query, State,
+        DefaultBodyLimit, Extension, Path, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -58,15 +60,16 @@ use crate::{
     },
     config::{AppState, BrowserGrantMode},
     domains::chat::shared::{
-        data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
-        proxy_model_json, proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        apply_org_zdr_posture, data_plane_authorization_value, data_plane_token,
+        delegated_auth_unavailable, model_token, proxy_model_json, proxy_model_json_with_data_plane,
+        proxy_model_json_with_inference, proxy_model_json_with_session,
         required_execution_token, required_inference_token, required_session_token,
     },
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
     rate_limit::{with_rate_class, RateClass},
-    upstream::{authorized_org_id, proxy_bearer_json, proxy_sse_stream},
+    upstream::{authorized_org_id, proxy_bearer_json, proxy_bearer_json_with_timeout, proxy_sse_stream},
 };
 
 /// Mirrors the SPA's `BrowserProfileScope` union (`browser-client.ts`).
@@ -106,17 +109,17 @@ impl BrowserProfileScope {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateSessionBody {
     pub(crate) url: String,
+    /// Personal browsing uses an owner grant rather than a host-scoped grant.
+    #[serde(default)]
+    pub(crate) purpose: Option<BrowserSessionPurpose>,
     #[serde(default)]
     pub(crate) profile_id: Option<String>,
     #[serde(default)]
     pub(crate) persistent_profile: bool,
     #[serde(default)]
     pub(crate) viewport: Option<Viewport>,
-    /// Phase 3: caller-requested Zero Data Retention mode. Enforcement of
-    /// "a ZDR session may never attach a persistent profile" happens
-    /// server-side in `create_session` (`reject_zdr_persistent_profile`) —
-    /// this flag is never trusted blindly for anything else, it only gates
-    /// that one check plus the metadata recorded for this session.
+    /// The caller may raise (but cannot lower) the organisation's Zero Data
+    /// Retention posture. Persistent profiles are forbidden when it is raised.
     #[serde(default)]
     pub(crate) zdr: bool,
     /// Phase 3 continuation: explicit scope for the profile this session
@@ -126,6 +129,13 @@ pub(crate) struct CreateSessionBody {
     /// `effective_profile_scope`).
     #[serde(default)]
     pub(crate) scope: Option<BrowserProfileScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserSessionPurpose {
+    PersonalBrowsing,
+    AssistantTask,
 }
 
 /// Resolves the real scope a session's profile attachment implies, so the
@@ -381,6 +391,19 @@ pub(crate) struct SuggestActionBody {
     pub(crate) include_screenshot: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopSuggestionBody {
+    goal: String,
+    url: String,
+    title: String,
+    observation: Value,
+    #[serde(default)]
+    history: Vec<String>,
+    #[serde(default)]
+    zdr: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct RestoreProbeBody {
     pub(crate) url: String,
@@ -391,6 +414,21 @@ pub(crate) struct RestoreProbeBody {
 pub(crate) struct StartAiRunBody {
     pub(crate) goal: String,
     #[serde(default)]
+    pub(crate) continue_in_tab: Option<ContinueInTab>,
+    /// A caller needing a session-bound run must never receive the legacy
+    /// unattached run when the attachment switch is off. This guarantees only
+    /// the binding, not live frame delivery or approval continuation.
+    #[serde(default)]
+    pub(crate) require_attached: bool,
+    /// Request the bounded interactive assistant policy on an attached run.
+    /// The server owns its restrictions; clients cannot supply weaker policy.
+    #[serde(default)]
+    pub(crate) assistant_interactive: bool,
+    /// Ask the execution plane to disable input, interaction and file transfer.
+    /// This is not a guarantee that navigation cannot cause state changes.
+    #[serde(default)]
+    pub(crate) plan_mode: Option<bool>,
+    #[serde(default)]
     pub(crate) allowed_domains: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) max_steps: Option<i32>,
@@ -398,10 +436,8 @@ pub(crate) struct StartAiRunBody {
     pub(crate) max_runtime_s: Option<i32>,
     #[serde(default)]
     pub(crate) stop_criteria: Option<String>,
-    /// Accepted for API back-compat only — deliberately never read. See
-    /// `build_ai_run_request`'s doc comment: this controls a confirmed-broken
-    /// legacy gate in execution-core, and the gateway must never arm it.
-    #[allow(dead_code)]
+    /// The legacy blanket approval gate cannot resume safely. Explicitly
+    /// requesting it is rejected instead of silently starting without it.
     #[serde(default)]
     pub(crate) require_approval: Option<bool>,
     #[serde(default)]
@@ -419,12 +455,19 @@ struct FrameQuery {
     max_width: Option<u32>,
     #[serde(default)]
     max_height: Option<u32>,
+    #[serde(default)]
+    tab_id: Option<String>,
 }
 
 const DEFAULT_VIEWPORT: Viewport = Viewport {
     width: 1280,
     height: 800,
 };
+// Quarry can spend the entire standard 25 s client budget launching Chromium.
+const BROWSER_LEASE_START_TIMEOUT: Duration = Duration::from_secs(60);
+// The first step attaches the tab, navigates, and observes the result. Leave
+// room for Quarry to return its typed navigation timeout and recovery details.
+const BROWSER_INITIAL_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
 const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
@@ -467,6 +510,14 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             post(start_ai_run),
         );
     let interactive = Router::new()
+        .route(
+            "/api/v1/browser/assistant/capabilities",
+            get(assistant_browser_capabilities),
+        )
+        .route(
+            "/api/v1/browser/assistant/desktop/suggestions",
+            post(suggest_desktop_action).layer(DefaultBodyLimit::max(96 * 1024)),
+        )
         .route("/api/v1/browser/sessions/{session_id}", get(get_session))
         .route(
             "/api/v1/browser/sessions/{session_id}/timeline",
@@ -571,6 +622,65 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
         ))
 }
 
+/// Reports whether an attempt can be made, not whether Quarry has enforced a
+/// policy. The latter is established by the individual attach acknowledgement.
+async fn assistant_browser_capabilities(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    assistant_browser_capabilities_with_switch(&state, &user, &headers, browser_ai_run_attach_enabled()).await
+}
+
+fn assistant_capability_body(available: bool, reason: Option<&str>) -> Value {
+    ok(json!({
+        "available": available,
+        "policySupported": available,
+        "canAttach": available,
+        "reason": reason,
+    }))
+}
+
+async fn assistant_browser_capabilities_with_switch(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    attach_enabled: bool,
+) -> Json<Value> {
+    let unavailable = |reason| Json(assistant_capability_body(false, Some(reason)));
+    if !attach_enabled || !state.browser_grant_mode.issues_grants() {
+        return unavailable("browser_assistant_not_configured");
+    }
+    match crate::zdr::org_zdr_lookup(state, user).await {
+        crate::zdr::OrgZdrPosture::Enabled => return unavailable("browser_attach_zdr_unsupported"),
+        crate::zdr::OrgZdrPosture::Unknown => return unavailable("browser_zdr_posture_unavailable"),
+        crate::zdr::OrgZdrPosture::Disabled => {}
+    }
+    let (model, execution) = tokio::join!(
+        model_token(state, user, headers),
+        required_execution_token(state, user, headers),
+    );
+    let (Some(model), Ok(execution)) = (model, execution) else {
+        return unavailable("delegated_auth_unavailable");
+    };
+    if model.trim().is_empty() || execution.trim().is_empty() {
+        return unavailable("delegated_auth_unavailable");
+    }
+    let url = format!("{}/v1/browser/runs/capabilities", state.model_gateway_url);
+    let (status, Json(response)) = proxy_model_json_with_delegated_headers(
+        state, Method::GET, &url, None, Some(&model),
+        &[("x-execution-authorization", execution.as_str())], &[], user,
+    ).await;
+    let data = unwrap_data(&response);
+    if !status.is_success()
+        || data.get("protocol_version").and_then(Value::as_u64).unwrap_or(0) < 1
+        || data.get("attached_policy_supported").and_then(Value::as_bool) != Some(true)
+    {
+        return unavailable("browser_assistant_capability_unverified");
+    }
+    Json(assistant_capability_body(true, None))
+}
+
 pub(crate) async fn create_session(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -592,34 +702,92 @@ pub(crate) async fn create_session(
     let requested_persistent_profile = body.persistent_profile || profile_id.is_some();
     let profile_scope =
         effective_profile_scope(profile_id, requested_persistent_profile, body.scope);
-    if let Some((code, message)) = reject_zdr_persistent_profile(body.zdr, profile_scope) {
+    let assistant_task_grant = body.purpose == Some(BrowserSessionPurpose::AssistantTask)
+        && state.browser_grant_mode.issues_grants()
+        && assistant_task_grants_enabled();
+    if assistant_task_grant
+        && (requested_persistent_profile || profile_scope != BrowserProfileScope::Ephemeral)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("assistant_profile_not_supported", "Use a fresh browser for this task.")),
+        )
+            .into_response();
+    }
+    // An organisation can require ZDR regardless of what the caller asks.
+    // The authoritative lookup fails closed when posture cannot be checked.
+    let zdr = body.zdr || crate::zdr::org_zdr_enabled(&state, &user).await;
+    if let Some((code, message)) = reject_zdr_persistent_profile(zdr, profile_scope) {
         return (StatusCode::BAD_REQUEST, Json(error(code, message))).into_response();
+    }
+    // The assistant browser cannot attach under ZDR (start_ai_run and
+    // capabilities both refuse it). Refuse here, before any grant is issued
+    // or any Quarry session is created, so a ZDR caller never holds an
+    // issuable-but-unusable assistant_task grant.
+    if body.purpose == Some(BrowserSessionPurpose::AssistantTask) && zdr {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_attach_zdr_unsupported",
+                "The assistant browser is not available under zero data retention.",
+            )),
+        )
+            .into_response();
     }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
-    let allowed_domain = hostname(&target);
+    let resolved_start_url = if body.purpose == Some(BrowserSessionPurpose::AssistantTask)
+        && state.browser_grant_mode.issues_grants()
+    {
+        match super::browser_redirect::resolve_start_url(
+            &state, &user, token.as_deref(), &target, assistant_task_grant,
+        ).await {
+            Ok(resolved) => resolved,
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+    let target = resolved_start_url.as_deref().unwrap_or(&target);
+    let allowed_domain = hostname(target);
 
-    // ZDR is caller-requested and enforced above against persistent profiles;
-    // the flag is threaded through metadata so the SPA renders persistence
-    // state from data instead of assuming it.
-    let zdr = body.zdr;
+    // Carry the effective posture to the grant and Quarry, never the caller's
+    // potentially weaker value.
     // WS8.D: a person's open-web session asks for a human_browse grant (no hosts) when the
     // switch is on and grants are issued at all. Otherwise the start-host session grant.
-    let human_scope = state.browser_human_browse && state.browser_grant_mode.issues_grants();
-    let grant_scope = if human_scope {
-        SessionGrantScope::HumanBrowse
-    } else {
-        SessionGrantScope::StartHost(allowed_domain.as_deref())
-    };
+    let grant_scope = session_grant_scope(
+        body.purpose,
+        state.browser_human_browse && state.browser_grant_mode.issues_grants(),
+        assistant_task_grant,
+        allowed_domain.as_deref(),
+    );
     // A BrowserBroker session grant, before Quarry is asked for a lease: in strict
     // mode no grant means no session.
     let grant_id = match issue_session_grant(&state, &user, &headers, grant_scope, zdr).await {
+        Ok(None) if resolved_start_url.is_some() => {
+            return super::browser_redirect::grant_unavailable();
+        }
         Ok(grant_id) => grant_id,
+        Err(response) if response.status() == StatusCode::FORBIDDEN => {
+            return if resolved_start_url.is_some() {
+                super::browser_redirect::access_denied(allowed_domain.as_deref())
+            } else if body.purpose == Some(BrowserSessionPurpose::AssistantTask) {
+                super::browser_redirect::direct_access_denied(
+                    &state,
+                    &user,
+                    allowed_domain.as_deref(),
+                    response,
+                )
+                .await
+            } else {
+                response
+            };
+        }
         Err(response) => return response,
     };
     // Without a human_browse grant (switch off, or a permissive issuance failure) the
     // first-host policy applies, as before WS8.D.
-    let human_grant = human_scope && grant_id.is_some();
+    let human_grant = grant_scope == SessionGrantScope::HumanBrowse && grant_id.is_some();
     let mut start_body = json!({
         "viewport": {
             "width": viewport.width,
@@ -641,13 +809,15 @@ pub(crate) async fn create_session(
         start_body["grant_id"] = Value::String(grant_id.to_owned());
     }
 
-    let (start_status, start_body) = quarry_call(
+    let quarry_edge = &state.quarry_edge_url;
+    let (start_status, Json(start_body)) = proxy_bearer_json_with_timeout(
         &state,
         Method::POST,
-        "/v1/agent/runs",
+        &format!("{quarry_edge}/v1/agent/runs"),
         Some(start_body),
         token.as_deref(),
         &user.user_id,
+        BROWSER_LEASE_START_TIMEOUT,
     )
     .await;
     if !start_status.is_success() {
@@ -676,16 +846,32 @@ pub(crate) async fn create_session(
         "action": initial_action.clone(),
         "instruction": "Open the page for the Verevon in-app browser surface."
     });
-    let (step_status, step_body) = quarry_call(
+    let (step_status, Json(step_body)) = proxy_bearer_json_with_timeout(
         &state,
         Method::POST,
-        &format!("/v1/agent/runs/{}/step", urlencoding::encode(&run_id)),
+        &format!("{quarry_edge}/v1/agent/runs/{}/step", urlencoding::encode(&run_id)),
         Some(step_body),
         token.as_deref(),
         &user.user_id,
+        BROWSER_INITIAL_NAVIGATION_TIMEOUT,
     )
     .await;
     if !step_status.is_success() {
+        if body.purpose == Some(BrowserSessionPurpose::PersonalBrowsing) {
+            if let Some(navigation_error) = retained_initial_navigation_error(step_status, &step_body)
+            {
+                if let Ok(projection) =
+                    owner_browser_session_projection(&state, &user, token.as_deref(), &run_id)
+                        .await
+                {
+                    if owner_projection_has_live_tab(&projection, &run_id) {
+                        let mut response = browser_response_from_owner_projection(&projection, None);
+                        response["navigationError"] = navigation_error;
+                        return (StatusCode::OK, Json(ok(response))).into_response();
+                    }
+                }
+            }
+        }
         let _ = quarry_call(
             &state,
             Method::DELETE,
@@ -707,8 +893,56 @@ pub(crate) async fn create_session(
             Ok(projection) => projection,
             Err(response) => return response,
         };
-    let response = browser_response_from_owner_projection(&projection, Some(observation));
+    let mut response = browser_response_from_owner_projection(&projection, Some(observation));
+    if let Some(resolved_start_url) = resolved_start_url {
+        response["resolvedStartUrl"] = json!(resolved_start_url);
+    }
     (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+/// Retain a personal browser only for a site HTTP failure tied to its guarded
+/// document request. A proxy authentication response is a browser service failure.
+fn retained_initial_navigation_error(status: StatusCode, body: &Value) -> Option<Value> {
+    if status != StatusCode::BAD_GATEWAY
+        || body.pointer("/error/code")?.as_str()? != "DRIVER_FAILED"
+        || body.pointer("/error/details/reason")?.as_str()? != "navigation_http_response"
+    {
+        return None;
+    }
+    let mut failure = json!({ "code": "browser_initial_navigation_failed" });
+    if let Some(http_status) = body.pointer("/error/details/http_status") {
+        let http_status = http_status.as_u64()?;
+        if !(400..=599).contains(&http_status) || http_status == 407 {
+            return None;
+        }
+        failure["httpStatus"] = json!(http_status);
+    }
+    if let Some(redirect_count) = body
+        .pointer("/error/details/redirect_count")
+        .and_then(Value::as_u64)
+        .and_then(|count| u16::try_from(count).ok())
+    {
+        failure["redirectCount"] = json!(redirect_count);
+    }
+    Some(failure)
+}
+
+fn owner_projection_has_live_tab(projection: &Value, run_id: &str) -> bool {
+    projection.get("runId").and_then(Value::as_str) == Some(run_id)
+        && projection.get("status").and_then(Value::as_str) == Some("active")
+        && projection.get("live").and_then(Value::as_bool) == Some(true)
+        && projection
+            .get("tabs")
+            .and_then(Value::as_array)
+            .is_some_and(|tabs| {
+                tabs.iter().any(|tab| {
+                    tab.get("active").and_then(Value::as_bool) == Some(true)
+                        && tab
+                            .get("tabId")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_valid_path_segment)
+                })
+            })
 }
 
 /// `POST /api/v1/browser/sessions/:session_id/keepalive` (WS8.D): extends the session's
@@ -1525,7 +1759,11 @@ pub(crate) async fn suggest_action(
         Ok(projection) => projection,
         Err(response) => return response,
     };
+    if is_personal_browser(&projection) {
+        return personal_browser_agent_refusal();
+    }
     let metadata = owner_session_state_from_projection(&projection);
+
     let Some(observation) = metadata.last_observation.clone() else {
         return (
             StatusCode::CONFLICT,
@@ -1596,6 +1834,67 @@ pub(crate) async fn suggest_action(
     }
 
     (StatusCode::OK, Json(ok(response_body))).into_response()
+}
+
+/// Stateless reasoning only. The local Quarry adapter owns the live guest,
+/// verifies its targets, and decides which proposed operations can execute.
+async fn suggest_desktop_action(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<DesktopSuggestionBody>,
+) -> (StatusCode, Json<Value>) {
+    let goal = body.goal.trim();
+    let url = normalize_public_http_url(&body.url);
+    if goal.is_empty()
+        || goal.chars().count() > 2_000
+        || body.url.len() > 4_096
+        || body.title.chars().count() > 500
+        || !body.observation.is_object()
+        || body.history.len() > 20
+        || body.history.iter().any(|entry| entry.chars().count() > 350)
+        || url.is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_desktop_observation", "The desktop observation is invalid.")),
+        );
+    }
+    let (model, inference) = tokio::join!(
+        model_token(&state, &user, &headers),
+        required_inference_token(&state, &user, &headers),
+    );
+    let (Some(model), Ok(inference)) = (model, inference) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error("delegated_auth_unavailable", "Model authentication is temporarily unavailable.")),
+        );
+    };
+    let mut request = json!({
+        "mode": "desktop",
+        "goal": goal,
+        "url": body.url,
+        "title": body.title,
+        "observation": body.observation,
+        "history": body.history,
+        "zdr": body.zdr,
+    });
+    apply_org_zdr_posture(&state, &user, &mut request).await;
+    let endpoint = format!("{}/v1/browser/suggest-action", state.model_gateway_url);
+    let (status, Json(response)) = proxy_model_json_with_inference(
+        &state, Method::POST, &endpoint, Some(request), Some(&model), Some(&inference), &user,
+    ).await;
+    if !status.is_success() {
+        return (
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                status
+            },
+            Json(error("desktop_browser_planner_unavailable", "The desktop browser planner could not complete the step.")),
+        );
+    }
+    (StatusCode::OK, Json(ok(response)))
 }
 
 trait BrowserSessionRunState {
@@ -1672,7 +1971,7 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
     let persistent_profile_id = (metadata.profile_scope() != BrowserProfileScope::Ephemeral)
         .then(|| metadata.profile_id().map(str::to_owned))
         .flatten();
-    json!({
+    let mut request = json!({
         "goal": goal,
         // The session's BrowserBroker grant (or, behind `BROWSER_AI_RUN_REAL_GRANT`,
         // one issued for this run). Model Gateway derives the run's own grant
@@ -1689,7 +1988,16 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
         // Server-derived only — mirrors `create_session`'s own zdr handling;
         // never sourced from the request body.
         "zdr": metadata.zdr(),
-    })
+    });
+    // Never strip a requested restriction. Model Gateway must either pass it
+    // through to Quarry or refuse the run; a false/omitted ask changes nothing.
+    if body.plan_mode == Some(true) {
+        request["plan_mode"] = json!(true);
+    }
+    if body.assistant_interactive {
+        request["policy"] = json!({ "disable": ["browser.act.upload", "browser.act.download"] });
+    }
+    request
 }
 
 /// `POST /api/v1/browser/sessions/:session_id/ai-runs` — start a durable,
@@ -1748,6 +2056,62 @@ async fn start_ai_run_with_switch(
     body: StartAiRunBody,
     real_grant_switch: bool,
 ) -> Response {
+    start_ai_run_with_switches(state, user, headers, session_id, body, real_grant_switch, browser_ai_run_attach_enabled()).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ContinueInTab {
+    tab_id: String,
+    expected_epoch: u64,
+    expected_origin: String,
+}
+
+fn continue_in_tab_host(
+    projection: &Value,
+    target: &ContinueInTab,
+    keyed: bool,
+) -> Option<String> {
+    if !is_personal_browser(projection)
+        || projection.get("live").and_then(Value::as_bool) != Some(true)
+        || !is_valid_path_segment(&target.tab_id)
+    {
+        return None;
+    }
+    let origin = Url::parse(&target.expected_origin).ok()?;
+    if !matches!(origin.scheme(), "http" | "https")
+        || origin.origin().ascii_serialization() != target.expected_origin
+    {
+        return None;
+    }
+
+    // A keyed retry must reach Model Gateway even after the original attach has
+    // moved the tab epoch. It fingerprints the exact target. Before any action,
+    // Quarry does the authoritative CAS against its own live tab and grant.
+    if !keyed {
+        let tab = projection.get("tabs")?.as_array()?.iter().find(|tab| {
+            tab.get("tabId").and_then(Value::as_str) == Some(target.tab_id.as_str())
+                && tab.get("active").and_then(Value::as_bool) == Some(true)
+                && tab.get("holder").and_then(Value::as_str) == Some("human")
+                && tab.get("tabEpoch").and_then(Value::as_u64) == Some(target.expected_epoch)
+        })?;
+        let live_url = Url::parse(tab.get("url")?.as_str()?).ok()?;
+        if live_url.origin() != origin.origin() {
+            return None;
+        }
+    }
+    origin.host_str().map(str::to_owned)
+}
+
+async fn start_ai_run_with_switches(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    body: StartAiRunBody,
+    real_grant_switch: bool,
+    attach_switch: bool,
+) -> Response {
     if !is_valid_path_segment(&session_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1757,6 +2121,22 @@ async fn start_ai_run_with_switch(
             )),
         )
             .into_response();
+    }
+    if body.continue_in_tab.is_some()
+        && (!body.require_attached || !body.assistant_interactive || body.allowed_domains.is_some())
+    {
+        return (StatusCode::BAD_REQUEST, Json(error(
+            "browser_continue_scope_invalid",
+            "Continuing in a tab requires an attached interactive run scoped to the current site.",
+        ))).into_response();
+    }
+    if body.assistant_interactive && (!body.require_attached
+        || body.plan_mode == Some(true)
+        || (body.continue_in_tab.is_none() && body.allowed_domains.as_ref().is_none_or(Vec::is_empty))) {
+        return (StatusCode::BAD_REQUEST, Json(error(
+            "browser_assistant_scope_invalid",
+            "An interactive assistant requires an attached run and explicit allowed domains.",
+        ))).into_response();
     }
     let goal = body.goal.trim();
     if goal.is_empty() {
@@ -1787,24 +2167,79 @@ async fn start_ai_run_with_switch(
         Ok(projection) => projection,
         Err(response) => return response,
     };
+    // The open-web grant alone does not establish agent site consent.
+    if is_personal_browser(&projection) && body.continue_in_tab.is_none() {
+        return personal_browser_agent_refusal();
+    }
+    let continue_host = if let Some(target) = &body.continue_in_tab {
+        let Some(host) = continue_in_tab_host(&projection, target, idempotency_key.is_some()) else {
+            return (StatusCode::CONFLICT, Json(error(
+                "browser_continue_tab_changed",
+                "The current browser tab changed. Review it before handing it to the assistant.",
+            ))).into_response();
+        };
+        Some(host)
+    } else {
+        None
+    };
     let metadata = owner_session_state_from_projection(&projection);
+
+    // The model's blanket approval flag cannot yet pause and durably resume a
+    // run. Never turn an explicit caller requirement into an unapproved run.
+    if body.require_approval == Some(true) {
+        return (StatusCode::CONFLICT, Json(error(
+            "browser_approval_continuation_unavailable",
+            "This browser run cannot require approval until approval continuation is available.",
+        ))).into_response();
+    }
+
+    // A session can outlive a change in organisation posture. Do not trust
+    // its old metadata alone when deciding whether to attach or persist.
+    let effective_zdr = metadata.zdr() || crate::zdr::org_zdr_enabled(&state, &user).await;
+
+    // Checked after owner authorization and before minting a grant or starting
+    // a Model run: an explicit attached request must never be downgraded.
+    if body.require_attached && !attach_switch {
+        return (StatusCode::CONFLICT, Json(error(
+            "browser_attach_unavailable",
+            "An attached browser run is not available for this session.",
+        ))).into_response();
+    }
+
+    // Attachment is private and requires this exact owner-authorized session's
+    // own grant. Never attach a run to a grant issued by the grantless fallback.
+    if attach_switch && effective_zdr {
+        return (StatusCode::CONFLICT, Json(error(
+            "browser_attach_zdr_unsupported",
+            "This browser session cannot attach an AI run under zero data retention.",
+        ))).into_response();
+    }
+    if attach_switch && projection_grant_id(&projection).is_none() {
+        return (StatusCode::CONFLICT, Json(error(
+            "browser_session_grant_missing",
+            "This browser session has no browser grant. Reopen it to attach an AI run.",
+        ))).into_response();
+    }
 
     // Server-derived only, from the session's own last observation: a freshly
     // `start_run`'d Quarry lease the AI run acquires has no page loaded, so
     // the loop's first action needs an explicit destination — the URL of the
     // tab the user is already looking at (never a client-supplied value).
-    let start_url = projection
-        .get("currentUrl")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
+    let start_url = if body.continue_in_tab.is_some() {
+        None
+    } else {
+        projection.get("currentUrl")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
 
     let grant_source = match projection_grant_id(&projection) {
         Some(grant_id) => AiRunGrantSource::Session(grant_id),
         // Behind `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7) a session without a grant
         // asks the broker for one over the run's hosts. A zero-retention session
         // never does: it gets no browser bearer and no grant here.
-        None if real_grant_switch && !metadata.zdr() => {
+        None if real_grant_switch && !effective_zdr => {
             let Some(domains) = ai_run_requested_domains(&body, start_url.as_deref()) else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1830,7 +2265,7 @@ async fn start_ai_run_with_switch(
                 .into_response()
         }
     };
-    let names_hosts = body
+    let names_hosts = continue_host.is_some() || body
         .allowed_domains
         .as_ref()
         .is_some_and(|domains| !domains.is_empty());
@@ -1871,7 +2306,10 @@ async fn start_ai_run_with_switch(
     };
 
     let (grant_id, allowed_domains) = match grant_source {
-        AiRunGrantSource::Session(grant_id) => (grant_id, body.allowed_domains.clone()),
+        AiRunGrantSource::Session(grant_id) => (
+            grant_id,
+            continue_host.map(|host| vec![host]).or_else(|| body.allowed_domains.clone()),
+        ),
         AiRunGrantSource::Issue(requested) => {
             match issue_ai_run_grant(&state, &user, token.as_deref(), &browser, &requested).await {
                 Ok(issued) => (issued.grant_id, Some(issued.allowed_domains)),
@@ -1879,7 +2317,7 @@ async fn start_ai_run_with_switch(
             }
         }
     };
-    let request_body = build_ai_run_request(
+    let mut request_body = build_ai_run_request(
         goal,
         &grant_id,
         allowed_domains.as_deref(),
@@ -1887,6 +2325,17 @@ async fn start_ai_run_with_switch(
         &body,
         start_url.as_deref(),
     );
+    request_body["zdr"] = json!(effective_zdr);
+    if attach_switch {
+        request_body["attach_session_id"] = Value::String(session_id.clone());
+        if let Some(target) = &body.continue_in_tab {
+            request_body["attach_tab"] = json!({
+                "tab_id": target.tab_id,
+                "expected_epoch": target.expected_epoch,
+                "expected_origin": target.expected_origin,
+            });
+        }
+    }
 
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
     // A retry of this start carries the client's key to Model Gateway, which
@@ -1966,6 +2415,15 @@ fn browser_ai_run_real_grant_enabled() -> bool {
 
 fn browser_ai_run_real_grant_from(value: Option<&str>) -> bool {
     value == Some("true")
+}
+
+/// Disabled by default: only an explicit server setting enables owner attachment.
+fn browser_ai_run_attach_enabled() -> bool {
+    std::env::var("BROWSER_AI_RUN_ATTACH_SESSION").ok().as_deref() == Some("true")
+}
+
+fn assistant_task_grants_enabled() -> bool {
+    std::env::var("BROWSER_ASSISTANT_TASK_GRANTS").ok().as_deref() == Some("true")
 }
 
 /// Where a workspace AI run's grant comes from.
@@ -2317,7 +2775,7 @@ async fn get_live_frame(
         .max_height
         .unwrap_or(metadata.viewport.height)
         .clamp(240, metadata.viewport.height.max(240));
-    let path = format!(
+    let mut path = format!(
         "/v1/agent/runs/{}/frame?format={}&quality={}&maxWidth={}&maxHeight={}",
         urlencoding::encode(&session_id),
         format,
@@ -2325,6 +2783,13 @@ async fn get_live_frame(
         max_width,
         max_height
     );
+    if let Some(tab_id) = query.tab_id.as_deref() {
+        if !is_valid_path_segment(tab_id) {
+            return (StatusCode::BAD_REQUEST, Json(error("invalid_browser_tab", "The requested browser tab id is invalid."))).into_response();
+        }
+        path.push_str("&tabId=");
+        path.push_str(&urlencoding::encode(tab_id));
+    }
 
     let (status, body) = quarry_call(
         &state,
@@ -3565,7 +4030,7 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
     if zdr_off {
         capabilities.push("persistent_profile");
     }
-    if projection.get("grantKind").and_then(Value::as_str) == Some("human_browse") {
+    if is_personal_browser(projection) {
         capabilities.push("human_browsing");
     }
     if flag("tabControl") {
@@ -3575,6 +4040,17 @@ fn browser_session_capabilities(projection: &Value) -> Vec<&'static str> {
         capabilities.push("attach");
     }
     capabilities
+}
+
+fn is_personal_browser(projection: &Value) -> bool {
+    projection.get("grantKind").and_then(Value::as_str) == Some("human_browse")
+}
+
+fn personal_browser_agent_refusal() -> Response {
+    (StatusCode::FORBIDDEN, Json(error(
+        "browser_personal_session",
+        "This browser is for personal browsing. Start a separate assistant task to give the agent site access.",
+    ))).into_response()
 }
 
 /// The SPA's `openedBy` marker for a tab (WS8.F): `"agent"` or `"human"`, read from Quarry's
@@ -3594,17 +4070,24 @@ fn opened_by_marker(opened_by: Option<&Value>) -> Option<&'static str> {
 /// the projection's tab with the same id. Every other field is kept as Quarry sent it; an opener
 /// that is not a known class is removed rather than passed on.
 fn tab_with_opened_by(mut tab: Value, projection: &Value) -> Value {
-    let marker = opened_by_marker(tab.get("openedBy")).or_else(|| {
+    let projected_tab = (|| {
         let tab_id = tab.get("tabId").and_then(Value::as_str)?;
         projection
             .get("tabs")
             .and_then(Value::as_array)?
             .iter()
             .find(|candidate| candidate.get("tabId").and_then(Value::as_str) == Some(tab_id))
-            .and_then(|candidate| opened_by_marker(candidate.get("openedBy")))
-    });
+    })();
+    let marker = opened_by_marker(tab.get("openedBy"))
+        .or_else(|| opened_by_marker(projected_tab?.get("openedBy")));
     if let Some(object) = tab.as_object_mut() {
         object.remove("openedBy");
+        if let Some(epoch) = projected_tab.and_then(|tab| tab.get("tabEpoch")).and_then(Value::as_u64) {
+            object.insert("tabEpoch".to_owned(), json!(epoch));
+        }
+        if let Some(holder @ ("human" | "agent")) = projected_tab.and_then(|tab| tab.get("holder")).and_then(Value::as_str) {
+            object.insert("holder".to_owned(), json!(holder));
+        }
         if let Some(marker) = marker {
             object.insert("openedBy".to_owned(), Value::String(marker.to_owned()));
         }
@@ -4924,8 +5407,25 @@ fn session_grant_refusal(upstream: Option<StatusCode>) -> Response {
 enum SessionGrantScope<'a> {
     /// The start host only: the first-host session grant every session had before WS8.D.
     StartHost(Option<&'a str>),
+    /// A submitted assistant task, scoped to a fresh browser and its start host.
+    AssistantTask(Option<&'a str>),
     /// A person's own open-web browsing. A `human_browse` grant names no hosts.
     HumanBrowse,
+}
+
+fn session_grant_scope(
+    purpose: Option<BrowserSessionPurpose>,
+    human_browse_enabled: bool,
+    assistant_task_grants_enabled: bool,
+    start_host: Option<&str>,
+) -> SessionGrantScope<'_> {
+    if human_browse_enabled && purpose == Some(BrowserSessionPurpose::PersonalBrowsing) {
+        SessionGrantScope::HumanBrowse
+    } else if assistant_task_grants_enabled && purpose == Some(BrowserSessionPurpose::AssistantTask) {
+        SessionGrantScope::AssistantTask(start_host)
+    } else {
+        SessionGrantScope::StartHost(start_host)
+    }
 }
 
 /// The `POST /v1/browser/grants` body for a scope (WS8.D). `None` means there is no
@@ -4935,7 +5435,10 @@ fn session_grant_request_body(scope: SessionGrantScope<'_>, zdr: bool) -> Option
         SessionGrantScope::StartHost(Some(host)) => {
             Some(json!({ "allowed_domains": [host], "zdr": zdr }))
         }
-        SessionGrantScope::StartHost(None) => None,
+        SessionGrantScope::AssistantTask(Some(host)) => Some(json!({
+            "kind": "assistant_task", "allowed_domains": [host], "zdr": zdr,
+        })),
+        SessionGrantScope::StartHost(None) | SessionGrantScope::AssistantTask(None) => None,
         SessionGrantScope::HumanBrowse => Some(json!({ "kind": "human_browse", "zdr": zdr })),
     }
 }
@@ -4971,7 +5474,7 @@ async fn issue_session_grant(
     if !mode.issues_grants() {
         return Ok(None);
     }
-    let strict = mode == BrowserGrantMode::Strict;
+    let strict = mode == BrowserGrantMode::Strict || matches!(scope, SessionGrantScope::AssistantTask(_));
     let Some(request_body) = session_grant_request_body(scope, zdr) else {
         return if strict {
             Err(session_grant_refusal(None))
@@ -5481,6 +5984,12 @@ fn safe_browser_artifact_content_type(value: Option<&str>, bytes: &[u8]) -> Head
         "image/webp" => HeaderValue::from_static("image/webp"),
         "application/json" => HeaderValue::from_static("application/json"),
         "application/problem+json" => HeaderValue::from_static("application/json"),
+        // Page utilities (F-t2-069): a PDF capture serves as itself only when
+        // the bytes really are a PDF; anything else keeps today's image
+        // fallback so a mislabelled artifact is never served as a PDF.
+        "application/pdf" if bytes.starts_with(b"%PDF-") => {
+            HeaderValue::from_static("application/pdf")
+        }
         _ if looks_like_json_payload(bytes) => HeaderValue::from_static("application/json"),
         _ => HeaderValue::from_static("image/png"),
     }
@@ -6093,6 +6602,31 @@ pub(crate) mod tests {
 
     /// WS9.I: the epoch the person saw travels to Quarry as a compare-and-set; a legacy body
     /// without it stays unconditional.
+    #[test]
+    fn a_keyed_handoff_can_be_replayed_after_the_tab_changes_holder() {
+        let target = ContinueInTab {
+            tab_id: "tab-1".to_owned(),
+            expected_epoch: 0,
+            expected_origin: "https://example.com".to_owned(),
+        };
+        let projection = json!({
+            "live": true,
+            "grantKind": "human_browse",
+            "tabs": [{
+                "tabId": "tab-1",
+                "active": true,
+                "holder": "agent",
+                "tabEpoch": 1,
+                "url": "https://example.com/next"
+            }]
+        });
+        assert!(continue_in_tab_host(&projection, &target, false).is_none());
+        assert_eq!(
+            continue_in_tab_host(&projection, &target, true).as_deref(),
+            Some("example.com"),
+        );
+    }
+
     #[test]
     fn control_body_forwards_expected_epoch() {
         let body: ControlBody = serde_json::from_value(json!({
@@ -7421,11 +7955,15 @@ pub(crate) mod tests {
                 headers.clone(),
                 Path("run-owned".to_owned()),
                 Json(StartAiRunBody {
+                    continue_in_tab: None,
                     goal: "private goal".to_owned(),
                     allowed_domains: None,
                     max_steps: None,
                     max_runtime_s: None,
                     stop_criteria: None,
+                    require_attached: false,
+                    assistant_interactive: false,
+                    plan_mode: None,
                     require_approval: None,
                     max_cost_usd: None,
                 }),
@@ -7456,6 +7994,7 @@ pub(crate) mod tests {
                     quality: None,
                     max_width: None,
                     max_height: None,
+                    tab_id: None,
                 }),
             )
             .await,
@@ -7511,14 +8050,23 @@ pub(crate) mod tests {
             auth: MockServer,
             model: MockServer,
             quarry: MockServer,
+            org: MockServer,
         }
 
         async fn upstreams() -> Upstreams {
-            Upstreams {
+            let up = Upstreams {
                 auth: plane_token_issuer().await,
                 model: MockServer::start().await,
                 quarry: MockServer::start().await,
-            }
+                org: MockServer::start().await,
+            };
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-a"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "metadata": { "interactiveRetention": { "zdr": false } } }
+                })))
+                .mount(&up.org).await;
+            up
         }
 
         fn state(up: &Upstreams, mode: BrowserGrantMode) -> AppState {
@@ -7526,6 +8074,7 @@ pub(crate) mod tests {
             state.auth_core_url = up.auth.uri();
             state.model_gateway_url = up.model.uri();
             state.quarry_edge_url = up.quarry.uri();
+            state.org_core_url = up.org.uri();
             state.browser_grant_mode = mode;
             state
         }
@@ -7577,8 +8126,11 @@ pub(crate) mod tests {
         }
 
         async fn create(state: AppState) -> (StatusCode, Value) {
-            let body: CreateSessionBody =
-                serde_json::from_value(json!({ "url": "https://example.com/" })).expect("body");
+            create_with_body(state, json!({ "url": "https://example.com/" })).await
+        }
+
+        async fn create_with_body(state: AppState, body: Value) -> (StatusCode, Value) {
+            let body: CreateSessionBody = serde_json::from_value(body).expect("body");
             let response = create_session(
                 State(state),
                 Extension(test_user("user-a", "org-a")),
@@ -7648,6 +8200,183 @@ pub(crate) mod tests {
             let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
             let start_body: Value = serde_json::from_slice(&starts[0].body).expect("start body");
             assert_eq!(start_body["grant_id"], json!(GRANT));
+        }
+
+        async fn mount_assistant_site_access(up: &Upstreams, host: &str, effective: &str) {
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-a/browser-sites/explain"))
+                .and(wiremock::matchers::query_param("host", host))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "organization_id": "org-a", "user_id": "user-a", "revision": 1,
+                    "decision": {"host": host, "effective": effective, "cap": "act"}
+                })))
+                .mount(&up.org)
+                .await;
+        }
+
+        async fn mount_assistant_redirect(up: &Upstreams, destination_access: &str) {
+            mount_assistant_site_access(up, "example.com", "ask").await;
+            mount_assistant_site_access(up, "docs.example.org", destination_access).await;
+            for (url, target) in [
+                ("https://example.com/", Some("https://docs.example.org/start")),
+                ("https://docs.example.org/start", None),
+            ] {
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/redirect-hop"))
+                    .and(wiremock::matchers::body_json(json!({ "url": url })))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(json!({ "data": { "target": target } })),
+                    )
+                    .mount(&up.quarry)
+                    .await;
+            }
+        }
+
+        #[tokio::test]
+        async fn assistant_redirect_grants_only_the_resolved_destination() {
+            let up = upstreams().await;
+            mount_assistant_redirect(&up, "act").await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({"grant_id": GRANT})))
+                .mount(&up.model)
+                .await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+
+            let (status, body) = create_with_body(
+                state(&up, BrowserGrantMode::Strict),
+                json!({"url": "https://example.com/", "purpose": "assistant_task"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["resolvedStartUrl"], "https://docs.example.org/start");
+            let grants = requests_to(&up.model, "POST", "/v1/browser/grants").await;
+            assert_eq!(grants.len(), 1);
+            let grant: Value = serde_json::from_slice(&grants[0].body).unwrap();
+            assert_eq!(grant["allowed_domains"], json!(["docs.example.org"]));
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            assert_eq!(starts.len(), 1);
+            let start: Value = serde_json::from_slice(&starts[0].body).unwrap();
+            assert_eq!(start["constraints"]["allowed_domains"], json!(["docs.example.org"]));
+            let steps = requests_to(&up.quarry, "POST", "/v1/agent/runs/run-1/step").await;
+            assert_eq!(steps.len(), 1);
+            let step: Value = serde_json::from_slice(&steps[0].body).unwrap();
+            assert_eq!(step["action"]["url"], "https://docs.example.org/start");
+        }
+
+        #[tokio::test]
+        async fn assistant_redirect_requests_access_without_starting_a_browser() {
+            let up = upstreams().await;
+            mount_assistant_redirect(&up, "ask").await;
+            let (status, body) = create_with_body(
+                state(&up, BrowserGrantMode::Strict),
+                json!({"url": "https://example.com/", "purpose": "assistant_task"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["error"]["code"], "browser_redirect_access_denied");
+            assert_eq!(body["error"]["details"]["host"], "docs.example.org");
+            assert_eq!(
+                body["error"]["details"]["canRequestAccess"],
+                crate::domains::browser_sites::enabled_from_env()
+            );
+            assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+            assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn direct_assistant_grant_refusal_can_request_access_to_the_original_host() {
+            let up = upstreams().await;
+            mount_assistant_site_access(&up, "example.com", "ask").await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(&up.model)
+                .await;
+            let (status, body) = create_with_body(
+                state(&up, BrowserGrantMode::Strict),
+                json!({"url": "https://example.com/docs", "purpose": "assistant_task"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["error"]["code"], "browser_grant_denied");
+            assert_eq!(body["error"]["details"]["host"], "example.com");
+            assert_eq!(
+                body["error"]["details"]["canRequestAccess"],
+                crate::domains::browser_sites::enabled_from_env()
+            );
+            assert!(requests_to(&up.quarry, "POST", "/v1/browser/redirect-hop").await.is_empty());
+            assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn assistant_task_session_is_refused_under_zdr_before_any_grant() {
+            for org_zdr in [false, true] {
+                let up = upstreams().await;
+                if org_zdr {
+                    Mock::given(wm_method("GET"))
+                        .and(wm_path("/api/v1/organizations/org-a"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                            "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                        })))
+                        .with_priority(1).mount(&up.org).await;
+                }
+                let (status, body) = create_with_body(
+                    state(&up, BrowserGrantMode::Strict),
+                    json!({
+                        "url": "https://example.com/",
+                        "purpose": "assistant_task",
+                        "zdr": !org_zdr,
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"]["code"], "browser_attach_zdr_unsupported");
+                assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+                assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn org_zdr_is_carried_to_the_grant_and_browser_even_if_caller_omits_it() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-a"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                })))
+                .with_priority(1).mount(&up.org).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                    "grant_id": GRANT, "kind": "session", "zdr": true
+                }))).mount(&up.model).await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let (status, payload) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert_eq!(status, StatusCode::OK, "{payload}");
+            let grants = requests_to(&up.model, "POST", "/v1/browser/grants").await;
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            let grant: Value = serde_json::from_slice(&grants[0].body).expect("grant body");
+            let start: Value = serde_json::from_slice(&starts[0].body).expect("start body");
+            assert_eq!(grant["zdr"], true);
+            assert_eq!(start["zdr"], true);
+        }
+
+        #[tokio::test]
+        async fn unknown_org_posture_refuses_a_persistent_browser_profile() {
+            let up = upstreams().await;
+            let mut app = state(&up, BrowserGrantMode::Strict);
+            app.org_core_url = "http://127.0.0.1:1".into();
+            let body: CreateSessionBody = serde_json::from_value(json!({
+                "url": "https://example.com/", "persistentProfile": true
+            })).expect("body");
+            let response = create_session(
+                State(app), Extension(test_user("user-a", "org-a")), HeaderMap::new(), Json(body),
+            ).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+            assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
         }
 
         #[tokio::test]
@@ -7728,6 +8457,50 @@ pub(crate) mod tests {
         }
 
         #[tokio::test]
+        async fn session_open_preserves_a_slow_quarry_navigation_timeout() {
+            let up = upstreams().await;
+            let mut state = state(&up, BrowserGrantMode::Off);
+            state.client = reqwest::Client::builder()
+                .timeout(Duration::from_millis(500))
+                .build()
+                .unwrap();
+            let slow_response = Duration::from_millis(700);
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "data": { "run_id": "run-1" } }))
+                        .set_delay(slow_response),
+                )
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(
+                    ResponseTemplate::new(504)
+                        .set_body_json(json!({ "error": {
+                            "code": "TIMEOUT",
+                            "message": "browser operation navigate timed out",
+                            "details": { "op": "navigate" }
+                        }}))
+                        .set_delay(slow_response),
+                )
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&up.quarry)
+                .await;
+
+            let (status, body) = create(state).await;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+            assert_eq!(body["error"]["code"], "TIMEOUT");
+            assert_eq!(body["error"]["details"]["op"], "navigate");
+        }
+
+        #[tokio::test]
         async fn a_failed_quarry_start_revokes_the_grant_it_was_given() {
             let up = upstreams().await;
             Mock::given(wm_method("POST"))
@@ -7796,13 +8569,81 @@ pub(crate) mod tests {
             assert_eq!(revokes.len(), 1);
         }
 
+        #[tokio::test]
+        async fn a_personal_browser_keeps_only_a_live_tab_with_a_typed_site_http_failure() {
+            for (step_status, code, reason, http_status, live, retained) in [
+                (502, "DRIVER_FAILED", "navigation_http_response", 403, true, true),
+                (502, "DRIVER_FAILED", "navigation_http_response", 407, true, false),
+                (502, "DRIVER_FAILED", "navigation_http_response", 429, false, false),
+                (403, "SECURITY_BLOCKED", "navigation_refused", 403, true, false),
+                (502, "DRIVER_FAILED", "browser_process_lost", 503, true, false),
+            ] {
+                let up = upstreams().await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/grants"))
+                    .respond_with(
+                        ResponseTemplate::new(201).set_body_json(json!({ "grant_id": GRANT })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                let mut projection = owner_projection(Some(GRANT));
+                projection["live"] = json!(live);
+                projection["tabs"] = json!([{ "tabId": "tab-1", "active": true }]);
+                mount_quarry_session(&up.quarry, projection).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/agent/runs/run-1/step"))
+                    .respond_with(ResponseTemplate::new(step_status).set_body_json(json!({
+                        "error": {
+                            "code": code,
+                            "details": {
+                                "reason": reason,
+                                "http_status": http_status,
+                                "redirect_count": 1,
+                                "internal": "discarded"
+                            }
+                        }
+                    })))
+                    .with_priority(1)
+                    .mount(&up.quarry)
+                    .await;
+
+                let (status, payload) = create_with_body(
+                    state(&up, BrowserGrantMode::Strict),
+                    json!({ "url": "https://example.com/", "purpose": "personal_browsing" }),
+                )
+                .await;
+
+                assert_eq!(status.is_success(), retained, "{payload}");
+                if retained {
+                    assert_eq!(
+                        payload.pointer("/data/navigationError"),
+                        Some(&json!({
+                            "code": "browser_initial_navigation_failed",
+                            "httpStatus": 403,
+                            "redirectCount": 1
+                        })),
+                    );
+                    assert!(!payload.to_string().contains(GRANT), "{payload}");
+                }
+                let deletions = requests_to(&up.quarry, "DELETE", "/v1/agent/runs/run-1").await;
+                let revokes =
+                    requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+                assert_eq!(deletions.is_empty(), retained, "{payload}");
+                assert_eq!(revokes.is_empty(), retained, "{payload}");
+            }
+        }
+
         fn ai_run_body() -> StartAiRunBody {
             StartAiRunBody {
+                continue_in_tab: None,
                 goal: "find the price".to_owned(),
                 allowed_domains: Some(vec!["shop.example.com".to_owned()]),
                 max_steps: None,
                 max_runtime_s: None,
                 stop_criteria: None,
+                require_attached: false,
+                assistant_interactive: false,
+                plan_mode: None,
                 require_approval: None,
                 max_cost_usd: None,
             }
@@ -7825,6 +8666,249 @@ pub(crate) mod tests {
                 status,
                 serde_json::from_slice(&bytes).unwrap_or(Value::Null),
             )
+        }
+
+        async fn start_run_with_attach(state: AppState, attach: bool) -> (StatusCode, Value) {
+            start_run_with_attach_requirement(state, attach, false).await
+        }
+
+        async fn start_run_with_attach_requirement(state: AppState, attach: bool, require_attached: bool) -> (StatusCode, Value) {
+            let mut body = ai_run_body();
+            body.require_attached = require_attached;
+            let response = start_ai_run_with_switches(
+                state, test_user("user-a", "org-a"), HeaderMap::new(), "run-1".to_owned(), body, true, attach,
+            ).await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024).await.expect("body");
+            (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        }
+
+        #[tokio::test]
+        async fn assistant_capabilities_do_not_claim_unverified_upstreams() {
+            let up = upstreams().await;
+            let app = state(&up, BrowserGrantMode::Strict);
+            let user = test_user("user-a", "org-a");
+            let Json(value) = assistant_browser_capabilities_with_switch(&app, &user, &HeaderMap::new(), true).await;
+            assert_eq!(value["data"]["available"], false);
+            assert_eq!(value["data"]["policySupported"], false);
+            assert_eq!(value["data"]["canAttach"], false);
+        }
+
+        #[tokio::test]
+        async fn assistant_capability_needs_authenticated_upstream_protocol_attestation() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/browser/runs/capabilities"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "protocol_version": 1, "attached_policy_supported": true
+                }))).mount(&up.model).await;
+            let app = state(&up, BrowserGrantMode::Strict);
+            let user = test_user("user-a", "org-a");
+            let Json(value) = assistant_browser_capabilities_with_switch(&app, &user, &HeaderMap::new(), true).await;
+            assert_eq!(value["data"]["available"], true);
+            assert_eq!(value["data"]["policySupported"], true);
+            assert_eq!(value["data"]["canAttach"], true);
+            let requests = requests_to(&up.model, "GET", "/v1/browser/runs/capabilities").await;
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].headers.get("authorization").is_some());
+            assert!(requests[0].headers.get("x-execution-authorization").is_some());
+
+            let Json(off) = assistant_browser_capabilities_with_switch(&app, &user, &HeaderMap::new(), false).await;
+            assert_eq!(off["data"]["available"], false);
+            assert_eq!(requests_to(&up.model, "GET", "/v1/browser/runs/capabilities").await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn assistant_capability_refuses_zdr_before_contacting_model() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-a"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                }))).with_priority(1).mount(&up.org).await;
+            let app = state(&up, BrowserGrantMode::Strict);
+            let Json(value) = assistant_browser_capabilities_with_switch(&app, &test_user("user-a", "org-a"), &HeaderMap::new(), true).await;
+            assert_eq!(value["data"]["available"], false);
+            assert_eq!(value["data"]["reason"], "browser_attach_zdr_unsupported");
+            assert!(requests_to(&up.model, "GET", "/v1/browser/runs/capabilities").await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn required_approval_is_rejected_instead_of_silently_dropped() {
+            for attach in [false, true] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                let mut body = ai_run_body();
+                body.require_attached = attach;
+                body.require_approval = Some(true);
+                let response = start_ai_run_with_switches(
+                    state(&up, BrowserGrantMode::Strict),
+                    test_user("user-a", "org-a"), HeaderMap::new(), "run-1".to_owned(),
+                    body, true, attach,
+                ).await;
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                let bytes = to_bytes(response.into_body(), 256 * 1024).await.expect("body");
+                let payload: Value = serde_json::from_slice(&bytes).expect("json");
+                assert_eq!(payload["error"]["code"], "browser_approval_continuation_unavailable");
+                assert!(requests_to(&up.model, "POST", "/v1/browser/runs").await.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn attached_plan_mode_is_forwarded_without_downgrade() {
+            for upstream_status in [200, 412] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                let upstream_body = if upstream_status == 200 {
+                    json!({ "run_id": "mp-run-1" })
+                } else {
+                    json!({ "error": "browser_attach_policy_unavailable" })
+                };
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(ResponseTemplate::new(upstream_status).set_body_json(upstream_body))
+                    .mount(&up.model).await;
+                let mut body = ai_run_body();
+                body.require_attached = true;
+                body.plan_mode = Some(true);
+                let response = start_ai_run_with_switches(
+                    state(&up, BrowserGrantMode::Strict), test_user("user-a", "org-a"),
+                    HeaderMap::new(), "run-1".to_owned(), body, true, true,
+                ).await;
+                assert_eq!(response.status().as_u16(), upstream_status);
+                let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+                assert_eq!(runs.len(), 1);
+                let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+                assert_eq!(sent["attach_session_id"], json!("run-1"));
+                assert_eq!(sent["plan_mode"], json!(true));
+            }
+        }
+
+        #[tokio::test]
+        async fn interactive_assistant_requires_attachment_and_sends_server_policy() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "run_id": "mp-run-1" })))
+                .mount(&up.model).await;
+            let mut body = ai_run_body();
+            body.assistant_interactive = true;
+            let denied = start_ai_run_with_switches(
+                state(&up, BrowserGrantMode::Strict), test_user("user-a", "org-a"),
+                HeaderMap::new(), "run-1".to_owned(), body, true, true,
+            ).await;
+            assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+            assert!(requests_to(&up.model, "POST", "/v1/browser/runs").await.is_empty());
+
+            let mut body = ai_run_body();
+            body.require_attached = true;
+            body.assistant_interactive = true;
+            let accepted = start_ai_run_with_switches(
+                state(&up, BrowserGrantMode::Strict), test_user("user-a", "org-a"),
+                HeaderMap::new(), "run-1".to_owned(), body, true, true,
+            ).await;
+            assert_eq!(accepted.status(), StatusCode::OK);
+            let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+            let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+            assert_eq!(sent["attach_session_id"], json!("run-1"));
+            assert_eq!(sent["policy"]["disable"], json!(["browser.act.upload", "browser.act.download"]));
+            assert!(sent.get("plan_mode").is_none());
+        }
+
+        #[tokio::test]
+        async fn attached_run_checks_current_org_zdr_not_only_session_metadata() {
+            let up = upstreams().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-a"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": { "metadata": { "interactiveRetention": { "zdr": true } } }
+                })))
+                .with_priority(1).mount(&up.org).await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let (status, body) = start_run_with_attach_requirement(
+                state(&up, BrowserGrantMode::Strict), true, true,
+            ).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"]["code"], "browser_attach_zdr_unsupported");
+            assert!(requests_to(&up.model, "POST", "/v1/browser/runs").await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn required_attachment_never_falls_back_to_an_unattached_run() {
+            for attach in [false, true] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "run_id": "mp-run-1" })))
+                    .mount(&up.model).await;
+                let (status, body) = start_run_with_attach_requirement(state(&up, BrowserGrantMode::Strict), attach, true).await;
+                let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+                if attach {
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(runs.len(), 1);
+                    let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+                    assert_eq!(sent["attach_session_id"], json!("run-1"));
+                } else {
+                    assert_eq!(status, StatusCode::CONFLICT);
+                    assert_eq!(body["error"]["code"], "browser_attach_unavailable");
+                    assert!(runs.is_empty());
+                    assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn owner_live_frame_forwards_a_validated_tab_id() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/agent/runs/run-1/frame"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "dataBase64": "AA==", "mimeType": "image/jpeg" } })))
+                .mount(&up.quarry).await;
+            let response = get_live_frame(
+                State(state(&up, BrowserGrantMode::Strict)), Extension(test_user("user-a", "org-a")), HeaderMap::new(),
+                Path("run-1".to_owned()), Query(FrameQuery { format: None, quality: None, max_width: None, max_height: None, tab_id: Some("tab-3".to_owned()) }),
+            ).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let requests = requests_to(&up.quarry, "GET", "/v1/agent/runs/run-1/frame").await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].url.query_pairs().find(|(key, _)| key == "tabId").map(|(_, value)| value.to_string()).as_deref(), Some("tab-3"));
+        }
+
+        #[tokio::test]
+        async fn owner_attachment_is_explicit_and_uses_the_sessions_own_grant() {
+            for attach in [false, true] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "run_id": "mp-run-1" })))
+                    .mount(&up.model).await;
+                let (status, _) = start_run_with_attach(state(&up, BrowserGrantMode::Strict), attach).await;
+                assert_eq!(status, StatusCode::OK);
+                let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+                let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+                assert_eq!(sent["grant_id"], json!(GRANT));
+                if attach { assert_eq!(sent["attach_session_id"], json!("run-1")); }
+                else { assert!(sent.get("attach_session_id").is_none()); }
+            }
+        }
+
+        #[tokio::test]
+        async fn owner_attachment_refuses_zdr_and_grantless_fallback_before_issuing_any_grant() {
+            for (zdr, grant) in [(true, Some(GRANT)), (false, None)] {
+                let up = upstreams().await;
+                let mut projection = owner_projection(grant);
+                projection["zdr"] = json!(zdr);
+                mount_quarry_session(&up.quarry, projection).await;
+                let (status, body) = start_run_with_attach(state(&up, BrowserGrantMode::Strict), true).await;
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(body["error"]["code"], if zdr { json!("browser_attach_zdr_unsupported") } else { json!("browser_session_grant_missing") });
+                assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
+                assert!(requests_to(&up.model, "POST", "/v1/browser/runs").await.is_empty());
+            }
         }
 
         #[tokio::test]
@@ -8883,11 +9967,15 @@ pub(crate) mod tests {
             zdr: false,
         };
         let body = StartAiRunBody {
+            continue_in_tab: None,
             goal: "check out the cart".to_owned(),
             allowed_domains: None,
             max_steps: Some(5),
             max_runtime_s: None,
             stop_criteria: None,
+            require_attached: false,
+            assistant_interactive: false,
+            plan_mode: None,
             require_approval: Some(true),
             max_cost_usd: None,
         };
@@ -8927,11 +10015,15 @@ pub(crate) mod tests {
             zdr: true,
         };
         let body = StartAiRunBody {
+            continue_in_tab: None,
             goal: "find the price".to_owned(),
             allowed_domains: None,
             max_steps: None,
             max_runtime_s: None,
             stop_criteria: None,
+            require_attached: false,
+            assistant_interactive: false,
+            plan_mode: None,
             require_approval: None,
             max_cost_usd: None,
         };
@@ -8974,11 +10066,15 @@ pub(crate) mod tests {
             zdr: false,
         };
         let body = StartAiRunBody {
+            continue_in_tab: None,
             goal: "browse around".to_owned(),
             allowed_domains: None,
             max_steps: None,
             max_runtime_s: None,
             stop_criteria: None,
+            require_attached: false,
+            assistant_interactive: false,
+            plan_mode: None,
             require_approval: None,
             max_cost_usd: None,
         };
@@ -9017,11 +10113,15 @@ pub(crate) mod tests {
                 zdr: false,
             };
             let body = StartAiRunBody {
+                continue_in_tab: None,
                 goal: "resume shopping".to_owned(),
                 allowed_domains: None,
                 max_steps: None,
                 max_runtime_s: None,
                 stop_criteria: None,
+                require_attached: false,
+                assistant_interactive: false,
+                plan_mode: None,
                 require_approval: None,
                 max_cost_usd: None,
             };
@@ -9045,11 +10145,15 @@ pub(crate) mod tests {
 
     fn ai_run_body(allowed_domains: Option<Vec<String>>) -> StartAiRunBody {
         StartAiRunBody {
+            continue_in_tab: None,
             goal: "buy the shoes".to_owned(),
             allowed_domains,
             max_steps: None,
             max_runtime_s: None,
             stop_criteria: None,
+            require_attached: false,
+            assistant_interactive: false,
+            plan_mode: None,
             require_approval: None,
             max_cost_usd: None,
         }
@@ -9152,7 +10256,7 @@ pub(crate) mod tests {
         AppState,
     ) {
         use wiremock::{
-            matchers::{method as wm_method, path as wm_path},
+            matchers::{method as wm_method, path as wm_path, path_regex},
             Mock, MockServer, ResponseTemplate,
         };
 
@@ -9192,10 +10296,24 @@ pub(crate) mod tests {
             .mount(&quarry)
             .await;
 
+        // org-core posture: the handler derives `effective_zdr` from the live
+        // posture and fails closed (`Unknown` = assume ZDR). Without this mock
+        // the unreachable default URL pins every `zdr=false` session to ZDR and
+        // the real-grant arm is skipped. The session flag stays authoritative:
+        // `zdr=true` sessions still refuse via `metadata.zdr()`.
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/v1/organizations/[^/]+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "metadata": { "interactiveRetention": { "zdr": false } } }
+            })))
+            .mount(&quarry)
+            .await;
+
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
         state.auth_core_url = auth_core.uri();
         state.model_gateway_url = model_gateway.uri();
+        state.org_core_url = quarry.uri();
         (quarry, auth_core, model_gateway, state)
     }
 
@@ -10358,6 +11476,14 @@ pub(crate) mod tests {
             safe_browser_artifact_content_type(Some("text/html"), b"<html></html>"),
             "image/png"
         );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"%PDF-1.7 body"),
+            "application/pdf"
+        );
+        assert_eq!(
+            safe_browser_artifact_content_type(Some("application/pdf"), b"not a pdf"),
+            "image/png"
+        );
     }
 
     #[test]
@@ -10412,6 +11538,33 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod human_browse_session_tests {
     use super::*;
+
+    #[test]
+    fn only_personal_browsing_requests_open_web_when_enabled() {
+        let url = "https://www.aquatiq.com/";
+        let host = Some("www.aquatiq.com");
+        let personal: CreateSessionBody = serde_json::from_value(json!({
+            "url": url, "purpose": "personal_browsing"
+        })).unwrap();
+        let existing: CreateSessionBody = serde_json::from_value(json!({ "url": url })).unwrap();
+        assert_eq!(session_grant_scope(personal.purpose, true, true, host), SessionGrantScope::HumanBrowse);
+        assert_eq!(session_grant_scope(personal.purpose, false, true, host), SessionGrantScope::StartHost(host));
+        assert_eq!(session_grant_scope(existing.purpose, true, true, host), SessionGrantScope::StartHost(host));
+    }
+
+    #[test]
+    fn assistant_task_requests_a_grant_for_only_its_start_host() {
+        let purpose = Some(BrowserSessionPurpose::AssistantTask);
+        let host = Some("example.com");
+        let scope = session_grant_scope(purpose, true, true, host);
+        assert_eq!(scope, SessionGrantScope::AssistantTask(host));
+        assert_eq!(
+            session_grant_request_body(scope, true),
+            Some(json!({ "kind": "assistant_task", "allowed_domains": ["example.com"], "zdr": true })),
+        );
+        assert_eq!(session_grant_scope(purpose, true, false, host), SessionGrantScope::StartHost(host));
+        assert_eq!(session_grant_request_body(SessionGrantScope::AssistantTask(None), false), None);
+    }
 
     // The HTTP path (create_session, keepalive_session) needs a live broker, model gateway
     // and Quarry; these tests pin the pure decisions those handlers make. The wire-level

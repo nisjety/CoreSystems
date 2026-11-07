@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   CHAT_RUN_PANEL_COLLAPSED_KEY,
   applyBrowserAction,
+  applyBrowserControl,
   applyBrowserObservation,
   applyDurableRunEvent,
   browserSessionFromChatRun,
@@ -207,6 +208,40 @@ describe('browserSessionFromChatRun', () => {
     expect(browserSessionFromChatRun(zdrState).status).toBe('live')
     expect(browserSessionFromChatRun(closeChatRunWatch(zdrState)).status).toBe('closed')
     expect(browserSessionFromChatRun(closeChatRunWatch(zdrState, 'boom')).status).toBe('degraded')
+  })
+})
+
+describe('the chat browser takeover binding (EP-1 S1)', () => {
+  const bound = () =>
+    applyBrowserControl(watched(), { sessionId: ' qrun_1 ', controlMode: 'human_takeover', controlEpoch: 3 })
+
+  it('names the bound Quarry run, its control and its live frames only with takeover on', () => {
+    const session = browserSessionFromChatRun(bound(), { takeover: true })
+    expect(session.sessionId).toBe('qrun_1')
+    expect(session.controlMode).toBe('human_takeover')
+    expect(session.controlEpoch).toBe(3)
+    expect(session.liveFrameStreamUrl).toBe('/api/v1/browser/sessions/qrun_1/frames/stream')
+  })
+
+  it('is exactly the unbound model with takeover off', () => {
+    expect(browserSessionFromChatRun(bound())).toEqual(browserSessionFromChatRun(watched()))
+    expect(browserSessionFromChatRun(bound(), { takeover: false }).sessionId).toBeUndefined()
+  })
+
+  it('has no session to control before the turn is bound', () => {
+    const session = browserSessionFromChatRun(watched(), { takeover: true })
+    expect(session.sessionId).toBeUndefined()
+    expect(session.controlMode).toBe('agent_control')
+    expect(session.liveFrameStreamUrl).toBeNull()
+  })
+
+  it('never binds a zero-retention turn or an empty id', () => {
+    const zdrState = emptyChatRunWatch('run_abc123', true)
+    const control = { sessionId: 'qrun_1', controlMode: 'agent_control', controlEpoch: 1 } as const
+    expect(applyBrowserControl(zdrState, control)).toBe(zdrState)
+    expect(browserSessionFromChatRun(zdrState, { takeover: true }).sessionId).toBeUndefined()
+    const unbound = watched()
+    expect(applyBrowserControl(unbound, { ...control, sessionId: '   ' })).toBe(unbound)
   })
 })
 

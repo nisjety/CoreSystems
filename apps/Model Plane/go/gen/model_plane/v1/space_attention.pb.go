@@ -26,6 +26,7 @@ const (
 type UnreadRule int32
 
 const (
+	// Default value; the caller named no rule.
 	UnreadRule_UNREAD_RULE_UNSPECIFIED UnreadRule = 0
 	// A thread is unread when its latest user or assistant message is newer than `since_ms` and
 	// the thread is not owned by the viewer (the rule the SPA applied before shared rooms).
@@ -76,9 +77,13 @@ func (UnreadRule) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_space_attention_proto_rawDescGZIP(), []int{0}
 }
 
+// Outcome of the attention query for one Space.
 type AttentionStatus int32
 
 const (
+	// The Space was read; its counts are set.
+	// Zero value name kept; renaming it would break generated code.
+	// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
 	AttentionStatus_ATTENTION_STATUS_OK AttentionStatus = 0
 	// The Space's decision did not verify, or the Space is not one the caller may read.
 	AttentionStatus_ATTENTION_STATUS_DENIED AttentionStatus = 1
@@ -131,11 +136,15 @@ func (AttentionStatus) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_space_attention_proto_rawDescGZIP(), []int{1}
 }
 
+// One Space in an attention request, with its read decision and read marker.
 type SpaceAttentionQuery struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SpaceId       string                 `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	DecisionRef   string                 `protobuf:"bytes,2,opt,name=decision_ref,json=decisionRef,proto3" json:"decision_ref,omitempty"`
-	DecisionToken string                 `protobuf:"bytes,3,opt,name=decision_token,json=decisionToken,proto3" json:"decision_token,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the Space to count.
+	SpaceId string `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Control `model.thread.read` decision reference for this Space.
+	DecisionRef string `protobuf:"bytes,2,opt,name=decision_ref,json=decisionRef,proto3" json:"decision_ref,omitempty"`
+	// Token for the decision named by decision_ref.
+	DecisionToken string `protobuf:"bytes,3,opt,name=decision_token,json=decisionToken,proto3" json:"decision_token,omitempty"`
 	// The effective read marker, epoch milliseconds. Zero or negative means the caller has no
 	// marker for this Space: nothing is unread.
 	SinceMs int64 `protobuf:"varint,4,opt,name=since_ms,json=sinceMs,proto3" json:"since_ms,omitempty"`
@@ -210,11 +219,15 @@ func (x *SpaceAttentionQuery) GetHeadlineThreadIds() []string {
 	return nil
 }
 
+// Request for attention counts across the Spaces listed, for one user.
 type GetSpaceAttentionRequest struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	OrgId  string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	Rule   UnreadRule             `protobuf:"varint,3,opt,name=rule,proto3,enum=model_plane.v1.UnreadRule" json:"rule,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the request runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the calling user; must equal the caller's principal id.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Which rule decides what counts as unread.
+	Rule UnreadRule `protobuf:"varint,3,opt,name=rule,proto3,enum=model_plane.v1.UnreadRule" json:"rule,omitempty"`
 	// At most 60.
 	Spaces        []*SpaceAttentionQuery `protobuf:"bytes,4,rep,name=spaces,proto3" json:"spaces,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -279,13 +292,19 @@ func (x *GetSpaceAttentionRequest) GetSpaces() []*SpaceAttentionQuery {
 	return nil
 }
 
+// An approval addressed to the caller that is still waiting.
 type PendingApproval struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ApprovalId    string                 `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	RunId         string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ThreadId      string                 `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	RequestedAtMs int64                  `protobuf:"varint,4,opt,name=requested_at_ms,json=requestedAtMs,proto3" json:"requested_at_ms,omitempty"`
-	Kind          string                 `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the approval.
+	ApprovalId string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// Id of the run the approval belongs to.
+	RunId string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Id of the thread the approval belongs to.
+	ThreadId string `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// When the approval was requested, in epoch milliseconds.
+	RequestedAtMs int64 `protobuf:"varint,4,opt,name=requested_at_ms,json=requestedAtMs,proto3" json:"requested_at_ms,omitempty"`
+	// Kind of approval requested.
+	Kind          string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -355,10 +374,13 @@ func (x *PendingApproval) GetKind() string {
 	return ""
 }
 
+// Display title of one thread the caller asked for.
 type ThreadHeadline struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ThreadId      string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the thread.
+	ThreadId string `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Display title of the thread.
+	Title         string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -407,19 +429,25 @@ func (x *ThreadHeadline) GetTitle() string {
 	return ""
 }
 
+// Attention counts and outcome for one Space.
 type SpaceAttentionResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SpaceId       string                 `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	Status        AttentionStatus        `protobuf:"varint,2,opt,name=status,proto3,enum=model_plane.v1.AttentionStatus" json:"status,omitempty"`
-	UnreadThreads uint32                 `protobuf:"varint,3,opt,name=unread_threads,json=unreadThreads,proto3" json:"unread_threads,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the Space this result is for.
+	SpaceId string `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Outcome of the query for this Space.
+	Status AttentionStatus `protobuf:"varint,2,opt,name=status,proto3,enum=model_plane.v1.AttentionStatus" json:"status,omitempty"`
+	// Threads unread for the caller; at most 100.
+	UnreadThreads uint32 `protobuf:"varint,3,opt,name=unread_threads,json=unreadThreads,proto3" json:"unread_threads,omitempty"`
 	// True when more than 100 threads matched; `unread_threads` is then 100.
 	UnreadCapped bool `protobuf:"varint,4,opt,name=unread_capped,json=unreadCapped,proto3" json:"unread_capped,omitempty"`
 	// Epoch milliseconds of the newest user or assistant message the caller may see; 0 = none.
-	LatestActivityMs int64  `protobuf:"varint,5,opt,name=latest_activity_ms,json=latestActivityMs,proto3" json:"latest_activity_ms,omitempty"`
-	WorkingRuns      uint32 `protobuf:"varint,6,opt,name=working_runs,json=workingRuns,proto3" json:"working_runs,omitempty"`
+	LatestActivityMs int64 `protobuf:"varint,5,opt,name=latest_activity_ms,json=latestActivityMs,proto3" json:"latest_activity_ms,omitempty"`
+	// Agent runs currently working in the Space.
+	WorkingRuns uint32 `protobuf:"varint,6,opt,name=working_runs,json=workingRuns,proto3" json:"working_runs,omitempty"`
 	// Approvals addressed to the caller, oldest first, at most 20.
-	Pending       []*PendingApproval `protobuf:"bytes,7,rep,name=pending,proto3" json:"pending,omitempty"`
-	Headlines     []*ThreadHeadline  `protobuf:"bytes,8,rep,name=headlines,proto3" json:"headlines,omitempty"`
+	Pending []*PendingApproval `protobuf:"bytes,7,rep,name=pending,proto3" json:"pending,omitempty"`
+	// Display titles for the threads the caller asked for.
+	Headlines     []*ThreadHeadline `protobuf:"bytes,8,rep,name=headlines,proto3" json:"headlines,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -510,6 +538,7 @@ func (x *SpaceAttentionResult) GetHeadlines() []*ThreadHeadline {
 	return nil
 }
 
+// Attention results, one per requested Space.
 type GetSpaceAttentionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One result per requested Space, in request order.

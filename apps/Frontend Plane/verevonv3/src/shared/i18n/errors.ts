@@ -279,6 +279,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Denne nettleserøkten har ikke tilgang til AI-kjøring. Åpne økten på nytt for å starte en.',
     en: 'This browser session has no access for an AI run. Reopen the session to start one.',
   },
+  browser_attach_unavailable: {
+    no: 'En tilkoblet agentnettleser er ikke tilgjengelig for denne økten.',
+    en: 'An attached agent browser is not available for this session.',
+  },
   browser_grant_not_derivable: {
     no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
     en: 'Access for this browser session has expired or been withdrawn, so the AI run could not start. Reopen the session and try again.',
@@ -540,6 +544,17 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_deletion_not_found: {
     no: 'Fant ingen slettingsforespørsel for dette rommet. Den kan allerede være fullført eller avbrutt.',
     en: 'No deletion request was found for this space. It may already be finished or cancelled.',
+  },
+  // EP-9 C4: a legal hold blocks a delete or an erasure until it is released in the
+  // organization's settings; retrying changes nothing. An outage of the check is retryable.
+  erasure_blocked_legal_hold: {
+    no: 'En juridisk tilbakeholdelse gjelder disse dataene, så ingenting ble slettet. Samtalen og målene og versjonene i den beholdes til tilbakeholdelsen oppheves.',
+    en: 'A legal hold covers this data, so nothing was deleted. The conversation and its goals and revisions are kept until the hold is released.',
+  },
+  erasure_hold_check_unavailable: {
+    no: 'Juridiske tilbakeholdelser kunne ikke kontrolleres, så ingenting ble slettet.',
+    en: 'Legal holds could not be checked, so nothing was deleted.',
+    retryable: true,
   },
   space_provisioning_unavailable: {
     no: 'Rommet kunne ikke opprettes akkurat nå, og ingenting ble satt opp. Prøv igjen om litt.',
@@ -1101,6 +1116,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   mention_text_missing: { no: 'Navnet står ikke lenger i meldingen, så omtalen ble ikke lagret.', en: 'The name is no longer in the message, so the mention was not recorded.' },
   mention_unavailable: { no: 'Omtaler kunne ikke lagres akkurat nå. Meldingen ble sendt som vanlig tekst.', en: 'Mentions could not be recorded right now. The message was sent as plain text.' },
   person_not_in_room: { no: 'Personen er ikke med i rommet, så omtalen ble ikke lagret.', en: 'That person is not in the room, so the mention was not recorded.' },
+  // EP-6 S9 agent version pinning (BFF read and model gateway stream codes)
+  agent_version_unavailable: { no: 'Agentens versjon kunne ikke leses akkurat nå. Prøv igjen snart.', en: 'This agent\'s version could not be read right now. Try again shortly.' },
+  agent_pin_invalid: { no: 'Agentversjonen for denne meldingen kunne ikke leses.', en: 'The agent version for this turn could not be read.' },
+  agent_tool_allowlist_do_unsupported: { no: 'Denne agentens verktøyliste kan ikke håndheves i en Gjør-kjøring ennå. Spør den i stedet.', en: 'This agent\'s tool list cannot be enforced on a Do run yet. Ask it instead.' },
+  // EP-6 S2 Run now: the BFF refuses a schedule someone else created
+  run_now_not_creator: { no: 'Bare den som opprettet planen kan kjøre den nå.', en: 'Only the person who created this schedule can run it now.' },
   space_addressed_wake_disabled: { no: 'Å tilkalle agenter fra en melding er ikke slått på ennå.', en: 'Calling agents from a message is not turned on yet.' },
   wake_not_authorized: { no: 'Du kan ikke tilkalle denne agenten her. Meldingen er sendt, men agenten svarer ikke.', en: 'You cannot call this agent here. Your message was sent, but the agent will not answer.' },
   wake_owner_required: { no: 'Bare den som startet denne samtalen kan tilkalle en agent i den. Meldingen er sendt uten svar fra agenten.', en: 'Only the person who started this conversation can call an agent in it. Your message was sent without an answer from the agent.' },

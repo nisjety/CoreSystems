@@ -322,6 +322,29 @@ fn missing_thread_append_error(error: &tonic::Status) -> bool {
     error.code() == Code::Internal && error.message().to_ascii_lowercase().contains("foreign key")
 }
 
+tokio::task_local! {
+    /// The validated context references of the chat send whose run is being prepared (EP-3 S5).
+    /// Scoped by [`with_user_context_refs`] around that one preparation, so the user message it
+    /// appends records them, and every other append in the process sees none.
+    static USER_TURN_CONTEXT_REFS: Vec<mp_contracts::context_refs::ContextRef>;
+}
+
+/// Runs `preparation` (the chat send's run preparation) so the user message it appends records
+/// `refs` in `metadata.context_refs`. With no references the future runs exactly as it would alone.
+pub async fn with_user_context_refs<F: std::future::Future>(
+    refs: Option<&crate::context_refs::ResolvedContextRefs>,
+    preparation: F,
+) -> F::Output {
+    match refs.filter(|resolved| !resolved.refs.is_empty()) {
+        Some(resolved) => {
+            USER_TURN_CONTEXT_REFS
+                .scope(resolved.refs.clone(), preparation)
+                .await
+        }
+        None => preparation.await,
+    }
+}
+
 /// Builds the durable `messages.metadata` Struct for the first-persisted user
 /// turn (chat-wave2 scope spec §2.4): `source_scope` when the thread is
 /// conversation-only, plus `retrieval_scope` when this turn's per-turn filter
@@ -334,11 +357,30 @@ fn user_message_metadata(
     conversation_only: bool,
     retrieval_scope: Option<&str>,
 ) -> Option<prost_types::Struct> {
+    // Outside [`with_user_context_refs`] (every caller but the chat send, and every send with the
+    // context-refs switch off) there is nothing to read, and the metadata is what it was.
+    let context_refs = USER_TURN_CONTEXT_REFS.try_with(Clone::clone).unwrap_or_default();
+    user_message_metadata_with(conversation_only, retrieval_scope, &context_refs)
+}
+
+fn user_message_metadata_with(
+    conversation_only: bool,
+    retrieval_scope: Option<&str>,
+    context_refs: &[mp_contracts::context_refs::ContextRef],
+) -> Option<prost_types::Struct> {
     let mut fields = std::collections::BTreeMap::new();
     if conversation_only {
         fields.insert("source_scope".to_owned(), json_to_prost_value(&serde_json::json!("conversation")));
     } else if let Some(scope) = retrieval_scope.filter(|s| !s.is_empty()) {
         fields.insert("retrieval_scope".to_owned(), json_to_prost_value(&serde_json::json!(scope)));
+    }
+    // The chips of the send (EP-3 S5): `{kind, id, label}` only, so they render after a reload. A ZDR
+    // turn appends no user message, so nothing is written for one.
+    if !context_refs.is_empty() {
+        fields.insert(
+            "context_refs".to_owned(),
+            json_to_prost_value(&crate::context_refs::metadata_value(context_refs)),
+        );
     }
     if fields.is_empty() {
         None
@@ -2315,6 +2357,40 @@ pub(crate) fn turn_evidence_metadata(
     Some(prost_types::Struct { fields })
 }
 
+/// The citations a turn may store: a ZDR or waived turn (DEC-32) keeps every citation but drops
+/// its `quote` and `locator`, which streamed live (EP-2-S4, D12). Any other turn stores them
+/// beside the citation, erased with the message.
+pub(crate) fn persistable_citations(
+    citations: Vec<crate::sse_events::RecordedCitation>,
+    zdr_or_waived: bool,
+) -> Vec<crate::sse_events::RecordedCitation> {
+    if !zdr_or_waived {
+        return citations;
+    }
+    citations
+        .into_iter()
+        .map(crate::sse_events::RecordedCitation::without_passage)
+        .collect()
+}
+
+/// The artifacts a turn may store: a ZDR or waived turn drops a report's provenance stamp, which
+/// streamed live (EP-2-S4, D12). The artifact itself is stored as before, except a deck manifest
+/// (EP-5 S3, D6): a deck is a store DEC-32 counts a waived run out of, so it streamed and is
+/// not kept, and the thread reopens without it.
+pub(crate) fn persistable_artifacts(
+    artifacts: Vec<crate::sse_events::RecordedArtifact>,
+    zdr_or_waived: bool,
+) -> Vec<crate::sse_events::RecordedArtifact> {
+    if !zdr_or_waived {
+        return artifacts;
+    }
+    artifacts
+        .into_iter()
+        .filter(|artifact| artifact.kind != crate::artifacts::ArtifactKind::Deck.as_str())
+        .map(crate::sse_events::RecordedArtifact::without_provenance)
+        .collect()
+}
+
 /// The turn's answer-quality assessment, for persistence alongside its
 /// evidence. Both halves are optional: a turn may be unscored, and only a
 /// low-scoring one is ever verified.
@@ -2359,6 +2435,27 @@ pub(crate) fn with_work_summary(
     };
     let mut metadata = metadata.unwrap_or_default();
     metadata.fields.insert(crate::room_run::WORK_KEY.to_owned(), json_to_prost_value(&work));
+    Some(metadata)
+}
+
+/// The metadata key a deep-research plan turn's plan is stored under (Wave 3 EP-2 S5).
+pub(crate) const RESEARCH_PLAN_KEY: &str = "research_plan";
+
+/// Save a plan turn's plan (`deep_research::ResearchPlan::record`) with its answer, so a reopened
+/// thread shows the plan card. A field of the message that already exists: no table, no column,
+/// and the message's GDPR erase removes it. Nothing is written for a ZDR or waived turn (D12),
+/// which streamed the plan, or when there is no plan; the metadata is then returned exactly as it
+/// was.
+pub(crate) fn with_research_plan(
+    metadata: Option<prost_types::Struct>,
+    plan: Option<&serde_json::Value>,
+    zdr_or_waived: bool,
+) -> Option<prost_types::Struct> {
+    let Some(plan) = plan.filter(|_| !zdr_or_waived) else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(RESEARCH_PLAN_KEY.to_owned(), json_to_prost_value(plan));
     Some(metadata)
 }
 
@@ -2563,6 +2660,90 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    /// EP-2 S5 (D12): a plan turn stores its plan beside the answer, except on a ZDR or waived turn,
+    /// and a turn with no plan leaves the metadata exactly as it was.
+    #[test]
+    fn a_research_plan_is_stored_only_on_a_retained_turn() {
+        let plan = serde_json::json!({ "version": 1, "sub_queries": ["a"], "questions": [] });
+        let stored = super::with_research_plan(None, Some(&plan), false).expect("stored");
+        assert!(stored.fields.contains_key(super::RESEARCH_PLAN_KEY));
+        assert_eq!(super::with_research_plan(None, Some(&plan), true), None);
+        assert_eq!(super::with_research_plan(None, None, false), None);
+        let existing = super::with_research_plan(Some(stored.clone()), None, false);
+        assert_eq!(existing, Some(stored.clone()));
+        assert_eq!(super::with_research_plan(Some(stored.clone()), Some(&plan), true), Some(stored));
+    }
+
+    /// EP-3 S5: a send's references are stored on its user message as `{kind, id, label}` only, and a
+    /// send without any keeps the metadata it had before (absent when there is nothing else).
+    #[test]
+    fn metadata_stores_kind_id_label_only() {
+        use mp_contracts::context_refs::{ArtifactSelection, ContextRef, ContextRefKind};
+        assert!(super::user_message_metadata_with(false, None, &[]).is_none(), "byte-identical");
+        let refs = vec![
+            ContextRef {
+                kind: ContextRefKind::Document,
+                id: "doc-1".to_owned(),
+                label: "Budsjett".to_owned(),
+                selection: None,
+            },
+            ContextRef {
+                kind: ContextRefKind::ArtifactSelection,
+                id: "art-1".to_owned(),
+                label: "Avsnitt".to_owned(),
+                selection: Some(ArtifactSelection {
+                    artifact_id: "art-1".to_owned(),
+                    version: 2,
+                    start: 0,
+                    end: 4,
+                    quote_sha256: "c".repeat(64),
+                }),
+            },
+        ];
+        let metadata = super::user_message_metadata_with(false, Some("knowledge_only"), &refs)
+            .expect("metadata");
+        assert!(metadata.fields.contains_key("retrieval_scope"));
+        let Some(prost_types::value::Kind::ListValue(list)) =
+            metadata.fields.get("context_refs").and_then(|value| value.kind.clone())
+        else {
+            panic!("context_refs is a list");
+        };
+        assert_eq!(list.values.len(), 2);
+        for item in &list.values {
+            let Some(prost_types::value::Kind::StructValue(entry)) = &item.kind else {
+                panic!("each reference is an object");
+            };
+            let mut keys: Vec<&str> = entry.fields.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, vec!["id", "kind", "label"], "no selection, quote or hash is kept");
+        }
+    }
+
+    /// Outside the chat send's scope no references are read, so every other append is unchanged.
+    #[tokio::test]
+    async fn only_the_scoped_preparation_sees_the_references() {
+        assert!(super::user_message_metadata(false, None).is_none());
+        let resolved = crate::context_refs::ResolvedContextRefs {
+            refs: vec![mp_contracts::context_refs::ContextRef {
+                kind: mp_contracts::context_refs::ContextRefKind::Skill,
+                id: "skill.a".to_owned(),
+                label: "Skriv".to_owned(),
+                selection: None,
+            }],
+            ..Default::default()
+        };
+        let scoped = super::with_user_context_refs(Some(&resolved), async {
+            super::user_message_metadata(false, None)
+        })
+        .await;
+        assert!(scoped.is_some_and(|metadata| metadata.fields.contains_key("context_refs")));
+        let unscoped = super::with_user_context_refs(None, async {
+            super::user_message_metadata(false, None)
+        })
+        .await;
+        assert!(unscoped.is_none());
+    }
+
     /// A send names itself to the transcript only with the switch on, only when the turn keeps a
     /// transcript at all, and never when it restates the previous question on purpose.
     #[test]
@@ -3363,5 +3544,190 @@ mod tests {
         let alone = crate::session_flow::with_retrieval_decline(None, Some(RetrievalDeclineReason::NotAuthorized));
         assert_eq!(stored(&alone).as_deref(), Some("retrieval_declined_not_authorized"));
         assert_eq!(alone.expect("metadata").fields.len(), 1, "the code is the only thing stored");
+    }
+
+    fn passage_citation() -> crate::sse_events::RecordedCitation {
+        crate::sse_events::RecordedCitation {
+            id: "doc-1".to_owned(),
+            title: "Policy".to_owned(),
+            url: "notion".to_owned(),
+            snippet: "Refunds within 30 days.".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: Some("Notion".to_owned()),
+            number: Some(1),
+            origin: "knowledge".to_owned(),
+            passage: crate::sse_events::CitationPassage::new(
+                "Refunds within 30 days.",
+                Some(crate::sse_events::CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 }),
+            ),
+        }
+    }
+
+    fn stamped_report() -> crate::sse_events::RecordedArtifact {
+        crate::sse_events::RecordedArtifact {
+            id: "research-r".to_owned(),
+            kind: "document".to_owned(),
+            title: "Dyp research".to_owned(),
+            content: "# Rapport".to_owned(),
+            version: 1,
+            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
+        }
+    }
+
+    /// The keys of the first entry of a stored list, or nothing when the list is absent.
+    fn first_entry_keys(metadata: &Option<prost_types::Struct>, list: &str) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(values)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get(list))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        match values.values.first().and_then(|value| value.kind.as_ref()) {
+            Some(Kind::StructValue(entry)) => entry.fields.keys().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn evidence(zdr_or_waived: bool) -> Option<prost_types::Struct> {
+        crate::session_flow::turn_evidence_metadata(
+            None,
+            &crate::session_flow::persistable_citations(vec![passage_citation()], zdr_or_waived),
+            &crate::session_flow::persistable_artifacts(vec![stamped_report()], zdr_or_waived),
+            crate::session_flow::TurnQuality::default(),
+        )
+    }
+
+    #[test]
+    fn a_persistent_turn_stores_the_citation_passage_and_the_report_stamp() {
+        let stored = evidence(false);
+        let citation = first_entry_keys(&stored, "citations");
+        assert!(citation.iter().any(|key| key == "quote"), "{citation:?}");
+        assert!(citation.iter().any(|key| key == "locator"), "{citation:?}");
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    /// D12: a ZDR or waived turn stores the citation and the artifact, never the passage or stamp.
+    #[test]
+    fn a_zdr_or_waived_turn_stores_no_citation_passage_or_report_stamp() {
+        let stored = evidence(true);
+        let citation = first_entry_keys(&stored, "citations");
+        assert!(citation.iter().any(|key| key == "number"), "the citation itself stays");
+        assert!(!citation.iter().any(|key| key == "quote" || key == "locator"), "{citation:?}");
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "content"), "the artifact itself stays");
+        assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    /// The keys of the stored `research_ledger` on the first artifact's stamp, or nothing.
+    fn stored_ledger_keys(metadata: &Option<prost_types::Struct>) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(artifacts)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get("artifacts"))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        let Some(Kind::StructValue(artifact)) = artifacts.values.first().and_then(|value| value.kind.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(Kind::StructValue(stamp)) = artifact.fields.get("provenance").and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        match stamp.fields.get("research_ledger").and_then(|value| value.kind.as_ref()) {
+            Some(Kind::StructValue(ledger)) => ledger.fields.keys().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn ledger_evidence(zdr_or_waived: bool) -> Option<prost_types::Struct> {
+        let mut report = stamped_report();
+        report.provenance = Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger()));
+        crate::session_flow::turn_evidence_metadata(
+            None,
+            &[],
+            &crate::session_flow::persistable_artifacts(vec![report], zdr_or_waived),
+            crate::session_flow::TurnQuality::default(),
+        )
+    }
+
+    /// EP-2-S6 (D2): a persistent turn stores the closed ledger beside the report it was built
+    /// for, and only its v1 keys.
+    #[test]
+    fn a_persistent_turn_stores_the_research_ledger_on_the_report_stamp() {
+        let mut keys = stored_ledger_keys(&ledger_evidence(false));
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["claims", "gaps", "pass_count", "version"]);
+    }
+
+    /// EP-2-S6 (D12): a ZDR or waived turn streamed the ledger and stores none of it.
+    #[test]
+    fn a_zdr_or_waived_turn_stores_no_research_ledger() {
+        let stored = ledger_evidence(true);
+        assert!(stored_ledger_keys(&stored).is_empty());
+        let artifact = first_entry_keys(&stored, "artifacts");
+        assert!(artifact.iter().any(|key| key == "content"), "the report itself stays");
+        assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+    }
+
+    fn deck_manifest() -> crate::sse_events::RecordedArtifact {
+        crate::sse_events::RecordedArtifact {
+            id: "deck-01test".to_owned(),
+            kind: "deck".to_owned(),
+            title: "Kvartalstall".to_owned(),
+            content: "{\"version\":1}".to_owned(),
+            version: 2,
+            provenance: None,
+        }
+    }
+
+    /// The ids of the stored `artifacts` list, in order.
+    fn stored_artifact_ids(metadata: &Option<prost_types::Struct>) -> Vec<String> {
+        use prost_types::value::Kind;
+        let Some(Kind::ListValue(artifacts)) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fields.get("artifacts"))
+            .and_then(|value| value.kind.as_ref())
+        else {
+            return Vec::new();
+        };
+        artifacts
+            .values
+            .iter()
+            .filter_map(|value| match value.kind.as_ref() {
+                Some(Kind::StructValue(entry)) => match entry.fields.get("id").and_then(|id| id.kind.as_ref()) {
+                    Some(Kind::StringValue(id)) => Some(id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// EP-5 S3 (D6, DEC-32): a waived turn streamed its deck and stores none of it; the other
+    /// artifacts of the turn are stored as before, and a persistent turn keeps the deck.
+    #[test]
+    fn waived_turn_does_not_persist_deck() {
+        let deck_evidence = |zdr_or_waived: bool| {
+            crate::session_flow::turn_evidence_metadata(
+                None,
+                &[],
+                &crate::session_flow::persistable_artifacts(vec![stamped_report(), deck_manifest()], zdr_or_waived),
+                crate::session_flow::TurnQuality::default(),
+            )
+        };
+        assert_eq!(stored_artifact_ids(&deck_evidence(true)), vec!["research-r"]);
+        assert_eq!(stored_artifact_ids(&deck_evidence(false)), vec!["research-r", "deck-01test"]);
+        let only_deck = crate::session_flow::turn_evidence_metadata(
+            None,
+            &[],
+            &crate::session_flow::persistable_artifacts(vec![deck_manifest()], true),
+            crate::session_flow::TurnQuality::default(),
+        );
+        assert!(only_deck.is_none(), "a waived turn with only a deck stores no artifacts key");
     }
 }

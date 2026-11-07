@@ -3,6 +3,7 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   type AgentModeId,
+  type ArtifactEditorKind,
   type AutonomyRung,
   type ChatAction,
   type ChatCostBasis,
@@ -11,9 +12,11 @@ import {
   type ChatUsagePhase,
   type ChatUsageProgressEvent,
   type ChatVerificationEvent,
+  type CitationLocator,
   type EffortLevel,
   type EffortProfile,
   type RecalledMemory,
+  type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import {
   type AnswerServedBy,
@@ -57,11 +60,15 @@ export type ChatCancelFailure = {
 }
 export type IconComponent = (props: LucideProps) => JSX.Element
 
-/** One revision of an artifact, as emitted by a single `artifact` SSE event. */
+/** One revision of an artifact, as emitted by a single `artifact` SSE event or read from the server's history. */
 export type ChatArtifactVersion = {
   content: string
   title: string
   version: number
+  /** Absent for a revision the server has not attributed (history off, or an older frame). */
+  editorKind?: ArtifactEditorKind
+  /** For a restore, the version whose text it brought back. */
+  restoredFromVersion?: number
 }
 
 export type ChatArtifact = {
@@ -82,6 +89,10 @@ export type ChatArtifact = {
    * then treats the current fields as a single revision.
    */
   history?: ChatArtifactVersion[]
+  /** A research report's provenance stamp (EP-2-S4), in the wire shape. */
+  provenance?: ResearchProvenance
+  /** Who made the newest revision, when the frame named it (EP-3 S3). */
+  editor?: ArtifactEditorKind
 }
 
 export type ChatToolCall = {
@@ -151,6 +162,10 @@ export type Citation = {
    * metadata line only, never body text, so the card shows those and nothing more.
    */
   origin?: 'web' | 'knowledge' | 'connector'
+  /** The passage this source contributed (EP-2-S4), when the server sent one. */
+  quote?: string
+  /** Where a knowledge source's passage sits in Data Plane, in the wire shape. */
+  locator?: CitationLocator
 }
 
 export type GeneratedFileCheckLevel = 'passed' | 'warnings' | 'failed' | 'skipped'
@@ -336,6 +351,23 @@ export type LifecycleNotice =
 
 /** The most notices one turn keeps. The oldest go first. */
 export const LIFECYCLE_NOTICE_CAP = 20
+
+/** The providers a connected-app suggestion may name: mp-contracts `connector_suggest`'s closed list. */
+export const CONNECTOR_SUGGESTION_PROVIDERS = ['google', 'microsoft'] as const
+export type ConnectorSuggestionProvider = (typeof CONNECTOR_SUGGESTION_PROVIDERS)[number]
+
+/**
+ * One connected-app suggestion (`connector_suggestion`, EP-10 S8). The reason is the gateway's scrubbed line,
+ * rendered as text. `restored` marks a suggestion read back from the cache after a reload: the moment it
+ * answered has passed, so the card shows it as a note and offers nothing.
+ */
+export type ChatConnectorSuggestion = {
+  suggestionId: string
+  provider: ConnectorSuggestionProvider
+  reason: string
+  requestId?: string
+  restored?: boolean
+}
 
 /**
  * `notices` with `notice` appended. An exact repeat of a notice the turn already holds is not added again: a
@@ -561,6 +593,11 @@ export type ChatTurn = {
    * than stale suggestions for an answer the user has moved past.
    */
   followUps?: string[]
+  /**
+   * The connected-app suggestion this turn's model made (`connector_suggestion`, EP-10 S8): at most one
+   * per turn. Kept with the turn's cached metadata so a reloaded thread shows it as a resolved note.
+   */
+  connectorSuggestion?: ChatConnectorSuggestion
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   /**
@@ -570,6 +607,8 @@ export type ChatTurn = {
    * read back on history playback (`ChatMessage.retrievalScope`).
    */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
@@ -579,6 +618,11 @@ export type ChatTurn = {
    * turn's offered set did NOT include because of the filter.
    */
   scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
+  /**
+   * The search providers that served this turn's web searches, and the route its entitlement allowed
+   * (`search_provenance` SSE event, EP-9 W1). Live only: nothing stores it, so a reloaded turn has none.
+   */
+  searchProvenance?: import('@/shared/api/chat-client').ChatSearchProvenanceEvent
 }
 
 export type AgentTaskStep = {
@@ -705,6 +749,8 @@ export type SendOptions = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
   connectorScope?: string[]
+  /** See `ChatInvokeRequest.contextRefs`. Per-turn, like `connectorScope`. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]

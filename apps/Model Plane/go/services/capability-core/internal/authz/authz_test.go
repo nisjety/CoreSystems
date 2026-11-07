@@ -305,3 +305,67 @@ func TestAuthorizeHTTPPinsOrgAgentPolicyRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestBundleReadRuleSwitchIsTheLiteralTrueOnly(t *testing.T) {
+	for _, raw := range []string{"", "1", "TRUE", " true", "yes"} {
+		if BundleReadRuleFromLookup(func(string) string { return raw }) {
+			t.Errorf("%q enabled the bundle read rule", raw)
+		}
+	}
+	if !BundleReadRuleFromLookup(func(key string) string {
+		if key == BundleReadRuleEnv {
+			return "true"
+		}
+		return ""
+	}) {
+		t.Fatal(`"true" did not enable the bundle read rule`)
+	}
+}
+
+func TestAUserPrincipalCannotReadABlob(t *testing.T) {
+	user := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"}
+	scopedUser := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user", Scopes: []string{ReadScope, WriteScope}}
+	serviceReader := authctx.Principal{OrganizationID: "org-a", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{ReadScope}}
+	serviceWriter := authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service", Scopes: []string{WriteScope}}
+	unscopedService := authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service"}
+	blob := mpv1.CapabilityCore_GetSkillBlob_FullMethodName
+	list := mpv1.CapabilityCore_ListSkillBundles_FullMethodName
+	manifest := mpv1.CapabilityCore_GetSkillBundleManifest_FullMethodName
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+		method    string
+		wantErr   bool
+	}{
+		{name: "a person may not fetch a bundle body", principal: user, method: blob, wantErr: true},
+		{name: "a person's scopes do not open a bundle body", principal: scopedUser, method: blob, wantErr: true},
+		{name: "a service with the read scope fetches a body", principal: serviceReader, method: blob},
+		{name: "a write scope alone is no read grant", principal: serviceWriter, method: blob, wantErr: true},
+		{name: "a service without a scope may not fetch a body", principal: unscopedService, method: blob, wantErr: true},
+		{name: "a person may list the org's bundles", principal: user, method: list},
+		{name: "a person may read a bundle manifest", principal: user, method: manifest},
+		{name: "a service with the read scope may list", principal: serviceReader, method: list},
+		{name: "a service writer may not list", principal: serviceWriter, method: list, wantErr: true},
+		{name: "a service without a scope may not read a manifest", principal: unscopedService, method: manifest, wantErr: true},
+		{name: "an unsigned principal is denied", principal: authctx.Principal{PrincipalType: "service", Scopes: []string{ReadScope}}, method: blob, wantErr: true},
+	}
+	rule := AuthorizeGRPCWith(true)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rule(tc.principal, tc.method, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("AuthorizeGRPCWith(true) error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+
+	// Off, the bundle RPCs keep the generic read rule: a person may still fetch a body.
+	if err := AuthorizeGRPCWith(false)(user, blob, nil); err != nil {
+		t.Fatalf("rule off must not change the generic read rule: %v", err)
+	}
+	// Other methods are untouched by the rule.
+	if err := rule(user, mpv1.CapabilityCore_ListCapabilities_FullMethodName, nil); err != nil {
+		t.Fatalf("rule on must leave other reads alone: %v", err)
+	}
+}

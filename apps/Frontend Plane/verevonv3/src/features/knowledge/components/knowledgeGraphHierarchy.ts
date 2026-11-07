@@ -8,6 +8,8 @@ import type {
   LiveKnowledgeGraphNode,
   LiveKnowledgePayload,
 } from '@/shared/api/knowledge-live-client'
+import type { OperatingMapWorkflow } from '@/shared/api/operating-map-client'
+import { resolveWorkflowEvidence } from '../lib/workflow-evidence'
 
 /**
  * The Graf tab renders the workspace as a progressively-disclosed tree rather
@@ -23,7 +25,7 @@ import type {
  */
 export const KNOWLEDGE_GRAPH_ROOT_ID = 'kg:root'
 
-export type KnowledgeGraphTier = 'root' | 'provider' | 'document' | 'entity'
+export type KnowledgeGraphTier = 'root' | 'provider' | 'document' | 'entity' | 'workflow'
 
 export type KnowledgeHierarchyNode = {
   /** Stable synthetic id. Entity tiers reuse the live graph node id verbatim. */
@@ -38,11 +40,13 @@ export type KnowledgeHierarchyNode = {
   clusterKey: string
   /** Present only for entity tiers, so the inspector keeps its richer payload. */
   liveNode?: LiveKnowledgeGraphNode
+  workflow?: { value: OperatingMapWorkflow; status: 'pending' | 'accepted'; unresolvedRefs: string[] }
 }
 
 export type KnowledgeHierarchy = {
   byId: Map<string, KnowledgeHierarchyNode>
   rootId: string
+  evidenceLinks: Array<{ workflowId: string; documentId: string }>
 }
 
 function providerNodeId(providerKey: string): string {
@@ -61,8 +65,10 @@ function documentNodeId(sourceId: string): string {
 export function buildKnowledgeHierarchy(
   payload: LiveKnowledgePayload,
   labels: { root: string; documents: (count: number) => string; chunks: (count: number) => string },
+  workflowMap?: { key: string; status: 'pending' | 'accepted'; statusLabel: string; workflows: readonly OperatingMapWorkflow[] },
 ): KnowledgeHierarchy {
   const byId = new Map<string, KnowledgeHierarchyNode>()
+  const evidenceLinks: KnowledgeHierarchy['evidenceLinks'] = []
 
   const root: KnowledgeHierarchyNode = {
     id: KNOWLEDGE_GRAPH_ROOT_ID,
@@ -159,7 +165,26 @@ export function buildKnowledgeHierarchy(
     parent.childIds.push(node.id)
   }
 
-  return { byId, rootId: root.id }
+  for (const workflow of workflowMap?.workflows ?? []) {
+    const id = `kg:workflow:${encodeURIComponent(workflowMap!.key)}:${encodeURIComponent(workflow.id)}`
+    if (byId.has(id)) continue
+    const evidence = resolveWorkflowEvidence(workflow, payload.sources)
+    byId.set(id, {
+      id,
+      label: `${workflowMap!.statusLabel} · ${workflow.name}`,
+      detail: workflow.phase,
+      tier: 'workflow',
+      parentId: root.id,
+      childIds: [],
+      sourceIds: evidence.sources.map((source) => source.id),
+      clusterKey: 'workflow',
+      workflow: { value: workflow, status: workflowMap!.status, unresolvedRefs: evidence.unresolvedRefs },
+    })
+    root.childIds.push(id)
+    for (const source of evidence.sources) evidenceLinks.push({ workflowId: id, documentId: documentNodeId(source.id) })
+  }
+
+  return { byId, rootId: root.id, evidenceLinks }
 }
 
 const TIER_VISUALS: Record<
@@ -170,6 +195,7 @@ const TIER_VISUALS: Record<
   provider: { kind: 'integration', role: 'hub', sizeWeight: 0.74 },
   document: { kind: 'knowledge', role: 'leaf', sizeWeight: 0.52 },
   entity: { kind: 'signal', role: 'leaf', sizeWeight: 0.38 },
+  workflow: { kind: 'signal', role: 'leaf', sizeWeight: 0.65 },
 }
 
 /**
@@ -185,15 +211,14 @@ export function collapseHierarchyToScene(
   const nodes: SourceGraphVisualNode[] = []
   const edges: SourceGraphVisualEdge[] = []
   const visible = new Set<string>()
-
-  const queue: string[] = [hierarchy.rootId]
-  while (queue.length > 0) {
-    const id = queue.shift()!
-    const node = hierarchy.byId.get(id)
-    if (!node || visible.has(id)) continue
-    visible.add(id)
-
-    const expanded = expandedIds.has(id)
+  const appendNode = (node: KnowledgeHierarchyNode) => {
+    if (visible.has(node.id)) return
+    if (node.parentId) {
+      const parent = hierarchy.byId.get(node.parentId)
+      if (parent) appendNode(parent)
+    }
+    visible.add(node.id)
+    const expanded = expandedIds.has(node.id)
     const visuals = TIER_VISUALS[node.tier]
     const childCount = node.childIds.length
     nodes.push({
@@ -208,11 +233,27 @@ export function collapseHierarchyToScene(
       role: visuals.role,
       clusterKey: node.clusterKey,
     })
+    if (node.parentId && visible.has(node.parentId)) edges.push({ from: node.parentId, to: node.id, label: '' })
+  }
 
-    if (node.parentId && visible.has(node.parentId)) {
-      edges.push({ from: node.parentId, to: node.id, label: '' })
-    }
+  const queue: string[] = [hierarchy.rootId]
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    const node = hierarchy.byId.get(id)
+    if (!node || visible.has(id)) continue
+    const expanded = expandedIds.has(id)
+    appendNode(node)
     if (expanded) queue.push(...node.childIds)
+  }
+
+  // A visible workflow brings its referenced documents (and their providers)
+  // into view, even when those provider branches are collapsed.
+  for (const link of hierarchy.evidenceLinks) {
+    if (!visible.has(link.workflowId)) continue
+    const document = hierarchy.byId.get(link.documentId)
+    if (!document) continue
+    appendNode(document)
+    edges.push({ from: link.workflowId, to: document.id, label: 'evidence' })
   }
 
   return { nodes, edges }

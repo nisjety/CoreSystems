@@ -1,16 +1,16 @@
 import { CalendarClock, Loader2, Trash2 } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { ApiError } from '@/shared/api/api-error'
 import {
   deleteCronSchedule,
   listCronSchedules,
   listScheduleFires,
+  runScheduleNow,
   updateCronSchedule,
   type CronSchedule,
-  type CronScheduleFire,
 } from '@/shared/api/cron-client'
-import { cronExprToLabel, listMySchedules, SCHEDULE_PRESETS } from '@/shared/api/schedule-from-chat'
+import { cronExprToLabel, SCHEDULE_PRESETS } from '@/shared/api/schedule-from-chat'
 import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { ScheduleDialog } from '@/features/chat/components/ScheduleDialog'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
@@ -27,7 +27,6 @@ import {
   automationStateOf,
   countAutomations,
   filterAutomations,
-  filterOf,
   goalOf,
   type AutomationFilter,
   type AutomationRow,
@@ -43,8 +42,9 @@ import {
  *   Settings page, where pause and delete are open to an admin and nothing else is offered.
  * - `compact` is the chat mount: the first `limit` rows, no filter tabs, no edits. Its "See
  *   results" stays on screen, disabled, while the results flag is off, as the chat always showed it.
- * - The full hub reads a paused schedule's reason from its last fire, once per pause. The other
- *   mounts show the pause without a reason, as they always did.
+ * - The full hub offers Run now (EP-6-S3) to the schedule's creator, when the server reports
+ *   `features.run_now`, and never on a lapsed approval. A paused row names its reason from the
+ *   `last_outcome` the list carries, so every mount names it the same way.
  *
  * A lapsed approval is never resumed by a bare toggle: renewal is the way back (WS20-S8). A goal and
  * an approval are never edited in place, because the template digest is signed.
@@ -69,6 +69,26 @@ const FILTERS: readonly AutomationFilter[] = ['active', 'paused', 'expired']
 const NAME_MAX = 120
 // The workflow a schedule fires when it names none. Settings shows it for schedules that name none.
 const DEFAULT_WORKFLOW_TYPE = 'InteractiveRunSupervision'
+// What a refused Run now means and what the person can do next (EP-6-S2). A refusal not listed
+// here keeps the shared copy.
+const RUN_NOW_REFUSALS: Partial<Record<string, { no: string; en: string }>> = {
+  run_now_in_flight: {
+    no: 'Planen kjører allerede. Vent til kjøringen er ferdig, og prøv igjen.',
+    en: 'This schedule is already running. Wait for that run to finish, then try again.',
+  },
+  run_now_rate_limited: {
+    no: 'Planen har kjørt for mange ganger den siste timen. Prøv igjen senere.',
+    en: 'This schedule has run too many times in the last hour. Try again later.',
+  },
+  approval_expired: {
+    no: 'Godkjenningen er utløpt, så planen kan ikke kjøres nå. Forny godkjenningen først.',
+    en: 'The approval has expired, so the schedule cannot run now. Renew the approval first.',
+  },
+  fire_not_authorized: {
+    no: 'Kjøringen ble ikke godkjent, så planen kjørte ikke. Sjekk planen og godkjenningen.',
+    en: 'This run was not authorized, so the schedule did not run. Check the schedule and its approval.',
+  },
+}
 
 function scheduleResultsEnabled(): boolean {
   return import.meta.env.VITE_SCHEDULE_RESULTS === 'true'
@@ -151,6 +171,13 @@ function messageFor(err: unknown, tr: Tr, fallback: { no: string; en: string }):
   return translateApiError(err, tr, fallback)
 }
 
+/** The words for a refused Run now (EP-6-S2). Any other failure keeps the shared copy. */
+function runNowMessage(err: unknown, tr: Tr): string {
+  const refusal = err instanceof ApiError && err.code !== null ? RUN_NOW_REFUSALS[err.code] : undefined
+  if (refusal) return tr(refusal.no, refusal.en)
+  return messageFor(err, tr, { no: 'Kunne ikke kjøre planen nå.', en: 'Could not run the schedule now.' })
+}
+
 // Closed tokens from cron_fires and the run's outcome. A token outside this
 // list is shown as-is rather than guessed at.
 function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string {
@@ -180,10 +207,11 @@ function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string
   }
 }
 
-function ScheduleFires(props: { orgId: string; cronId: string }) {
+function ScheduleFires(props: { orgId: string; cronId: string; revision: number }) {
   const i18n = useI18n()
+  // The revision changes after a Run now, so the open results read again and show the new fire first.
   const [fires] = createResource(
-    () => [props.orgId, props.cronId] as const,
+    () => [props.orgId, props.cronId, props.revision] as const,
     ([org, id]) => listScheduleFires(org, id),
   )
   const openTranscript = (event: MouseEvent, threadId: string) => {
@@ -227,6 +255,9 @@ function ScheduleFires(props: { orgId: string; cronId: string }) {
                       )}
                     </Show>
                     <span class="verevon-scheduled-runs-panel__chip">{i18n.tr('Plan', 'Schedule')}</span>
+                    <Show when={fire.fire_key?.startsWith('manual:')}>
+                      <span class="verevon-scheduled-runs-panel__chip">{i18n.tr('Manuell', 'Manual')}</span>
+                    </Show>
                     <Show when={fire.withheld_effects > 0}>
                       <span>
                         {i18n.tr('Holdt tilbake', 'Withheld')}: {fire.withheld_effects}
@@ -257,14 +288,15 @@ export function AutomationsList(props: AutomationsListProps) {
   const myUserId = createMemo(() => session.user?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
   const localeTag = () => (i18n.locale() === 'no' ? 'nb-NO' : 'en-US')
-  // Only the full hub has filters, the paused reason and the edits that belong to the creator.
+  // Only the full hub has filters and the edits that belong to the creator.
   const full = () => props.scope === 'mine' && !props.compact
   // Pause and delete belong to the creator and, on the Settings page, to an org admin. Renew and copy are the creator's alone.
   const canManage = () => props.scope === 'mine' || isAdmin()
 
   // capability-core still returns every schedule in the org, goal text included (D2-121). A `mine`
   // list shows only the signed-in person's own, a client filter until the server offers creator=self.
-  const [schedules, { refetch }] = createResource(
+  // The same answer carries the server's feature flags, which the hub reads for Run now.
+  const [listing, { refetch }] = createResource(
     () => {
       const org = orgId()
       const user = myUserId()
@@ -273,25 +305,33 @@ export function AutomationsList(props: AutomationsListProps) {
       return key
     },
     (key) =>
-      key.scope === 'org'
-        ? listCronSchedules(key.org).then((result) => result.schedules)
-        : listMySchedules(key.org, key.user),
+      listCronSchedules(key.org).then((result) => ({
+        schedules:
+          key.scope === 'org'
+            ? result.schedules
+            : result.schedules.filter((schedule) => schedule.creator_subject_id === key.user),
+        runNow: result.features?.run_now === true,
+      })),
   )
+  const schedules = () => listing()?.schedules
+  const runNow = () => listing()?.runNow === true
 
   const [filter, setFilter] = createSignal<AutomationFilter>('active')
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  const [notice, setNotice] = createSignal<string | null>(null)
   const [openResultsId, setOpenResultsId] = createSignal<string | null>(null)
+  // Bumped after a Run now, so open results read again and show the new fire first.
+  const [firesRevision, setFiresRevision] = createSignal(0)
   const [renewing, setRenewing] = createSignal<CronSchedule | null>(null)
   const [copying, setCopying] = createSignal<CronSchedule | null>(null)
   const [retiming, setRetiming] = createSignal<RetimeDraft | null>(null)
-  const [lastFires, setLastFires] = createSignal<Readonly<Record<string, CronScheduleFire | null>>>({})
 
   const rows = createMemo((): AutomationRow[] => {
     const now = Date.now()
     return (schedules() ?? []).map((schedule) => ({
       schedule,
-      state: automationStateOf(schedule, lastFires()[schedule.id], now),
+      state: automationStateOf(schedule, now),
     }))
   })
   const counts = createMemo(() => countAutomations(rows()))
@@ -299,31 +339,6 @@ export function AutomationsList(props: AutomationsListProps) {
     const listed = full() ? filterAutomations(rows(), filter()) : rows()
     return props.limit === undefined ? listed : listed.slice(0, props.limit)
   })
-
-  // The reason a schedule is paused lives on its last fire, so the full hub reads it only for paused
-  // rows on screen, and once per pause: the key carries the schedule's own updated_at, which a pause
-  // or a resume changes.
-  const requestedFires = new Set<string>()
-  createEffect(
-    () => {
-      const org = orgId()
-      const pending = full()
-        ? visible()
-            .filter((row) => filterOf(row.state) === 'paused')
-            .map((row) => ({ id: row.schedule.id, key: `${row.schedule.id}@${row.schedule.updated_at ?? ''}` }))
-        : []
-      return { org, pending }
-    },
-    ({ org, pending }) => {
-      for (const { id, key } of pending) {
-        if (!org || requestedFires.has(key)) continue
-        requestedFires.add(key)
-        listScheduleFires(org, id, 1)
-          .then((fires) => setLastFires((current) => ({ ...current, [id]: fires[0] ?? null })))
-          .catch(() => setLastFires((current) => ({ ...current, [id]: null })))
-      }
-    },
-  )
 
   const handleToggle = async (schedule: CronSchedule) => {
     const org = orgId()
@@ -396,6 +411,37 @@ export function AutomationsList(props: AutomationsListProps) {
     }
   }
 
+  // A press asks for one manual fire. Its request id is made once per press, and kept only while the
+  // answer is unknown (no answer, or a server error): a retry of that press then gets the fire it made
+  // first, not a second one (EP-6-S2). A refusal is an answer, so the next press starts with a new id.
+  const runNowRequests = new Map<string, string>()
+
+  const handleRunNow = async (schedule: CronSchedule) => {
+    const org = orgId()
+    if (!org || busyId()) return
+    const requestId = runNowRequests.get(schedule.id) ?? crypto.randomUUID()
+    setBusyId(schedule.id)
+    setActionError(null)
+    setNotice(null)
+    try {
+      await runScheduleNow(org, schedule.id, requestId)
+      runNowRequests.delete(schedule.id)
+      setNotice(i18n.tr('Kjøringen er startet.', 'The run has started.'))
+      setOpenResultsId(schedule.id)
+      setFiresRevision((current) => current + 1)
+    } catch (err) {
+      if (err instanceof ApiError && err.status < 500) runNowRequests.delete(schedule.id)
+      else runNowRequests.set(schedule.id, requestId)
+      setActionError(runNowMessage(err, i18n.tr))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // Run now is the creator's, on the full hub only, and never on a lapsed approval: renewal is the way back.
+  const canRunNow = (row: AutomationRow) =>
+    full() && runNow() && row.state !== 'expired' && row.schedule.creator_subject_id === myUserId()
+
   const emptyNotice = () => {
     if (props.scope === 'org') {
       return (
@@ -434,9 +480,16 @@ export function AutomationsList(props: AutomationsListProps) {
           </p>
         )}
       </Show>
+      <Show when={notice()}>
+        {(message) => (
+          <p class="verevon-settings-status-message verevon-settings-status-message--success" role="status">
+            {message()}
+          </p>
+        )}
+      </Show>
 
       <Show
-        when={!schedules.loading}
+        when={!listing.loading}
         fallback={
           <p role="status" aria-busy="true">
             <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Laster automatiseringer …', 'Loading automations…')}
@@ -444,10 +497,10 @@ export function AutomationsList(props: AutomationsListProps) {
         }
       >
         <Show
-          when={!schedules.error}
+          when={!listing.error}
           fallback={
             <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
-              {messageFor(schedules.error, i18n.tr, {
+              {messageFor(listing.error, i18n.tr, {
                 no: 'Kunne ikke laste automatiseringene.',
                 en: 'Could not load automations.',
               })}
@@ -547,6 +600,17 @@ export function AutomationsList(props: AutomationsListProps) {
                                 {i18n.tr('Se resultater', 'See results')}
                               </Button>
                             </Show>
+                          </Show>
+                          <Show when={canRunNow(row())}>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={busyId() === cronId()}
+                              onClick={() => void handleRunNow(scheduleOf())}
+                              aria-label={`${i18n.tr('Kjør nå', 'Run now')} ${scheduleOf().name}`}
+                            >
+                              {i18n.tr('Kjør nå', 'Run now')}
+                            </Button>
                           </Show>
                           <Show when={canManage() && (scheduleOf().enabled || !approvalLapsed(scheduleOf()))}>
                             <Button
@@ -648,7 +712,7 @@ export function AutomationsList(props: AutomationsListProps) {
 
                         <Show when={scheduleResultsEnabled() && openResultsId() === cronId()}>
                           <div id={`automation-fires-${cronId()}`}>
-                            <ScheduleFires orgId={orgId()} cronId={cronId()} />
+                            <ScheduleFires orgId={orgId()} cronId={cronId()} revision={firesRevision()} />
                           </div>
                         </Show>
                       </li>

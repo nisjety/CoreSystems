@@ -318,6 +318,10 @@ pub const FEATURES: &[Feature] = &[
         label: "browser tools",
     },
     Feature {
+        key: "browser_human_assist",
+        label: "browser help requests",
+    },
+    Feature {
         key: "translation",
         label: "translation",
     },
@@ -375,6 +379,34 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         key: "run_inspection",
         label: "run timing and request inspection",
+    },
+    // EP-3 S5: a send's typed context references (documents, threads, selections) are refused on a
+    // ZDR turn before any network call, so no reference is resolved and none is silently dropped.
+    Feature {
+        key: "context_references",
+        label: "references to documents, threads or selections",
+    },
+    // EP-7 S1: a thread goal is user content in a new durable store (D7).
+    Feature {
+        key: "thread_goal",
+        label: "persistent goals",
+    },
+    // EP-9 C1: org-core refuses a thread legal hold on a ZDR or waived thread with
+    // legal_hold_nothing_retained: nothing is retained, so there is nothing to hold.
+    Feature {
+        key: "legal_hold",
+        label: "a legal hold on a thread",
+    },
+    // EP-11 S7: /learn sends a thread's transcript to the review model and keeps what it distils, so a
+    // ZDR or waived caller, and a thread holding a ZDR or waived run, is refused before any read.
+    Feature {
+        key: "learn_command",
+        label: "learning from this conversation",
+    },
+    // EP-11 S1/S8: saving, editing or importing a skill is configuration a ZDR credential cannot write.
+    Feature {
+        key: "skill_authoring",
+        label: "saving or editing skills",
     },
 ];
 

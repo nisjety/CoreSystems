@@ -6,7 +6,7 @@
 //! any member reads, sets or forgets their own choice for one host. It decides nothing about who
 //! may browse, and it forwards no host that a client did not name in the path or the query.
 //!
-//! The routes exist only when `BROWSER_DO_ENABLED` is the literal `true`, read once when the
+//! The routes exist when `BROWSER_DO_ENABLED` or `BROWSER_SITES_ENABLED` is the literal `true`, read when the
 //! browser router is built. Off, they are absent, so an operator cannot set a policy that no run
 //! enforces yet. org-core still answers every semantic rule (canonical hosts, the choice limit,
 //! revisions); the checks here only keep malformed or unknown fields from reaching it.
@@ -67,10 +67,17 @@ pub(crate) fn routes(enabled: bool) -> Router<AppState> {
         )
 }
 
-/// Whether the browser-site routes are switched on for this gateway (`BROWSER_DO_ENABLED`). Exact,
-/// like the other switches: only the word `true` enables it.
+/// Browser-site settings can be enabled for the assistant without enabling chat browser tools.
+/// Both switches are exact: only the literal `true` enables the routes.
 pub(crate) fn enabled_from_env() -> bool {
-    switch_enabled(std::env::var("BROWSER_DO_ENABLED").ok().as_deref())
+    browser_sites_enabled(
+        std::env::var("BROWSER_DO_ENABLED").ok().as_deref(),
+        std::env::var("BROWSER_SITES_ENABLED").ok().as_deref(),
+    )
+}
+
+fn browser_sites_enabled(browser_do: Option<&str>, browser_sites: Option<&str>) -> bool {
+    switch_enabled(browser_do) || switch_enabled(browser_sites)
 }
 
 fn switch_enabled(value: Option<&str>) -> bool {
@@ -133,21 +140,30 @@ async fn explain_site(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> GatewayJsonResponse {
-    if let Err(response) = require_active_org(&user, &id) {
+    let host = query.get("host").map_or("", |host| host.trim());
+    explain_site_for_member(&state, &user, &id, host).await
+}
+
+pub(super) async fn explain_site_for_member(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    host: &str,
+) -> GatewayJsonResponse {
+    if let Err(response) = require_active_org(user, org_id) {
         return response;
     }
-    let host = query.get("host").map_or("", |host| host.trim());
     if !valid_host(host) {
         return invalid("host is required and must be a hostname");
     }
     let suffix = format!("/explain?host={}", urlencoding::encode(host));
     proxy_json(
-        &state,
+        state,
         Method::GET,
-        &org_core_url(&state, &id, &suffix),
+        &org_core_url(state, org_id, &suffix),
         None,
-        Some(&id),
-        Some(&actor_for(&user)),
+        Some(org_id),
+        Some(&actor_for(user)),
         None,
     )
     .await
@@ -417,7 +433,7 @@ mod tests {
     use crate::middleware::require_session;
 
     use super::{
-        routes, switch_enabled, valid_host, validate_choice_body, validate_policy_body,
+        browser_sites_enabled, routes, switch_enabled, valid_host, validate_choice_body, validate_policy_body,
     };
 
     const COOKIE: &str = "better-auth.session_token=session-1";
@@ -741,6 +757,14 @@ mod tests {
         assert!(recorded
             .iter()
             .any(|request| request.url.query() == Some("host=example.com")));
+    }
+
+    #[test]
+    fn assistant_site_settings_do_not_require_chat_browser_tools() {
+        assert!(browser_sites_enabled(None, Some("true")));
+        assert!(browser_sites_enabled(Some("true"), None));
+        assert!(!browser_sites_enabled(None, None));
+        assert!(!browser_sites_enabled(Some("false"), Some("TRUE")));
     }
 
     #[test]

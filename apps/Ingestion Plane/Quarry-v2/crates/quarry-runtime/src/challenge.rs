@@ -287,6 +287,7 @@ const TEXT_GROUPS: &[(&str, &[&str])] = &[
             "this request was blocked",
             "has been blocked by",
             "access to this page has been denied",
+            "access is temporarily restricted",
             "pardon our interruption",
             "attention required",
         ],
@@ -320,6 +321,7 @@ const TITLE_CUES: &[&str] = &[
     "robot check",
     "security check",
     "access denied",
+    "access is temporarily restricted",
     "you have been blocked",
     "pardon our interruption",
     "captcha",
@@ -1164,24 +1166,26 @@ fn document_key(raw: &str) -> Option<String> {
 }
 
 /// The status of the response that delivered the document the browser is on:
-/// the latest `Network.responseReceived` whose redacted URL equals the current
-/// one, and that came after the last request for that URL. The request starts
-/// the navigation, so a response for the same URL before it is an earlier
-/// visit's (a stale 403 or 429) and is not this page's status. `None` when the
-/// page was reached without an answered request in the window (a history push,
-/// an event buffer that rolled over).
+/// the latest top-level document response for the current redacted URL that
+/// came after its latest top-level document request in the same tab. The URL
+/// alone is insufficient because a subresource or child frame can request
+/// the same path. A legacy event without the browser's frame classification
+/// cannot establish document status.
 pub fn main_document_status(events: &[BrowserDevtoolsEvent], current_url: &str) -> Option<u16> {
     let want = document_key(current_url)?;
     let for_current = |event: &BrowserDevtoolsEvent| {
-        event.url.as_deref().and_then(document_key).as_deref() == Some(&want)
+        event.payload.get("topLevelDocument").and_then(serde_json::Value::as_bool) == Some(true)
+            && event.url.as_deref().and_then(document_key).as_deref() == Some(&want)
     };
     let start = events
         .iter()
         .rposition(|event| event.name == "Network.requestWillBeSent" && for_current(event))?;
-    events[start..]
+    events[start + 1..]
         .iter()
         .rev()
-        .filter(|event| event.name == "Network.responseReceived")
+        .filter(|event| {
+            event.name == "Network.responseReceived" && event.tab_id == events[start].tab_id
+        })
         .filter(|event| for_current(event))
         .find_map(|event| event.status)
 }
@@ -1727,6 +1731,7 @@ mod tests {
             text_case("unusual traffic and automated queries", "https://search.example/results", None, "We have detected unusual traffic from your network. Automated queries are not allowed.", Some(200), Strong(UnexpectedBotError)),
             text_case("title says checking your browser", "https://example.com/", Some("Just a moment..."), "Checking your browser before accessing example.com.", None, Strong(WafInterstitial)),
             text_case("blocked text plus a 403", "https://example.com/", None, "You have been blocked.", Some(403), Strong(WafInterstitial)),
+            text_case("temporary access restriction on a results URL", "https://example.com/search?filter=active", Some("Access is temporarily restricted"), "Access is temporarily restricted. Please try again later.", Some(200), Strong(WafInterstitial)),
             case("blocked text in html plus a 403", "https://example.com/", None, Some(blocked_text_403), Some(403), Strong(WafInterstitial)),
             case("captcha path plus a prove-human phrase", "https://example.com/captcha/verify", None, Some(captcha_path), Some(200), Strong(UnexpectedBotError)),
             text_case("wrapper style: a title that asks for proof of humanity", "https://example.test/challenge", Some("Verify you are human"), "captcha required", None, Strong(UnexpectedBotError)),
@@ -2081,7 +2086,7 @@ mod tests {
             status: Some(status),
             text: None,
             timestamp_ms: 0,
-            payload: json!({}),
+            payload: json!({ "topLevelDocument": true }),
         }
     }
 
@@ -2114,6 +2119,37 @@ mod tests {
         let mut request = response_event("https://example.com/page", 200);
         request.name = "Network.requestWillBeSent".into();
         assert_eq!(main_document_status(&[request], "https://example.com/page"), None);
+    }
+
+    #[test]
+    fn a_same_path_non_document_failure_does_not_corroborate_a_challenge() {
+        let url = "https://example.com/search";
+        let mut other_request = request_event(url);
+        other_request.payload = json!({ "topLevelDocument": false });
+        let mut xhr_response = response_event(url, 403);
+        xhr_response.payload = json!({ "topLevelDocument": false });
+        let mut legacy_response = response_event(url, 429);
+        legacy_response.payload = json!({});
+        let mut different_tab = response_event(url, 403);
+        different_tab.tab_id = Some("other-tab".to_owned());
+
+        let events = [
+            request_event(url),
+            response_event(url, 200),
+            other_request,
+            xhr_response,
+            legacy_response,
+            different_tab,
+        ];
+        assert_eq!(
+            main_document_status(&events, "https://example.com/search?filters=active"),
+            Some(200)
+        );
+        assert_eq!(main_document_status(&events[2..], url), None);
+        assert_eq!(
+            main_document_status(&[request_event(url), response_event(url, 403)], url),
+            Some(403)
+        );
     }
 
     fn request_event(url: &str) -> BrowserDevtoolsEvent {

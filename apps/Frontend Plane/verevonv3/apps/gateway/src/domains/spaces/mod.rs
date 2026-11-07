@@ -4593,6 +4593,9 @@ async fn compose_space_agents_from_members(
                         ("allowedTools", "allowed_tools"),
                         ("approvalMode", "approval_mode"),
                         ("avatarColor", "avatar_color"),
+                        // EP-6 S9: the agent version this binding pins. Absent follows the
+                        // published version.
+                        ("pinnedVersion", "pinned_version"),
                     ] {
                         if let Some(value) = binding.get(from) {
                             if !value.is_null() {
@@ -4654,6 +4657,18 @@ fn valid_avatar_color(value: &str) -> bool {
 /// implementation detail the browser has no business carrying.
 const MENTIONED_AGENT_FIELDS: [&str; 2] = ["mentioned_agent_ref", "mentionedAgentRef"];
 
+/// The agent version pin a mention turn carries to the model gateway (EP-6 S9). Server-resolved
+/// from the binding and the agent's Convex definition, never the browser's: a client copy is
+/// removed on every turn, whatever `AGENT_VERSION_PINNING` says, so it can never reach a gateway
+/// whose own switch reads it.
+const AGENT_PIN_FIELDS: [&str; 5] = [
+    "agent_ref",
+    "agent_version",
+    "agent_digest",
+    "agent_tool_capability_ids",
+    "agent_autonomy_cap",
+];
+
 /// Exchange a browser-supplied agent mention for the two facts that actually
 /// authorize and voice it: an active Control membership for that subject in
 /// this Space, and the Application binding naming it. Only a hit on both
@@ -4689,6 +4704,71 @@ async fn fetch_agent_persona(state: &AppState, org_id: &str, agent_ref: &str) ->
     .await
     .ok()
     .filter(|value| !value.is_null())
+}
+
+/// The persona of the version a mention turn runs (EP-6 S9): the binding's pinned version when it
+/// pins one, else what `agentPersonaForGateway` serves (the published version, or the legacy
+/// prompt of an unversioned agent). `None` when Convex cannot answer or has no such version.
+async fn fetch_agent_version_persona(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    agent_ref: &str,
+    pinned_version: Option<u64>,
+) -> Option<Value> {
+    let Some(version) = pinned_version else {
+        return fetch_agent_persona(state, org_id, agent_ref).await;
+    };
+    convex_gateway_call(
+        state,
+        "query",
+        "agents:getVersionForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "agentId": agent_ref,
+            "version": version,
+        }),
+    )
+    .await
+    .ok()
+    .filter(|value| !value.is_null())
+}
+
+/// Puts a resolved version on the outbound turn: its instructions, and, for a versioned agent, the
+/// pin the model gateway narrows the turn by (`agent_ref`, `agent_version`, `agent_digest`, the tool
+/// allowlist and the autonomy cap). An unversioned agent's persona has no `version`, so its turn
+/// carries the instructions alone, as before.
+fn apply_agent_version_persona(object: &mut Map<String, Value>, agent_ref: &str, persona: &Value) {
+    if let Some(system_prompt) = persona.get("systemPrompt").and_then(Value::as_str) {
+        object.insert("agent_system_prompt".to_owned(), json!(system_prompt));
+    }
+    let (Some(version), Some(digest)) = (
+        persona.get("version").and_then(Value::as_u64),
+        persona.get("digest").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    object.insert("agent_ref".to_owned(), json!(agent_ref));
+    object.insert("agent_version".to_owned(), json!(version));
+    object.insert("agent_digest".to_owned(), json!(digest));
+    if let Some(ids) = persona.get("toolCapabilityIds").filter(|ids| ids.is_array()) {
+        object.insert("agent_tool_capability_ids".to_owned(), ids.clone());
+    }
+    if let Some(cap) = persona.get("autonomyCap").filter(|cap| cap.is_string()) {
+        object.insert("agent_autonomy_cap".to_owned(), cap.clone());
+    }
+}
+
+/// The typed refusal for a mention whose agent version cannot be read while pinning is on.
+fn agent_version_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "agent_version_unavailable",
+            "This agent's version could not be read right now.",
+        )),
+    )
 }
 
 /// Read (never consume) whichever spelling of the Space reference the request
@@ -4919,6 +4999,9 @@ pub(crate) async fn inject_mentioned_space_agent(
             )),
         )
     })?;
+    for field in AGENT_PIN_FIELDS {
+        object.remove(field);
+    }
     // The wake request is consumed here whatever happens next; the other wake fields are never the
     // browser's (see FORGED_WAKE_FIELDS).
     let wake_request = object.remove("wake").filter(|value| !value.is_null());
@@ -5055,9 +5138,22 @@ pub(crate) async fn inject_mentioned_space_agent(
         .to_owned();
     object.insert("agent_name".to_owned(), json!(name));
 
-    // Best-effort: a persona missing its instructions still answers, in its
-    // own name, on the framing message alone.
-    if let Some(agent_ref) = agent.get("agent_ref").and_then(Value::as_str) {
+    if state.space_features.agent_version_pinning {
+        // EP-6 S9: the turn runs one exact version, the binding's pin or else the published one,
+        // and carries that version's allowlist and cap. Not best-effort: a version that cannot be
+        // read would drop both, which is a wider turn than the definition allows.
+        let pinned_version = agent.get("pinned_version").and_then(Value::as_u64);
+        let agent_ref = agent
+            .get("agent_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(agent_version_unavailable)?;
+        let persona = fetch_agent_version_persona(state, user, org_id, agent_ref, pinned_version)
+            .await
+            .ok_or_else(agent_version_unavailable)?;
+        apply_agent_version_persona(object, agent_ref, &persona);
+    } else if let Some(agent_ref) = agent.get("agent_ref").and_then(Value::as_str) {
+        // Best-effort: a persona missing its instructions still answers, in its
+        // own name, on the framing message alone.
         if let Some(persona) = fetch_agent_persona(state, org_id, agent_ref).await {
             if let Some(system_prompt) = persona.get("systemPrompt").and_then(Value::as_str) {
                 object.insert("agent_system_prompt".to_owned(), json!(system_prompt));
@@ -10325,6 +10421,207 @@ mod tests {
         // The Space reference is left untouched here: that field belongs to
         // `inject_personal_thread_context`, which runs next and removes it.
         assert_eq!(body["space_ref"], "space-1");
+    }
+
+    const V2_DIGEST: &str =
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    const V3_DIGEST: &str =
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+    /// The binding the EP-6 S9 tests mention, pinned to `pinned` when given.
+    fn versioned_binding(pinned: Option<u64>) -> Value {
+        let mut binding = json!({
+            "bindingRef": "sab_1",
+            "agentRef": "agent-1",
+            "subjectId": "svc-support",
+            "name": "Kundestøtte",
+            "status": "active",
+            "approvalMode": "auto",
+            "deliveryTargets": []
+        });
+        if let Some(version) = pinned {
+            binding["pinnedVersion"] = json!(version);
+        }
+        binding
+    }
+
+    /// Convex as it stands after v3 is published: the published persona is v3, and v2 is still
+    /// readable by number.
+    async fn mount_published_v3_with_v2(application: &MockServer) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {
+                    "name": "Kundestøtte",
+                    "systemPrompt": "Version three.",
+                    "version": 3,
+                    "digest": V3_DIGEST,
+                    "toolCapabilityIds": ["cap.retrieval.query", "cap.tool.http"],
+                    "autonomyCap": "auto"
+                }
+            })))
+            .mount(application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({
+                "path": "agents:getVersionForGateway",
+                "args": {"agentId": "agent-1", "version": 2}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {
+                    "version": 2,
+                    "digest": V2_DIGEST,
+                    "name": "Kundestøtte",
+                    "systemPrompt": "Version two.",
+                    "toolCapabilityIds": ["cap.retrieval.query"],
+                    "autonomyCap": "read_only"
+                }
+            })))
+            .mount(application)
+            .await;
+    }
+
+    fn mention_body() -> Value {
+        json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        })
+    }
+
+    /// EP-6 S9: a binding pinned to v2 keeps answering as v2 after v3 is published, and the turn
+    /// carries v2's allowlist and cap.
+    #[tokio::test]
+    async fn a_v2_pinned_binding_injects_v2_after_v3_publishes() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([versioned_binding(Some(2))]),
+        )
+        .await;
+        state.space_features.agent_version_pinning = true;
+        mount_published_v3_with_v2(&application).await;
+
+        let mut body = mention_body();
+        inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
+            .await
+            .expect("a pinned version is readable");
+
+        assert_eq!(body["agent_system_prompt"], "Version two.");
+        assert_eq!(body["agent_ref"], "agent-1");
+        assert_eq!(body["agent_version"], 2);
+        assert_eq!(body["agent_digest"], V2_DIGEST);
+        assert_eq!(body["agent_tool_capability_ids"], json!(["cap.retrieval.query"]));
+        assert_eq!(body["agent_autonomy_cap"], "read_only");
+    }
+
+    /// EP-6 S9: an unpinned binding follows the published version.
+    #[tokio::test]
+    async fn an_unpinned_binding_follows_the_published_version() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([versioned_binding(None)]),
+        )
+        .await;
+        state.space_features.agent_version_pinning = true;
+        mount_published_v3_with_v2(&application).await;
+
+        let mut body = mention_body();
+        inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
+            .await
+            .expect("the published version is readable");
+
+        assert_eq!(body["agent_system_prompt"], "Version three.");
+        assert_eq!(body["agent_version"], 3);
+        assert_eq!(body["agent_digest"], V3_DIGEST);
+        assert_eq!(body["agent_autonomy_cap"], "auto");
+    }
+
+    /// EP-6 S9: with pinning on, a pinned version Convex cannot serve refuses the turn rather than
+    /// run it without the version's allowlist and cap.
+    #[tokio::test]
+    async fn an_unreadable_pinned_version_refuses_the_mention() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([versioned_binding(Some(7))]),
+        )
+        .await;
+        state.space_features.agent_version_pinning = true;
+        mount_published_v3_with_v2(&application).await;
+
+        let mut body = mention_body();
+        let (status, payload) =
+            inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
+                .await
+                .expect_err("version 7 does not exist");
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(payload.0["error"]["code"], "agent_version_unavailable");
+        assert!(body.get("agent_version").is_none());
+    }
+
+    /// EP-6 S9: the pin fields are never the browser's. A forged allowlist (or any other pin field)
+    /// is stripped with pinning off, with pinning on, and on a turn that mentions nobody.
+    #[tokio::test]
+    async fn forged_agent_pin_fields_from_the_client_are_stripped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let forged = json!({
+            "agent_ref": "agent-9",
+            "agent_version": 1,
+            "agent_digest": V2_DIGEST,
+            "agent_tool_capability_ids": ["cap.command.shell"],
+            "agent_autonomy_cap": "auto",
+        });
+        for pinning in [false, true] {
+            let (mut state, application, _user_core) = mention_test_state(
+                json!([mention_service_member("svc-support")]),
+                json!([versioned_binding(None)]),
+            )
+            .await;
+            state.space_features.agent_version_pinning = pinning;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(wm_body_partial_json(
+                    json!({"path": "spaceAgents:agentPersonaForGateway"}),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": {"name": "Kundestøtte", "systemPrompt": "Legacy."}
+                })))
+                .mount(&application)
+                .await;
+
+            let mut mention = mention_body();
+            mention
+                .as_object_mut()
+                .expect("object")
+                .extend(forged.as_object().expect("object").clone());
+            inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut mention)
+                .await
+                .expect("a legacy agent answers");
+            let mut plain = json!({"content": "hello"});
+            plain
+                .as_object_mut()
+                .expect("object")
+                .extend(forged.as_object().expect("object").clone());
+            inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut plain)
+                .await
+                .expect("a turn without a mention passes");
+
+            for body in [&mention, &plain] {
+                for field in super::AGENT_PIN_FIELDS {
+                    assert!(
+                        body.get(field).is_none(),
+                        "{field} must not survive (pinning {pinning})"
+                    );
+                }
+            }
+            assert_eq!(mention["agent_system_prompt"], "Legacy.");
+        }
     }
 
     /// A binding whose policy says `approval_mode: blocked` refuses the

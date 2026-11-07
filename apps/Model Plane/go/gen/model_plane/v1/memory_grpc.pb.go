@@ -69,15 +69,24 @@ type MemoryServiceClient interface {
 	// an empty answer with skip_reason "zdr", never an error. Refused with
 	// failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
 	// is off.
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetUserProfile(ctx context.Context, in *GetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
 	// Replace the profile text with the person's own edit. User callers only, for
 	// themselves; a stale expected_revision is refused (failed_precondition
 	// "profile_revision_stale"); a ZDR or waived credential is refused
 	// zdr_feature_not_supported (feature "user_profile").
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SetUserProfile(ctx context.Context, in *SetUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
 	// Rebuild the profile from the person's accepted memories. Refused while
 	// memory is paused, off or disabled; an edited profile is kept unless force
 	// is set. Same caller and ZDR rules as SetUserProfile.
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RebuildUserProfile(ctx context.Context, in *RebuildUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
 }
 
@@ -236,15 +245,24 @@ type MemoryServiceServer interface {
 	// an empty answer with skip_reason "zdr", never an error. Refused with
 	// failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
 	// is off.
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetUserProfile(context.Context, *GetUserProfileRequest) (*UserProfileResponse, error)
 	// Replace the profile text with the person's own edit. User callers only, for
 	// themselves; a stale expected_revision is refused (failed_precondition
 	// "profile_revision_stale"); a ZDR or waived credential is refused
 	// zdr_feature_not_supported (feature "user_profile").
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SetUserProfile(context.Context, *SetUserProfileRequest) (*UserProfileResponse, error)
 	// Rebuild the profile from the person's accepted memories. Refused while
 	// memory is paused, off or disabled; an edited profile is kept unless force
 	// is set. Same caller and ZDR rules as SetUserProfile.
+	// Response type is shared by the user profile RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RebuildUserProfile(context.Context, *RebuildUserProfileRequest) (*UserProfileResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }

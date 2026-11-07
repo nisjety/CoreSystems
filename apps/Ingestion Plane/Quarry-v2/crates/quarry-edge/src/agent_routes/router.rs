@@ -43,10 +43,12 @@ pub fn agent_router() -> Router<AppState> {
         .route("/v1/agent/runs/:run_id/tabs", get(list_tabs).post(new_tab))
         // WS8.F: the agent attachment (dark behind QUARRY_EDGE__ATTACH) and the hand-over of a tab.
         .route("/v1/agent/runs/:run_id/attach", post(attach_run))
+        .route("/v1/agent/runs/:run_id/attach-current-tab", post(attach_current_tab))
         .route(
             "/v1/agent/runs/:run_id/attach/:attach_id",
             delete(release_attach),
         )
+        .route("/v1/agent/runs/:run_id/tabs/:tab_id/mark", post(mark_tab))
         .route(
             "/v1/agent/runs/:run_id/tabs/:tab_id/control",
             post(control_tab),

@@ -61,6 +61,28 @@ const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
 /// Tool name that drives the live agentic browser loop through Quarry
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
+
+/// Apply the signed browser class as an additional ceiling, without changing
+/// the legacy decision for any other tool. The class never loosens that answer.
+fn browser_scoped_permission(
+    enforced: bool,
+    tool_name: &str,
+    tool_input: &str,
+    mode: PermissionMode,
+    legacy: PermissionDecision,
+    signed: &crate::mcp_gateway::SignedToolClass,
+) -> PermissionDecision {
+    if !enforced || tool_name != BROWSER_AGENT_TOOL {
+        return legacy;
+    }
+    let view = permission::ToolClassView::from_registry(tool_name, &signed.class, &signed.floor, "");
+    let declared = permission::evaluate_call_with_class(mode, &view, tool_input);
+    match (legacy, declared) {
+        (PermissionDecision::Deny, _) | (_, PermissionDecision::Deny) => PermissionDecision::Deny,
+        (PermissionDecision::AwaitApproval, _) | (_, PermissionDecision::AwaitApproval) => PermissionDecision::AwaitApproval,
+        _ => PermissionDecision::Allow,
+    }
+}
 /// Thin Model-Plane MCP aliases for an existing Quarry browser run. Unlike
 /// `browser_agent`, these do not plan, acquire, or expose a browser; they
 /// execute one grant-bound observation or opaque snapshot-ref action.
@@ -1178,8 +1200,12 @@ async fn execute_step_inner(
     // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
     // instead of the name (`permission::RunGate`); with the gate off this is
     // `evaluate_call` exactly.
-    let permission_decision =
+    let legacy_permission =
         permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input);
+    let permission_decision = browser_scoped_permission(
+        crate::capability_policy::browser_agent_policy_enforced(),
+        tool_name, tool_input, mode, legacy_permission, &signed_class,
+    );
     if matches!(permission_decision, PermissionDecision::Deny) {
         return StepOutcome::permission_denied();
     }
@@ -1290,7 +1316,7 @@ async fn execute_step_inner(
             tool_bridge::execute_browser_agent(
                 tool_input,
                 org_id,
-                zdr,
+                zdr || waived,
                 browser_event_sink,
                 state,
                 inference_bearer,
@@ -1308,6 +1334,13 @@ async fn execute_step_inner(
     // `result_query` reads a result this run held, so it is answered from the run's own
     // store and never reaches a tool. It passed the capability, hook and permission
     // gates above like any other read. Without a store the name falls through as it did.
+    // The long-page reader (EP-2-S10) answers read_page and find_in_page from the pages this run holds, as result_query answers from its own store. Off, the names fall through as before.
+    if let Some(read) = result_handles::execute_reader_tool(tool_name, tool_input, org_id, run_id, result_store) {
+        return match read {
+            Ok(output) => StepOutcome::completed(output),
+            Err(error) => StepOutcome::failed(&error),
+        };
+    }
     if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {
         return match result_handles::execute_result_query(tool_input, org_id, run_id, result_store) {
             Ok(output) => StepOutcome::completed(output),
@@ -1409,6 +1442,7 @@ async fn execute_step_inner(
                 Some(lock) => Some(lock.write().await),
                 None => None,
             };
+            let egress = crate::egress_proxy::run_egress().call_egress(org_id, run_id);
             let execution = execute_code_interpreter(
                 tool_input,
                 run_id,
@@ -1419,6 +1453,7 @@ async fn execute_step_inner(
                     .as_deref()
                     .map(crate::skill_mounts::SkillTree::path),
                 lease_id.as_deref(),
+                &egress,
             )
             .await;
             // The step's changes are recorded before the lock is released, so the record holds
@@ -1693,7 +1728,10 @@ async fn execute_step_inner(
             screened.output = content;
         }
     }
-    let rendered = crate::provenance::render(&screened.output, &screened.provenance);
+    let rendered = crate::provenance::render(
+        &result_handles::inline_text(tool_name, &screened.output),
+        &screened.provenance,
+    );
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
     // tool's output, and every read repeats the same verdict.
@@ -1702,19 +1740,47 @@ async fn execute_step_inner(
         .and_then(|store| {
             let prefix = crate::provenance::render("", &screened.provenance);
             let label = prefix.strip_suffix('\n').unwrap_or(&prefix);
-            store
-                .park(org_id, run_id, label, &screened.output)
-                .ok()
-                .map(|handle_id| {
-                    result_handles::handle_envelope(&handle_id, label, &screened.output)
-                })
+            result_handles::hold_for_model(store, org_id, run_id, tool_name, label, &screened.output)
         });
-    let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
+    let mut outcome = StepOutcome::completed(with_edit_note(
+        parked.unwrap_or(rendered),
+        tool_name,
+        release.filter(|_| released),
+    ));
     outcome.compaction_triggered = compaction_triggered;
     outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
         && screened.provenance.is_audit_worthy())
         || screened.taint;
     outcome
+}
+
+/// The result of a provider write the person edited before approving it (EP-10-S5, D8), with the
+/// note that says so first: the field names only, from the release the resume boundary built,
+/// never from the model's own arguments. The note sits outside the provenance-labelled result, as
+/// the executor's own words. Every other result is returned as it is.
+fn with_edit_note(
+    output: String,
+    tool_name: &str,
+    release: Option<&resume::ApprovedRelease>,
+) -> String {
+    match release.and_then(resume::ApprovedRelease::edit) {
+        Some(edit) if tool_name == EXECUTE_PROVIDER_ACTION_TOOL => {
+            format!("{}\n{output}", edit.sentence())
+        }
+        _ => output,
+    }
+}
+
+/// What a provider write's step record adds for an edited call (EP-10-S5): ` edited=<names>`
+/// when the result opens with the edit note [`with_edit_note`] wrote, else nothing. Field names
+/// only; the persisted record keeps no value of the edit.
+pub(crate) fn edit_step_note(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .and_then(resume::EditNote::from_sentence)
+        .map(|edit| edit.step_note())
+        .unwrap_or_default()
 }
 
 /// Run a `subagent.*` call as a REAL nested agent loop through the dispatch
@@ -1868,8 +1934,9 @@ async fn execute_code_interpreter(
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
     lease_id: Option<&str>,
+    egress: &crate::egress_proxy::CallEgress,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run_with_skills(
+    match crate::code_interpreter::run_with_egress(
         tool_input,
         run_id,
         step_id,
@@ -1877,6 +1944,7 @@ async fn execute_code_interpreter(
         ro_inputs,
         skills,
         lease_id,
+        egress,
     )
     .await
     {
@@ -1943,6 +2011,8 @@ async fn execute_thread_code_interpreter(
         skills,
         // The thread's own lease: a workspace-rooted spawn is refused without one (WS06-S9).
         Some(lease.lease_id.as_str()),
+        // Thread leases are not tiered until D2-145/147/149 close.
+        &crate::egress_proxy::CallEgress::off(),
     )
     .await;
     let report = match workspace.commit().await {
@@ -2418,6 +2488,8 @@ async fn execute_governed_mcp(
     let Some(governed) = crate::mcp_gateway::GovernedMcp::shared() else {
         return tool_error("MCP gateway credential is not configured; the tool was not run".to_owned());
     };
+    // EP-4 S7: a server's form needs a run that can pause for its owner's answer (WS14-S5's
+    // executor input pause), which no run has yet, so no call allows one: the wire stays as it was.
     match governed
         .proxy(
             org_id,
@@ -2426,15 +2498,47 @@ async fn execute_governed_mcp(
             remote_tool,
             tool_input,
             view.digest(),
+            false,
         )
         .await
     {
-        Ok(output) => tool_bridge::ToolExecution {
+        Ok(crate::mcp_gateway::McpProxyOutcome::Output(output)) => tool_bridge::ToolExecution {
             output,
             error: None,
         },
+        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending)) => {
+            cancel_unasked_form(governed, org_id, user_id, &pending).await
+        }
         Err(e) => tool_error(e),
     }
+}
+
+/// A form the gateway returned although the call did not allow one: a gateway fault. The held
+/// call is cancelled at once, so the server is not left waiting for an answer no one was asked
+/// for, and the model reads that the call did not complete.
+async fn cancel_unasked_form(
+    governed: &crate::mcp_gateway::GovernedMcp,
+    org_id: &str,
+    user_id: &str,
+    pending: &pb::McpElicitationPending,
+) -> tool_bridge::ToolExecution {
+    metrics::counter!("mcp_elicitation_unasked_total").increment(1);
+    let cancel = crate::mcp_gateway::ElicitationReply {
+        action: crate::mcp_gateway::ELICITATION_CANCEL,
+        answers: Vec::new(),
+    };
+    if let Err(error) = governed
+        .answer_elicitation(org_id, user_id, &pending.elicitation_id, cancel)
+        .await
+    {
+        // Ids and lengths only: the server's message and schema never reach a log.
+        tracing::warn!(
+            elicitation_id = %pending.elicitation_id,
+            error_len = error.len(),
+            "an unasked MCP form could not be cancelled; the gateway's hold expires it"
+        );
+    }
+    tool_error(crate::mcp_gateway::UNASKED_FORM.to_owned())
 }
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned
@@ -3724,6 +3828,8 @@ async fn execute_reattach_skill(
             // if the row comes back.
             enabled_only: false,
             for_user_id: String::new(),
+            kinds: Vec::new(),
+            thread_id: String::new(),
         },
         bearer,
     ) {
@@ -6126,5 +6232,85 @@ mod space_overlay_tests {
             record_space_overlay(&sandbox, &state, "run-1", "org-1", false, execution.clone()).await;
 
         assert_eq!(recorded, execution);
+    }
+
+    #[test]
+    fn browser_scoped_signed_class_only_tightens_that_tool() {
+        let ask = crate::mcp_gateway::SignedToolClass::new("external_write", "ask");
+        let none = crate::mcp_gateway::SignedToolClass::new("read", "none");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(false, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, "web_fetch", "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Ask, PermissionDecision::AwaitApproval, &none), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Deny, PermissionDecision::Deny, &none), PermissionDecision::Deny);
+        let unknown = crate::mcp_gateway::SignedToolClass::new("", "");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &unknown), PermissionDecision::AwaitApproval);
+    }
+
+}
+
+#[cfg(test)]
+mod edit_note_tests {
+    //! EP-10-S5: the released result of a provider write the person edited says so, by field
+    //! name, and its step record keeps the names and nothing of the values.
+    use super::*;
+
+    const SEND: &str = r#"{"connection_id":"conn-1","operation":"gmail.send","body":{"to":["a@example.com"],"subject":"New","bodyText":"edited"}}"#;
+    const RESULT: &str = "Executed gmail.send. Result:\n{\"id\":\"msg-1\"}";
+
+    fn release(edit: Option<resume::EditNote>) -> resume::ApprovedRelease {
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-1",
+            "run-1",
+        );
+        resume::ApprovedRelease::new(gate, "s2.tool_1_approved", EXECUTE_PROVIDER_ACTION_TOOL, SEND)
+            .expect("a provider write is releasable")
+            .with_edit(edit)
+    }
+
+    fn subject_and_body() -> resume::EditNote {
+        let sentence = "The person edited subject, body before approving; the sent version differs \
+                        from your draft. Do not quote your draft as what was sent.";
+        resume::EditNote::from_sentence(sentence).expect("a sentence the note builds")
+    }
+
+    #[test]
+    fn an_edited_release_opens_its_result_with_the_field_names() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        let (first, rest) = output.split_once('\n').expect("the note is a line of its own");
+        assert_eq!(first, subject_and_body().sentence());
+        assert_eq!(rest, RESULT, "the provider's result follows unchanged");
+        assert!(!output.contains("New") && !output.contains("edited\""), "names only, never values");
+        // The verdict line a write's step record keeps stays the last line.
+        assert_eq!(output.lines().last(), RESULT.lines().last());
+    }
+
+    #[test]
+    fn an_unedited_release_and_every_other_call_keep_their_result() {
+        let plain = release(None);
+        let noted = release(Some(subject_and_body()));
+        assert_eq!(
+            with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&plain)),
+            RESULT
+        );
+        assert_eq!(with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, None), RESULT);
+        assert_eq!(with_edit_note(RESULT.to_owned(), "shell", Some(&noted)), RESULT);
+    }
+
+    #[test]
+    fn the_step_record_keeps_the_edited_names_and_nothing_else() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        assert_eq!(edit_step_note(&output), " edited=subject,body_text");
+        let unnamed = release(Some(resume::EditNote::unnamed()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&unnamed));
+        assert_eq!(edit_step_note(&output), " edited=unnamed");
+        // A result with no note adds nothing, so a write's record is byte-identical to before.
+        assert_eq!(edit_step_note(RESULT), "");
+        assert_eq!(edit_step_note(""), "");
+        // A line that only resembles the note is not taken for one.
+        assert_eq!(edit_step_note("The person edited subject before approving.\nx"), "");
     }
 }

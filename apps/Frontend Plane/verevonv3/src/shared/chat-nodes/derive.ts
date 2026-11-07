@@ -183,6 +183,10 @@ export function deriveConversationNodes(
       })
     }
   }
+  // Like the scope receipt, the search provenance is a receipt of a finished turn.
+  if (!waiting && turn.searchProvenance) {
+    nodes.push({ kind: 'search-provenance', provenance: turn.searchProvenance })
+  }
   // Shown while the turn waits too: a retry is most useful while the answer is still pending. A turn with no
   // notice derives no node at all, so a plain stream's list is unchanged.
   if (turn.lifecycle && turn.lifecycle.length > 0) {

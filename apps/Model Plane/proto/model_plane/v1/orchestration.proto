@@ -95,6 +95,11 @@ service OrchestrationCoreService {
   // approval and no one else (build plan WS10 S8).
   rpc GetQuarantinePreview(GetQuarantinePreviewRequest) returns (GetQuarantinePreviewResponse);
 
+  // EP-10 S1: the full draft a pending approval would release, shaped from its retained
+  // descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+  // other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+  rpc GetApprovalPreview(GetApprovalPreviewRequest) returns (GetApprovalPreviewResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -390,6 +395,7 @@ message Plan {
 // never stored on the approval and never claimed by a client. UNSPECIFIED
 // means the approval is not granted yet (or the state cannot be told).
 enum ContinuationState {
+  // Approval not granted yet, or the state cannot be told.
   CONTINUATION_STATE_UNSPECIFIED = 0;
   // Granted, and the action is not one a worker can run: the approval only lets
   // the agent retry this exact action once. The run does not continue by itself.
@@ -412,6 +418,7 @@ enum ContinuationState {
 
 // Read projection of an approval's continuation (build plan WS10 S1).
 message ApprovalContinuation {
+  // Where the approved action stands; see ContinuationState.
   ContinuationState state = 1;
   // Closed failure code when `state` is FAILED; empty otherwise.
   string failure_code = 2;
@@ -423,6 +430,7 @@ message ApprovalContinuation {
 
 // Who is asked to decide an approval (build plan WS10; used from S6).
 enum AddresseeKind {
+  // Addressee kind not set.
   ADDRESSEE_KIND_UNSPECIFIED = 0;
   // The member whose request raised the approval.
   ADDRESSEE_KIND_REQUESTER = 1;
@@ -436,6 +444,7 @@ enum AddresseeKind {
 
 // An approval addressee (build plan WS10; used from S6).
 message Addressee {
+  // Who the approval is addressed to; see AddresseeKind.
   AddresseeKind kind = 1;
   // Subject id when `kind` is NAMED; empty otherwise.
   string subject_id = 2;
@@ -525,12 +534,17 @@ message Approval {
 
   // Where the turn came from (`direct`, `ambient`, `automation`); empty reads as `direct`.
   string turn_origin = 23;
+
+  // EP-10 S4: how many times the person edited the approved call before granting it; 0 = never
+  // edited. Read from `approval_continuation_descriptors.revision` (at most 3).
+  uint32 revision = 25;
 }
 
 // Who recorded an approval decision (build plan WS13 S3). Stored as
 // `metadata.decision.source`. UNSPECIFIED is recorded as `unattributed` and
 // counted, never guessed from the caller.
 enum ApprovalDecisionSource {
+  // Not recorded; stored as `unattributed`.
   APPROVAL_DECISION_SOURCE_UNSPECIFIED = 0;
   // A person decided it.
   APPROVAL_DECISION_SOURCE_USER = 1;
@@ -547,6 +561,7 @@ enum ApprovalDecisionSource {
 // How far an approval decision reaches (build plan WS13 S3). Space's
 // "conversation" is THREAD. UNSPECIFIED is read as ONCE.
 enum ApprovalScope {
+  // Not set; read as ONCE.
   APPROVAL_SCOPE_UNSPECIFIED = 0;
   // This one call only.
   APPROVAL_SCOPE_ONCE = 1;
@@ -603,6 +618,24 @@ message ApprovalCause {
   // zero-retention caller), and a read-back cause leaves it empty. Field 11: 10 is
   // WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
   string host_class = 11;
+
+  // Field 12 is held for WS21-S6's `max_level` (browser site consent).
+
+  // What a `browser_human_assist` pause hands to the person (EP-1): `user_takeover`
+  // when the person took the browser, or the challenge the agent asks help with
+  // (`login`, `captcha`, `consent`, `waf`). Closed; empty for every other code.
+  string assist_kind = 13;
+
+  // Who started a `browser_human_assist` pause (EP-1): `person` (a takeover) or
+  // `agent` (a help request). Closed; empty for every other code.
+  string assist_origin = 14;
+
+  // The host of the browser session a `browser_human_assist` pause is about (EP-1),
+  // shown on the card from the approval record, never from the page. Stored in the
+  // cause, so it is never kept for a zero-retention caller. Field 15, not the 11 the
+  // EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
+  // site-consent cause reuses this field.
+  string host = 15;
 }
 
 // A durable todo record.
@@ -660,6 +693,21 @@ message LineageEdge {
 
   // When the edge was recorded.
   google.protobuf.Timestamp spawned_at = 4;
+
+  // The delegated goal `AttachSubagentRequest.goal_summary` stored on the edge (Wave 3 EP-2 S9;
+  // additive readback of a value session-core already keeps). Empty for an edge stored without
+  // one: a ZDR run, or a caller that predates the field.
+  string goal_summary = 5;
+
+  // The fan-out batch `AttachSubagentRequest.batch_id` stored on the edge (Wave 3 EP-2 S9;
+  // additive). Empty for a standalone `subagent.task` delegation. A reloaded wide-research
+  // panel groups its cards by it.
+  string batch_id = 6;
+
+  // The edge's own `subagent_edges.status` value ("attached" or "detached") (Wave 3 EP-2 S9;
+  // additive). It says whether the child is still linked, not how the child run ended: that is
+  // the child run's own status.
+  string status = 7;
 }
 
 // Aggregated subagent lineage for a thread.
@@ -1031,6 +1079,53 @@ message GetQuarantinePreviewResponse {
   string trust_class = 4;
 }
 
+// EP-10 S1: GetApprovalPreview asks for the draft behind one pending approval.
+message GetApprovalPreviewRequest {
+  // EP-10 S1: the pending approval to preview.
+  string approval_id = 1;
+  // EP-10 S1: server-authoritative org scope; must match the caller.
+  string org_id = 2;
+}
+
+// EP-10 S1: what an approval would release, in display fields. Never the raw descriptor: a kind
+// other than "mail_send" carries no argument values.
+message ApprovalPreview {
+  // EP-10 S1: "mail_send", "other" (another tool call, no values) or "none" (the approval has
+  // no retained descriptor, such as a browser takeover; nothing beyond the card to show).
+  string kind = 1;
+  // EP-10 S1: the provider the operation belongs to ("google", "microsoft"); empty when unknown.
+  string provider = 2;
+  // EP-10 S1: the provider operation as drafted.
+  string operation = 3;
+  // EP-10 S1: the connection the call is pinned to.
+  string connection_id = 4;
+  // EP-10 S1: every recipient of a mail send, in draft order.
+  repeated string to = 5;
+  // EP-10 S1: the full subject of a mail send.
+  string subject = 6;
+  // EP-10 S1: the full plain-text body of a mail send. Show as text, never as markup.
+  string body_text = 7;
+  // EP-10 S1: true when the draft also carries a formatted (HTML) body, which is not shown.
+  bool has_html = 8;
+  // EP-10 S1: true when the send replies in an existing thread (threadId or inReplyTo set).
+  bool is_reply = 9;
+  // EP-10 S1: true for a Gmail raw draft, whose fields are inside an encoded message.
+  bool raw_only = 10;
+  // EP-10 S1: the fields a later edit may change ("to", "subject", "body_text"); empty when
+  // the draft is not editable.
+  repeated string editable_fields = 11;
+  // EP-10 S1: the descriptor's action fingerprint, so a later edit can name what it saw.
+  string action_fingerprint = 12;
+  // EP-10 S1: the descriptor revision the preview was shaped from; 0 until edits exist (S4).
+  uint32 revision = 13;
+}
+
+// EP-10 S1: the preview of one pending approval.
+message GetApprovalPreviewResponse {
+  // EP-10 S1: the shaped preview.
+  ApprovalPreview preview = 1;
+}
+
 // ConsumeApproval claims one granted loop-mode approval for the loop that is
 // re-entering. Scope comes from the verified caller; the ids only select.
 message ConsumeApprovalRequest {
@@ -1079,6 +1174,12 @@ message ConsumeApprovalResponse {
   // S3). A continuation runs under this snapshot only: nothing a client sends
   // replaces it. Absent for an approval raised cold (no snapshot was taken).
   ApprovedAuthority authority = 7;
+  // EP-10 S4: how many times the person edited the call before granting it; 0 = the call is
+  // the one the model drafted.
+  uint32 revision = 8;
+  // EP-10 S4: the fingerprint of the call as first drafted, set only when revision > 0. A digest,
+  // never the original content: the loop matches its own pending fingerprint against it.
+  string original_action_fingerprint = 9;
 }
 
 // The authority an approval was raised under, snapshotted at pause time.
@@ -1140,7 +1241,9 @@ message ListApprovalsRequest {
   // room view (no context, no decision reason). With no `run_id`, lists the Space's approvals
   // (newest first, at most 100). A partial triple is refused.
   string space_id = 4;
+  // Reference of the Control `model.thread.read` decision for the room read.
   string space_read_decision_ref = 5;
+  // Token of the same Control `model.thread.read` decision.
   string space_read_decision_token = 6;
 
   // Space-wide list only: keep one state (REQUESTED, GRANTED, DENIED, TIMED_OUT). Unspecified
@@ -1183,7 +1286,9 @@ message GetApprovalRequest {
   // Room read (build plan WS10 S6): as on ListApprovalsRequest, the redacted room view of one
   // approval of a run in this Space.
   string space_id = 3;
+  // Reference of the Control `model.thread.read` decision for the room read.
   string space_read_decision_ref = 4;
+  // Token of the same Control `model.thread.read` decision.
   string space_read_decision_token = 5;
 }
 
@@ -1226,7 +1331,9 @@ message DecideApprovalRequest {
   // scope. All three or none; a partial set is refused. The decision's subject must be the
   // caller. Refused while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
   string space_id = 8;
+  // Reference of the Control `model.approval.decide` decision for a member decide.
   string space_decision_ref = 9;
+  // Token of the same `model.approval.decide` decision.
   string space_decision_token = 10;
 
   // Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
@@ -1236,6 +1343,21 @@ message DecideApprovalRequest {
   // rule is not in force until the person confirms it.
   // Field 8 was renumbered to 12 when main was merged: main already used 8-11 for the Space member decide.
   bool rule_proposed = 12;
+
+  // EP-10 S4: "Send with my edits". Set only with a GRANTED, ONCE-scoped decision: session-core
+  // replaces the approved call with the edited one and grants it in one transaction. Refused while
+  // APPROVAL_EDIT_ENABLED is off. Tag 9 in the design was taken by the Space member decide.
+  ApprovalEdit edit = 13;
+}
+
+// EP-10 S4: the person's edit of a pending approval's call.
+message ApprovalEdit {
+  // EP-10 S4: a JSON object with only `to`, `subject` and `body_text`
+  // (mp_contracts::approval_edit::MailSendPatch); any other key is refused.
+  string patch_json = 1;
+  // EP-10 S4: the action fingerprint the person saw in the preview. A mismatch with the stored
+  // descriptor is refused as `approval_changed`.
+  string base_fingerprint = 2;
 }
 
 message DecideApprovalResponse {
@@ -1243,6 +1365,7 @@ message DecideApprovalResponse {
   Approval approval = 1;
 }
 
+// Request to move an approval to a new addressee.
 message RerouteApprovalRequest {
   // Approval to move.
   string approval_id = 1;
@@ -1255,10 +1378,13 @@ message RerouteApprovalRequest {
 
   // Control `model.approval.reroute` decision for this approval and this addressee.
   string space_id = 4;
+  // Reference of the Control `model.approval.reroute` decision.
   string space_decision_ref = 5;
+  // Token of the same `model.approval.reroute` decision.
   string space_decision_token = 6;
 }
 
+// Result of RerouteApprovalRequest: the updated approval record.
 message RerouteApprovalResponse {
   // Updated approval record.
   Approval approval = 1;
@@ -1612,12 +1738,20 @@ message OrchestrationEvent {
     // Standing rule that decided it (WS13 S7). Empty until rules exist.
     string rule_id = 7;
 
+    // How far the decision reaches; see ApprovalScope.
     ApprovalScope scope = 8;
 
+    // Who recorded the decision; see ApprovalDecisionSource.
     ApprovalDecisionSource decision_source = 9;
 
     // True when a recent re-authentication was verified for the decision (WS13 S5).
     bool step_up_verified = 10;
+
+    // EP-10 S4: the descriptor revision after this decision; 0 when the call was not edited.
+    uint32 revision = 11;
+
+    // EP-10 S4: names of the fields the person edited ("to", "subject", "body_text"), never values.
+    repeated string edited_fields = 12;
   }
 
   message SubagentAttached {
@@ -1705,8 +1839,12 @@ message OrchestrationEvent {
     string run_id = 1;
     string plan_id = 2;
     // Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
-    // `user_took_over` when the person took control of an attached tab.
+    // `user_took_over` when the person took control of an attached tab, or of
+    // the browser a chat Do run holds (EP-1).
     string reason = 3;
+    // Quarry's control epoch the pause was seen in (EP-1, additive). Zero when
+    // the pause is not a takeover, or the epoch could not be read.
+    uint64 control_epoch = 4;
   }
 
   // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
@@ -1714,8 +1852,12 @@ message OrchestrationEvent {
     string run_id = 1;
     string plan_id = 2;
     // Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
-    // `control_returned` when the person gave control of an attached tab back.
+    // `control_returned` when the person gave control of an attached tab, or of
+    // a chat Do run's browser (EP-1), back.
     string reason = 3;
+    // Quarry's control epoch the give-back was seen in (EP-1, additive). Zero
+    // when the resume is not a give-back, or the epoch could not be read.
+    uint64 control_epoch = 4;
   }
 
   // A delegate agent attached to the owner's browser session with the shared
@@ -1724,9 +1866,11 @@ message OrchestrationEvent {
   message BrowserAttachSharedJar {
     string run_id = 1;
     string plan_id = 2;
+    // Identifier of this delegate attach.
     string attach_id = 3;
     // The user's own browser run the delegate attached to.
     string session_run_id = 4;
+    // Identifier of the browser tab the delegate attached to.
     string tab_id = 5;
   }
 
@@ -2193,6 +2337,7 @@ message ApprovalScopeGrant {
   google.protobuf.Timestamp last_used_at = 14;
 }
 
+// Request to check whether a live approval scope grant releases a call.
 message UseApprovalScopeGrantRequest {
   // Server-authoritative org scope of the run.
   string org_id = 1;
@@ -2216,11 +2361,13 @@ message UseApprovalScopeGrantRequest {
   string effect_class = 7;
 }
 
+// Result of UseApprovalScopeGrantRequest: the grant that released the call, if any.
 message UseApprovalScopeGrantResponse {
   // The grant that released the call. Empty when no live grant matches.
   string grant_id = 1;
 }
 
+// Request to list the approval scope grants of one thread.
 message ListApprovalScopeGrantsRequest {
   // Server-authoritative org scope.
   string org_id = 1;
@@ -2229,10 +2376,13 @@ message ListApprovalScopeGrantsRequest {
   string thread_id = 2;
 }
 
+// Result of ListApprovalScopeGrantsRequest.
 message ListApprovalScopeGrantsResponse {
+  // The approval scope grants of the thread.
   repeated ApprovalScopeGrant grants = 1;
 }
 
+// Request to revoke one approval scope grant.
 message RevokeApprovalScopeGrantRequest {
   // Server-authoritative org scope.
   string org_id = 1;
@@ -2241,6 +2391,7 @@ message RevokeApprovalScopeGrantRequest {
   string grant_id = 2;
 }
 
+// Result of RevokeApprovalScopeGrantRequest.
 message RevokeApprovalScopeGrantResponse {
   // The grant as it stands after the revocation.
   ApprovalScopeGrant grant = 1;

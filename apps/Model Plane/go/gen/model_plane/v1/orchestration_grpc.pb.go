@@ -37,6 +37,7 @@ const (
 	OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/HoldQuarantinedOutput"
 	OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ClaimQuarantineRelease"
 	OrchestrationCoreService_GetQuarantinePreview_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/GetQuarantinePreview"
+	OrchestrationCoreService_GetApprovalPreview_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/GetApprovalPreview"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
@@ -125,6 +126,10 @@ type OrchestrationCoreServiceClient interface {
 	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
 	// approval and no one else (build plan WS10 S8).
 	GetQuarantinePreview(ctx context.Context, in *GetQuarantinePreviewRequest, opts ...grpc.CallOption) (*GetQuarantinePreviewResponse, error)
+	// EP-10 S1: the full draft a pending approval would release, shaped from its retained
+	// descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+	// other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+	GetApprovalPreview(ctx context.Context, in *GetApprovalPreviewRequest, opts ...grpc.CallOption) (*GetApprovalPreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -367,6 +372,16 @@ func (c *orchestrationCoreServiceClient) GetQuarantinePreview(ctx context.Contex
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) GetApprovalPreview(ctx context.Context, in *GetApprovalPreviewRequest, opts ...grpc.CallOption) (*GetApprovalPreviewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetApprovalPreviewResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetApprovalPreview_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) ClaimApprovalDeliveries(ctx context.Context, in *ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*ClaimApprovalDeliveriesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ClaimApprovalDeliveriesResponse)
@@ -588,6 +603,10 @@ type OrchestrationCoreServiceServer interface {
 	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
 	// approval and no one else (build plan WS10 S8).
 	GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error)
+	// EP-10 S1: the full draft a pending approval would release, shaped from its retained
+	// descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+	// other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+	GetApprovalPreview(context.Context, *GetApprovalPreviewRequest) (*GetApprovalPreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -703,6 +722,9 @@ func (UnimplementedOrchestrationCoreServiceServer) ClaimQuarantineRelease(contex
 }
 func (UnimplementedOrchestrationCoreServiceServer) GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetQuarantinePreview not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetApprovalPreview(context.Context, *GetApprovalPreviewRequest) (*GetApprovalPreviewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetApprovalPreview not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
@@ -1092,6 +1114,24 @@ func _OrchestrationCoreService_GetQuarantinePreview_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_GetApprovalPreview_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalPreviewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalPreview(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetApprovalPreview_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalPreview(ctx, req.(*GetApprovalPreviewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ClaimApprovalDeliveriesRequest)
 	if err := dec(in); err != nil {
@@ -1417,6 +1457,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OrchestrationCoreService_GetQuarantinePreview_Handler,
 		},
 		{
+			MethodName: "GetApprovalPreview",
+			Handler:    _OrchestrationCoreService_GetApprovalPreview_Handler,
+		},
+		{
 			MethodName: "ClaimApprovalDeliveries",
 			Handler:    _OrchestrationCoreService_ClaimApprovalDeliveries_Handler,
 		},
@@ -1501,13 +1545,13 @@ type OrchestratorWorkflowServiceClient interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(ctx context.Context, in *StartWorkflowRequest, opts ...grpc.CallOption) (*StartWorkflowResponse, error)
@@ -1549,13 +1593,13 @@ type OrchestratorWorkflowServiceServer interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(context.Context, *StartWorkflowRequest) (*StartWorkflowResponse, error)

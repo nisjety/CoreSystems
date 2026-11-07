@@ -251,6 +251,8 @@ service SessionRetentionService {
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 service ThreadAutonomy {
   // The live grant of one thread: the rung, the reason it was granted, the plan
   // it was approved with and when it lapses. A thread with no grant, or one
@@ -273,6 +275,8 @@ service ThreadAutonomy {
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 service MessageSearch {
   // Search the messages of threads the caller may list, with the same owner and
   // Space-audience rules as ListThreads. Refused with unavailable
@@ -433,12 +437,16 @@ message MentionInput {
 // refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
 // person.
 message MentionRef {
+  // The subject that was mentioned.
   string subject_id = 1;
+  // What kind of subject was mentioned.
   string kind = 2;
+  // Wake state of the mention, derived at read; empty for a person.
   string wake_state = 3;
   // The refusal code when wake_state is refused.
   string reason = 4;
   string source = 5;
+  // Wake order among the agents of this post (0-based). Persons carry 0.
   uint32 ordinal = 6;
 }
 
@@ -636,7 +644,9 @@ message StartScheduledRunRequest {
   // without one. contract_digest and contract_expires_at are the values Control
   // signed; Session Core re-checks them on the direct hop before binding.
   string contract_json = 14;
+  // Digest of the contract, as Control signed it.
   string contract_digest = 15;
+  // Expiry of the contract, as Control signed it.
   string contract_expires_at = 16;
 }
 
@@ -1108,11 +1118,14 @@ message UpsertAgentSkillRequest {
   // "accepted").
   string scope = 10;
   string owner_user_id = 11;
+  // Review state of the skill. Ignored for a human write, which is accepted.
   string review_state = 12;
   // The run and thread the proposal was distilled from, and the reviewer's
   // reason for proposing it (at most 300 characters). Provenance only.
   string source_run_id = 13;
+  // The thread the proposal was distilled from.
   string source_thread_id = 14;
+  // The reviewer's reason for proposing it.
   string proposal_reason = 15;
 }
 
@@ -1126,8 +1139,10 @@ message UpsertAgentSkillResponse {
   bool skipped_protected = 3;
   // Why nothing was written, as a closed token: "memory_state",
   // "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
-  // "owner_required", or "skill_policy:<rule>" when the content policy refused
-  // the text (WS26 S5). Empty when the write happened.
+  // "owner_required", "origin_requires_person" (origin "user" from a caller
+  // that is not a person, D2-509), "skill_lint:<code>" when the skill lint
+  // refused the text under enforce (EP-11 S4), or "skill_policy:<rule>" when
+  // the content policy refused the text (WS26 S5). Empty when the write happened.
   string skip_reason = 4;
   // The row's revision number after the write, from the revision log; 0 when
   // nothing was written.
@@ -1146,6 +1161,19 @@ message ListAgentSkillsRequest {
   // caller (a user caller is always listed as itself), so the learning review
   // can see the existing skills of the user whose run it is reviewing.
   string for_user_id = 3;
+  // EP-11 S6. Which authored kinds to list: "skill", "template", "preset".
+  // Empty lists skills only, so every caller that predates templates and
+  // presets (the gateway's match cache, recovery, the learning review) can
+  // never see one. An unknown kind is refused as invalid_argument.
+  repeated string kinds = 4;
+  // EP-11 S9. The thread the turn runs in. While session-core's
+  // SKILL_SPACE_SCOPE is on and the caller owns this thread, session-core reads
+  // the thread's own Space (threads.space_id, never a Space the caller names)
+  // and adds that Space's skills to the answer. Empty, unknown, not the
+  // caller's, or not in a Space: no Space skill is returned. Ignored while the
+  // switch is off. (Round B reserved field 5 as `space_id`; it carries the
+  // thread instead, so the Space is always resolved server-side.)
+  string thread_id = 5;
 }
 
 message AgentSkill {
@@ -1169,17 +1197,40 @@ message AgentSkill {
   // decision), "accepted" or "rejected". Only an accepted skill is ever
   // injected or matched.
   string review_state = 13;
+  // The run the skill was distilled from.
   string source_run_id = 14;
+  // The thread the skill was distilled from.
   string source_thread_id = 15;
+  // The reviewer's reason for proposing the skill.
   string proposal_reason = 16;
   // RFC 3339, UTC.
   string updated_at = 17;
   // The skill's newest revision number in the revision log.
   int64 revision = 18;
+  // EP-11 S2. The skill's newest immutable version: 0 for a proposal that was
+  // never accepted, then 1, 2, ... each time the digest of the accepted row
+  // changes. Set by a database trigger, never by a writer.
+  int32 version = 19;
+  // EP-11 S2. Lowercase hex sha256 of the versioned fields of `version`; empty
+  // while `version` is 0. SkillVersionService (skill_versions.proto) reads the
+  // body of any version.
+  string digest = 20;
+  // EP-11 S6. The authored kind: "skill" (injected into turns), "template"
+  // (text the composer inserts before the person sends) or "preset" (visible
+  // composer/console defaults). Only "skill" is ever matched or injected.
+  string kind = 21;
+  // EP-11 S6. The preset's settings as a JSON object text ("{}" for a skill
+  // or a template). Closed schema, linted by the authored-behaviour lint.
+  string settings_json = 22;
 }
 
 message ListAgentSkillsResponse {
   repeated AgentSkill skills = 1;
+  // EP-11 S9. The Space session-core resolved `thread_id` to, set whenever it
+  // did so and listed that Space's skills (rows with scope "space"; possibly
+  // none). The gateway caches those rows under this Space alone, apart from the
+  // org's and the caller's own. Empty: no Space was resolved.
+  string space_id = 2;
 }
 
 // --- ListConversation (G7 transcript source) ---
@@ -1323,24 +1374,33 @@ message ListConversationResponse {
 // A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
 // does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
 message MessageEntry {
+  // Closed word naming the entry, such as link_previews.
   string kind = 1;
+  // Version of the entry kind.
   uint32 version = 2;
+  // The link previews captured when the post was sent.
   repeated LinkPreview link_previews = 3;
 }
 
 // One captured link preview, text only (no image), snapshotted when the post was sent.
 message LinkPreview {
+  // The link URL.
   string url = 1;
+  // The final URL of the link.
   string final_url = 2;
+  // The host of the link.
   string host = 3;
   string title = 4;
   string description = 5;
+  // The name of the site the link is on.
   string site_name = 6;
+  // When the preview was fetched.
   google.protobuf.Timestamp fetched_at = 7;
 }
 
 // --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
 
+// Request to edit or delete one message in a thread.
 message ReviseMessageRequest {
   // Required. The owning org; must equal the caller's org and the thread's org.
   string org_id = 1;
@@ -1375,6 +1435,7 @@ message ReviseMessageRequest {
   string idempotency_key = 18;
 }
 
+// The recorded revision of one message: its number, state and time.
 message ReviseMessageResponse {
   // The message that was revised.
   string message_id = 1;
@@ -1382,6 +1443,7 @@ message ReviseMessageResponse {
   uint32 revision_no = 2;
   // "edited" or "deleted".
   string revision_state = 3;
+  // When the revision was recorded.
   google.protobuf.Timestamp revised_at = 4;
   // True when the idempotency key had already recorded this exact revision.
   bool deduplicated = 5;
@@ -1389,6 +1451,7 @@ message ReviseMessageResponse {
   string actor_class = 6;
 }
 
+// Request to look up a message's role and revision state, with a Space read decision.
 message ResolveMessageTargetRequest {
   // Required. The owning org.
   string org_id = 1;
@@ -1403,6 +1466,7 @@ message ResolveMessageTargetRequest {
   string space_read_decision_token = 6;
 }
 
+// The role of a message, and whether and how it was revised.
 message ResolveMessageTargetResponse {
   // "user" | "assistant" | "system" | "tool".
   string role = 1;
@@ -1809,13 +1873,19 @@ message RecordScheduledRunResultRequest {
   string idempotency_key = 4;
   string receipt_id = 5;
   string status = 6;
+  // The output of the step.
   string output = 7;
   string error_code = 8;
   bool unknown_outcome = 9;
+  // Number of rounds the step executed.
   uint32 rounds_executed = 10;
+  // Number of effects withheld during the step.
   uint32 withheld_effects = 11;
+  // Number of tool calls made by the step.
   uint32 tool_calls = 12;
+  // Input tokens used by the step.
   uint32 input_tokens = 13;
+  // Output tokens used by the step.
   uint32 output_tokens = 14;
 }
 
@@ -1824,6 +1894,7 @@ message RecordScheduledRunResultRequest {
 message RecordScheduledRunResultResponse {
   string receipt_id = 1;
   string status = 2;
+  // Id of the appended answer; empty when no answer was appended.
   string message_id = 3;
 }
 
@@ -1860,6 +1931,7 @@ message WaivedRunCount {
 
 // --- ThreadAutonomy.GetThreadGrant (build plan WS04 S4) ---
 
+// Request to read the live grant of one thread.
 message GetThreadGrantRequest {
   string thread_id = 1;
   // Server-authoritative org scope, forwarded from the gateway's authenticated
@@ -1867,6 +1939,7 @@ message GetThreadGrantRequest {
   string org_id = 2;
 }
 
+// The live grant of one thread: its rung, reason, plan and expiry.
 message GetThreadGrantResponse {
   // The rung the thread's approved plan granted. UNSPECIFIED when the thread
   // holds no live grant (none made, or it has lapsed).
@@ -1883,6 +1956,7 @@ message GetThreadGrantResponse {
 
 // --- ThreadAutonomy.BindGrantToRun (build plan WS14 S2) ---
 
+// Request to bind a thread's live grant to the run that executes its plan.
 message BindGrantToRunRequest {
   string run_id = 1;
   string thread_id = 2;
@@ -1893,6 +1967,7 @@ message BindGrantToRunRequest {
   string approved_plan_id = 4;
 }
 
+// The grant copied onto the run: its rung, reason and plan.
 message BindGrantToRunResponse {
   // The rung the run was bound with, copied from the thread's grant.
   AutonomyRung granted_rung = 1;
@@ -2057,6 +2132,8 @@ message ListToolActionsResponse {
 // that holds a zero-retention or waived run.
 enum SearchPurpose {
   // The person at the keyboard. The zero value, so a caller that sets nothing searches as UI.
+  // Zero value is the UI purpose, not an unset marker; renaming it would break generated code.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
   SEARCH_PURPOSE_UI = 0;
   // The read-only recall tool. Excludes zero-retention and waived threads.
   SEARCH_PURPOSE_RECALL = 1;
@@ -2130,8 +2207,11 @@ message SearchMessagesResponse {
 // The owner's decision on a proposal. Values are prefixed because proto enum
 // values share the package scope.
 enum SkillDecision {
+  // Unset decision, the zero value.
   SKILL_DECISION_UNSPECIFIED = 0;
+  // Accept the proposal.
   SKILL_DECISION_ACCEPT = 1;
+  // Reject the proposal.
   SKILL_DECISION_REJECT = 2;
 }
 
@@ -2141,6 +2221,7 @@ message DecideSkillProposalRequest {
   string org_id = 1;
   // The proposal, by id.
   string skill_id = 2;
+  // The owner's decision on the proposal.
   SkillDecision decision = 3;
 }
 
@@ -2167,6 +2248,7 @@ message UndoLearningEntryResponse {
   // What the undo did to the skill: "restored" (its before-snapshot is back) or
   // "deleted" (the entry had created the skill).
   string action = 1;
+  // The skill the undo acted on.
   string skill_id = 2;
   // The skill's revision after the undo.
   int64 revision = 3;
@@ -2196,19 +2278,24 @@ message LearningLedgerEntry {
   // Skill: created, proposed, updated, accepted, rejected, enabled, disabled,
   // edited, deleted, restored or promoted. Memory: learned.
   string action = 3;
+  // The skill the entry is about.
   string skill_id = 4;
+  // The skill's name.
   string skill_name = 5;
   // The skill's revision number; 0 for a memory.
   int64 revision = 6;
   // Who made the change: user, service, system or unattributed.
   string actor_kind = 7;
+  // Id of the actor who made the change.
   string actor_id = 8;
   string run_id = 9;
   string thread_id = 10;
+  // The reason recorded for the change.
   string reason = 11;
   // The skill snapshots before and after the change, as JSON; empty on the side
   // that does not exist. For a memory, `after_json` is {"content": ...}.
   string before_json = 12;
+  // Skill snapshot after the change, as JSON; empty when it does not exist after it.
   string after_json = 13;
   // Whether the entry has been undone by a later entry.
   bool undone = 14;
@@ -2288,4 +2375,87 @@ message ForkThreadResponse {
   string new_thread_id = 1;
   // How many turns were copied, the chosen message included.
   uint32 copied_message_count = 2;
+}
+
+// --- ThreadReference (EP-3 S7) ---
+
+// ThreadReferenceService: reads one of the owner's earlier chat threads that the person attached
+// to a turn as a reference, for the gateway's read-only thread reference tools (EP-3 S7). A
+// separate service, as ThreadForkService is, so that SessionCore and every mock of it stay
+// source-compatible.
+service ThreadReferenceService {
+  // Read an outline or a page of an attached thread's active path, newest first. Owner only, with
+  // `session:read`; a zero-retention credential and a service credential are refused. Refused with
+  // failed_precondition for the current thread (`thread_reference_current_thread`), a Space or
+  // non-chat thread (`thread_reference_not_chat`), an archived thread (`thread_reference_archived`)
+  // and a thread that holds a zero-retention or waived run (`thread_reference_retention`). A thread
+  // the caller does not own answers not_found, as a missing one does. Writes nothing.
+  rpc ReadThreadForReference(ReadThreadForReferenceRequest) returns (ReadThreadForReferenceResponse);
+}
+
+// What a thread reference read returns.
+enum ThreadReferenceMode {
+  // Refused: a caller must say which read it wants.
+  THREAD_REFERENCE_MODE_UNSPECIFIED = 0;
+  // The first line of each turn, for finding the part of the thread worth reading.
+  THREAD_REFERENCE_MODE_OUTLINE = 1;
+  // The turns themselves, each capped in length.
+  THREAD_REFERENCE_MODE_PAGE = 2;
+}
+
+// The parameters of one thread reference read.
+message ReadThreadForReferenceRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The caller, who must own the thread.
+  string user_id = 2;
+  // Required. The attached thread to read.
+  string thread_id = 3;
+  // Required. OUTLINE or PAGE.
+  ThreadReferenceMode mode = 4;
+  // Optional cursor: only turns older than this one, which must lie on the thread's active path.
+  // Empty starts from the newest turn.
+  string before_message_id = 5;
+  // Optional. 0 means the server default; clamped to at most 20 turns.
+  uint32 limit = 6;
+  // Required. The thread the reading turn runs in; reading it as a reference is refused.
+  string current_thread_id = 7;
+}
+
+// One page of a thread reference read. Exactly one of `messages` and `outline` is filled, by mode.
+message ReadThreadForReferenceResponse {
+  // The thread's title, as ListThreads shows it.
+  string thread_title = 1;
+  // PAGE: the turns of the page, oldest first.
+  repeated ThreadReferenceMessage messages = 2;
+  // Whether older turns exist before the oldest one returned.
+  bool has_more = 3;
+  // OUTLINE: one item per turn of the page, oldest first.
+  repeated ThreadReferenceOutlineItem outline = 4;
+}
+
+// One turn of a referenced thread, as the reference tools read it.
+message ThreadReferenceMessage {
+  // The turn's message id, usable as the next read's before_message_id.
+  string message_id = 1;
+  // "user" or "assistant".
+  string role = 2;
+  // The turn's text, cut to at most 4,000 characters.
+  string content = 3;
+  // When the turn was written.
+  google.protobuf.Timestamp created_at = 4;
+  // Whether `content` was cut to the cap.
+  bool truncated = 5;
+}
+
+// One line of a referenced thread's outline.
+message ThreadReferenceOutlineItem {
+  // The turn's message id, usable as a read's before_message_id.
+  string message_id = 1;
+  // "user" or "assistant".
+  string role = 2;
+  // The turn's first non-empty line, cut to at most 160 characters.
+  string first_line = 3;
+  // When the turn was written.
+  google.protobuf.Timestamp created_at = 4;
 }

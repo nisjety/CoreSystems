@@ -1092,6 +1092,51 @@ pub async fn decide_approval_recorded(
         decided_by,
         decision_reason,
         record,
+        None,
+    )
+    .await
+}
+
+/// Grant an approval with the owner's edit of its call (EP-10-S4, decision D1): the edited call
+/// replaces the retained descriptor's input, the fingerprint, the reason and the cause's call digest
+/// follow it, and the grant is recorded, all in one transaction. Nothing else about the approval
+/// changes, and a refused edit leaves it pending exactly as it was.
+///
+/// Owner only, a `once` grant only, never with a rule proposal. The caller has already refused ZDR
+/// and waived callers and checked `APPROVAL_EDIT_ENABLED`; this checks the rest under the row lock.
+///
+/// # Errors
+///
+/// An [`EditRefusal`] (downcast it) for a refused edit; any other error when a query, the key or
+/// the cipher fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn decide_approval_with_edit(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    user_id: &str,
+    decided_by: &str,
+    decision_reason: &str,
+    record: &DecisionRecord<'_>,
+    edit: &ApprovalEdit<'_>,
+) -> Result<ApprovalDecisionWrite> {
+    if user_id.trim().is_empty() {
+        bail!("user_id is required");
+    }
+    if record.scope != "once" || record.rule_proposed {
+        return Err(EditRefusal::OnceOnly.into());
+    }
+    decide_approval_inner(
+        pool,
+        id,
+        org_id,
+        Some(user_id),
+        None,
+        "granted",
+        decided_by,
+        decision_reason,
+        record,
+        Some(edit),
     )
     .await
 }
@@ -1128,6 +1173,7 @@ pub async fn decide_approval_as_member(
         decided_by,
         decision_reason,
         record,
+        None,
     )
     .await
 }
@@ -1143,6 +1189,7 @@ async fn decide_approval_inner(
     decided_by: &str,
     decision_reason: &str,
     record: &DecisionRecord<'_>,
+    edit: Option<&ApprovalEdit<'_>>,
 ) -> Result<ApprovalDecisionWrite> {
     if org_id.trim().is_empty() {
         bail!("org_id is required");
@@ -1165,6 +1212,14 @@ async fn decide_approval_inner(
         decision["via"] = JsonValue::String("space_member".to_owned());
     }
     let mut transaction = pool.begin().await?;
+    // The edit lands under the approval's row lock and before the compare-and-set below, so the
+    // grant records the edited call or, on any refusal, the dropped transaction leaves both as
+    // they were (EP-10-S4).
+    if let Some(edit) = edit {
+        let owner = user_id.filter(|_| member_space.is_none() && status == "granted");
+        let owner = owner.ok_or_else(|| anyhow::anyhow!("an edit is the owner's grant only"))?;
+        revise_descriptor_for_edit(&mut transaction, id, org_id, owner, edit).await?;
+    }
     let updated = if let Some(space_id) = member_space {
         sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_AS_MEMBER_SQL)
             .bind(id)
@@ -1189,6 +1244,11 @@ async fn decide_approval_inner(
             .await?
     };
     let updated = updated.is_some();
+    if edit.is_some() && !updated {
+        // The row was locked as pending and unexpired a moment ago in this transaction, so this is
+        // not reachable; refusing keeps an edit from ever standing without its grant.
+        return Err(EditRefusal::ApprovalChanged.into());
+    }
 
     if updated && matches!(status, "denied" | "timed_out") {
         sqlx::query(
@@ -1369,6 +1429,312 @@ impl std::fmt::Display for ScopeGrantRefusal {
 }
 
 impl std::error::Error for ScopeGrantRefusal {}
+
+/// The largest plaintext descriptor a continuation may retain, created or edited. The mirror value
+/// in execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
+///
+/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
+/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
+/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
+/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
+pub(crate) const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const _: () = assert!(
+    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
+    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
+);
+
+/// The most times one approval's call may be edited (EP-10 D1; the column CHECK says the same).
+pub const MAX_APPROVAL_REVISIONS: i16 = 3;
+
+/// The tool whose calls an edit may change: a provider write, and of those only a mail send.
+const EDITABLE_TOOL: &str = "execute_provider_action";
+
+/// The owner's edit of a pending approval's call (EP-10-S4).
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalEdit<'a> {
+    /// The fields the person changed; any other key was refused when it was parsed.
+    pub patch: &'a mp_contracts::approval_edit::MailSendPatch,
+    /// The action fingerprint the person saw in the preview.
+    pub base_fingerprint: &'a str,
+}
+
+/// Why an edit was refused (EP-10-S4). Every refusal is decided before anything is written, or
+/// rolls back with the transaction, so the approval stays pending and unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditRefusal {
+    /// Not a pending approval of the caller's in this org. One answer for every such case, so an
+    /// edit discloses nothing about another owner's approval.
+    NotFound,
+    /// The approval moved on since the person saw it: decided, expired, or another call.
+    ApprovalChanged,
+    /// Nothing to edit: no retained call (a browser takeover, round B C-B4), another tool or
+    /// operation, a run that is not persistent, or a descriptor that does not reproduce its own
+    /// fingerprint.
+    NotEditable,
+    /// An edit is a `once` grant only, never a standing scope or a rule proposal (D1).
+    OnceOnly,
+    /// The call was already edited `MAX_APPROVAL_REVISIONS` times.
+    RevisionLimit,
+    /// The edit contract refused the patch, or the edited descriptor is over the cap
+    /// (`edit_too_large`).
+    Invalid(mp_contracts::approval_edit::EditError),
+}
+
+impl EditRefusal {
+    /// The closed token the refusal reaches the caller as.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "approval_not_found",
+            Self::ApprovalChanged => "approval_changed",
+            Self::NotEditable => "not_editable",
+            Self::OnceOnly => "edit_requires_once",
+            Self::RevisionLimit => "revision_limit",
+            Self::Invalid(error) => error.code(),
+        }
+    }
+}
+
+impl std::fmt::Display for EditRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for EditRefusal {}
+
+/// Whether a provider operation is a mail send the person may edit, whichever provider serves it
+/// (the retained input names a connection, not a provider).
+fn operation_is_editable_mail(operation: &str) -> bool {
+    use mp_contracts::provider_writes::{editable_kind, EditableKind, WRITE_OPERATIONS};
+    WRITE_OPERATIONS
+        .iter()
+        .any(|write| editable_kind(write.provider, operation) == Some(EditableKind::MailSend))
+}
+
+/// Rebuild a descriptor's fingerprinted scope with `input` in place of its own, through the same
+/// function execution-core fingerprints with, and hash it. `None` when the descriptor lacks a scope
+/// field or is another version or kind.
+fn descriptor_fingerprint_with(descriptor: &JsonValue, input: &JsonValue) -> Option<String> {
+    let text = |key: &str| descriptor.get(key).and_then(JsonValue::as_str);
+    if descriptor.get("version").and_then(JsonValue::as_u64)
+        != Some(u64::from(mp_contracts::approval_descriptor::DESCRIPTOR_VERSION))
+        || text("action_kind") != Some("tool_call")
+    {
+        return None;
+    }
+    let scope = mp_contracts::approval_descriptor::descriptor_scope(
+        text("run_id")?,
+        text("org_id")?,
+        text("user_id")?,
+        text("step_id")?,
+        text("tool_name")?,
+        input,
+        text("permission_mode")?,
+    );
+    mp_contracts::approval_descriptor::action_fingerprint(&scope).ok()
+}
+
+/// The approval reason for an edited mail send, in the wording the approval was raised with:
+/// execution-core's cold pause says "provider write '<op>' requires approval: the agent would ...",
+/// its loop pause "The agent would ... Approve to let it send." Scrubbed like the original
+/// (K3-16); it names the edited recipients and subject, never the replaced ones.
+fn edited_approval_reason(previous: &str, operation: &str, input: &JsonValue) -> String {
+    let cold = format!("provider write '{operation}' requires approval");
+    let summary = serde_json::to_string(input)
+        .ok()
+        .and_then(|raw| mp_contracts::provider_writes::provider_effect_summary(&raw));
+    let Some(summary) = summary else {
+        // No summary for the edited call: say nothing of the old one either.
+        return cold;
+    };
+    let reason = if previous.starts_with("provider write '") {
+        format!("{cold}: the agent would {summary}")
+    } else {
+        format!("The agent would {summary}. Approve to let it send.")
+    };
+    mp_scrub::scrub_string(&reason)
+}
+
+/// The approval's state, owner run and metadata, locked for the edit (EP-10-S4).
+const LOCK_APPROVAL_FOR_EDIT_SQL: &str = "SELECT a.run_id, a.status, \
+     (a.expires_at IS NULL OR a.expires_at > now()), r.retention_class, a.metadata \
+     FROM approvals a \
+     JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
+     WHERE a.id = $1 AND a.org_id = $2 AND a.user_id = $3 AND r.user_id = $3 \
+     FOR UPDATE OF a";
+
+/// Replace a pending approval's retained call with the owner's edit, inside the grant's
+/// transaction (EP-10-S4). Checks, in order: the approval is the owner's, pending and unexpired on
+/// a persistent run; it retains a call; that call was edited fewer than three times; the person
+/// saw this call (`base_fingerprint`); it is an editable mail send whose descriptor reproduces its
+/// own fingerprint; the patch passes the edit contract; the result fits the cap. Then the
+/// descriptor is re-encrypted with the edited input and its new fingerprint, the first fingerprint
+/// is kept as a digest, and the reason, the cause's call digest and `metadata.revision` (field
+/// names only) follow the edited call. Nothing here is logged.
+async fn revise_descriptor_for_edit(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    approval_id: &str,
+    org_id: &str,
+    user_id: &str,
+    edit: &ApprovalEdit<'_>,
+) -> Result<()> {
+    let locked: Option<(String, String, bool, String, JsonValue)> =
+        sqlx::query_as(LOCK_APPROVAL_FOR_EDIT_SQL)
+            .bind(approval_id)
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    let (run_id, status, live, retention_class, mut metadata) =
+        locked.ok_or(EditRefusal::NotFound)?;
+    if status != "requested" || !live {
+        return Err(EditRefusal::ApprovalChanged.into());
+    }
+    // A waived run counts as ZDR for a new store dimension (D9), and a ZDR run keeps no call.
+    if retention_class != "persistent" {
+        return Err(EditRefusal::NotEditable.into());
+    }
+
+    let stored: Option<(String, String, String, i16)> = sqlx::query_as(
+        "SELECT user_id, action_fingerprint, ciphertext, revision \
+         FROM approval_continuation_descriptors \
+         WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 \
+         FOR UPDATE",
+    )
+    .bind(approval_id)
+    .bind(org_id)
+    .bind(&run_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    // Round B C-B4: a cause with no retained call (a browser takeover) has nothing to edit.
+    let (descriptor_user, old_fingerprint, ciphertext, revision) =
+        stored.ok_or(EditRefusal::NotEditable)?;
+    if revision >= MAX_APPROVAL_REVISIONS {
+        return Err(EditRefusal::RevisionLimit.into());
+    }
+    if edit.base_fingerprint != old_fingerprint {
+        return Err(EditRefusal::ApprovalChanged.into());
+    }
+
+    let cipher = DescriptorCipher::from_env()?;
+    let plaintext = cipher.decrypt(approval_id, org_id, &descriptor_user, &ciphertext)?;
+    let mut descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|_| anyhow::anyhow!("stored continuation descriptor is invalid"))?;
+    let tool_name = descriptor
+        .get("tool_name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let input = descriptor.get("input").cloned().unwrap_or(JsonValue::Null);
+    let operation = input
+        .get("operation")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if tool_name != EDITABLE_TOOL || !operation_is_editable_mail(&operation) {
+        return Err(EditRefusal::NotEditable.into());
+    }
+    // The rebuilt fingerprint must be the one stored, or the edited call would be bound by a
+    // scope that differs from the one execution-core bound the draft with.
+    let reproduced = descriptor_fingerprint_with(&descriptor, &input);
+    if reproduced.as_deref() != Some(old_fingerprint.as_str()) {
+        return Err(EditRefusal::NotEditable.into());
+    }
+
+    // A draft the contract finds not editable (a Gmail raw draft) is refused like any other
+    // uneditable call, not as a bad patch.
+    let edited =
+        mp_contracts::approval_edit::apply_edit(&input, edit.patch).map_err(|error| match error {
+            mp_contracts::approval_edit::EditError::NotEditable => EditRefusal::NotEditable,
+            other => EditRefusal::Invalid(other),
+        })?;
+    let new_fingerprint = descriptor_fingerprint_with(&descriptor, &edited.input)
+        .ok_or(EditRefusal::NotEditable)?;
+    descriptor["input"] = edited.input.clone();
+    descriptor["action_fingerprint"] = JsonValue::String(new_fingerprint.clone());
+    let plaintext = serde_json::to_string(&descriptor)?;
+    if plaintext.len() > MAX_CONTINUATION_DESCRIPTOR_BYTES {
+        let too_large = mp_contracts::approval_edit::EditError::EditTooLarge;
+        return Err(EditRefusal::Invalid(too_large).into());
+    }
+    let ciphertext = cipher.encrypt(approval_id, org_id, &descriptor_user, &plaintext)?;
+    let revised = sqlx::query(
+        "UPDATE approval_continuation_descriptors \
+         SET ciphertext = $4, action_fingerprint = $5, revision = revision + 1, \
+             original_action_fingerprint = COALESCE(original_action_fingerprint, $6), \
+             revised_at = now() \
+         WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND action_fingerprint = $6",
+    )
+    .bind(approval_id)
+    .bind(org_id)
+    .bind(&run_id)
+    .bind(&ciphertext)
+    .bind(&new_fingerprint)
+    .bind(&old_fingerprint)
+    .execute(&mut **transaction)
+    .await?;
+    if revised.rows_affected() != 1 {
+        return Err(EditRefusal::ApprovalChanged.into());
+    }
+
+    let previous_reason = metadata["reason"].as_str().unwrap_or_default();
+    let reason = edited_approval_reason(previous_reason, &operation, &edited.input);
+    let edited_input = serde_json::to_string(&edited.input)?;
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("approval metadata is not an object"))?;
+    object.insert("reason".to_owned(), JsonValue::String(reason));
+    if let Some(cause) = object.get_mut("cause").and_then(JsonValue::as_object_mut) {
+        if cause.contains_key("call_digest") {
+            cause.insert(
+                "call_digest".to_owned(),
+                JsonValue::String(mp_contracts::approval_cause::call_digest(
+                    &run_id,
+                    &tool_name,
+                    &edited_input,
+                )),
+            );
+        }
+    }
+    object.insert(
+        "revision".to_owned(),
+        serde_json::json!({
+            "n": revision + 1,
+            "edited_fields": edited.edited_fields,
+            "at": Utc::now().to_rfc3339(),
+        }),
+    );
+    sqlx::query("UPDATE approvals SET metadata = $3 WHERE id = $1 AND org_id = $2")
+        .bind(approval_id)
+        .bind(org_id)
+        .bind(&metadata)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+/// The descriptor revision an approval's metadata records (EP-10-S4), and the fields the edit
+/// changed. `(0, [])` for an approval that was never edited.
+#[must_use]
+pub fn approval_revision(metadata: &JsonValue) -> (u32, Vec<String>) {
+    let revision = &metadata["revision"];
+    let n = revision["n"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let fields = revision["edited_fields"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    (n, fields)
+}
 
 /// The approval's owner, run, thread and cause, read in the decision's own transaction.
 const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_id, \
@@ -1688,6 +2054,12 @@ pub struct ConsumedCall {
     /// The offered tools and authority the approval was raised under, as the
     /// retained snapshot's JSON (empty when none was retained).
     pub offered_json: String,
+    /// How many times the person edited the call before granting it (EP-10-S5); 0 when the
+    /// call is the one the model drafted.
+    pub revision: u32,
+    /// The fingerprint of the call as first drafted, set only when `revision > 0`. A digest:
+    /// the loop matches its fold's pending fingerprint against it.
+    pub original_action_fingerprint: String,
 }
 
 /// The outcome of [`consume_approval`].
@@ -1932,6 +2304,10 @@ async fn consume_approval_with(
 // side of `mp_contracts::durable_gate::refuse_unless_persistent_class`; the caller's
 // token is checked before this runs, but the stored class is what the run actually
 // is, and a waived token has `zdr = false`.
+//
+// An edited approval (EP-10-S5, `revision > 0`) also matches the fingerprint of the call as
+// first drafted: the paused loop only knows the draft's, and the grant that replaced it was the
+// person's own act. An unedited row has no original, so it matches its own fingerprint only.
 const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
      SET consumed_at = now(), consumed_claim_hash = $6 \
      FROM runs AS r \
@@ -1943,7 +2319,8 @@ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
        AND (a.expires_at IS NULL OR a.expires_at > now()) \
        AND EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
                    WHERE d.approval_id = a.id \
-                     AND ($5 = '' OR d.action_fingerprint = $5)) \
+                     AND ($5 = '' OR d.action_fingerprint = $5 \
+                          OR (d.revision > 0 AND d.original_action_fingerprint = $5))) \
      RETURNING a.id";
 
 /// Renew the managed terminalization obligation of the run whose approval a
@@ -1986,6 +2363,8 @@ async fn renew_recovery_deadline(
 /// Read and decrypt the retained descriptor of an approval the caller holds the
 /// claim on, and return the call it authorised. The descriptor is the only
 /// source of what an approval authorised; nothing a client sends names the call.
+/// The revision columns (EP-10-S5) come back with it, so the loop can tell an edited
+/// call from the model's draft without being sent the draft.
 async fn read_consumed_call(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: &str,
@@ -1993,8 +2372,9 @@ async fn read_consumed_call(
     run_id: &str,
     user_id: &str,
 ) -> Result<Option<ConsumedCall>> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT ciphertext FROM approval_continuation_descriptors \
+    let row: Option<(String, i16, Option<String>)> = sqlx::query_as(
+        "SELECT ciphertext, revision, original_action_fingerprint \
+         FROM approval_continuation_descriptors \
          WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND user_id = $4",
     )
     .bind(id)
@@ -2003,9 +2383,10 @@ async fn read_consumed_call(
     .bind(user_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((ciphertext,)) = row else {
+    let Some((ciphertext, revision, original)) = row else {
         return Ok(None);
     };
+    let (revision, original_action_fingerprint) = consumed_revision(revision, original);
     let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
     let descriptor: JsonValue = serde_json::from_str(&plaintext)
         .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
@@ -2023,7 +2404,22 @@ async fn read_consumed_call(
         tool_name,
         tool_input_json: serde_json::to_string(&input)?,
         offered_json,
+        revision,
+        original_action_fingerprint,
     }))
+}
+
+/// The revision a consume reports. A row the column CHECK should have kept out (a negative
+/// revision) reads as unedited, and an original fingerprint is reported only with a revision:
+/// a loop that is told "edited" always has the draft's fingerprint to match, and one that is
+/// not told so never matches against an original.
+fn consumed_revision(revision: i16, original: Option<String>) -> (u32, String) {
+    match (u32::try_from(revision), original) {
+        (Ok(revision), Some(original)) if revision > 0 && !original.is_empty() => {
+            (revision, original)
+        }
+        _ => (0, String::new()),
+    }
 }
 
 const DECIDE_APPROVAL_SQL: &str =
@@ -2368,6 +2764,74 @@ pub async fn get_approval_for_org(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+/// What the preview of one approval may read (EP-10-S1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OwnerDescriptor {
+    /// Not a pending, unexpired approval of a persistent run the caller owns in this org. One
+    /// answer for every such case, so a miss discloses nothing about another owner's approval.
+    NotFound,
+    /// A pending approval of the caller's that retains no descriptor (a browser takeover, a cause
+    /// with no tool call).
+    NoDescriptor,
+    /// The decrypted descriptor and its stored fingerprint.
+    Descriptor {
+        descriptor: JsonValue,
+        action_fingerprint: String,
+    },
+}
+
+/// Read and decrypt the retained descriptor of a pending approval for the run's owner, for the
+/// approval card's preview (EP-10-S1, decision D4). The approval must be `requested` and
+/// unexpired, its run must be the caller's and persistent (a waived run counts as ZDR, D9), and
+/// the descriptor is decrypted with the same scope binding it was encrypted under. The caller
+/// shapes the result through `mp_contracts::write_preview` and never logs it.
+///
+/// # Errors
+///
+/// Returns an error when the query fails, the key is missing, or the stored ciphertext does not
+/// decrypt to JSON.
+pub async fn read_descriptor_for_owner(
+    pool: &Pool,
+    approval_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<OwnerDescriptor> {
+    if org_id.trim().is_empty() || user_id.trim().is_empty() {
+        return Ok(OwnerDescriptor::NotFound);
+    }
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT d.user_id, d.action_fingerprint, d.ciphertext \
+         FROM approvals a \
+         JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
+         LEFT JOIN approval_continuation_descriptors d \
+           ON d.approval_id = a.id AND d.org_id = a.org_id AND d.run_id = a.run_id \
+         WHERE a.id = $1 AND a.org_id = $2 AND a.user_id = $3 AND r.user_id = $3 \
+           AND a.status = 'requested' AND (a.expires_at IS NULL OR a.expires_at > now()) \
+           AND r.retention_class = 'persistent'",
+    )
+    .bind(approval_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((descriptor_user, fingerprint, ciphertext)) = row else {
+        return Ok(OwnerDescriptor::NotFound);
+    };
+    let (Some(descriptor_user), Some(action_fingerprint), Some(ciphertext)) =
+        (descriptor_user, fingerprint, ciphertext)
+    else {
+        return Ok(OwnerDescriptor::NoDescriptor);
+    };
+    let plaintext =
+        DescriptorCipher::from_env()?.decrypt(approval_id, org_id, &descriptor_user, &ciphertext)?;
+    let descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|_| anyhow::anyhow!("stored continuation descriptor is invalid"))?;
+    Ok(OwnerDescriptor::Descriptor {
+        descriptor,
+        action_fingerprint,
+    })
 }
 
 /// Fetch a single approval by its `(org_id, idempotency_key)` pair. Used to
@@ -3656,7 +4120,7 @@ mod tests {
     fn a_missing_descriptor_reads_as_no_call() {
         let source = production_source();
         let reader = function_text(&source, "async fn read_consumed_call(");
-        assert!(reader.contains("let Some((ciphertext,)) = row else {\n        return Ok(None);\n    };"));
+        assert!(reader.contains("let Some((ciphertext, revision, original)) = row else {\n        return Ok(None);\n    };"));
     }
 }
 
@@ -6423,5 +6887,1027 @@ mod approval_scope_grant_db_tests {
                 .await
                 .expect("count proposals");
         assert_eq!(proposals, 0);
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_db_tests {
+    //! EP-10-S1: the owner-only descriptor read behind the approval card's preview. Every miss is
+    //! the one `NotFound`, so another owner, another org, a decided or expired approval and a
+    //! waived run all look the same.
+    use super::*;
+    use base64::Engine as _;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        // The retained descriptor is encrypted: the process needs its key.
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        Some(pool)
+    }
+
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    struct Seed {
+        run_id: String,
+        org: String,
+        user: String,
+    }
+
+    /// A waived run must name its acknowledgement and connection, and no other class may (a
+    /// table CHECK).
+    async fn seed_run(pool: &Pool, tag: &str, class: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("pv-t-{tag}-{sfx}"),
+            format!("pv-r-{tag}-{sfx}"),
+            format!("pv-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        let (ack, connection) = if class == "zdr_waived" {
+            (Some("ack-1"), Some("conn-1"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
+             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
+        .bind(class).bind(ack).bind(connection)
+        .execute(pool).await.expect("seed run");
+        Seed { run_id, org, user }
+    }
+
+    fn mail_descriptor(seed: &Seed) -> JsonValue {
+        serde_json::json!({
+            "version": 1,
+            "run_id": seed.run_id,
+            "org_id": seed.org,
+            "user_id": seed.user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": FINGERPRINT,
+            "tool_name": "execute_provider_action",
+            "input": {
+                "connection_id": "conn-1",
+                "operation": "gmail.send",
+                "body": { "to": "a@example.com", "subject": "S", "bodyText": "the whole body" },
+            },
+            "permission_mode": "ask",
+        })
+    }
+
+    async fn approval(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        request_approval(
+            pool,
+            &id,
+            &seed.run_id,
+            None,
+            "tool_call",
+            &seed.user,
+            &seed.org,
+            &seed.user,
+            "",
+            &serde_json::json!({}),
+            descriptor,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_is_owner_only() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "owner", "persistent").await;
+        let descriptor = mail_descriptor(&seed);
+        let id = approval(&pool, &seed, Some(&descriptor)).await;
+        let read = read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(
+            read,
+            OwnerDescriptor::Descriptor {
+                descriptor,
+                action_fingerprint: FINGERPRINT.to_owned(),
+            }
+        );
+        let other = read_descriptor_for_owner(&pool, &id, &seed.org, "u2").await.expect("read");
+        assert_eq!(other, OwnerDescriptor::NotFound, "another member of the org reads nothing");
+        let unknown = read_descriptor_for_owner(&pool, "appr_missing", &seed.org, &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(unknown, OwnerDescriptor::NotFound);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_other_org_as_not_found() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "org", "persistent").await;
+        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        let read = read_descriptor_for_owner(&pool, &id, "pv-org-other", &seed.user)
+            .await
+            .expect("read");
+        assert_eq!(read, OwnerDescriptor::NotFound);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_decided_and_expired_approvals() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "state", "persistent").await;
+        let decided = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        decide_approval(&pool, &decided, &seed.org, Some(&seed.user), "denied", &seed.user, "no")
+            .await
+            .expect("decide");
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &decided, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "a decided approval is not previewed"
+        );
+        let expired = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
+            .bind(&expired)
+            .execute(&pool)
+            .await
+            .expect("expire");
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &expired, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "an expired approval is not previewed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_refuses_a_waived_run_as_not_found() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "waived", "zdr_waived").await;
+        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NotFound,
+            "a waived run counts as ZDR (D9)"
+        );
+    }
+
+    /// Integration round B C-B4: a cause with no descriptor (`browser_human_assist`) previews as
+    /// the no-descriptor form, not as a miss.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_of_an_approval_without_a_descriptor_is_the_no_descriptor_form() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "assist", "persistent").await;
+        let id = approval(&pool, &seed, None).await;
+        assert_eq!(
+            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
+            OwnerDescriptor::NoDescriptor
+        );
+    }
+}
+
+#[cfg(test)]
+mod approval_edit_tests {
+    //! EP-10-S4: the pure parts of an edit (reason wording, fingerprint rebuild, the migration).
+    use super::*;
+
+    fn mail_input(subject: &str) -> JsonValue {
+        serde_json::json!({
+            "connection_id": "conn-1",
+            "operation": "gmail.send",
+            "body": { "to": ["alice@example.com"], "subject": subject, "bodyText": "Hei" },
+        })
+    }
+
+    fn descriptor(input: &JsonValue) -> JsonValue {
+        serde_json::json!({
+            "version": 1,
+            "run_id": "run-1",
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "step_id": "step-1",
+            "action_kind": "tool_call",
+            "tool_name": "execute_provider_action",
+            "input": input,
+            "permission_mode": "ask",
+        })
+    }
+
+    #[test]
+    fn the_rebuilt_fingerprint_is_the_one_execution_core_binds() {
+        let input = mail_input("Status");
+        let scope = mp_contracts::approval_descriptor::descriptor_scope(
+            "run-1",
+            "org-1",
+            "user-1",
+            "step-1",
+            "execute_provider_action",
+            &input,
+            "ask",
+        );
+        let expected = mp_contracts::approval_descriptor::action_fingerprint(&scope).expect("hash");
+        assert_eq!(descriptor_fingerprint_with(&descriptor(&input), &input), Some(expected));
+        let edited = mail_input("Changed");
+        assert_ne!(
+            descriptor_fingerprint_with(&descriptor(&input), &edited),
+            descriptor_fingerprint_with(&descriptor(&input), &input),
+            "an edited input binds a new fingerprint"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_of_another_version_or_kind_has_no_fingerprint() {
+        let input = mail_input("Status");
+        let mut other_version = descriptor(&input);
+        other_version["version"] = serde_json::json!(2);
+        assert_eq!(descriptor_fingerprint_with(&other_version, &input), None);
+        let mut other_kind = descriptor(&input);
+        other_kind["action_kind"] = serde_json::json!("plan");
+        assert_eq!(descriptor_fingerprint_with(&other_kind, &input), None);
+        let mut missing = descriptor(&input);
+        missing.as_object_mut().expect("object").remove("step_id");
+        assert_eq!(descriptor_fingerprint_with(&missing, &input), None);
+    }
+
+    #[test]
+    fn edited_reason_keeps_the_wording_and_names_the_edited_send_only() {
+        let loop_reason = edited_approval_reason(
+            "The agent would send an email to alice@example.com with the subject \"Old\". Approve to let it send.",
+            "gmail.send",
+            &mail_input("New subject"),
+        );
+        assert!(loop_reason.starts_with("The agent would "), "{loop_reason}");
+        assert!(loop_reason.contains("New subject"), "{loop_reason}");
+        assert!(!loop_reason.contains("Old"), "{loop_reason}");
+
+        let cold_reason = edited_approval_reason(
+            "provider write 'gmail.send' requires approval: the agent would send ...",
+            "gmail.send",
+            &mail_input("New subject"),
+        );
+        assert!(
+            cold_reason.starts_with("provider write 'gmail.send' requires approval: the agent would "),
+            "{cold_reason}"
+        );
+        assert_eq!(cold_reason, mp_scrub::scrub_string(&cold_reason), "the reason is scrubbed");
+    }
+
+    #[test]
+    fn an_edited_call_without_a_summary_keeps_no_trace_of_the_old_reason() {
+        let reason = edited_approval_reason(
+            "The agent would send an email to alice@example.com.",
+            "gmail.send",
+            // No `operation`: the input has no summary (a mail send always has one).
+            &serde_json::json!({ "body": { "to": "bob@example.com" } }),
+        );
+        assert_eq!(reason, "provider write 'gmail.send' requires approval");
+    }
+
+    #[test]
+    fn only_a_mail_send_is_an_editable_operation() {
+        assert!(operation_is_editable_mail("gmail.send"));
+        assert!(operation_is_editable_mail("mail.send"));
+        assert!(!operation_is_editable_mail("message.send"));
+        assert!(!operation_is_editable_mail("unknown.op"));
+    }
+
+    #[test]
+    fn approval_descriptor_revision_migration_adds_three_columns_and_its_revert_drops_them() {
+        let up = include_str!("../migrations/0102_approval_descriptor_revision.sql");
+        let down = include_str!("../migrations/revert/0102_approval_descriptor_revision.down.sql");
+        let sql = |text: &'static str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let up = sql(up);
+        for column in ["revision SMALLINT", "original_action_fingerprint TEXT", "revised_at TIMESTAMPTZ"] {
+            assert!(up.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")), "{column}");
+        }
+        assert!(up.contains("CHECK (revision BETWEEN 0 AND 3)"));
+        assert!(!up.contains("BEGIN;"), "sqlx wraps the migration in its own transaction");
+        let down = sql(down);
+        for column in ["revised_at", "original_action_fingerprint", "revision"] {
+            assert!(down.contains(&format!("DROP COLUMN IF EXISTS {column}")), "{column}");
+        }
+        assert_eq!(MAX_APPROVAL_REVISIONS, 3, "the column CHECK and the code agree");
+    }
+
+    // EP-10-S5: a consume says "edited" only with the draft's fingerprint to match.
+    #[test]
+    fn consume_reports_a_revision_only_together_with_its_original_fingerprint() {
+        let original = "a".repeat(64);
+        assert_eq!(consumed_revision(1, Some(original.clone())), (1, original.clone()));
+        assert_eq!(consumed_revision(3, Some(original.clone())), (3, original.clone()));
+        assert_eq!(consumed_revision(0, None), (0, String::new()), "an unedited call");
+        assert_eq!(consumed_revision(0, Some(original.clone())), (0, String::new()));
+        assert_eq!(consumed_revision(1, None), (0, String::new()), "no original, no revision");
+        assert_eq!(consumed_revision(1, Some(String::new())), (0, String::new()));
+        assert_eq!(consumed_revision(-1, Some(original)), (0, String::new()));
+    }
+
+    #[test]
+    fn consume_accepts_the_drafted_fingerprint_only_for_a_revised_descriptor() {
+        let sql = CONSUME_APPROVAL_SQL;
+        assert!(sql.contains("$5 = '' OR d.action_fingerprint = $5"));
+        assert!(
+            sql.contains("OR (d.revision > 0 AND d.original_action_fingerprint = $5)"),
+            "the original matches only a revised descriptor"
+        );
+        assert_eq!(sql.matches("original_action_fingerprint").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod approval_edit_db_tests {
+    //! EP-10-S4: approve with edits against a real Postgres. The edit and the grant are one
+    //! transaction; every refusal leaves the approval pending and its descriptor as it was.
+    use super::*;
+    use base64::Engine as _;
+    use mp_contracts::approval_edit::{EditError, MailSendPatch};
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        Some(pool)
+    }
+
+    struct Seed {
+        run_id: String,
+        org: String,
+        user: String,
+    }
+
+    async fn seed_run(pool: &Pool, tag: &str, class: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("ed-t-{tag}-{sfx}"),
+            format!("ed-r-{tag}-{sfx}"),
+            format!("ed-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        let (ack, connection) = if class == "zdr_waived" {
+            (Some("ack-1"), Some("conn-1"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
+             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
+        .bind(class).bind(ack).bind(connection)
+        .execute(pool).await.expect("seed run");
+        Seed { run_id, org, user }
+    }
+
+    fn mail_input(operation: &str) -> JsonValue {
+        serde_json::json!({
+            "connection_id": "conn-1",
+            "operation": operation,
+            "body": {
+                "to": ["alice@example.com"],
+                "subject": "Old subject",
+                "bodyText": "the drafted body",
+            },
+        })
+    }
+
+    /// A descriptor as execution-core builds it, with its real fingerprint.
+    fn descriptor_for(seed: &Seed, tool_name: &str, input: &JsonValue) -> (JsonValue, String) {
+        let scope = mp_contracts::approval_descriptor::descriptor_scope(
+            &seed.run_id, &seed.org, &seed.user, "tool_1_call-1", tool_name, input, "ask",
+        );
+        let fingerprint = mp_contracts::approval_descriptor::action_fingerprint(&scope).expect("hash");
+        let mut descriptor = scope;
+        descriptor["action_fingerprint"] = JsonValue::String(fingerprint.clone());
+        (descriptor, fingerprint)
+    }
+
+    async fn pending(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
+        pending_in_mode(pool, seed, descriptor, "").await
+    }
+
+    /// A pending approval in `mode` (`""` cold, `"loop"` loop-owned).
+    async fn pending_in_mode(
+        pool: &Pool,
+        seed: &Seed,
+        descriptor: Option<&JsonValue>,
+        mode: &str,
+    ) -> String {
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        let input = descriptor.map_or_else(String::new, |d| d["input"].to_string());
+        let metadata = serde_json::json!({
+            "reason": "The agent would send an email to alice@example.com with the subject \"Old subject\". Approve to let it send.",
+            "cause": {
+                "code": "provider_write",
+                "tool": "execute_provider_action",
+                "call_digest": mp_contracts::approval_cause::call_digest(
+                    &seed.run_id, "execute_provider_action", &input,
+                ),
+            },
+        });
+        request_approval(
+            pool,
+            &id,
+            &seed.run_id,
+            None,
+            "tool_call",
+            &seed.user,
+            &seed.org,
+            &seed.user,
+            "",
+            &metadata,
+            descriptor,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            mode,
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        id
+    }
+
+    const RECORD: DecisionRecord<'static> = DecisionRecord {
+        source: "user",
+        scope: "once",
+        audit: false,
+        grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
+        rule_proposed: false,
+        authz_audit: false,
+    };
+
+    fn subject_patch(subject: &str) -> MailSendPatch {
+        MailSendPatch {
+            subject: Some(subject.to_owned()),
+            body_text: Some("the edited body".to_owned()),
+            ..MailSendPatch::default()
+        }
+    }
+
+    async fn edit(
+        pool: &Pool,
+        seed: &Seed,
+        id: &str,
+        patch: &MailSendPatch,
+        base: &str,
+    ) -> Result<ApprovalDecisionWrite> {
+        decide_approval_with_edit(
+            pool,
+            id,
+            &seed.org,
+            &seed.user,
+            &seed.user,
+            "",
+            &RECORD,
+            &ApprovalEdit {
+                patch,
+                base_fingerprint: base,
+            },
+        )
+        .await
+    }
+
+    fn refusal(result: Result<ApprovalDecisionWrite>) -> EditRefusal {
+        *result
+            .expect_err("refused")
+            .downcast_ref::<EditRefusal>()
+            .expect("a typed refusal")
+    }
+
+    /// The stored descriptor columns and the approval's state.
+    async fn stored(pool: &Pool, id: &str) -> (String, i16, Option<String>, String) {
+        let (fingerprint, revision, original): (String, i16, Option<String>) = sqlx::query_as(
+            "SELECT action_fingerprint, revision, original_action_fingerprint \
+             FROM approval_continuation_descriptors WHERE approval_id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("descriptor row");
+        let status: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("approval");
+        (fingerprint, revision, original, status)
+    }
+
+    async fn stored_input(pool: &Pool, seed: &Seed, id: &str) -> JsonValue {
+        let ciphertext: String = sqlx::query_scalar(
+            "SELECT ciphertext FROM approval_continuation_descriptors WHERE approval_id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("ciphertext");
+        let plaintext = DescriptorCipher::from_env()
+            .expect("key")
+            .decrypt(id, &seed.org, &seed.user, &ciphertext)
+            .expect("decrypt");
+        let descriptor: JsonValue = serde_json::from_str(&plaintext).expect("json");
+        descriptor["input"].clone()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_changes_fingerprint_and_keeps_the_original_hash() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "fp", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+
+        let write = edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
+            .await
+            .expect("edited grant");
+        assert!(write.updated);
+        assert!(write.delivery_id.is_some(), "a cold grant still leaves its delivery row");
+
+        let (fingerprint, revision, kept, status) = stored(&pool, &id).await;
+        assert_eq!(status, "granted");
+        assert_eq!(revision, 1);
+        assert_ne!(fingerprint, original);
+        assert_eq!(kept.as_deref(), Some(original.as_str()), "the original is kept as a hash");
+        let input = stored_input(&pool, &seed, &id).await;
+        assert_eq!(input["body"]["subject"], "New subject");
+        assert_eq!(input["body"]["bodyText"], "the edited body");
+        assert_eq!(input["connection_id"], "conn-1", "an edit never retargets the connection");
+        assert_eq!(input["operation"], "gmail.send");
+        let (_, expected) = descriptor_for(&seed, "execute_provider_action", &input);
+        assert_eq!(fingerprint, expected, "the new fingerprint is execution-core's for the edit");
+
+        let metadata: JsonValue = sqlx::query_scalar("SELECT metadata FROM approvals WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("metadata");
+        assert_eq!(metadata["revision"]["n"], 1);
+        assert_eq!(metadata["revision"]["edited_fields"], serde_json::json!(["subject", "body_text"]));
+        assert_eq!(
+            metadata["cause"]["call_digest"],
+            mp_contracts::approval_cause::call_digest(
+                &seed.run_id,
+                "execute_provider_action",
+                &serde_json::to_string(&input).expect("input"),
+            ),
+            "the cause's digest follows the edited call"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edited_reason_is_scrubbed_and_recomputed() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "reason", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        edit(&pool, &seed, &id, &subject_patch("New subject"), &original).await.expect("edit");
+        let reason: String =
+            sqlx::query_scalar("SELECT metadata->>'reason' FROM approvals WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("reason");
+        assert!(reason.contains("New subject"), "{reason}");
+        assert!(!reason.contains("Old subject"), "the replaced draft is not described: {reason}");
+        assert_eq!(reason, mp_scrub::scrub_string(&reason));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn stale_base_fingerprint_is_approval_changed() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "stale", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let stale = "f".repeat(64);
+        let refused = refusal(edit(&pool, &seed, &id, &subject_patch("New"), &stale).await);
+        assert_eq!(refused, EditRefusal::ApprovalChanged);
+        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn two_concurrent_edits_one_wins() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "race", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let (first, second) = (subject_patch("First"), subject_patch("Second"));
+        let (a, b) = tokio::join!(
+            edit(&pool, &seed, &id, &first, &original),
+            edit(&pool, &seed, &id, &second, &original),
+        );
+        let wins = [a.is_ok(), b.is_ok()].iter().filter(|won| **won).count();
+        assert_eq!(wins, 1, "exactly one edit is granted");
+        let loser = if a.is_ok() { b } else { a };
+        assert_eq!(refusal(loser), EditRefusal::ApprovalChanged);
+        let (_, revision, _, status) = stored(&pool, &id).await;
+        assert_eq!((revision, status.as_str()), (1, "granted"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_and_grant_is_one_transaction() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "atomic", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        // Fail the grant itself, after the descriptor was re-encrypted in the same transaction.
+        let function = format!("ed_fail_{}", id.to_lowercase());
+        sqlx::query(&format!(
+            "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'grant refused for the test'; END $$"
+        ))
+        .execute(&pool)
+        .await
+        .expect("function");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {function} BEFORE UPDATE OF status ON approvals FOR EACH ROW \
+             WHEN (NEW.id = '{id}' AND NEW.status = 'granted') EXECUTE FUNCTION {function}()"
+        ))
+        .execute(&pool)
+        .await
+        .expect("trigger");
+
+        let failed = edit(&pool, &seed, &id, &subject_patch("New"), &original).await;
+
+        sqlx::query(&format!("DROP TRIGGER {function} ON approvals"))
+            .execute(&pool)
+            .await
+            .expect("drop trigger");
+        sqlx::query(&format!("DROP FUNCTION {function}()"))
+            .execute(&pool)
+            .await
+            .expect("drop function");
+        assert!(failed.is_err(), "the grant failed");
+        assert_eq!(
+            stored(&pool, &id).await,
+            (original, 0, None, "requested".to_owned()),
+            "the edit rolled back with the grant"
+        );
+        let input = stored_input(&pool, &seed, &id).await;
+        assert_eq!(input["body"]["subject"], "Old subject");
+        let metadata: JsonValue = sqlx::query_scalar("SELECT metadata FROM approvals WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("metadata");
+        assert!(metadata.get("revision").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_refused_for_non_mail_writes() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "nonmail", "persistent").await;
+        let (slack, slack_fp) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("message.send"));
+        let id = pending(&pool, &seed, Some(&slack)).await;
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &slack_fp).await),
+            EditRefusal::NotEditable
+        );
+        let (other_tool, other_fp) =
+            descriptor_for(&seed, "delete_records", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&other_tool)).await;
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &other_fp).await),
+            EditRefusal::NotEditable
+        );
+        let mut raw_input = mail_input("gmail.send");
+        raw_input["body"] = serde_json::json!({ "raw": "RnJvbTogYQ==" });
+        let (raw, raw_fp) = descriptor_for(&seed, "execute_provider_action", &raw_input);
+        let id = pending(&pool, &seed, Some(&raw)).await;
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &raw_fp).await),
+            EditRefusal::NotEditable,
+            "a Gmail raw draft is preview-only"
+        );
+        assert_eq!(stored(&pool, &id).await.3, "requested");
+    }
+
+    /// Integration round B C-B4: a cause with no retained call (`browser_human_assist`) is not
+    /// editable, and the approval stays pending.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_refused_for_an_approval_without_a_descriptor() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "assist", "persistent").await;
+        let id = pending(&pool, &seed, None).await;
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &"a".repeat(64)).await),
+            EditRefusal::NotEditable
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "requested");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_refused_for_thread_scope_and_rule_proposal() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "scope", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let patch = subject_patch("New");
+        for record in [
+            DecisionRecord { scope: "thread", ..RECORD },
+            DecisionRecord { rule_proposed: true, ..RECORD },
+        ] {
+            let refused = decide_approval_with_edit(
+                &pool,
+                &id,
+                &seed.org,
+                &seed.user,
+                &seed.user,
+                "",
+                &record,
+                &ApprovalEdit {
+                    patch: &patch,
+                    base_fingerprint: &original,
+                },
+            )
+            .await;
+            assert_eq!(refusal(refused), EditRefusal::OnceOnly);
+        }
+        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_refused_for_zdr_and_waived() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "waived", "zdr_waived").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &original).await),
+            EditRefusal::NotEditable,
+            "a waived run counts as ZDR (D9); a ZDR caller is refused by the handler"
+        );
+        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn fourth_revision_is_refused() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "limit", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        sqlx::query("UPDATE approval_continuation_descriptors SET revision = 3 WHERE approval_id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("three revisions");
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &original).await),
+            EditRefusal::RevisionLimit
+        );
+        assert_eq!(stored(&pool, &id).await.3, "requested");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn edit_of_another_owner_or_org_is_not_found() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "owner", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let patch = subject_patch("New");
+        for (org, user) in [("ed-org-other", seed.user.as_str()), (seed.org.as_str(), "u2")] {
+            let refused = decide_approval_with_edit(
+                &pool,
+                &id,
+                org,
+                user,
+                user,
+                "",
+                &RECORD,
+                &ApprovalEdit {
+                    patch: &patch,
+                    base_fingerprint: &original,
+                },
+            )
+            .await;
+            assert_eq!(refusal(refused), EditRefusal::NotFound, "{org} {user}");
+        }
+        assert_eq!(stored(&pool, &id).await.3, "requested");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn an_invalid_patch_leaves_the_approval_pending() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "invalid", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let bad = MailSendPatch {
+            subject: Some("Line\r\nBcc: eve@example.com".to_owned()),
+            ..MailSendPatch::default()
+        };
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &bad, &original).await),
+            EditRefusal::Invalid(EditError::InvalidSubject)
+        );
+        let unchanged = MailSendPatch {
+            subject: Some("Old subject".to_owned()),
+            ..MailSendPatch::default()
+        };
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &unchanged, &original).await),
+            EditRefusal::Invalid(EditError::NoChange)
+        );
+        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn an_edit_replayed_after_its_grant_is_approval_changed() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "replay", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        let patch = subject_patch("New");
+        edit(&pool, &seed, &id, &patch, &original).await.expect("first");
+        assert_eq!(
+            refusal(edit(&pool, &seed, &id, &patch, &original).await),
+            EditRefusal::ApprovalChanged,
+            "a second edit never lands on a granted approval"
+        );
+        assert_eq!(stored(&pool, &id).await.1, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn revised_descriptor_is_erased_with_the_run() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "erase", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending(&pool, &seed, Some(&descriptor)).await;
+        edit(&pool, &seed, &id, &subject_patch("New"), &original).await.expect("edit");
+        sqlx::query("DELETE FROM approval_delivery_outbox WHERE approval_id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("drop delivery");
+        sqlx::query("DELETE FROM approvals WHERE run_id = $1")
+            .bind(&seed.run_id)
+            .execute(&pool)
+            .await
+            .expect("erase approvals");
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&seed.run_id)
+            .execute(&pool)
+            .await
+            .expect("erase run");
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM approval_continuation_descriptors WHERE approval_id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(left, 0, "the edited descriptor goes with its approval and run");
+    }
+
+    // EP-10-S5: the loop that paused knows the draft's fingerprint only. A consume of an edited,
+    // loop-owned approval matches it as well as the edited one, and hands back the edited call
+    // with its revision and the draft's fingerprint.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_edited_approval_returns_the_edited_call_its_revision_and_the_original() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-edit", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        let write = edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
+            .await
+            .expect("edited grant");
+        assert!(write.loop_owned && write.delivery_id.is_none());
+        let (edited, _, _, _) = stored(&pool, &id).await;
+
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
+            .await
+            .unwrap()
+            .expect("the draft's fingerprint matches an edited approval");
+        assert!(won.consumed);
+        let call = won.call.expect("the claim holder gets the call");
+        assert_eq!(call.revision, 1);
+        assert_eq!(call.original_action_fingerprint, original);
+        let input: JsonValue = serde_json::from_str(&call.tool_input_json).expect("json");
+        assert_eq!(input["body"]["subject"], "New subject", "the edited call, never the draft");
+        assert_eq!(input["connection_id"], "conn-1");
+        assert_ne!(edited, original);
+
+        // The same claim replaying gets the same revision back.
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        let again = replay.call.expect("a same-claim replay gets the call");
+        assert_eq!((again.revision, again.original_action_fingerprint), (1, original));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_edited_approval_accepts_the_current_fingerprint_and_refuses_another() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-fp", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
+            .await
+            .expect("edited grant");
+        let (edited, _, _, _) = stored(&pool, &id).await;
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &"b".repeat(64), "a")
+                .await
+                .unwrap(),
+            Err(ConsumeRefusal::FingerprintMismatch),
+            "a third call's fingerprint is refused and leaves the approval unconsumed"
+        );
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &edited, "a")
+            .await
+            .unwrap()
+            .expect("the edited fingerprint matches too");
+        assert!(won.consumed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_an_unedited_approval_reports_revision_zero() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "consume-plain", "persistent").await;
+        let (descriptor, original) =
+            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
+        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
+        decide_approval(&pool, &id, &seed.org, Some(&seed.user), "granted", &seed.user, "ok")
+            .await
+            .expect("plain grant");
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        let call = won.call.expect("the call");
+        assert_eq!((call.revision, call.original_action_fingerprint.as_str()), (0, ""));
     }
 }

@@ -822,6 +822,7 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
             claims.has_scope("scrape:read") || claims.has_scope("scrape:write")
         }
         "/v1/audit/page" => claims.has_scope("scrape:read"),
+        "/v1/browser/redirect-hop" => claims.has_scope("browser:execute"),
         "/v1/search" => claims.has_scope("search:read"),
         "/v1/map" => claims.has_scope("map:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
@@ -1219,6 +1220,7 @@ mod tests {
             .route("/v1/search", get(ok_handler))
             .route("/v1/map", get(ok_handler))
             .route("/v1/audit/page", get(ok_handler))
+            .route("/v1/browser/redirect-hop", get(ok_handler))
             .route("/v1/extract", get(ok_handler))
             .route("/v1/other", get(ok_handler))
             .route("/v1/artifacts", get(ok_handler))
@@ -1266,6 +1268,19 @@ mod tests {
                 StatusCode::FORBIDDEN
             );
         }
+    }
+
+    #[tokio::test]
+    async fn redirect_probe_requires_browser_execute_for_service_principals() {
+        let route = "/v1/browser/redirect-hop";
+        assert_eq!(
+            status_for(service_claims(&["browser:execute"]), route).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_for(service_claims(&["scrape:read", "map:read"]), route).await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     async fn status_for(claims: Claims, path: &str) -> StatusCode {

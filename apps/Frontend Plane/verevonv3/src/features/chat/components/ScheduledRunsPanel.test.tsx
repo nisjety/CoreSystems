@@ -266,4 +266,37 @@ describe('ScheduledRunsPanel', () => {
     expect(await screen.findByText('Pauset')).toBeTruthy()
     expect(screen.getByText('Utløpt')).toBeTruthy()
   })
+
+  it('marks a fire that Run now made with a Manual chip, and leaves the schedule’s own fire unmarked', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+    mockedFires.mockResolvedValue([
+      {
+        id: 'fire_m',
+        fired_at: '2026-11-04T08:00:00Z',
+        status: 'completed',
+        outcome: null,
+        run_id: null,
+        thread_id: null,
+        withheld_effects: 0,
+        fire_key: 'manual:6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10',
+      },
+      {
+        id: 'fire_s',
+        fired_at: '2026-11-03T07:00:00Z',
+        status: 'completed',
+        outcome: null,
+        run_id: null,
+        thread_id: null,
+        withheld_effects: 0,
+        fire_key: '2026-11-03T07:00:00Z',
+      },
+    ])
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Se resultater'))
+
+    expect(await screen.findByText('Manuell')).toBeTruthy()
+    expect(screen.getAllByText('Manuell')).toHaveLength(1)
+  })
 })

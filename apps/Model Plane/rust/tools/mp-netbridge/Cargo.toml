@@ -1,0 +1,13 @@
+[package]
+name = "mp-netbridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Inside a network-less sandbox, bridges 127.0.0.1:3128 to the per-call egress proxy socket (EP-9 E3)."
+
+[lints]
+workspace = true
+
+# Standard library only: this binary runs inside every tiered sandbox, so it
+# carries no dependency that could widen what the sandbox can do.
+[dependencies]

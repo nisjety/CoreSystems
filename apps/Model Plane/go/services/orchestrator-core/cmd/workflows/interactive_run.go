@@ -51,6 +51,21 @@ type ScheduledRunInput struct {
 	ContractDigest    string               `json:"contract_digest,omitempty"`
 	ContractExpiresAt string               `json:"contract_expires_at,omitempty"`
 	Retention         activities.Retention `json:"retention"`
+	// GoalID is the thread goal a goal-bound schedule continues (EP-7 S6), read from the
+	// digest-verified template. Set only while ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED is on;
+	// empty, the fire is not judged and its history is what it was before the field existed.
+	GoalID string `json:"goal_id,omitempty"`
+}
+
+// GoalJudgeTurnInput asks model-gateway to judge the goal turn one finished fire spent (EP-7 S6).
+// It carries ids only: Temporal history must never hold the objective, the criteria or the answer,
+// so the judge reads them itself from their owners.
+type GoalJudgeTurnInput struct {
+	GoalID     string `json:"goal_id"`
+	RunID      string `json:"run_id"`
+	OrgID      string `json:"org_id"`
+	ScheduleID string `json:"schedule_id"`
+	FireKey    string `json:"fire_key"`
 }
 
 const (
@@ -70,6 +85,11 @@ const (
 	// contract (WS20 S6). Histories that predate it keep the step loops below.
 	scheduledAgentLaneChange  = "scheduled-agent-lane"
 	scheduledAgentLaneVersion = 1
+
+	// goalJudgeTurnChange gates the judge of a goal-bound fire (EP-7 S6). Histories that predate it
+	// complete without the activity.
+	goalJudgeTurnChange  = "goal-judge-turn"
+	goalJudgeTurnVersion = 1
 )
 
 // InteractiveRunSupervision orchestrates an interactive agent run.
@@ -276,8 +296,25 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	if err := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); err != nil {
 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("complete scheduled run: %v", err))
 	}
+	if input.GoalID != "" &&
+		workflow.GetVersion(ctx, goalJudgeTurnChange, workflow.DefaultVersion, goalJudgeTurnVersion) == goalJudgeTurnVersion {
+		judgeGoalTurn(ctx, actCtx, input)
+	}
 	logger.Info("ScheduledRunSupervision completed", "run_id", input.RunID)
 	return nil
+}
+
+// judgeGoalTurn asks for the verdict on the goal turn a completed fire spent (EP-7 S6). The run is
+// already complete and its turn already ledgered, so a judge that fails only leaves the turn
+// unjudged: the goal's caps still stop it, and the next fire is judged afresh.
+func judgeGoalTurn(ctx, actCtx workflow.Context, input ScheduledRunInput) {
+	judge := GoalJudgeTurnInput{
+		GoalID: input.GoalID, RunID: input.RunID, OrgID: input.OrgID,
+		ScheduleID: input.ScheduleID, FireKey: input.FireKey,
+	}
+	if err := workflow.ExecuteActivity(actCtx, "JudgeGoalTurnActivity", judge).Get(ctx, nil); err != nil {
+		workflow.GetLogger(ctx).Warn("goal turn not judged", "run_id", input.RunID, "error", err)
+	}
 }
 
 // handleFailure records run failure via FailRunActivity and returns the error.

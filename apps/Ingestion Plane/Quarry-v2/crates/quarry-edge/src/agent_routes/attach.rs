@@ -36,7 +36,20 @@ pub struct AttachBody {
     #[serde(default, alias = "startUrl")]
     pub start_url: Option<String>,
     #[serde(default)]
+    pub attach_tab: Option<AttachTabTarget>,
+    #[serde(default)]
     pub constraints: AttachConstraints,
+    /// Restrictions for this delegate only; never relaxes the parent run.
+    #[serde(default)]
+    pub policy: Option<quarry_core::web_policy::RequestAsk>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachTabTarget {
+    tab_id: String,
+    expected_epoch: u64,
+    expected_origin: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +72,9 @@ pub struct AttachData {
     pub opened_by: &'static str,
     pub holder: &'static str,
     pub allowed_domains: Vec<String>,
+    /// Positive receipt: false for no ask; old servers omit it entirely.
+    pub policy_applied: bool,
+    pub attached_existing_tab: bool,
 }
 
 /// `DELETE .../attach/{attach_id}` query: `release` (default) or `abort`.
@@ -151,6 +167,36 @@ pub async fn attach_run(
     Path(run_id): Path<String>,
     Json(body): Json<AttachBody>,
 ) -> Result<Json<Envelope<AttachData>>, ApiErr> {
+    if body.attach_tab.is_some() {
+        return Err(status_err(StatusCode::BAD_REQUEST, &crate::request_id::current(), "use attach-current-tab for an existing tab"));
+    }
+    attach_run_inner(state, claims, run_id, body).await
+}
+
+pub async fn attach_current_tab(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(run_id): Path<String>,
+    Json(mut body): Json<AttachBody>,
+) -> Result<Json<Envelope<AttachData>>, ApiErr> {
+    if body.attach_tab.is_none() || body.start_url.is_some() {
+        return Err(status_err(StatusCode::BAD_REQUEST, &crate::request_id::current(), "an existing tab is required, without a start URL"));
+    }
+    let policy = body.policy.get_or_insert_with(Default::default);
+    for capability in ["browser.act.upload", "browser.act.download"] {
+        if !policy.disable.iter().any(|name| name == capability) {
+            policy.disable.push(capability.to_owned());
+        }
+    }
+    attach_run_inner(state, claims, run_id, body).await
+}
+
+async fn attach_run_inner(
+    state: AppState,
+    claims: crate::auth::Claims,
+    run_id: String,
+    body: AttachBody,
+) -> Result<Json<Envelope<AttachData>>, ApiErr> {
     let request_id = crate::request_id::current();
     if !crate::run_limits::attach_enabled() {
         return Err(driver_err(
@@ -168,6 +214,16 @@ pub async fn attach_run(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
     let _in_flight = handle.live.in_flight_guard();
+    // A human step releases the entry while it runs. Serialize with that lane
+    // before inspecting or changing an existing tab.
+    let owner_lane = match body.attach_tab {
+        Some(_) => Some(super::step::human_lane_of(&handle).await),
+        None => None,
+    };
+    let _owner_guard = match &owner_lane {
+        Some(lane) => Some(lane.0.lock().await),
+        None => None,
+    };
     let mut entry = handle.entry.lock().await;
     if entry.org_id != claims.org_id {
         return Err(status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found"));
@@ -179,6 +235,9 @@ pub async fn attach_run(
     let refuse = |reason: &str| driver_err(&request_id, QuarryError::new(ErrorCode::Forbidden, reason));
     if entry.zdr.is_active() {
         return Err(refuse("attach_zdr_refused"));
+    }
+    if body.attach_tab.is_some() && !entry.nav_policy.is_open_web() {
+        return Err(refuse("attach_current_tab_requires_personal_browser"));
     }
     let Some(parent_grant) = entry.grant_id.clone() else {
         return Err(refuse("attach_requires_grant"));
@@ -217,6 +276,11 @@ pub async fn attach_run(
         return Err(refuse(reason));
     }
     let allowed_domains = grant.allowed_domains.clone();
+    // Validate and resolve before opening a tab or performing any navigation.
+    let attachment_policy = body.policy.as_ref()
+        .map(crate::agent_policy_gate::attachment_policy)
+        .transpose()
+        .map_err(|error| driver_err(&request_id, error))?;
 
     if let Some(url) = body.start_url.as_deref() {
         if !domain_allowed(url, &allowed_domains) {
@@ -238,30 +302,93 @@ pub async fn attach_run(
         .map_err(|error| driver_err(&request_id, error))?;
         crate::agent_policy_gate::gate_visit(&state, &handle.live, false, url)
             .map_err(|error| driver_err(&request_id, error))?;
+        if let Some(policy) = &attachment_policy {
+            crate::agent_policy_gate::gate_attachment_url(policy, url)
+                .map_err(|error| driver_err(&request_id, error))?;
+        }
     }
 
-    // The tab opens in the background: the person's active tab does not change.
-    let tab = state
-        .agent_driver
-        .open_tab(
-            &entry.session,
-            OpenTabOptions {
-                url: body.start_url.clone(),
-                activate: false,
-                egress_policy: Some(BrowserEgressPolicy::from_allowed_domains(&allowed_domains)),
-            },
-        )
-        .await
-        .map_err(|error| driver_err(&request_id, error))?;
-    let tabs = state
-        .agent_driver
-        .list_tabs(&entry.session)
-        .await
-        .map_err(|error| driver_err(&request_id, error))?;
     let attach_id = new_attach_id();
-    let tab_id = tab.tab_id.clone();
-    sync_ledger_with_driver(&handle.live, &tabs);
-    handle.live.tabs().open_agent_tab(&tab_id, &attach_id);
+    let egress = match &attachment_policy {
+        Some(policy) => crate::agent_policy_gate::attachment_egress_policy(
+            policy,
+            &allowed_domains,
+            body.policy.as_ref().expect("resolved from an attachment ask"),
+        ),
+        None => BrowserEgressPolicy::from_allowed_domains(&allowed_domains).with_public_assets(),
+    };
+    let (tab_id, tabs, borrowed, opened_by) = if let Some(target) = &body.attach_tab {
+        let changed = || driver_err(&request_id, QuarryError::new(ErrorCode::Conflict, "browser_continue_tab_changed"));
+        let tabs = state.agent_driver.list_tabs(&entry.session).await
+            .map_err(|error| driver_err(&request_id, error))?;
+        let tab = tabs.iter().find(|tab| tab.active && tab.tab_id == target.tab_id)
+            .ok_or_else(changed)?;
+        let raw_url = tab.url.as_deref().ok_or_else(changed)?;
+        let url = Url::parse(raw_url).map_err(|_| changed())?;
+        let origin = url.origin();
+        let host = url.host_str().ok_or_else(changed)?;
+        if !matches!(url.scheme(), "http" | "https")
+            || origin.ascii_serialization() != target.expected_origin
+            || !matches!(allowed_domains.as_slice(), [domain] if domain == host)
+        {
+            return Err(changed());
+        }
+        sync_ledger_with_driver(&handle.live, &tabs);
+        let opened_by = {
+            let ledger = handle.live.tabs();
+            let meta = ledger.get(&target.tab_id).ok_or_else(changed)?;
+            if meta.holder != BrowserTabHolder::Human || meta.epoch != target.expected_epoch
+                || meta.attach_id.is_some()
+            {
+                return Err(changed());
+            }
+            match meta.opened_by {
+                OpenedBy::Human => "human",
+                OpenedBy::Agent => "agent",
+            }
+        };
+        validate_navigation_for_run(
+            &AgentAction::Navigate { url: raw_url.to_owned() },
+            state.security.as_ref(),
+            &entry.nav_policy,
+        ).await.map_err(|error| driver_err(&request_id, error))?;
+        crate::agent_policy_gate::gate_visit(&state, &handle.live, false, raw_url)
+            .map_err(|error| driver_err(&request_id, error))?;
+        if let Some(policy) = &attachment_policy {
+            crate::agent_policy_gate::gate_attachment_url(policy, raw_url)
+                .map_err(|error| driver_err(&request_id, error))?;
+        }
+        // Install the narrower request boundary before giving the delegate any
+        // control. The person's page, document, and browser context stay live.
+        let prior_egress = state.agent_driver.swap_tab_egress_policy(
+            &entry.session, &target.tab_id, Some(egress.with_only_origin(origin.clone())),
+        ).await.map_err(|error| driver_err(&request_id, error))?;
+        let bound = {
+            let mut ledger = handle.live.tabs();
+            ledger.approve_consent(&target.tab_id, host, &body.grant_id).and_then(|()| {
+                ledger.attach_visible_tab(&target.tab_id, &attach_id, host, Some(target.expected_epoch))
+            })
+        };
+        if bound.is_err() {
+            state.agent_driver.swap_tab_egress_policy(
+                &entry.session, &target.tab_id, prior_egress,
+            ).await.map_err(|error| driver_err(&request_id, error))?;
+            return Err(changed());
+        }
+        (target.tab_id.clone(), tabs, Some(BorrowedTab { origin, prior_egress }), opened_by)
+    } else {
+        // A separately opened agent tab does not replace the person's active tab.
+        let tab = state.agent_driver.open_tab(
+            &entry.session,
+            OpenTabOptions { url: body.start_url.clone(), activate: false, egress_policy: Some(egress) },
+        ).await.map_err(|error| driver_err(&request_id, error))?;
+        let tabs = state.agent_driver.list_tabs(&entry.session).await
+            .map_err(|error| driver_err(&request_id, error))?;
+        sync_ledger_with_driver(&handle.live, &tabs);
+        handle.live.tabs().open_agent_tab(&tab.tab_id, &attach_id);
+        (tab.tab_id, tabs, None, "agent")
+    };
+    let attached_existing_tab = borrowed.is_some();
     let started = unix_ms_now();
     handle
         .live
@@ -271,7 +398,9 @@ pub async fn attach_run(
             grant_id: body.grant_id.clone(),
             delegate_actor: claims.actor_id().to_owned(),
             tab_id: tab_id.clone(),
+            borrowed,
             allowed_domains: allowed_domains.clone(),
+            policy_ask: body.policy.clone(),
             budget: AttachBudget::new(max_steps, max_runtime_s),
             lane: LaneRef::new(LaneState::default()),
             phase: BrowserAttachState::Attached,
@@ -286,17 +415,7 @@ pub async fn attach_run(
         })?;
     let agent = derive_initiator_ref(&claims, None, &AdvisoryAgent::default()).agent;
     let control_epoch = handle.live.snapshot().epoch;
-    remember_tab_opener(
-        &mut entry,
-        &tab_id,
-        TabOrigin {
-            initiated_by: StepInitiator::Agent,
-            agent: agent.clone(),
-            unattributed: false,
-        },
-        &tabs,
-    );
-    record_browser_timeline_event(
+    if let Err(error) = record_browser_timeline_event(
         &state,
         &entry,
         &handle.live,
@@ -305,24 +424,41 @@ pub async fn attach_run(
             attach_id: attach_id.clone(),
             tab_id: Some(tab_id.clone()),
         },
-    )
-    .await
-    .map_err(|error| driver_err(&request_id, error))?;
-    record_browser_timeline_event(
-        &state,
-        &entry,
-        &handle.live,
-        BrowserTimelineEventKind::Tab {
-            operation: BrowserTabOperation::Opened,
-            tab_id: Some(tab_id.clone()),
-            active_tab_id: active_browser_tab_id(&tabs),
-            initiated_by: Some(StepInitiator::Agent),
-            agent,
-            control_epoch,
-        },
-    )
-    .await
-    .map_err(|error| driver_err(&request_id, error))?;
+    ).await {
+        // Do not leave the owner's tab borrowed if the attachment cannot be started.
+        let ended = handle.live.attaches().end(&attach_id, BrowserAttachState::Aborted);
+        if let Some(ended) = ended {
+            finish_attach(&state, &handle, &mut entry, ended, BrowserAttachState::Aborted).await;
+        }
+        return Err(driver_err(&request_id, error));
+    }
+    if !attached_existing_tab {
+        remember_tab_opener(
+            &mut entry,
+            &tab_id,
+            TabOrigin {
+                initiated_by: StepInitiator::Agent,
+                agent: agent.clone(),
+                unattributed: false,
+            },
+            &tabs,
+        );
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            &handle.live,
+            BrowserTimelineEventKind::Tab {
+                operation: BrowserTabOperation::Opened,
+                tab_id: Some(tab_id.clone()),
+                active_tab_id: active_browser_tab_id(&tabs),
+                initiated_by: Some(StepInitiator::Agent),
+                agent,
+                control_epoch,
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
+    }
     state
         .event_sink
         .emit_for_zdr(
@@ -341,15 +477,61 @@ pub async fn attach_run(
             tab_id,
             tab_epoch,
             control_epoch,
-            opened_by: "agent",
+            opened_by,
             holder: "agent",
             allowed_domains,
+            policy_applied: body.policy.is_some(),
+            attached_existing_tab,
         },
     )))
 }
 
+/// The delegate can nominate only its own attached tab for handoff on successful release.
+#[derive(Debug, Deserialize)]
+pub struct MarkTabBody {
+    pub grant_id: String,
+    pub mark: String,
+}
+
+pub async fn mark_tab(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path((run_id, tab_id)): Path<(String, String)>,
+    Json(body): Json<MarkTabBody>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiErr> {
+    let request_id = crate::request_id::current();
+    let not_found = || status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found");
+    if !matches!(body.mark.as_str(), "deliverable" | "handoff") {
+        return Err(status_err(StatusCode::BAD_REQUEST, &request_id, "invalid tab mark"));
+    }
+    let handle = lookup_run(&state, &run_id).ok_or_else(not_found)?;
+    let _in_flight = handle.live.in_flight_guard();
+    // Match the delegate step's lane-before-entry lock order. This waits for any
+    // already admitted action before handing control to the person.
+    let lane = {
+        let entry = handle.entry.lock().await;
+        delegate_attach_of(&handle, &entry, &claims, Some(&body.grant_id))
+            .ok_or_else(not_found)?.lane
+    };
+    let _lane_guard = lane.0.lock().await;
+    let entry = handle.entry.lock().await;
+    if entry.closed || entry.zdr.is_active() { return Err(not_found()); }
+    let attach = delegate_attach_of(&handle, &entry, &claims, Some(&body.grant_id)).ok_or_else(not_found)?;
+    if attach.lane != lane { return Err(not_found()); }
+    if attach.tab_id != tab_id { return Err(not_found()); }
+    let parent_grant = entry.grant_id.as_deref().ok_or_else(not_found)?;
+    let grant = state.grant_validator.validate_for_org(&entry.org_id, &body.grant_id).await
+        .map_err(|error| driver_err(&request_id, error))?;
+    if attach_grant_refusal(&grant, &run_id, &entry.actor_id, parent_grant).is_some() {
+        return Err(driver_err(&request_id, QuarryError::new(ErrorCode::Forbidden, "attach_grant_invalid")));
+    }
+    handle.live.tabs().mark_for_handoff(&tab_id, &attach.attach_id).map_err(|_| not_found())?;
+    handle.live.touch();
+    Ok(Json(Envelope::ok(request_id, serde_json::json!({"tab_id": tab_id, "mark": body.mark}))))
+}
+
 /// `DELETE /v1/agent/runs/{run_id}/attach/{attach_id}`: the delegate ends its own
-/// attachment, or the owner stops it. The agent tab is closed; the grant is not revoked.
+/// attachment, or the owner stops it. A marked successful release hands the tab to the owner.
 pub async fn release_attach(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -362,6 +544,18 @@ pub async fn release_attach(
         return Err(not_found());
     };
     let _in_flight = handle.live.in_flight_guard();
+    let owner_lane = {
+        let entry = handle.entry.lock().await;
+        handle.live.attaches().live()
+            .filter(|live| live.attach_id == attach_id && live.borrowed.is_some())
+            .filter(|live| caller_owns_live_run(&entry, &claims)
+                || (claims.is_service() && entry.org_id == claims.org_id && live.delegate_actor == claims.actor_id()))
+            .map(|_| entry.human_lane.clone())
+    };
+    let _owner_guard = match &owner_lane {
+        Some(lane) => Some(lane.0.lock().await),
+        None => None,
+    };
     let mut entry = handle.entry.lock().await;
     let owner = caller_owns_live_run(&entry, &claims);
     let delegate = claims.is_service()
@@ -386,6 +580,20 @@ pub async fn release_attach(
             ))
         }
     };
+    // A mark is only a request, not a durable permission. Recheck the grant at
+    // release so revocation, expiry or an unavailable broker closes the tab.
+    if phase == BrowserAttachState::Released {
+        let attach = handle.live.attaches().live().cloned();
+        if let Some(attach) = attach.filter(|attach| attach.attach_id == attach_id) {
+            if handle.live.tabs().is_marked_for_handoff(&attach.tab_id, &attach.attach_id) {
+                let valid = if let Some(parent) = entry.grant_id.as_deref() {
+                    state.grant_validator.validate_for_org(&entry.org_id, &attach.grant_id).await
+                        .ok().is_some_and(|grant| attach_grant_refusal(&grant, &run_id, &entry.actor_id, parent).is_none())
+                } else { false };
+                if !valid { handle.live.tabs().clear_handoff(&attach.tab_id); }
+            }
+        }
+    }
     let ended = handle
         .live
         .attaches()
@@ -404,8 +612,8 @@ pub async fn release_attach(
     )))
 }
 
-/// The common end of an attachment: the agent tab is closed (its ids leave the ledger),
-/// and the timeline and the event record the end. Called with the run's lock held.
+/// End an attachment with the run lock held. An owner's borrowed tab is always
+/// returned. An agent-created tab survives only a successfully marked release.
 async fn finish_attach(
     state: &AppState,
     handle: &RunHandle,
@@ -413,11 +621,21 @@ async fn finish_attach(
     ended: AttachState,
     phase: BrowserAttachState,
 ) {
-    if let Err(error) = state.agent_driver.close_tab(&entry.session, &ended.tab_id).await {
-        // zdr-log-ok: the tab id is an opaque browser id; the driver error text is masked by the caller's driver path
-        tracing::warn!(%error, "could not close the agent tab of an ended attachment");
+    if let Some(borrowed) = ended.borrowed {
+        if let Err(error) = state.agent_driver.swap_tab_egress_policy(
+            &entry.session, &ended.tab_id, borrowed.prior_egress,
+        ).await {
+            tracing::warn!(%error, "could not restore the egress of a returned browser tab");
+        }
+        handle.live.tabs().return_borrowed_tab(&ended.tab_id, &ended.attach_id);
+    } else if !(phase == BrowserAttachState::Released
+        && handle.live.tabs().handoff_marked_tab(&ended.tab_id, &ended.attach_id)) {
+        if let Err(error) = state.agent_driver.close_tab(&entry.session, &ended.tab_id).await {
+            // zdr-log-ok: the tab id is opaque; the caller's driver path masks error text.
+            tracing::warn!(%error, "could not close the agent tab of an ended attachment");
+        }
+        handle.live.tabs().forget(&ended.tab_id);
     }
-    handle.live.tabs().forget(&ended.tab_id);
     if let Err(error) = record_browser_timeline_event(
         state,
         entry,
@@ -591,6 +809,10 @@ pub(super) fn delegate_attach_of(
     }
 }
 
+fn matches_borrowed_origin(raw: &str, tab: &BorrowedTab) -> bool {
+    Url::parse(raw).is_ok_and(|url| url.origin() == tab.origin)
+}
+
 pub(super) async fn delegate_step(
     state: &AppState,
     handle: &RunHandle,
@@ -604,12 +826,15 @@ pub(super) async fn delegate_step(
     // WS8.H: the delegate's lane is the attachment's own. It is taken before the entry, and
     // the entry is released while the browser runs, so a person's action on the other lane
     // does not wait for this step.
-    let lane_ref = {
+    let (lane_ref, owner_lane) = {
         let entry = handle.entry.lock().await;
-        match delegate_attach_of(handle, &entry, claims, body.grant_id.as_deref()) {
-            Some(attach) => attach.lane,
-            None => return Err(not_found()),
-        }
+        let attach = delegate_attach_of(handle, &entry, claims, body.grant_id.as_deref())
+            .ok_or_else(not_found)?;
+        (attach.lane, attach.borrowed.is_some().then(|| entry.human_lane.clone()))
+    };
+    let _owner_guard = match &owner_lane {
+        Some(lane) => Some(lane.0.lock().await),
+        None => None,
     };
     let mut lane = lane_ref.0.lock().await;
     let mut entry = handle.entry.lock().await;
@@ -693,6 +918,30 @@ pub(super) async fn delegate_step(
         ));
     }
 
+    // Meet the delegate's independently enforced ask with the ordinary run
+    // admission chain. Do this before admission reserves budget or receipts.
+    let attachment_policy = attach.policy_ask.as_ref()
+        .map(crate::agent_policy_gate::attachment_policy)
+        .transpose()
+        .map_err(|error| driver_err(request_id, error))?;
+    if let Some(policy) = &attachment_policy {
+        crate::agent_policy_gate::gate_attachment_action(policy, &body.action)
+            .map_err(|error| driver_err(request_id, error))?;
+    }
+
+    if let Some(borrowed) = &attach.borrowed {
+        let pinned = entry.session.pinned_to(&attach.tab_id);
+        let current = state.agent_driver.current_url(&pinned).await
+            .map_err(|error| driver_err(request_id, error))?;
+        if !current.as_deref().is_some_and(|raw| matches_borrowed_origin(raw, borrowed))
+            || matches!(&body.action, AgentAction::Navigate { url } if !matches_borrowed_origin(url, borrowed))
+        {
+            return Err(driver_err(request_id, QuarryError::new(
+                ErrorCode::SecurityBlocked, "browser_continue_origin_changed",
+            )));
+        }
+    }
+
     // The run-level chain (control, run grant, driver capabilities, policy, navigation
     // security). The initiator is the delegate, so it is an agent whatever it sends.
     let admitted = admit_action(
@@ -703,6 +952,7 @@ pub(super) async fn delegate_step(
             initiator: derive_initiator_ref(claims, body.initiated_by, &body.advisory_agent()),
             action: &body.action,
             enforce_takeover: crate::run_limits::takeover_enforced(),
+            consented_tab_control: attach.borrowed.is_some(),
             last_observation: lane.last_observation.as_deref(),
         },
     )
@@ -758,7 +1008,24 @@ pub(super) async fn delegate_step(
         live.last_activity_ms = unix_ms_now();
     }
     let egress_cursor = lane.ctx.last_egress_sequence;
+    lane.ctx.live_attach_id = Some(attach_id.clone());
+    let pointer_live = handle.live.clone();
+    let pointer_attach = attach_id.clone();
+    let pointer_tab = tab_id.clone();
+    lane.ctx.live_attach_valid = Some(Arc::new(move || {
+        let attached = {
+            let registry = pointer_live.attaches();
+            registry.live().is_some_and(|a| a.attach_id == pointer_attach && a.tab_id == pointer_tab)
+        };
+        let held = {
+            let tabs = pointer_live.tabs();
+            tabs.get(&pointer_tab).is_some_and(|tab| tab.holder == BrowserTabHolder::Agent && tab.attach_id.as_deref() == Some(pointer_attach.as_str()))
+        };
+        attached && held
+    }));
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
+    lane.ctx.live_attach_id = None;
+    lane.ctx.live_attach_valid = None;
     let mut entry = handle.entry.lock().await;
     // D2-031: the attachment may have been released, revoked or ended (or the run closed)
     // while the browser ran this step. Admission was checked before it ran; the lane's owner
@@ -800,6 +1067,9 @@ pub(super) async fn delegate_step(
     // attachment's hosts. An agent tab opened without a start URL is on `about:blank`.
     let ran = step_result.as_ref().ok().map(|observation| observation.telemetry.clone());
     let step_result = step_result.and_then(|observation| {
+        if attach.borrowed.as_ref().is_some_and(|borrowed| !matches_borrowed_origin(&observation.url, borrowed)) {
+            return Err(QuarryError::new(ErrorCode::SecurityBlocked, "browser_continue_origin_changed"));
+        }
         super::step::check_landed_page(
             state,
             &handle.live,
@@ -808,6 +1078,11 @@ pub(super) async fn delegate_step(
             |url| domain_allowed(url, &attach.allowed_domains),
             "browser action reached a domain outside the attachment's allowed domains",
         )?;
+        if observation.url != "about:blank" {
+            if let Some(policy) = &attachment_policy {
+                crate::agent_policy_gate::gate_attachment_url(policy, &observation.url)?;
+            }
+        }
         Ok(observation)
     });
     let observation = match step_result {
@@ -1012,9 +1287,10 @@ mod delegate_lane_tests {
         }
         async fn configure_egress_policy(
             &self,
-            _session: &BrowserSession,
+            session: &BrowserSession,
             _policy: BrowserEgressPolicy,
         ) -> QuarryResult<()> {
+            assert!(session.tab_pin().is_none(), "a delegate step must preserve the owner's session egress");
             Ok(())
         }
         async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
@@ -1048,7 +1324,7 @@ mod delegate_lane_tests {
     }
 
     /// Validates the attach grant for the run id that is written into field 0 once the run exists.
-    struct AttachGrant(Arc<std::sync::Mutex<String>>);
+    struct AttachGrant(Arc<std::sync::Mutex<String>>, Arc<AtomicBool>);
 
     #[async_trait::async_trait]
     impl quarry_runtime::GrantValidator for AttachGrant {
@@ -1056,7 +1332,7 @@ mod delegate_lane_tests {
             // The run has no grant of its own in these tests, so the parent is the empty id.
             Ok(GrantValidation {
                 grant_id: grant_id.to_owned(),
-                active: true,
+                active: self.1.load(Ordering::SeqCst),
                 expires_at: None,
                 allowed_domains: vec!["example.com".to_owned()],
                 allowed_actions: Vec::new(),
@@ -1093,6 +1369,7 @@ mod delegate_lane_tests {
         handle: RunHandle,
         driver: Arc<DelegateDriver>,
         run_id: String,
+        grant_active: Arc<AtomicBool>,
     }
 
     /// A live run owned by `u1` in `org`, with one attachment (`att_1`, tab `tab_agent`) held by
@@ -1100,9 +1377,10 @@ mod delegate_lane_tests {
     async fn fixture(tab_ids: &[&str]) -> Fixture {
         let driver = DelegateDriver::new(tab_ids);
         let resource = Arc::new(std::sync::Mutex::new(String::new()));
+        let grant_active = Arc::new(AtomicBool::new(true));
         let mut state = crate::test_support::test_state_with_grants(
             crate::test_support::StubDriver::ok(),
-            Arc::new(AttachGrant(resource.clone())),
+            Arc::new(AttachGrant(resource.clone(), grant_active.clone())),
             false,
         );
         state.agent_driver = driver.clone();
@@ -1113,11 +1391,13 @@ mod delegate_lane_tests {
             .live
             .attaches()
             .begin(AttachState {
+                borrowed: None,
                 attach_id: "att_1".to_owned(),
                 grant_id: "grant_attach".to_owned(),
                 delegate_actor: "svc_execution_core".to_owned(),
                 tab_id: "tab_agent".to_owned(),
                 allowed_domains: vec!["example.com".to_owned()],
+            policy_ask: None,
                 budget: AttachBudget::new(5, 60),
                 lane: LaneRef::new(LaneState {
                     ctx: ObservationContext {
@@ -1136,7 +1416,7 @@ mod delegate_lane_tests {
             ledger.seed("tab_home", OpenedBy::Human);
             ledger.open_agent_tab("tab_agent", "att_1");
         }
-        Fixture { state, handle, driver, run_id }
+        Fixture { state, handle, driver, run_id, grant_active }
     }
 
     fn wait_step(grant: &str) -> StepBody {
@@ -1149,6 +1429,100 @@ mod delegate_lane_tests {
             extraction_profile: None,
             grant_id: Some(grant.to_owned()),
         }
+    }
+
+    #[tokio::test]
+    async fn marked_release_hands_only_the_delegates_tab_to_the_owner() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.entry.lock().await.grant_id = Some(String::new());
+        let body = || MarkTabBody { grant_id: "grant_attach".into(), mark: "deliverable".into() };
+        let bad_tab = mark_tab(State(f.state.clone()), Extension(service_claims()),
+            Path((f.run_id.clone(), "tab_home".into())), Json(body())).await;
+        assert_eq!(bad_tab.unwrap_err().0, StatusCode::NOT_FOUND);
+        let bad_grant = mark_tab(State(f.state.clone()), Extension(service_claims()),
+            Path((f.run_id.clone(), "tab_agent".into())),
+            Json(MarkTabBody { grant_id: "other".into(), mark: "handoff".into() })).await;
+        assert_eq!(bad_grant.unwrap_err().0, StatusCode::NOT_FOUND);
+        let other_user = crate::test_support::claims_for_org("org");
+        let untrusted = mark_tab(State(f.state.clone()), Extension(other_user),
+            Path((f.run_id.clone(), "tab_agent".into())), Json(body())).await;
+        assert_eq!(untrusted.unwrap_err().0, StatusCode::NOT_FOUND);
+        let _ = mark_tab(State(f.state.clone()), Extension(service_claims()),
+            Path((f.run_id.clone(), "tab_agent".into())), Json(body())).await.unwrap();
+        let _ = release_attach(State(f.state.clone()), Extension(service_claims()),
+            Path((f.run_id.clone(), "att_1".into())), Query(ReleaseQuery::default())).await.unwrap();
+        assert!(f.handle.live.attaches().live().is_none());
+        let tabs = f.handle.live.tabs();
+        assert_eq!(tabs.get("tab_agent").unwrap().holder, BrowserTabHolder::Human);
+        assert_eq!(tabs.get("tab_home").unwrap().holder, BrowserTabHolder::Human);
+    }
+
+    #[tokio::test]
+    async fn mark_waits_for_the_delegate_lane_and_prevents_further_steps() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.entry.lock().await.grant_id = Some(String::new());
+        let lane = f.handle.live.attaches().live().unwrap().lane.clone();
+        let in_flight = lane.0.lock().await;
+        let state = f.state.clone();
+        let run_id = f.run_id.clone();
+        let mut marking = tokio::spawn(async move {
+            mark_tab(State(state), Extension(service_claims()), Path((run_id, "tab_agent".into())),
+                Json(MarkTabBody { grant_id: "grant_attach".into(), mark: "handoff".into() })).await
+        });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut marking).await.is_err());
+        drop(in_flight);
+        let _ = marking.await.unwrap().unwrap();
+        let err = delegate_step(&f.state, &f.handle, &service_claims(), "after_mark", wait_step("grant_attach"))
+            .await.expect_err("no delegate step may run after the handoff starts");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(f.handle.live.tabs().get("tab_agent").unwrap().holder, BrowserTabHolder::Human);
+    }
+
+    #[tokio::test]
+    async fn owner_release_hands_off_but_revocation_before_release_closes() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.entry.lock().await.grant_id = Some(String::new());
+        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        let _ = release_attach(State(f.state.clone()), Extension(crate::test_support::claims_for_org("org")),
+            Path((f.run_id.clone(), "att_1".into())), Query(ReleaseQuery::default())).await.unwrap();
+        assert_eq!(f.handle.live.tabs().get("tab_agent").unwrap().holder, BrowserTabHolder::Human);
+
+        let revoked = fixture(&["tab_home", "tab_agent"]).await;
+        revoked.handle.entry.lock().await.grant_id = Some(String::new());
+        revoked.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        revoked.grant_active.store(false, Ordering::SeqCst);
+        let _ = release_attach(State(revoked.state.clone()), Extension(service_claims()),
+            Path((revoked.run_id.clone(), "att_1".into())), Query(ReleaseQuery::default())).await.unwrap();
+        assert!(revoked.handle.live.tabs().get("tab_agent").is_none());
+    }
+
+    #[tokio::test]
+    async fn abort_discards_even_a_marked_tab() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        let _ = release_attach(State(f.state.clone()), Extension(service_claims()),
+            Path((f.run_id.clone(), "att_1".into())),
+            Query(ReleaseQuery { disposition: Some("abort".into()) })).await.unwrap();
+        assert!(f.handle.live.tabs().get("tab_agent").is_none());
+    }
+
+    #[tokio::test]
+    async fn attached_policy_refuses_disabled_action_before_dispatch_or_receipt() {
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        f.handle.live.attaches().live_mut().unwrap().policy_ask = Some(
+            quarry_core::web_policy::RequestAsk {
+                disable: vec!["browser.act.interact".to_owned()],
+                ..Default::default()
+            }
+        );
+        let mut request = wait_step("grant_attach");
+        request.action = AgentAction::Click { selector: "button".to_owned() };
+        let (status, _) = delegate_step(&f.state, &f.handle, &service_claims(), "req_policy", request)
+            .await.expect_err("the delegate policy must refuse the click");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let rid: RunKind = f.run_id.parse().unwrap();
+        assert!(f.state.receipts.list(&rid).await.unwrap().is_empty());
+        assert_eq!(f.handle.live.attaches().live().unwrap().budget.steps_used, 0);
     }
 
     /// D2-031: the attachment is released while the browser is running the delegate's step.

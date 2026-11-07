@@ -257,6 +257,22 @@
       "treatment": "inert"
     },
     {
+      "basis": "browser_redirect::probe uses credentialless pinned transport and touches no cache, artifact store, index or event sink",
+      "detail": {
+        "reason": "checks one public HTTP response header for a redirect and stores nothing"
+      },
+      "enforced_by": [],
+      "id": "browser_redirect_probe",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/browser/redirect-hop"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
       "basis": "audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio",
       "detail": null,
       "enforced_by": [

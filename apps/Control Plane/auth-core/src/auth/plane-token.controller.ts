@@ -65,6 +65,7 @@ import {
 } from './convex-token.service';
 import {
   assertServiceOrganizationBinding,
+  resolveFreshExecutionRetentionProof,
   resolveInteractiveRetentionPosture,
   resolveTenantServiceRetentionPosture,
 } from './interactive-retention-policy';
@@ -262,6 +263,9 @@ export class PlaneTokenController {
     const retentionPosture = await resolveInteractiveRetentionPosture(
       sessionContext.orgId,
     );
+    const executionRetentionProof = audience === 'execution-core' && !retentionPosture.zdr
+      ? await resolveFreshExecutionRetentionProof(sessionContext.orgId)
+      : undefined;
 
     // WS7.I: the org web policy for `quarry` and `browser-broker` (undefined
     // for every other audience). With WEB_POLICY_CLAIM_ENABLED off it is
@@ -276,6 +280,7 @@ export class PlaneTokenController {
       email: session.user.email ?? undefined,
       scopes,
       retentionPosture,
+      executionRetentionProof,
       webPolicy,
     });
 

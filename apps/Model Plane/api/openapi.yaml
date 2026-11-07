@@ -38,6 +38,8 @@ tags:
     description: Server-Sent Event streams
   - name: browser
     description: Browser grants issued by BrowserBroker
+  - name: threads
+    description: Thread export
 
 paths:
   # ===========================================================================
@@ -661,6 +663,78 @@ paths:
           description: No such run for this caller
         "501":
           description: "`trace_unavailable`: Session Core does not serve the run trace"
+
+  # ===========================================================================
+  # Thread export (Wave 3 EP-12 S10), dark behind MODEL_GATEWAY_THREAD_EXPORT
+  # ===========================================================================
+  /v1/threads/{thread_id}/export:
+    get:
+      operationId: getThreadExport
+      tags: [threads]
+      summary: The owner's whole-conversation export of one thread
+      description: >-
+        Reads one bounded copy of a thread the caller owns: the turns of its active branch, the
+        text of their artifacts and a summary of each run. `format=json` answers the
+        `verevon.thread-export.v1` document and `format=markdown` a readable copy. The `redacted`
+        profile drops tool arguments and results, connector payloads, citation snippets, URL query
+        strings and attachment names, and is the input of the replay view. Session Core refuses a
+        thread that holds a run kept outside retention, or that belongs to a Space, with 412
+        `thread_not_exportable` and `details.reason`. A zero-retention caller is refused with 412
+        `zdr_feature_not_supported` before any read. The answer is an attachment and is never
+        cached. A key principal is refused by the route policy.
+      parameters:
+        - $ref: "#/components/parameters/ThreadId"
+        - name: format
+          in: query
+          required: true
+          description: The rendering to return.
+          schema:
+            type: string
+            enum: [json, markdown]
+        - name: profile
+          in: query
+          required: true
+          description: Which copy of the thread to return. There is no default.
+          schema:
+            type: string
+            enum: [full, redacted]
+      responses:
+        "200":
+          description: The export, as an attachment
+          headers:
+            Content-Disposition:
+              description: >-
+                An attachment named `verevon-thread-<id>.json` or `verevon-thread-<id>.md`.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                description: The `verevon.thread-export.v1` document.
+            text/markdown:
+              schema:
+                type: string
+        "400":
+          description: >-
+            `invalid_request`: a missing or unknown `format` or `profile` (`details.parameter` and
+            `details.allowed` name it), or a request Session Core refuses as invalid.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The route policy refuses the principal (a key principal, or a service).
+        "404":
+          description: >-
+            `thread_export_disabled` while the switch is off, or `thread_not_found` for a thread
+            the caller does not own.
+        "412":
+          description: >-
+            `thread_not_exportable` (`details.reason` is `non_persistent_run` or `space_thread`),
+            or `zdr_feature_not_supported` with `feature` `conversation_export`.
+        "502":
+          description: "`thread_export_failed`: the copy could not be rendered, so nothing is sent."
+        "503":
+          description: "`thread_export_unavailable`: Session Core cannot read the thread now; retry."
 
   # ===========================================================================
   # Browser key grants (INNH-10 MP-3), dark behind MODEL_GATEWAY_BROWSER_KEY_GRANTS
@@ -1873,6 +1947,7 @@ components:
             - hook_ask
             - browser_action_risk
             - auto_posture_provider_write
+            - browser_human_assist
             - unclassified_gate
         tool:
           type: string

@@ -15,6 +15,12 @@
           ],
           "presence": "always"
         },
+        "editor": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
         "id": {
           "types": [
             "string"
@@ -26,6 +32,12 @@
             "string"
           ],
           "presence": "always"
+        },
+        "provenance": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
         },
         "title": {
           "types": [
@@ -115,6 +127,12 @@
           ],
           "presence": "always"
         },
+        "locator": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "number": {
           "types": [
             "integer"
@@ -126,6 +144,12 @@
             "string"
           ],
           "presence": "always"
+        },
+        "quote": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
         },
         "snippet": {
           "types": [
@@ -202,6 +226,38 @@
           "presence": "always"
         },
         "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "connector_suggestion": {
+      "family": null,
+      "variants": [
+        "ConnectorSuggestion"
+      ],
+      "keys": {
+        "provider": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "suggestion_id": {
           "types": [
             "string"
           ],
@@ -338,6 +394,82 @@
         "suggestions": {
           "types": [
             "array"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "goal_progress": {
+      "family": null,
+      "variants": [
+        "GoalProgress"
+      ],
+      "keys": {
+        "cost_budget_usd_micros": {
+          "types": [
+            "integer",
+            "null"
+          ],
+          "presence": "always"
+        },
+        "cost_used_usd_micros": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "goal_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "max_turns": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status_reason": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "token_budget": {
+          "types": [
+            "integer",
+            "null"
+          ],
+          "presence": "always"
+        },
+        "tokens_used": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "turn_no": {
+          "types": [
+            "integer"
+          ],
+          "presence": "always"
+        },
+        "turns_used": {
+          "types": [
+            "integer"
           ],
           "presence": "always"
         }
@@ -528,6 +660,38 @@
         }
       }
     },
+    "research_plan": {
+      "family": null,
+      "variants": [
+        "ResearchPlan"
+      ],
+      "keys": {
+        "caps": {
+          "types": [
+            "object"
+          ],
+          "presence": "always"
+        },
+        "questions": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "sub_queries": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "result_receipt": {
       "family": "usage",
       "variants": [
@@ -688,6 +852,32 @@
           "presence": "always"
         },
         "state": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
+    "search_provenance": {
+      "family": "citations",
+      "variants": [
+        "SearchProvenance"
+      ],
+      "keys": {
+        "providers": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "route": {
           "types": [
             "string"
           ],
@@ -1149,6 +1339,18 @@
             "array"
           ],
           "presence": "always"
+        },
+        "origin": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "origin_label": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
         },
         "question_id": {
           "types": [

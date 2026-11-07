@@ -761,6 +761,11 @@ pub(crate) mod tests {
                 "posture equality between an api key's ingress and broker bearers, not a decision",
             ),
             (
+                "auth.rs",
+                "verify_delegated_api_key_session_bearer",
+                "posture equality between an api key's ingress and session bearers, not a decision",
+            ),
+            (
                 "grpc_auth.rs",
                 "verify_delegated_bearer",
                 "posture equality across the user bearers of one gRPC request, not a decision",
@@ -904,6 +909,9 @@ pub(crate) mod tests {
             ("space_routes/runs.rs", "room_run_stop"),
             // A member's approval decision keeps its free-text reason (WS10-S6).
             ("space_routes/approvals.rs", "decide_space_approval"),
+            // A thread goal is user content in a durable store (EP-7 S1).
+            ("thread_goal_routes.rs", "set_thread_goal"),
+            ("thread_goal_routes.rs", "update_thread_goal"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {
@@ -1019,9 +1027,19 @@ pub(crate) mod tests {
                 "synthesize_report",
                 "refused on a waived turn at the stream entry",
             ),
+            (
+                "deep_research.rs",
+                "ledger_inference",
+                "refused on a waived turn at the stream entry; copies the turn's zdr and privacy floor",
+            ),
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),
+            (
+                "agent_api_run.rs",
+                "run_ask_turn",
+                "persistent only: a ZDR key is refused in admit before any call (EP-12 D6)",
+            ),
             // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
             // the gRPC method through `zdr_for` on the request's route, the chat tool with the
             // turn's own `zdr`; the call carries it on the request and on the page scrape.

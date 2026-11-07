@@ -22,6 +22,7 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
     updateCronSchedule: vi.fn(),
     deleteCronSchedule: vi.fn(),
     listScheduleFires: vi.fn(),
+    runScheduleNow: vi.fn(),
   }
 })
 
@@ -30,16 +31,18 @@ import {
   deleteCronSchedule,
   listCronSchedules,
   listScheduleFires,
+  runScheduleNow,
   updateCronSchedule,
   type CronSchedule,
-  type CronScheduleFire,
 } from '@/shared/api/cron-client'
 import { AutomationsHub } from './AutomationsHub'
+import { AutomationsList } from './AutomationsList'
 
 const mockedList = vi.mocked(listCronSchedules)
 const mockedFires = vi.mocked(listScheduleFires)
 const mockedUpdate = vi.mocked(updateCronSchedule)
 const mockedDelete = vi.mocked(deleteCronSchedule)
+const mockedRun = vi.mocked(runScheduleNow)
 
 function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   return {
@@ -66,10 +69,6 @@ function approvalTemplate(expiresAt: string) {
   }
 }
 
-function fire(outcome: string): CronScheduleFire {
-  return { id: 'fire_1', fired_at: '2026-11-02T07:00:00Z', status: 'paused', outcome, withheld_effects: 0 }
-}
-
 const ACTIVE = schedule({
   id: 'cron_active',
   name: 'Daglig rapport',
@@ -85,7 +84,7 @@ const EXPIRED = schedule({
 const ANOTHERS = schedule({ id: 'cron_other', name: 'Andres plan', creator_subject_id: 'user-2' })
 
 beforeEach(() => {
-  // A paused row asks for its last fire once it is on screen; a test that does not care about the reason gets none.
+  // The results read is answered empty unless a test opens a schedule's results.
   mockedFires.mockResolvedValue([])
 })
 
@@ -221,16 +220,14 @@ describe('AutomationsHub', () => {
     expect(await screen.findByText('Ingen kjøringer ennå.')).toBeTruthy()
   })
 
-  it('reads the reason a schedule is paused from its last fire, once, and names it', async () => {
-    mockedList.mockResolvedValue({ schedules: [PAUSED] })
-    mockedFires.mockResolvedValue([fire('paused_failures')])
+  it('names a pause from the last outcome its row carries, without reading its fires', async () => {
+    mockedList.mockResolvedValue({ schedules: [{ ...PAUSED, last_outcome: 'paused_failures' }] })
 
     render(() => <AutomationsHub />)
     fireEvent.click(await screen.findByRole('button', { name: 'Pausede (1)' }))
 
     expect(await screen.findByText('Pauset etter feil')).toBeTruthy()
-    expect(mockedFires).toHaveBeenCalledTimes(1)
-    expect(mockedFires).toHaveBeenCalledWith('org-1', 'cron_paused', 1)
+    expect(mockedFires).not.toHaveBeenCalled()
   })
 
   it('shows the scheduled-runs refusal when the list is refused under zero retention', async () => {
@@ -286,5 +283,139 @@ describe('AutomationsHub', () => {
     expect(filterIndex).toBeGreaterThanOrEqual(0)
     expect(filterIndex).toBeLessThan(pauseIndex)
     expect(pauseIndex).toBeLessThan(deleteIndex)
+  })
+})
+
+describe('AutomationsHub Run now (EP-6-S3)', () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const RUN_NOW = 'Kjør nå Daglig rapport'
+  const STARTED = { fire_id: 'fire_1', fire_key: 'manual:x', task_id: 'task_1', status: 'pending', deduplicated: false }
+
+  // Each press makes a request id the test can tell apart from the one before it.
+  let issued = 0
+  beforeEach(() => {
+    issued = 0
+    vi.stubGlobal('crypto', { randomUUID: () => `00000000-0000-4000-8000-${String(++issued).padStart(12, '0')}` })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('is not offered while the server reports the feature off', async () => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: false } })
+
+    render(() => <AutomationsHub />)
+
+    expect(await screen.findByText('Daglig rapport')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: RUN_NOW })).toBeNull()
+  })
+
+  it('is offered on the creator’s live schedules, and never on one whose approval has lapsed', async () => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE, EXPIRED], features: { run_now: true } })
+
+    render(() => <AutomationsHub />)
+    expect(await screen.findByRole('button', { name: RUN_NOW })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Utløpte (1)' }))
+    expect(await screen.findByRole('button', { name: 'Forny godkjenning Gammel plan' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Kjør nå Gammel plan' })).toBeNull()
+  })
+
+  it('is never offered for a schedule someone else created', async () => {
+    mockedList.mockResolvedValue({ schedules: [ANOTHERS], features: { run_now: true } })
+
+    render(() => <AutomationsHub />)
+
+    expect(await screen.findByText(/Ingen automatiseringer ennå/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Kjør nå Andres plan' })).toBeNull()
+  })
+
+  it('is a hub control only, so the Settings list never offers it', async () => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+
+    render(() => <AutomationsList scope="org" />)
+
+    expect(await screen.findByText('Daglig rapport')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: RUN_NOW })).toBeNull()
+  })
+
+  it('reuses the request id when a press is retried after its answer was lost', async () => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+    mockedRun.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValueOnce(STARTED)
+
+    render(() => <AutomationsHub />)
+    fireEvent.click(await screen.findByRole('button', { name: RUN_NOW }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: RUN_NOW }))
+    await waitFor(() => expect(mockedRun).toHaveBeenCalledTimes(2))
+
+    const [first, second] = mockedRun.mock.calls.map((call) => call[2])
+    expect(first).toMatch(UUID)
+    expect(second).toBe(first)
+    expect(mockedRun).toHaveBeenNthCalledWith(2, 'org-1', 'cron_active', first)
+  })
+
+  it('makes a new request id after a refusal, and again after the fire started', async () => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+    mockedRun
+      .mockRejectedValueOnce(new ApiError('refused', 409, 'run_now_in_flight'))
+      .mockResolvedValueOnce(STARTED)
+      .mockResolvedValueOnce(STARTED)
+
+    render(() => <AutomationsHub />)
+    fireEvent.click(await screen.findByRole('button', { name: RUN_NOW }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: RUN_NOW }))
+    await screen.findByText('Kjøringen er startet.')
+    fireEvent.click(screen.getByRole('button', { name: RUN_NOW }))
+    await waitFor(() => expect(mockedRun).toHaveBeenCalledTimes(3))
+
+    const [refused, started, next] = mockedRun.mock.calls.map((call) => call[2])
+    expect(refused).toMatch(UUID)
+    expect(started).not.toBe(refused)
+    expect(next).not.toBe(started)
+  })
+
+  it.each([
+    ['run_now_in_flight', 409, 'Planen kjører allerede. Vent til kjøringen er ferdig, og prøv igjen.'],
+    ['run_now_rate_limited', 429, 'Planen har kjørt for mange ganger den siste timen. Prøv igjen senere.'],
+    ['approval_expired', 409, 'Godkjenningen er utløpt, så planen kan ikke kjøres nå. Forny godkjenningen først.'],
+    ['fire_not_authorized', 403, 'Kjøringen ble ikke godkjent, så planen kjørte ikke. Sjekk planen og godkjenningen.'],
+  ])('says what a refused Run now means for %s, in words the person can act on', async (code, status, sentence) => {
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+    mockedRun.mockRejectedValueOnce(new ApiError('refused', status, code))
+
+    render(() => <AutomationsHub />)
+    fireEvent.click(await screen.findByRole('button', { name: RUN_NOW }))
+
+    expect(await screen.findByText(sentence)).toBeTruthy()
+    expect(screen.queryByText('Kjøringen er startet.')).toBeNull()
+  })
+
+  it('reads the open results again after a Run now, so the new fire shows first', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+    mockedRun.mockResolvedValue(STARTED)
+    mockedFires.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: 'fire_m',
+        fired_at: '2026-11-04T08:00:00Z',
+        status: 'pending',
+        outcome: null,
+        run_id: null,
+        thread_id: null,
+        withheld_effects: 0,
+        fire_key: 'manual:6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10',
+      },
+    ])
+
+    render(() => <AutomationsHub />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Se resultater' }))
+    expect(await screen.findByText('Ingen kjøringer ennå.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: RUN_NOW }))
+
+    expect(await screen.findByText('Manuell')).toBeTruthy()
+    expect(mockedFires).toHaveBeenCalledTimes(2)
   })
 })

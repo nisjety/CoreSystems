@@ -133,6 +133,25 @@ type dueSchedule struct {
 	nextFire       *time.Time
 }
 
+// DueSchedule is the part of a schedule a fire is made from. The sweeper and Run now
+// (EP-6-S2) both hand it to InsertFire, so a manual fire writes the same task and fire
+// rows a cron slot does.
+type DueSchedule struct {
+	ID             string
+	OrgID          string
+	SpaceRef       string
+	SubjectID      string
+	TemplateDigest string
+	Template       json.RawMessage
+}
+
+func (d dueSchedule) fireView() DueSchedule {
+	return DueSchedule{
+		ID: d.id, OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
+		TemplateDigest: d.templateDigest, Template: d.template,
+	}
+}
+
 // RunOnce scans due schedules and fires each exactly once. It returns the number
 // of schedules whose task fired and committed. Schedules being initialized for the
 // first time, or whose expression is invalid, do not count, and neither does a
@@ -379,6 +398,18 @@ func taskConfigJSON(template []byte, intent *FireIntent) []byte {
 // caller rolls the fire's savepoint back, so a failed fire leaves no task or pending
 // row behind.
 func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time) error {
+	// The fire key is the schedule's slot. Session Core matches a scheduled run
+	// back to this fire through it (build plan WS20 S1).
+	_, _, err := InsertFire(ctx, tx, d.fireView(), d.nextFire.UTC().Format(time.RFC3339Nano), now)
+	return err
+}
+
+// InsertFire creates a task from the schedule's template and records a pending
+// cron_fires row under fireKey. The task carries the non-secret fire intent, so the
+// workflow dispatcher asks Control again before the Temporal handoff whatever made the
+// fire. It stops at the first failed statement and returns that error, because
+// Postgres rejects every later statement on the aborted transaction.
+func InsertFire(ctx context.Context, tx pgx.Tx, d DueSchedule, fireKey string, now time.Time) (fireID, taskID string, err error) {
 	var tpl struct {
 		Kind        string `json:"kind"`
 		Title       string `json:"title"`
@@ -386,35 +417,34 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
 		Assignee    string `json:"assignee"`
 		Priority    int    `json:"priority"`
 	}
-	_ = json.Unmarshal(d.template, &tpl)
+	_ = json.Unmarshal(d.Template, &tpl)
 	if tpl.Kind == "" {
 		tpl.Kind = "cron"
 	}
 	if tpl.Title == "" {
 		tpl.Title = "Scheduled task"
 	}
-	taskID := "task_" + uuid.New().String()
-	fireID := "cronfire_" + uuid.New().String()
-	// The fire key is the schedule's slot. Session Core matches a scheduled run
-	// back to this fire through it (build plan WS20 S1).
-	fireKey := d.nextFire.UTC().Format(time.RFC3339Nano)
+	taskID = "task_" + uuid.New().String()
+	fireID = "cronfire_" + uuid.New().String()
 	_, terr := tx.Exec(ctx, `
 		INSERT INTO tasks (id, org_id, kind, title, description, assignee, status,
 		    priority, config_json, scheduled_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)
-	`, taskID, d.orgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
-		taskConfigJSON(d.template, &FireIntent{
-			OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
-			ScheduleID: d.id, FireKey: d.nextFire.UTC().Format(time.RFC3339Nano),
-			TemplateDigest: d.templateDigest, IdempotencyKey: d.id + ":" + d.nextFire.UTC().Format(time.RFC3339Nano),
+	`, taskID, d.OrgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
+		taskConfigJSON(d.Template, &FireIntent{
+			OrgID: d.OrgID, SpaceRef: d.SpaceRef, SubjectID: d.SubjectID,
+			ScheduleID: d.ID, FireKey: fireKey,
+			TemplateDigest: d.TemplateDigest, IdempotencyKey: d.ID + ":" + fireKey,
 		}), now)
 	if terr != nil {
-		return terr
+		return "", "", terr
 	}
-	_, err := tx.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)`,
-		fireID, d.id, taskID, now, fireKey)
-	return err
+		fireID, d.ID, taskID, now, fireKey); err != nil {
+		return "", "", err
+	}
+	return fireID, taskID, nil
 }
 
 // pauseNotice is one guard pause, noticed once its batch has committed.

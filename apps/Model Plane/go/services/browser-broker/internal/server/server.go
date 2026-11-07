@@ -44,6 +44,9 @@ type Options struct {
 	// mint (WS21-S4). Off makes no call.
 	SitePolicy   sitepolicy.Mode
 	SiteResolver sitepolicy.Resolver
+	// AssistantTaskGrantsEnabled lets a submitted task use the default ask
+	// decision within the organisation's act ceiling, for one exact host.
+	AssistantTaskGrantsEnabled bool
 	// MaxRequestTTL caps a caller's requested grant lifetime
 	// (BROWSER_GRANT_MAX_TTL).
 	MaxRequestTTL time.Duration
@@ -107,8 +110,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if principal.PrincipalType == authz.PrincipalAPIKey {
 		return s.acquireKeyGrant(ctx, req, scopeURL, principal)
 	}
-	// grant_kind (WS8.C): "" is the ordinary path below; human_browse is a
-	// different grant with its own rules; anything else is refused.
+	// An empty kind uses the ordinary session or sensitive-approval path.
 	if req.GetGrantKind() != grantKindOriginExtension &&
 		(req.GetConsentScope() != "" || len(req.GetConsentDeniedDomains()) != 0) {
 		// A consent field on any other grant would be ignored silently; refuse it.
@@ -116,6 +118,11 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	switch req.GetGrantKind() {
 	case "":
+	case grantKindAssistantTask:
+		if err := s.validateAssistantTaskGrant(req, principal, scopeURL); err != nil {
+			return nil, err
+		}
+		scopeURL = grant.AssistantTaskScopeURL
 	case grantKindOriginExtension:
 		return s.acquireOriginExtension(ctx, req, scopeURL, principal)
 	case grantKindHumanBrowse:
@@ -126,7 +133,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		}
 		return s.acquireHumanBrowse(ctx, req, scopeURL, principal)
 	default:
-		return nil, status.Error(codes.InvalidArgument, "grant_kind must be empty, human_browse or origin_extension")
+		return nil, status.Error(codes.InvalidArgument, "unsupported browser grant kind")
 	}
 	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
 	if err != nil {
@@ -179,7 +186,12 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		if ttlErr != nil {
 			return nil, ttlErr
 		}
-		allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+		if scopeURL == grant.AssistantTaskScopeURL {
+			ttl = min(ttl, assistantTaskGrantTTL)
+			err = s.checkAssistantTaskSitePolicy(ctx, principal, allowedDomains)
+		} else {
+			allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+		}
 		if err != nil {
 			return nil, err
 		}

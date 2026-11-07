@@ -56,13 +56,16 @@ pub enum CauseCode {
     BrowserActionRisk,
     /// A provider write the chat posture approved on the person's behalf.
     AutoPostureProviderWrite,
+    /// The person holds the run's browser, or the agent asked them for help in it (EP-1). The
+    /// approval is the hand-back: consuming it lets the held browser call run again.
+    BrowserHumanAssist,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -72,6 +75,7 @@ impl CauseCode {
         Self::HookAsk,
         Self::BrowserActionRisk,
         Self::AutoPostureProviderWrite,
+        Self::BrowserHumanAssist,
         Self::UnclassifiedGate,
     ];
 
@@ -88,6 +92,7 @@ impl CauseCode {
             Self::HookAsk => "hook_ask",
             Self::BrowserActionRisk => "browser_action_risk",
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
+            Self::BrowserHumanAssist => "browser_human_assist",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -362,8 +367,62 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
     if !is_sha256_hex(&cause.tool_digest) {
         cause.tool_digest.clear();
     }
+    keep_browser_assist_facts(&mut cause, code);
     cause.scope_options = eligible_scopes(&cause);
     (cause, known)
+}
+
+/// `assist_kind` of a pause raised because the person took the browser (EP-1).
+pub const ASSIST_KIND_USER_TAKEOVER: &str = "user_takeover";
+/// Every `assist_kind` a `browser_human_assist` pause may state: the takeover, and the challenges
+/// the agent may ask help with (EP-1 D4).
+pub const ASSIST_KINDS: [&str; 5] =
+    [ASSIST_KIND_USER_TAKEOVER, "login", "captcha", "consent", "waf"];
+/// `assist_origin` of a pause the person started by taking the browser.
+pub const ASSIST_ORIGIN_PERSON: &str = "person";
+/// `assist_origin` of a pause the agent raised to ask for help.
+pub const ASSIST_ORIGIN_AGENT: &str = "agent";
+
+/// The cause of a pause on a browser call the person holds or was asked to help with (EP-1): the
+/// call's cause under `browser_human_assist`, with the closed kind and origin and the session's
+/// host. A word outside the closed sets is dropped, never stored.
+#[must_use]
+pub fn for_browser_assist(
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    assist_kind: &str,
+    assist_origin: &str,
+    host: &str,
+) -> ApprovalCause {
+    let cause = ApprovalCause {
+        assist_kind: assist_kind.to_owned(),
+        assist_origin: assist_origin.to_owned(),
+        host: host.to_owned(),
+        ..for_call(CauseCode::BrowserHumanAssist, run_id, tool_name, tool_input)
+    };
+    normalized(cause).0
+}
+
+/// The browser-assist facts a cause may keep: only a `browser_human_assist` cause states them, only
+/// closed words for the kind and origin, and a bounded host. Any other cause keeps none, so a
+/// creator cannot attach a host to a pause whose card does not show one.
+fn keep_browser_assist_facts(cause: &mut ApprovalCause, code: CauseCode) {
+    if code != CauseCode::BrowserHumanAssist {
+        cause.assist_kind.clear();
+        cause.assist_origin.clear();
+        cause.host.clear();
+        return;
+    }
+    if !ASSIST_KINDS.contains(&cause.assist_kind.as_str()) {
+        cause.assist_kind.clear();
+    }
+    if ![ASSIST_ORIGIN_PERSON, ASSIST_ORIGIN_AGENT].contains(&cause.assist_origin.as_str()) {
+        cause.assist_origin.clear();
+    }
+    if cause.host.chars().count() > MAX_FIELD_CHARS {
+        cause.host = cause.host.chars().take(MAX_FIELD_CHARS).collect();
+    }
 }
 
 /// The stored shape, `approvals.metadata.cause`. Empty strings and an unset
@@ -380,6 +439,9 @@ pub fn to_metadata(cause: &ApprovalCause) -> Value {
         ("action_key", &cause.action_key),
         ("call_digest", &cause.call_digest),
         ("tool_digest", &cause.tool_digest),
+        ("assist_kind", &cause.assist_kind),
+        ("assist_origin", &cause.assist_origin),
+        ("host", &cause.host),
     ] {
         if !value.is_empty() {
             map.insert(key.to_owned(), Value::String(value.clone()));
@@ -430,6 +492,9 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
         tool_digest: text("tool_digest"),
         // Write-only (see the proto): a stored cause never carries it.
         host_class: String::new(),
+        assist_kind: text("assist_kind"),
+        assist_origin: text("assist_origin"),
+        host: text("host"),
     };
     Some(normalized(cause).0)
 }
@@ -963,5 +1028,62 @@ mod tests {
         for cause in &refused {
             assert!(!rule_offered(cause), "{cause:?}");
         }
+    }
+
+    #[test]
+    fn a_browser_assist_cause_is_once_and_keeps_its_closed_facts_through_the_stored_shape() {
+        let cause = for_browser_assist(
+            "run_1",
+            "browser.observe",
+            "{}",
+            ASSIST_KIND_USER_TAKEOVER,
+            ASSIST_ORIGIN_PERSON,
+            "example.com",
+        );
+        assert_eq!(cause.code, "browser_human_assist");
+        assert_eq!(scopes(&cause), ["once"]);
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("user_takeover", "person", "example.com")
+        );
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(from_metadata(&metadata), Some(cause));
+    }
+
+    #[test]
+    fn browser_assist_words_outside_the_closed_sets_are_dropped() {
+        let cause = for_browser_assist(
+            "run_1",
+            "browser.observe",
+            "{}",
+            "type your password here",
+            "page",
+            &"h".repeat(MAX_FIELD_CHARS + 10),
+        );
+        assert_eq!(cause.assist_kind, "");
+        assert_eq!(cause.assist_origin, "");
+        assert_eq!(cause.host.chars().count(), MAX_FIELD_CHARS);
+        for kind in ASSIST_KINDS {
+            let kept =
+                for_browser_assist("run_1", "browser.observe", "{}", kind, ASSIST_ORIGIN_AGENT, "");
+            assert_eq!(kept.assist_kind, kind);
+            assert_eq!(kept.assist_origin, "agent");
+        }
+    }
+
+    #[test]
+    fn only_a_browser_assist_cause_may_state_a_host_or_assist_facts() {
+        let (cause, known) = normalized(ApprovalCause {
+            code: "risky_effect_under_ask".to_owned(),
+            assist_kind: ASSIST_KIND_USER_TAKEOVER.to_owned(),
+            assist_origin: ASSIST_ORIGIN_PERSON.to_owned(),
+            host: "example.com".to_owned(),
+            ..ApprovalCause::default()
+        });
+        assert!(known);
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("", "", "")
+        );
     }
 }

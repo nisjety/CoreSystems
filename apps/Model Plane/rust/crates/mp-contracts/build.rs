@@ -67,6 +67,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/space_attention.proto",
         // EP-4 S4: McpElicitationService (gateway.proto imports it too).
         "model_plane/v1/mcp_elicitation.proto",
+        // EP-3 S2: ArtifactRevisionService (session-core's artifact revision store).
+        "model_plane/v1/artifact_revisions.proto",
+        // EP-7 S1: ThreadGoalService (session-core's thread goal store).
+        "model_plane/v1/thread_goals.proto",
+        // EP-11 S2: SkillVersionService (session-core's immutable skill versions).
+        "model_plane/v1/skill_versions.proto",
+        // EP-12 S9: ThreadExportService (session-core's owner-only thread export).
+        "model_plane/v1/thread_export.proto",
+        // EP-12 S14: ThreadShareService (session-core's owner-only share snapshots).
+        "model_plane/v1/thread_shares.proto",
     ];
 
     let dp_protos = &[
@@ -103,8 +113,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hit again 2026-09-07 adding ListRunsRequest.space_id + the Space read
     // decision fields: model-gateway rebuilt and session-core did not, so the
     // room Work listing would have compiled against a contract without the
-    // fields. Touching this comment is the fingerprint bust (last: EP-14 S5,
-    // run_ledger.proto's timing RPCs and RunAgentResponse.round_timing).
+    // fields. Touching this comment is the fingerprint bust (last: EP-7 S1,
+    // thread_goals.proto and RunContext.goal_recitation).
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }

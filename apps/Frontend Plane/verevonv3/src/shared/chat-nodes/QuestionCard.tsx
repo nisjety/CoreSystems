@@ -28,6 +28,7 @@ function minutesAndSeconds(ms: number): string {
  * The answer is not an approval: it goes out as the person's next message, and the run's next turn works
  * from it. Each item is answered once, with its choices or, where the item allows it, the person's own words.
  * Skipping sends nothing but the skip. The card asks for no credentials and says so.
+ * A question an MCP server sent names that server above the items and again where the answer goes (EP-4 S6).
  */
 export function QuestionCard(props: {
   question: ChatUserQuestionEvent
@@ -74,6 +75,9 @@ export function QuestionCard(props: {
   }
   const complete = () => props.question.items.every((item) => isAnswered(item, picked()[item.id]))
   const locked = () => props.pending === true || expired()
+  // The server that asked, when an MCP server did (EP-4 S6): the card names it, and the answer goes back to it.
+  // A model question names nobody, so this is empty and the card reads as it always has.
+  const server = () => (props.question.origin === 'mcp_elicitation' ? (props.question.originLabel ?? '') : '')
 
   const submit = () => {
     if (locked() || !complete()) return
@@ -99,6 +103,11 @@ export function QuestionCard(props: {
           'Answer with the choices shown. Do not enter passwords, codes or card numbers here.',
         )}
       </p>
+      <Show when={server()}>
+        <p class="verevon-question-card__origin">
+          {i18n.tr(`Spørsmål fra ${server()}`, `Question from ${server()}`)}
+        </p>
+      </Show>
       <For each={props.question.items}>
         {(item) => (
           <fieldset class="verevon-question-card__item">
@@ -149,6 +158,11 @@ export function QuestionCard(props: {
           </fieldset>
         )}
       </For>
+      <Show when={server()}>
+        <p class="verevon-question-card__notice">
+          {i18n.tr(`Svaret sendes til ${server()}`, `The answer goes to ${server()}`)}
+        </p>
+      </Show>
       <Show when={countdown() !== undefined}>
         <p class="verevon-question-card__countdown" role="timer">
           {i18n.tr(

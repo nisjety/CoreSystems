@@ -9,9 +9,10 @@ export type BrowserNavigationFailure = {
   /** The URL the person asked for. Only navigate actions produce one. */
   url: string
   /** A typed reason for the card. Never a raw message from the server. */
-  reason: 'invalid_url' | 'blocked' | 'outside_scope' | 'unreachable' | 'failed'
+  reason: 'invalid_url' | 'blocked' | 'outside_scope' | 'unreachable' | 'http_response' | 'failed'
   /** The user-facing sentence, already chosen by the caller's `tr` (no raw error text). */
   sentence: string
+  openOutsideUrl?: string
 }
 
 export type NavigationCopy = (noText: string, enText: string) => string
@@ -32,11 +33,46 @@ export function navigationFailureFromError(
   tr: NavigationCopy,
 ): BrowserNavigationFailure | null {
   if (action.type !== 'navigate') return null
+  if (
+    error instanceof ApiError
+    && error.code === 'DRIVER_FAILED'
+    && error.blockReason === null
+    && error.details?.reason === 'navigation_http_response'
+    && error.details.http_status !== 407
+  ) {
+    return navigationHttpResponseFailure(action.url, error.details.http_status, tr, error.details.redirect_count)
+  }
   return {
     url: action.url,
     reason: navigationReasonOf(error),
     sentence: describeBrowserError(error, tr, FALLBACK_COPY).message,
   }
+}
+
+/** Keeps a retained tab recoverable after the site returned an HTTP error. */
+export function navigationHttpResponseFailure(
+  url: string,
+  httpStatus: unknown,
+  tr: NavigationCopy,
+  redirectCount?: unknown,
+): BrowserNavigationFailure {
+  const hasStatus = typeof httpStatus === 'number'
+    && Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus <= 599 && httpStatus !== 407
+  const statusSentence = hasStatus
+    ? tr(`Nettstedet svarte med HTTP ${httpStatus} da Verevon prøvde å åpne siden.`, `The site returned HTTP ${httpStatus} when Verevon tried to open the page.`)
+    : tr('Nettstedet svarte med en feil da Verevon prøvde å åpne siden.', 'The site returned an error when Verevon tried to open the page.')
+  const redirectSentence = redirectCount === 1
+    ? tr('Nettstedet videresendte forespørselen én gang.', 'The site redirected the request once.')
+    : typeof redirectCount === 'number' && Number.isSafeInteger(redirectCount) && redirectCount > 1
+      ? tr(`Nettstedet videresendte forespørselen ${redirectCount} ganger.`, `The site redirected the request ${redirectCount} times.`)
+      : null
+  const sentence = redirectSentence ? `${statusSentence} ${redirectSentence}` : statusSentence
+  const address = URL.canParse(url) ? new URL(url) : null
+  const openOutsideUrl = address && (address.protocol === 'http:' || address.protocol === 'https:')
+    && !address.username && !address.password
+    ? address.href
+    : undefined
+  return { url, reason: 'http_response', sentence, openOutsideUrl }
 }
 
 /** The URL a Retry or a soft reload should load. */

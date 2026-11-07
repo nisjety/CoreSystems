@@ -827,6 +827,22 @@ pub(crate) async fn prepare_select(page: &Page, object_id: &RemoteObjectId) -> Q
     settle(page, object_id, Intent::Select).await.map(|_| ())
 }
 
+/// Move Chromium's real pointer without pressing a button. This is used only
+/// after the attached agent action has passed the same policy as its click.
+pub(crate) async fn dispatch_pointer_move(page: &Page, x: f64, y: f64) -> QuarryResult<()> {
+    let moved = DispatchMouseEventParams::builder()
+        .x(x).y(y)
+        .r#type(DispatchMouseEventType::MouseMoved)
+        .buttons(0)
+        .pointer_type(DispatchMouseEventPointerType::Mouse)
+        .build()
+        .map_err(|_| QuarryError::new(ErrorCode::DriverFailed, "pointer move could not be built"))?;
+    with_deadline(Op::Input, async {
+        page.execute(moved).await.map_err(|_| QuarryError::new(ErrorCode::DriverFailed, "pointer move failed"))
+    }).await?;
+    Ok(())
+}
+
 /// The three mouse events of a left click at `(x, y)`: move, press, release.
 /// Chromium treats them as real input (`isTrusted`). Shared by the
 /// `click_point` trait method and the ref pipeline.

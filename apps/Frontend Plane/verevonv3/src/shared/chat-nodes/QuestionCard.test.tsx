@@ -169,4 +169,25 @@ describe('QuestionCard', () => {
     expect(view.send().disabled).toBe(true)
     expect(view.skip().disabled).toBe(true)
   })
+
+  /** EP-4 S6: a question an MCP server sent names that server above the items and where the answer goes. */
+  it('names the asking server above the items and where the answer goes', () => {
+    const view = mount({ question: { origin: 'mcp_elicitation', originLabel: 'Fixture server' } })
+
+    expect(view.container.querySelector('.verevon-question-card__origin')?.textContent).toMatch(
+      /^(Spørsmål fra|Question from) Fixture server$/,
+    )
+    expect(view.container.querySelector('.verevon-question-card__notice')?.textContent).toMatch(
+      /^(Svaret sendes til|The answer goes to) Fixture server$/,
+    )
+  })
+
+  /** EP-4 S6: a model question names no server and keeps the card it always had. */
+  it('a model question shows no server line and no notice', () => {
+    const view = mount()
+
+    expect(view.container.querySelector('.verevon-question-card__origin')).toBeNull()
+    expect(view.container.querySelector('.verevon-question-card__notice')).toBeNull()
+    expect(view.container.textContent).not.toMatch(/Spørsmål fra|Svaret sendes til|Question from|The answer goes to/)
+  })
 })

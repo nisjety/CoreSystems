@@ -23,12 +23,13 @@
 //! the natural future extension.
 //!
 //! SECURITY: the `AllowDomains` network policy is not self-enforcing (see
-//! `sandbox.rs`) — a caller using it MUST also run behind a configured egress
-//! proxy or the process gets unrestricted egress. `execute_sandboxed` fails
-//! closed on both of the ways a policy can go unenforced: the requested local
-//! filesystem isolation being unavailable, and `AllowDomains` with no egress
-//! proxy (`HTTPS_PROXY`/`ALL_PROXY`) configured to actually enforce it — see
-//! `require_requested_isolation`. Neither ever spawns the process.
+//! `sandbox.rs`) — a caller using it MUST also run behind this call's own
+//! egress proxy or the process gets unrestricted egress. `execute_sandboxed`
+//! fails closed on both of the ways a policy can go unenforced: the requested
+//! local filesystem isolation being unavailable, and `AllowDomains` without a
+//! live per-call proxy ([`crate::egress_proxy::EgressProxy`], EP-9 E3) to
+//! enforce it — see `require_requested_isolation`. A proxy environment
+//! variable no longer stands in for one. Neither ever spawns the process.
 
 use crate::policy::{MpSandboxPolicy, ResourceLimits};
 use crate::{sandbox, scrub};
@@ -371,28 +372,6 @@ fn scrub_and_cap(raw: &[u8]) -> String {
     capped
 }
 
-/// Pure check, split out from the environment read so it's unit-testable
-/// without mutating real process env vars (forbidden in this crate — see
-/// `parse_timeout_secs`/`timeout_from_env`). True if any candidate value is
-/// present and non-blank.
-fn any_proxy_var_set(candidates: &[Option<&str>]) -> bool {
-    candidates
-        .iter()
-        .any(|value| value.is_some_and(|v| !v.trim().is_empty()))
-}
-
-/// Whether an egress proxy is configured for this process, by the same
-/// convention curl/most HTTP clients honor: `HTTPS_PROXY` or `ALL_PROXY`,
-/// either case.
-fn egress_proxy_configured() -> bool {
-    any_proxy_var_set(&[
-        std::env::var("HTTPS_PROXY").ok().as_deref(),
-        std::env::var("https_proxy").ok().as_deref(),
-        std::env::var("ALL_PROXY").ok().as_deref(),
-        std::env::var("all_proxy").ok().as_deref(),
-    ])
-}
-
 /// A model-authored execution policy must never silently become a host command
 /// just because the local sandbox substrate is unavailable. `DangerFullAccess`
 /// is the explicit operator-authored escape hatch; `External` delegates its
@@ -400,14 +379,14 @@ fn egress_proxy_configured() -> bool {
 /// a local Bubblewrap request. Every other policy names local filesystem and/or
 /// egress restrictions and has to fail closed when they cannot be enforced.
 ///
-/// `AllowDomains` gets its own check, not just `sandboxed`: `build_bwrap_argv`
-/// deliberately keeps the network namespace up for it (the allowlist lives at
-/// an external egress proxy, not in bwrap itself — see `sandbox.rs`'s own
-/// SECURITY note, tracked as `capability-ownership-matrix.md` §G1's recorded
-/// requirement). A process can come back `sandboxed: true` — real filesystem
-/// isolation — while still having FULLY UNRESTRICTED network egress, because
-/// bwrap alone cannot enforce a domain allowlist. Without this check, that gap
-/// was silent: `sandboxed` reported success while the allowlist was a no-op.
+/// `AllowDomains` gets its own check, not just `sandboxed`: without an egress
+/// boundary `build_bwrap_argv` keeps the network namespace up for it, and a
+/// process can then come back `sandboxed: true` — real filesystem isolation —
+/// while still having FULLY UNRESTRICTED network egress, because bwrap alone
+/// cannot enforce a domain allowlist. So it is admitted only with this call's
+/// own live proxy behind it (EP-9 E3), whose argv unshares the namespace and
+/// leaves the proxy socket as the one way out. A proxy environment variable is
+/// not trusted to stand in for one.
 /// The same fail-closed gate every one-shot spawn runs, for callers that
 /// build their own `tokio::process::Command` rather than going through
 /// [`execute_sandboxed_in_dir`] — S4.2's background process host needs piped
@@ -416,7 +395,7 @@ fn egress_proxy_configured() -> bool {
 ///
 /// # Errors
 /// `Unsupported` when the policy demands local isolation this host cannot
-/// provide, or when `AllowDomains` has no egress proxy behind it.
+/// provide, or when a network policy has no live per-call proxy behind it.
 ///
 /// WS06-S9: this is the one admission gate every spawn path calls, and it takes
 /// a [`SpawnAdmission`] with no default, so a new spawn path that omits the
@@ -426,7 +405,9 @@ pub(crate) fn require_spawn_admission(
     sandboxed: bool,
     admission: &SpawnAdmission<'_>,
 ) -> std::io::Result<()> {
-    require_spawn_admission_with(policy, sandboxed, egress_proxy_configured(), admission)
+    // No per-call proxy on this path, so no network policy is admitted here; a
+    // tiered call is admitted by `execute_sandboxed_with_egress`.
+    require_spawn_admission_with(policy, sandboxed, false, admission)
 }
 
 /// What a spawn site knows about the Space it runs for (WS06-S9). Built by the
@@ -450,17 +431,26 @@ impl SpawnAdmission<'_> {
 }
 
 /// Pure half of [`require_spawn_admission`]. Rules, in order: the isolation
-/// check; no network other than `Disabled` (sandbox egress does not exist, and
-/// the proxy environment variable is no longer trusted to stand in for it);
-/// no `DangerFullAccess`/`External` for a Space; a Space spawn needs a lease.
+/// check; no network other than `Disabled`, except `AllowDomains` behind this
+/// call's live proxy (EP-9 E3; the proxy environment variable is not trusted to
+/// stand in for one, and `AllowAll` is never admitted); no
+/// `DangerFullAccess`/`External` for a Space; a Space spawn needs a lease.
 fn require_spawn_admission_with(
     policy: &MpSandboxPolicy,
     sandboxed: bool,
-    egress_proxy_configured: bool,
+    egress_proxy_live: bool,
     admission: &SpawnAdmission<'_>,
 ) -> std::io::Result<()> {
-    require_requested_isolation(policy, sandboxed, egress_proxy_configured)?;
-    if policy.network().allows_any_network() {
+    require_requested_isolation(policy, sandboxed, egress_proxy_live)?;
+    // Only a wrapped process has the unshared namespace that makes the proxy
+    // the one way out; an unwrapped one (`External`) would keep host network.
+    let proxied = egress_proxy_live
+        && sandboxed
+        && matches!(
+            policy.network(),
+            crate::policy::MpNetworkPolicy::AllowDomains(_)
+        );
+    if policy.network().allows_any_network() && !proxied {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "sandbox egress is not available; refusing a spawn with network access",
@@ -489,7 +479,7 @@ fn require_spawn_admission_with(
 fn require_requested_isolation(
     policy: &MpSandboxPolicy,
     sandboxed: bool,
-    egress_proxy_configured: bool,
+    egress_proxy_live: bool,
 ) -> std::io::Result<()> {
     let requires_local_isolation = matches!(
         policy,
@@ -504,12 +494,12 @@ fn require_requested_isolation(
     if matches!(
         policy.network(),
         crate::policy::MpNetworkPolicy::AllowDomains(_)
-    ) && !egress_proxy_configured
+    ) && !egress_proxy_live
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "AllowDomains egress policy requires an egress proxy (HTTPS_PROXY/ALL_PROXY); \
-             none is configured, refusing to grant unrestricted network egress",
+            "AllowDomains egress policy requires this call's egress proxy; \
+             none is running, refusing to grant unrestricted network egress",
         ));
     }
     Ok(())
@@ -636,6 +626,34 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
     timeout: Duration,
     admission: &SpawnAdmission<'_>,
 ) -> std::io::Result<ExecOutcome> {
+    execute_sandboxed_with_egress(
+        policy, program, args, cwd, env, ro_binds, timeout, admission, None,
+    )
+    .await
+}
+
+/// [`execute_sandboxed_in_dir_with_ro_binds`] behind a per-call egress proxy
+/// (EP-9 E3). With `egress` the namespace is unshared, this call's socket is
+/// the one way out, the program runs under the bridge, and `AllowDomains` is
+/// admitted because the proxy that enforces it is live; the admission and the
+/// argv are built from the same proxy, so one cannot be had without the other.
+/// `None` is exactly [`execute_sandboxed_in_dir_with_ro_binds`].
+///
+/// # Errors
+/// As [`execute_sandboxed_in_dir_with_ro_binds`]; a network policy whose proxy
+/// is not live is refused before any spawn.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_sandboxed_with_egress(
+    policy: &MpSandboxPolicy,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    ro_binds: &[(PathBuf, PathBuf)],
+    timeout: Duration,
+    admission: &SpawnAdmission<'_>,
+    egress: Option<&crate::egress_proxy::EgressProxy>,
+) -> std::io::Result<ExecOutcome> {
     // WS06-S8: per-spawn ceilings sized from this call's wall-clock budget.
     let limits = crate::policy::limits_for(timeout);
     let options = sandbox::LaunchOptions {
@@ -643,9 +661,19 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
         env: sandbox::SandboxEnv::Only(env),
         extra_ro_binds: ro_binds,
         limits: limits.as_ref(),
+        egress: egress.map(|proxy| sandbox::EgressBridge {
+            socket_root: proxy.socket_root(),
+            socket: proxy.socket_path(),
+            bridge_program: crate::egress_proxy::NETBRIDGE_BIN,
+        }),
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
-    require_spawn_admission(policy, cmd.sandboxed, admission)?;
+    require_spawn_admission_with(
+        policy,
+        cmd.sandboxed,
+        egress.is_some_and(crate::egress_proxy::EgressProxy::is_live),
+        admission,
+    )?;
     require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
     require_limits_applied_for(limits.as_ref(), &cmd)?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout, limits.as_ref()).await
@@ -674,6 +702,12 @@ async fn spawn_capture(
     timeout: Duration,
     limits: Option<&ResourceLimits>,
 ) -> std::io::Result<ExecOutcome> {
+    // An unisolated same-UID child could read the parent's /proc environment,
+    // even if its own environment was cleared. Never start one while this
+    // process holds the attachment signing key.
+    if !cmd.sandboxed && std::env::var_os("BROWSER_ATTACH_COMPAT_HMAC_KEY").is_some() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "browser receipt signing requires an isolated tool process"));
+    }
     let mut command = tokio::process::Command::new(&cmd.program);
     command.args(&cmd.args);
     // Set on the spawned process itself, not just via bwrap's `--chdir`/
@@ -687,6 +721,9 @@ async fn spawn_capture(
         command.env_clear();
         command.envs(allowlist.iter().map(|(key, value)| (key, value)));
     }
+    // The shell path may inherit the service environment when sandboxing is
+    // unavailable. Receipt signing authority must never reach a tool process.
+    command.env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY");
     // `kill_on_drop` is what makes the timeout real: `timeout()` cancels by
     // DROPPING the output future, and without it the orphaned child keeps
     // running (and holding its sandbox) after we've already given up on it.
@@ -810,6 +847,17 @@ pub(crate) async fn hold_every_spawn_permit_for_test() -> HeldGate {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_attach_secret_refuses_unisolated_shell() {
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "test-only-secret-for-child-environment");
+        let cmd = super::sandbox::SandboxedCommand {
+            program: "/bin/sh".into(), args: vec!["-c".into(), "if [ -n \"${BROWSER_ATTACH_COMPAT_HMAC_KEY+x}\" ]; then echo leaked; else echo absent; fi".into()], sandboxed: false, limits_applied: false,
+        };
+        let result = super::spawn_capture(&cmd, None, None, std::time::Duration::from_secs(5), None).await;
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    }
     use super::*;
 
     fn args(v: &[&str]) -> Vec<String> {
@@ -882,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_domains_with_an_egress_proxy_configured_is_accepted() {
+    fn allow_domains_with_a_live_egress_proxy_is_accepted() {
         let policy = MpSandboxPolicy::WorkspaceWrite {
             writable_roots: vec![],
             network: crate::policy::MpNetworkPolicy::AllowDomains(
@@ -913,18 +961,6 @@ mod tests {
             false,
         )
         .is_ok());
-    }
-
-    #[test]
-    fn any_proxy_var_set_is_true_only_for_a_non_blank_candidate() {
-        assert!(!any_proxy_var_set(&[None, None, None, None]));
-        assert!(!any_proxy_var_set(&[Some(""), Some("   "), None, None]));
-        assert!(any_proxy_var_set(&[
-            None,
-            None,
-            Some("http://proxy:3128"),
-            None
-        ]));
     }
 
     // External => wrap_command returns a transparent passthrough, so these run
@@ -1459,18 +1495,19 @@ mod tests {
 
     #[test]
     fn egress_policies_are_refused_for_every_spawn_with_the_egress_message() {
-        for network in [
-            crate::policy::MpNetworkPolicy::AllowAll,
-            crate::policy::MpNetworkPolicy::AllowDomains(vec!["api.example.com".into()]),
-        ] {
-            // Even with an egress proxy configured and a lease in hand.
-            let err = require_spawn_admission_with(&ro(network), true, true, &SPACE_WITH_LEASE)
-                .expect_err("egress");
-            assert!(
-                err.to_string().contains("sandbox egress is not available"),
-                "{err}"
-            );
-        }
+        // AllowAll is refused even with a live proxy and a lease in hand: the
+        // proxy enforces a list, and AllowAll names none.
+        let err = require_spawn_admission_with(
+            &ro(crate::policy::MpNetworkPolicy::AllowAll),
+            true,
+            true,
+            &SPACE_WITH_LEASE,
+        )
+        .expect_err("egress");
+        assert!(
+            err.to_string().contains("sandbox egress is not available"),
+            "{err}"
+        );
         let err = require_spawn_admission_with(
             &MpSandboxPolicy::DangerFullAccess,
             true,
@@ -1491,6 +1528,33 @@ mod tests {
         )
         .expect_err("egress");
         assert!(err.to_string().contains("sandbox egress is not available"));
+    }
+
+    /// EP-9 E3: an allow-list is admitted only with this call's proxy live, and
+    /// only for a wrapped process; the proxy environment variable is not read.
+    #[test]
+    fn allow_domains_is_admitted_only_behind_a_live_proxy_in_a_wrapped_process() {
+        let allow = || crate::policy::MpNetworkPolicy::AllowDomains(vec!["pypi.org".into()]);
+        assert!(require_spawn_admission_with(&ro(allow()), true, true, &SPACE_WITH_LEASE).is_ok());
+        assert!(
+            require_spawn_admission_with(&ro(allow()), true, true, &SpawnAdmission::NOT_SPACE)
+                .is_ok()
+        );
+        let err = require_spawn_admission_with(&ro(allow()), true, false, &SPACE_WITH_LEASE)
+            .expect_err("no proxy");
+        assert!(err.to_string().contains("egress proxy"), "{err}");
+        // `External` is not wrapped, so its process would keep host network.
+        let external = MpSandboxPolicy::External { network: allow() };
+        let err = require_spawn_admission_with(&external, false, true, &SpawnAdmission::NOT_SPACE)
+            .expect_err("unwrapped");
+        assert!(
+            err.to_string().contains("sandbox egress is not available"),
+            "{err}"
+        );
+        // The ordinary gate never sees a proxy, so it refuses an allow-list.
+        let err = require_spawn_admission(&ro(allow()), true, &SpawnAdmission::NOT_SPACE)
+            .expect_err("no per-call proxy on the ordinary path");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     }
 
     #[test]

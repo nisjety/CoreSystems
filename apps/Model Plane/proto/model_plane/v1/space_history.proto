@@ -18,17 +18,29 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 // nothing is persisted, cached or logged (query text and hit ids never reach a log).
 service SpaceHistoryService {
   // Keyword search over the user and assistant messages of one Space.
+  // Request and response type names kept; renaming them would break generated code.
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc SearchMessages(SearchSpaceMessagesRequest) returns (SearchSpaceMessagesResponse);
   // Maps a message id to its thread, under the same authority. Not found, hidden by audience,
   // another Space and another org all answer NotFound("entry not found").
+  // Request and response type names kept; renaming them would break generated code.
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc ResolveMessage(ResolveSpaceMessageRequest) returns (ResolveSpaceMessageResponse);
 }
 
+// Keyword search request over the messages of one Space.
 message SearchSpaceMessagesRequest {
+  // Id of the org the search runs in.
   string org_id = 1;
+  // Id of the calling user; must equal the caller's principal id.
   string user_id = 2;
+  // Id of the Space to search.
   string space_id = 3;
+  // Control read decision for this Space; without one only the caller's own threads are searched.
   string space_read_decision_ref = 4;
+  // Token for the decision named by space_read_decision_ref.
   string space_read_decision_token = 5;
   // 2 to 200 characters after trim, no control characters.
   string query = 6;
@@ -40,7 +52,9 @@ message SearchSpaceMessagesRequest {
   string author_subject_id = 9;
   // "", "user" or "assistant".
   string role = 10;
+  // Earliest message time to include, when set.
   google.protobuf.Timestamp since = 11;
+  // Latest message time to include, when set.
   google.protobuf.Timestamp until = 12;
   // "recent" (default) or "relevance".
   string sort = 13;
@@ -52,23 +66,37 @@ message SearchSpaceMessagesRequest {
 
 // One slice of a snippet. The client renders `text` as a text node, never as markup.
 message SnippetSegment {
+  // Text of this slice; the client shows it as plain text.
   string text = 1;
+  // True when this slice matches the query.
   bool matched = 2;
 }
 
+// One message that matched the search.
 message SpaceMessageHit {
+  // Id of the matched message.
   string message_id = 1;
+  // Thread the message is in.
   string thread_id = 2;
+  // Space the message is in.
   string space_id = 3;
+  // Role of the author, such as user or assistant.
   string role = 4;
+  // Id of the subject who authored the message.
   string author_subject_id = 5;
+  // Name of the agent that wrote the message, if any.
   string agent_name = 6;
+  // When the message was created.
   google.protobuf.Timestamp created_at = 7;
+  // Snippet of the message, as segments.
   repeated SnippetSegment snippet = 8;
+  // Title of the thread the message is in.
   string thread_title = 9;
 }
 
+// One page of search hits.
 message SearchSpaceMessagesResponse {
+  // Matching messages on this page.
   repeated SpaceMessageHit hits = 1;
   // Empty when there is no further page.
   string next_cursor = 2;
@@ -80,17 +108,28 @@ message SearchSpaceMessagesResponse {
   repeated string excluded = 5;
 }
 
+// Request to resolve one message id to its thread.
 message ResolveSpaceMessageRequest {
+  // Id of the org the lookup runs in.
   string org_id = 1;
+  // Id of the calling user; must equal the caller's principal id.
   string user_id = 2;
+  // Id of the Space the message should be in.
   string space_id = 3;
+  // Control `model.thread.read` decision reference for this Space.
   string space_read_decision_ref = 4;
+  // Token for the decision named by space_read_decision_ref.
   string space_read_decision_token = 5;
+  // Id of the message to resolve.
   string message_id = 6;
 }
 
+// The thread and Space that a message id resolves to.
 message ResolveSpaceMessageResponse {
+  // Id of the resolved message.
   string message_id = 1;
+  // Thread the message is in.
   string thread_id = 2;
+  // Space the message is in.
   string space_id = 3;
 }

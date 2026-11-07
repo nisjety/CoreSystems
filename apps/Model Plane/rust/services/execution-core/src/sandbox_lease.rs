@@ -175,6 +175,14 @@ pub async fn ensure_sandbox_lease(
         .inspect_err(|status| {
             warn!(code = ?status.code(), "sandbox-manager AcquireLease failed");
         })?;
+    // EP-9 E3: the tier sandbox-manager recorded and the Space list the decision was signed over, for
+    // this run's code_interpreter calls. Ignored unless the run registered for egress (switch on).
+    crate::egress_proxy::run_egress().record_lease(
+        org_id,
+        run_id,
+        crate::egress_proxy::lease_tier(response.egress_tier),
+        &claims.egress_allowlist,
+    );
 
     let lease = SandboxLease {
         lease_id: response.lease_id,

@@ -5,8 +5,9 @@ import {
   Square,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
-import { For } from 'solid-js'
+import { createSignal, For, Show } from 'solid-js'
 import katex from 'katex'
+import { CitedPassageViewer, citedPassageOf } from './CitedPassageViewer'
 import {
   imageArtifactSrc,
   looksLikeImageContent,
@@ -1225,7 +1226,11 @@ export function InlineCitationMarker(props: {
     (entry) => citationGroupKey(entry.citation),
     (entry) => citationGroupLabel(entry.citation),
   )
+  // The source whose passage is open (EP-2-S4). The sheet sits outside the popover, so closing the chip does
+  // not take the passage away mid-read.
+  const [opened, setOpened] = createSignal<Citation | null>(null)
   return (
+    <>
     <details class="verevon-chat-citation-chip">
       <summary aria-label={i18n.tr(`Kilde ${props.indexes.join(', ')}`, `Source ${props.indexes.join(', ')}`)}>{label}</summary>
       <div class="verevon-chat-citation-chip__popover" role="group" aria-label={i18n.tr('Kildedetaljer', 'Source details')}>
@@ -1246,7 +1251,7 @@ export function InlineCitationMarker(props: {
                       </span>
                     </>
                   )
-                  return isSafeLinkHref(entry.citation.url)
+                  const source = isSafeLinkHref(entry.citation.url)
                     ? (
                       <a
                         href={entry.citation.url}
@@ -1265,6 +1270,22 @@ export function InlineCitationMarker(props: {
                         {content}
                       </span>
                     )
+                  // Only a source the server sent a passage for offers one: with the gateway switch off the chip is
+                  // exactly what it was.
+                  return citedPassageOf(entry.citation)
+                    ? (
+                      <>
+                        {source}
+                        <button
+                          type="button"
+                          class="verevon-chat-citation-chip__passage"
+                          onClick={() => setOpened(() => entry.citation)}
+                        >
+                          {i18n.tr('Vis passasjen', 'Show the passage')}
+                        </button>
+                      </>
+                    )
+                    : source
                 }}
               </For>
             </div>
@@ -1272,6 +1293,10 @@ export function InlineCitationMarker(props: {
         </For>
       </div>
     </details>
+    <Show when={opened()}>
+      {(citation) => <CitedPassageViewer citation={citation()} onClose={() => setOpened(null)} />}
+    </Show>
+    </>
   )
 }
 

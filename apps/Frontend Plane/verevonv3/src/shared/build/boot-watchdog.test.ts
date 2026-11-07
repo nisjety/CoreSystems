@@ -5,6 +5,10 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+vi.mock('@/app/App', () => ({ default: () => document.createElement('main') }))
+vi.mock('@/app/chunk-recovery', () => ({ installChunkRecovery: vi.fn() }))
+vi.mock('@/shared/build/version-check', () => ({ startVersionCheck: vi.fn() }))
+
 // WS07-S2: public/boot-watchdog.js is a classic script that index.html loads before the module
 // script. This test lives under src/ (not public/) so it is never copied into the image. It runs
 // the real file against jsdom: the script is evaluated fresh for each case.
@@ -159,6 +163,19 @@ describe('boot watchdog', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(document.getElementById('verevon-boot-failure')).toBeNull()
     expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('removes the painted watchdog card when the app mounts after the timeout', async () => {
+    fetchMock.mockImplementation(() => versionAnswer('build-aaaa'))
+    runWatchdog()
+    await fire()
+    expect(document.getElementById('verevon-boot-failure')).not.toBeNull()
+
+    await import('@/index')
+
+    expect(document.querySelector('#root main')).not.toBeNull()
+    expect(document.getElementById('verevon-boot-failure')).toBeNull()
+    expect((window as BootWindow).__verevonBoot).toBe(true)
   })
 
   it('never throws when storage access throws, and does not reload without the guard', async () => {

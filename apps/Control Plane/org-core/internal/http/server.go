@@ -13,6 +13,7 @@ import (
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/orgkeys"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
 	"github.com/gin-gonic/gin"
 )
 
@@ -65,6 +66,12 @@ type Server struct {
 	// service they answer 503 keys_unavailable.
 	keysOn  bool
 	orgKeys orgKeyService
+
+	// retentionOn mounts the retention policy and legal hold routes (EP-9 C1,
+	// ORG_RETENTION_POLICY_ENABLED, only "true" turns it on); retention is set by
+	// SetRetention. Off, none of the routes is mounted.
+	retentionOn bool
+	retention   retentionService
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -147,6 +154,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	// the service (SetOrgKeys) and refuses to boot without usable master keys
 	// (ValidateOrgKeysConfig).
 	s.keysOn = orgkeys.Enabled(os.Getenv)
+	s.retentionOn = retention.Enabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -380,4 +388,7 @@ func (s *Server) setupRoutes() {
 	// crypto-shred. Registered only when ORG_CORE_KEYS_ENABLED=1; see
 	// keys_handlers.go for the scope of each route.
 	s.registerOrgKeyRoutes(internal)
+	// Retention policy and legal holds (EP-9 C1). Mounted only when
+	// ORG_RETENTION_POLICY_ENABLED is "true"; see retention_handlers.go.
+	s.registerRetentionRoutes(v1, internal, guard)
 }

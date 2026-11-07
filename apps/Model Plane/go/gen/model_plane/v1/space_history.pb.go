@@ -22,13 +22,19 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Keyword search request over the messages of one Space.
 type SearchSpaceMessagesRequest struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	OrgId                  string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId                 string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	SpaceId                string                 `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceReadDecisionRef   string                 `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
-	SpaceReadDecisionToken string                 `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the search runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the calling user; must equal the caller's principal id.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Id of the Space to search.
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Control read decision for this Space; without one only the caller's own threads are searched.
+	SpaceReadDecisionRef string `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token for the decision named by space_read_decision_ref.
+	SpaceReadDecisionToken string `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
 	// 2 to 200 characters after trim, no control characters.
 	Query string `protobuf:"bytes,6,opt,name=query,proto3" json:"query,omitempty"`
 	// True while the user is still typing: the trailing word also matches as a prefix.
@@ -38,8 +44,10 @@ type SearchSpaceMessagesRequest struct {
 	// Scope person: only messages this subject authored.
 	AuthorSubjectId string `protobuf:"bytes,9,opt,name=author_subject_id,json=authorSubjectId,proto3" json:"author_subject_id,omitempty"`
 	// "", "user" or "assistant".
-	Role  string                 `protobuf:"bytes,10,opt,name=role,proto3" json:"role,omitempty"`
+	Role string `protobuf:"bytes,10,opt,name=role,proto3" json:"role,omitempty"`
+	// Earliest message time to include, when set.
 	Since *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=since,proto3" json:"since,omitempty"`
+	// Latest message time to include, when set.
 	Until *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=until,proto3" json:"until,omitempty"`
 	// "recent" (default) or "relevance".
 	Sort string `protobuf:"bytes,13,opt,name=sort,proto3" json:"sort,omitempty"`
@@ -188,9 +196,11 @@ func (x *SearchSpaceMessagesRequest) GetCursor() string {
 
 // One slice of a snippet. The client renders `text` as a text node, never as markup.
 type SnippetSegment struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
-	Matched       bool                   `protobuf:"varint,2,opt,name=matched,proto3" json:"matched,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Text of this slice; the client shows it as plain text.
+	Text string `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	// True when this slice matches the query.
+	Matched       bool `protobuf:"varint,2,opt,name=matched,proto3" json:"matched,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -239,19 +249,29 @@ func (x *SnippetSegment) GetMatched() bool {
 	return false
 }
 
+// One message that matched the search.
 type SpaceMessageHit struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	MessageId       string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	ThreadId        string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	SpaceId         string                 `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	Role            string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
-	AuthorSubjectId string                 `protobuf:"bytes,5,opt,name=author_subject_id,json=authorSubjectId,proto3" json:"author_subject_id,omitempty"`
-	AgentName       string                 `protobuf:"bytes,6,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	CreatedAt       *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	Snippet         []*SnippetSegment      `protobuf:"bytes,8,rep,name=snippet,proto3" json:"snippet,omitempty"`
-	ThreadTitle     string                 `protobuf:"bytes,9,opt,name=thread_title,json=threadTitle,proto3" json:"thread_title,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the matched message.
+	MessageId string `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Thread the message is in.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Space the message is in.
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Role of the author, such as user or assistant.
+	Role string `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	// Id of the subject who authored the message.
+	AuthorSubjectId string `protobuf:"bytes,5,opt,name=author_subject_id,json=authorSubjectId,proto3" json:"author_subject_id,omitempty"`
+	// Name of the agent that wrote the message, if any.
+	AgentName string `protobuf:"bytes,6,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// When the message was created.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Snippet of the message, as segments.
+	Snippet []*SnippetSegment `protobuf:"bytes,8,rep,name=snippet,proto3" json:"snippet,omitempty"`
+	// Title of the thread the message is in.
+	ThreadTitle   string `protobuf:"bytes,9,opt,name=thread_title,json=threadTitle,proto3" json:"thread_title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SpaceMessageHit) Reset() {
@@ -347,9 +367,11 @@ func (x *SpaceMessageHit) GetThreadTitle() string {
 	return ""
 }
 
+// One page of search hits.
 type SearchSpaceMessagesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Hits  []*SpaceMessageHit     `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"`
+	// Matching messages on this page.
+	Hits []*SpaceMessageHit `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"`
 	// Empty when there is no further page.
 	NextCursor string `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
 	// True when the relevance horizon (100 hits) cut the result.
@@ -427,16 +449,23 @@ func (x *SearchSpaceMessagesResponse) GetExcluded() []string {
 	return nil
 }
 
+// Request to resolve one message id to its thread.
 type ResolveSpaceMessageRequest struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	OrgId                  string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId                 string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	SpaceId                string                 `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	SpaceReadDecisionRef   string                 `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
-	SpaceReadDecisionToken string                 `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
-	MessageId              string                 `protobuf:"bytes,6,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the org the lookup runs in.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Id of the calling user; must equal the caller's principal id.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Id of the Space the message should be in.
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Control `model.thread.read` decision reference for this Space.
+	SpaceReadDecisionRef string `protobuf:"bytes,4,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// Token for the decision named by space_read_decision_ref.
+	SpaceReadDecisionToken string `protobuf:"bytes,5,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	// Id of the message to resolve.
+	MessageId     string `protobuf:"bytes,6,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResolveSpaceMessageRequest) Reset() {
@@ -511,11 +540,15 @@ func (x *ResolveSpaceMessageRequest) GetMessageId() string {
 	return ""
 }
 
+// The thread and Space that a message id resolves to.
 type ResolveSpaceMessageResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	ThreadId      string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	SpaceId       string                 `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Id of the resolved message.
+	MessageId string `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Thread the message is in.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Space the message is in.
+	SpaceId       string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

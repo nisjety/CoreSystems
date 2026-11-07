@@ -11,7 +11,20 @@ import "model_plane/v1/inference.proto";
 // Owns: tool planning/selection, permission checkpoints, tool execution,
 //       artifacts, subagents, step transitions, compaction triggers.
 service ExecutionCore {
-  // Execute a single step within a run.
+  // Authenticated execution-protocol handshake. This says only what this
+  // deployment implements; Quarry must still acknowledge every attachment.
+  rpc BrowserAgentCapabilities(BrowserAgentCapabilitiesRequest) returns (BrowserAgentCapabilitiesResponse);
+
+  // Restricted attached browser runs use a distinct RPC so mixed-version
+  // deployments fail closed: an older execution instance cannot accidentally
+  // accept and drop a restriction it does not understand. It takes the ExecuteStep
+  // request and response on purpose: the payload is the same step, only the route differs.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc ExecuteRestrictedBrowserStep(ExecuteStepRequest) returns (ExecuteStepResponse);
+  // Execute a single step within a run. ExecuteRestrictedBrowserStep shares its types.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
 
   // Resume a paused or checkpointed run.
@@ -38,6 +51,16 @@ service ExecutionCore {
   // to make Temporal work. The lane remains disabled until Session Core's
   // current-run claim/receipt and Control's per-step decision are deployed.
   rpc ExecuteScheduledStep(ExecuteScheduledStepRequest) returns (ExecuteScheduledStepResponse);
+}
+
+// BrowserAgentCapabilitiesRequest asks which execution protocol this deployment implements.
+message BrowserAgentCapabilitiesRequest { string org_id = 1; }
+
+// BrowserAgentCapabilitiesResponse names the protocol this deployment implements; Quarry
+// must still acknowledge every attachment.
+message BrowserAgentCapabilitiesResponse {
+  // The attached-browser policy protocol version this deployment implements.
+  uint32 attached_policy_protocol = 1;
 }
 
 // ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
@@ -73,9 +96,13 @@ message ExecuteScheduledStepResponse {
   // Counts of the scheduled Do lane (WS20 S6). Zero on the single-inference lane.
   // They carry no content: the withheld effects are named only in the transcript.
   uint32 rounds_executed = 7;
+  // Number of effects withheld; their names appear only in the transcript.
   uint32 withheld_effects = 8;
+  // Number of tool calls made by the scheduled step.
   uint32 tool_calls = 9;
+  // Input tokens used by the scheduled step.
   uint32 input_tokens = 10;
+  // Output tokens produced by the scheduled step.
   uint32 output_tokens = 11;
 }
 
@@ -269,6 +296,29 @@ message RunAgentRequest {
   // which the run's hook engine enforces on every tool call. Absent when HOOKS_DO_RUNS is off
   // or the org has no rules, so the run is exactly as it was before the field existed.
   OrgPolicyContext org_policy = 24;
+
+  // A wide-research run started from the composer (Wave 3 EP-2 S8/S9; additive). Absent = an ordinary Do
+  // run, exactly as before the field existed. The gateway sets it only while WIDE_RESEARCH_ENTRY_ENABLED
+  // is on and never for a zero-retention turn; execution-core then bounds the run's delegations to
+  // `item_cap` and seeds the run's goal with the items. Field 25 is reserved for this message by the
+  // Wave 3 integration round A.
+  WideResearchRequest wide_research = 25;
+}
+
+// WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
+// narrows the run: it can never raise the run's delegation ceiling above the platform's.
+message WideResearchRequest {
+  // The most items the run may fan out: the gateway sets it to the smaller of the person's ask and the
+  // org's `research.max_fan_out_items` agent-policy key. Zero means the org has wide research off, and
+  // execution-core refuses the run.
+  uint32 item_cap = 1;
+  // The person's items, one research question each, in the order they were given. Items past
+  // `item_cap` are not researched; execution-core names them in the answer.
+  repeated string items = 2;
+  // The fan-out batch a retry belongs to (EP-2 S9). Empty for a fresh wide-research run.
+  string batch_id = 3;
+  // The child run whose item a one-item retry runs again (EP-2 S9). Empty for a fresh run.
+  string retry_of_child_run_id = 4;
 }
 
 // OrgPolicyContext is the org's policy for one Do run (build plan WS25 S3). Its rules can only
@@ -281,6 +331,27 @@ message OrgPolicyContext {
   int64 policy_revision = 2;
   // Digest of the policy document the rules came from. Empty until WS25 S7.
   string policy_digest = 3;
+  // The org's web switches for this run (Wave 3 EP-9 W2; additive). Absent while the org policy does not bind
+  // web access (ORG_AGENT_POLICY_MODE is off or shadow, or the org has no policy held), so the run is exactly as
+  // it was before the field existed. execution-core withholds the public web tools when it says "off".
+  WebPolicyContext web = 4;
+}
+
+// WebPolicyContext is the org's web switches for one Do run (Wave 3 EP-9 W2; additive). Execution-core reads
+// `mode` to withhold the public web tools and to refuse a call to one; the other fields are attribution.
+message WebPolicyContext {
+  // The org's web mode the run was admitted under: "live" offers the web tools, "off" withholds them. Any
+  // other value is read as "off", so a mode this build does not know can only narrow the run.
+  string mode = 1;
+  // Whether a paid search provider may serve the org's agents. Execution-core's web search names no paid
+  // provider, so this is carried for attribution and is not enforced in the Do loop.
+  bool paid_providers = 2;
+  // The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
+  // switches apply (an enforced org the gateway could not read takes "off").
+  int64 revision = 3;
+  // The org browser-site policy revision the run was admitted under (Wave 3 EP-9 W3; additive). Carried for attribution
+  // only: zero when no revision was read for the run (WEB_DOMAIN_POLICY_MODE off), and execution-core never gates on it.
+  int64 site_policy_revision = 4;
 }
 
 // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
@@ -351,6 +422,14 @@ message RunContext {
   // never persisted, never built for a ZDR, waived or scheduled run, and
   // ignored by execution-core with EXECUTION_CORE_SUBAGENT_ROLES off.
   repeated AgentRoleSpec agent_roles = 8;
+  // The thread goal recited to the model as data (EP-7 S1; owner: session-core
+  // renders it, model-gateway carries it, execution-core places it in the
+  // Volatile tier of the root loop only). Finished text with a header that
+  // says to read it as data, never instructions. Empty when the thread has no
+  // active goal, with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, and always for a
+  // ZDR, waived or Space-scoped run. In flight only: never persisted. Fields 5
+  // and 6 stay reserved for WS08 and WS20 (plan 4.3).
+  string goal_recitation = 9;
 }
 
 // AgentRoleSpec - one published agent definition a delegated subagent may take
@@ -607,6 +686,7 @@ message ExecuteStepRequest {
 
 // RunAttachmentKind — what a staged run input is.
 enum RunAttachmentKind {
+  // Kind not set.
   RUN_ATTACHMENT_KIND_UNSPECIFIED = 0;
   // A document or data file the sandbox program reads (xlsx, csv, pdf, ...).
   RUN_ATTACHMENT_KIND_FILE = 1;
@@ -632,6 +712,7 @@ message RunAttachment {
   string sha256 = 5;
   // The file bytes.
   bytes content = 6;
+  // What the input is: a document or data file, or an image.
   RunAttachmentKind kind = 7;
 }
 

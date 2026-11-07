@@ -58,9 +58,10 @@ func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, 
 	l := &lease.Lease{
 		ID: id, ScopeID: scopeID, ScopeType: scopeType, OrgID: orgID, OwnerID: ownerID,
 		Endpoint: "sandbox://" + id, SpaceID: spaceID, BackendID: backendID,
-		ProcessesPermitted: grant.ProcessesPermitted,
-		AudienceRevision:   grant.RecipientAudienceRevision,
-		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: now.Add(ttl), CreatedAt: now, LastActivityAt: now,
+		ProcessesPermitted:  grant.ProcessesPermitted,
+		AudienceRevision:    grant.RecipientAudienceRevision,
+		EgressTierPermitted: grant.EgressTierPermitted,
+		State:               mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: now.Add(ttl), CreatedAt: now, LastActivityAt: now,
 	}
 	s.mu.Lock()
 	s.byID[id] = cloneLease(l)

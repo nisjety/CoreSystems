@@ -65,6 +65,12 @@ type Server struct {
 	// refuses before it removes anything while either is nil.
 	threadErase ThreadEraser
 	threadBlobs threadworkspace.BlobEraser
+	// egressTiersEnabled is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3). Off, every
+	// lease records egress off, the response leaves egress_tier unset, and an
+	// egress-capable claim the decision does not grant is refused exactly as
+	// before. On, that claim gets its lease at off instead (D-E2) and the
+	// granted tier is recorded on the lease and reported back.
+	egressTiersEnabled bool
 }
 
 // NewServer constructs a Server with the given stores. Space capability
@@ -114,6 +120,41 @@ func (s *Server) WithThreadErasure(rows ThreadEraser, blobs threadworkspace.Blob
 	return s
 }
 
+// WithEgressTiers wires the SANDBOX_MANAGER_EGRESS_TIERS switch (EP-9 E3). See
+// the egressTiersEnabled field for what it changes.
+func (s *Server) WithEgressTiers(enabled bool) *Server {
+	s.egressTiersEnabled = enabled
+	return s
+}
+
+// egressTierProto maps a recorded tier word onto the wire enum. A word this
+// build does not know reads as OFF, never as a wider reach.
+func egressTierProto(tier string) mpv1.SandboxEgressTier {
+	switch tier {
+	case authz.EgressTierRegistries:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_REGISTRIES
+	case authz.EgressTierAllowlist:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_ALLOWLIST
+	default:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF
+	}
+}
+
+// permittedEgressTier is the tier a lease records for a verified decision.
+// 'all' is not storable in Wave 3 (D-E3): the verifier never grants it today,
+// and a decision that did is recorded as off rather than as the widest reach.
+func permittedEgressTier(enabled bool, granted string) string {
+	if !enabled {
+		return authz.EgressTierOff
+	}
+	switch granted {
+	case authz.EgressTierRegistries, authz.EgressTierAllowlist:
+		return granted
+	default:
+		return authz.EgressTierOff
+	}
+}
+
 // AcquireLease creates a new lease for the requested scope.
 func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*AcquireLeaseResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "AcquireLease")))
@@ -157,6 +198,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	spaceID := strings.TrimSpace(req.GetSpaceId())
 	backendID := ""
 	processesPermitted := false
+	egressTier := authz.EgressTierOff
 	var grant lease.SpaceGrant
 	if spaceID != "" {
 		if s.capabilityVerify == nil {
@@ -164,6 +206,11 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		}
 		verified, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
 			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
+			// D-E2: with the switch on, an egress-capable claim the decision
+			// does not grant is verified at off instead of refused, as an
+			// ungranted process claim already is. execution-core enforces
+			// the recorded tier at its per-call boundary.
+			GrantEgressAtOff: s.egressTiersEnabled,
 		})
 		if err != nil {
 			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
@@ -187,8 +234,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// Control decision is in hand — and it becomes the ceiling the human
 		// read path applies to every process this lease admits (0004).
 		grant.RecipientAudienceRevision = verified.RecipientAudienceRevision
+		// Recorded for the same reason as processesPermitted: nothing later
+		// holds the decision. Hosts are never recorded, only the tier word.
+		egressTier = permittedEgressTier(s.egressTiersEnabled, verified.EgressTier)
 	}
 	grant.ProcessesPermitted = processesPermitted
+	grant.EgressTierPermitted = egressTier
 
 	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, grant, ttl)
 	if err != nil {
@@ -196,6 +247,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		return nil, mapErr(err)
 	}
 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
+	// Unset while the switch is off, so the response is unchanged; read back
+	// off the created lease otherwise, like processes_permitted.
+	responseEgressTier := mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED
+	if s.egressTiersEnabled {
+		responseEgressTier = egressTierProto(l.EgressTierPermitted)
+	}
 	return &AcquireLeaseResponse{
 		LeaseId:   l.ID,
 		Endpoint:  l.Endpoint,
@@ -210,6 +267,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// preparing a spawn `RegisterProcess` would deny; that denial remains
 		// the authoritative one.
 		ProcessesPermitted: l.ProcessesPermitted,
+		EgressTier:         responseEgressTier,
 	}, nil
 }
 

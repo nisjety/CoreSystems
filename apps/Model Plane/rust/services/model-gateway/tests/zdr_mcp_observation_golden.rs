@@ -37,10 +37,10 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// The enforcement rows of the canonical matrix when this test was written, and how they split by decision.
 /// A row added or removed without this file being read is a change nobody reviewed against the MCP gate.
-const ENFORCEMENT_ROWS: usize = 30;
-const ZDR: usize = 6;
+const ENFORCEMENT_ROWS: usize = 33;
+const ZDR: usize = 7;
 const PERSISTENT: usize = 3;
-const WAIVED: usize = 3;
+const WAIVED: usize = 5;
 const REFUSE: usize = 18;
 
 /// The root secret the observation post is signed with in the test. Any non-empty value serves: the golden

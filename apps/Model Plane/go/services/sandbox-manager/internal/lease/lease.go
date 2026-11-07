@@ -89,9 +89,13 @@ type Lease struct {
 	// can apply the same ceiling Session Core applies to runs (migration
 	// 0004). Zero for a non-Space lease, and for leases predating 0004.
 	AudienceRevision int64
-	State            mpv1.SandboxLifecycleState
-	ExpiresAt          time.Time
-	CreatedAt          time.Time
+	// EgressTierPermitted is the egress tier this lease permits (migration 0008, EP-9 E3), decided once at
+	// AcquireLease. Set by Create; not read back by scanLease, so a lease read from the table carries "",
+	// which every reader treats as off.
+	EgressTierPermitted string
+	State               mpv1.SandboxLifecycleState
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
 	// FailureCause is the cause the latest thread-workspace apply recorded (migration 0007), UNSPECIFIED
 	// when that apply was clean or none has run.
 	FailureCause mpv1.SandboxFailureCause
@@ -149,6 +153,8 @@ type SpaceGrant struct {
 	// the decision was signed. It becomes the ceiling every process this lease
 	// admits is read under (migration 0004).
 	RecipientAudienceRevision int64
+	// EgressTierPermitted is the tier the verified decision grants (EP-9 E3); empty is recorded as off.
+	EgressTierPermitted string
 }
 
 func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, grant SpaceGrant, ttl time.Duration) (*Lease, error) {
@@ -157,26 +163,31 @@ func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, 
 		return nil, err
 	}
 	now := s.nowFn()
+	egressTier := grant.EgressTierPermitted
+	if egressTier == "" {
+		egressTier = "off"
+	}
 	l := &Lease{
-		ID:                 id,
-		ScopeID:            scopeID,
-		ScopeType:          scopeType,
-		OrgID:              orgID,
-		OwnerID:            ownerID,
-		Endpoint:           "sandbox://" + id,
-		SpaceID:            spaceID,
-		BackendID:          backendID,
-		ProcessesPermitted: grant.ProcessesPermitted,
-		AudienceRevision:   grant.RecipientAudienceRevision,
-		State:              mpv1.SandboxLifecycleState_SCRATCH,
-		ExpiresAt:          now.Add(ttl),
-		CreatedAt:          now,
-		LastActivityAt:     now,
+		ID:                  id,
+		ScopeID:             scopeID,
+		ScopeType:           scopeType,
+		OrgID:               orgID,
+		OwnerID:             ownerID,
+		Endpoint:            "sandbox://" + id,
+		SpaceID:             spaceID,
+		BackendID:           backendID,
+		ProcessesPermitted:  grant.ProcessesPermitted,
+		AudienceRevision:    grant.RecipientAudienceRevision,
+		EgressTierPermitted: egressTier,
+		State:               mpv1.SandboxLifecycleState_SCRATCH,
+		ExpiresAt:           now.Add(ttl),
+		CreatedAt:           now,
+		LastActivityAt:      now,
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt)
+		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, egress_tier_permitted)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt, l.EgressTierPermitted)
 	if err != nil {
 		return nil, fmt.Errorf("create lease: %w", err)
 	}

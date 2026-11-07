@@ -1,0 +1,101 @@
+/* The conversation export menu beside "Fork from here" on the latest answer (EP-12 S12). */
+.verevon-chat-export {
+  position: relative;
+  display: inline-flex;
+}
+
+.verevon-chat-export__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-export__trigger:hover,
+.verevon-chat-export__trigger:focus-visible {
+  background: var(--verevon-surface-soft, #f3f4f6);
+  color: inherit;
+}
+
+.verevon-chat-export__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: 10px;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 32px));
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.verevon-chat-export__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+}
+
+.verevon-chat-export__choices legend {
+  margin-bottom: 4px;
+  padding: 0;
+  font-weight: 600;
+}
+
+.verevon-chat-export__option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.verevon-chat-export__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft, #f3f4f6);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-export__action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.verevon-chat-export__action:focus-visible,
+.verevon-chat-export__trigger:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, #2b5cd9);
+  outline-offset: 2px;
+}
+
+.verevon-chat-export__refusal {
+  margin: 0;
+  color: #b42318;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-export__loading {
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+}

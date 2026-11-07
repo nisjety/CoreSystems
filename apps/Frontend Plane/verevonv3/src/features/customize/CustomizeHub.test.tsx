@@ -15,6 +15,7 @@ vi.mock('@/features/customize/AgentModesSection', async (importOriginal) => {
   return { ...actual, AgentModesSection: () => 'Agent mode section' }
 })
 vi.mock('@/features/customize/HooksSection', () => ({ HooksSection: () => 'Hooks section' }))
+vi.mock('@/features/customize/OrgWebAccessSection', () => ({ OrgWebAccessSection: () => 'Web access section' }))
 vi.mock('@/features/settings/components/McpServersSection', () => ({ McpServersSection: () => 'MCP section' }))
 vi.mock('@/features/settings/components/SkillsSection', () => ({ SkillsSection: () => 'Skills section' }))
 vi.mock('@/features/settings/components/OrgInstructionsSection', () => ({ OrgInstructionsSection: () => 'Instructions section' }))
@@ -56,7 +57,7 @@ describe('CustomizeHub', () => {
 
     // The stubs are bare text, so the check reads the page rather than one element.
     await waitFor(() => expect(document.body.textContent).toContain('Agent mode section'))
-    for (const section of ['Hooks section', 'MCP section', 'Skills section', 'Instructions section', 'Plugins section']) {
+    for (const section of ['Web access section', 'Hooks section', 'MCP section', 'Skills section', 'Instructions section', 'Plugins section']) {
       expect(document.body.textContent).toContain(section)
     }
   })
@@ -68,6 +69,7 @@ describe('CustomizeHub', () => {
 
     expect(await screen.findByText('Customize is not switched on for this deployment yet.')).toBeTruthy()
     expect(screen.queryByText('Agent mode section')).toBeNull()
+    expect(screen.queryByText('Web access section')).toBeNull()
     expect(screen.queryByText('Hooks section')).toBeNull()
     expect(screen.queryByText('MCP section')).toBeNull()
   })

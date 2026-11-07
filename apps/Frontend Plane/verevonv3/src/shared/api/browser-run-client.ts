@@ -12,8 +12,17 @@ function orgHeaders(orgId: string): Record<string, string> {
   return { 'x-verevon-org-id': orgId }
 }
 
+export type BrowserTabContinuation = { tabId: string; expectedEpoch: number; expectedOrigin: string }
+
 export type StartBrowserAiRunParams = {
   goal: string
+  /** Fail closed if this run cannot attach to the owner's session. This does not guarantee frames. */
+  requireAttached?: boolean
+  /** Tighten the Quarry browser policy for this run; enforcement is confirmed server-side. */
+  planMode?: boolean
+  /** Server-owned, transfer-disabled interactive policy for the assistant. */
+  assistantInteractive?: boolean
+  continueInTab?: BrowserTabContinuation
   allowedDomains?: string[]
   maxSteps?: number
   maxRuntimeSeconds?: number
@@ -80,6 +89,12 @@ function startFingerprint(sessionId: string, params: StartBrowserAiRunParams): s
   return JSON.stringify([
     sessionId,
     params.goal.trim(),
+    params.requireAttached ?? false,
+    params.planMode ?? false,
+    params.assistantInteractive ?? false,
+    params.continueInTab
+      ? [params.continueInTab.tabId, params.continueInTab.expectedEpoch, params.continueInTab.expectedOrigin]
+      : null,
     params.allowedDomains ?? null,
     params.maxSteps ?? null,
     params.maxRuntimeSeconds ?? null,
@@ -151,6 +166,10 @@ export async function startBrowserAiRun(
       method: 'POST',
       body: JSON.stringify({
         goal: params.goal,
+        requireAttached: params.requireAttached,
+        planMode: params.planMode,
+        assistantInteractive: params.assistantInteractive,
+        continueInTab: params.continueInTab,
         allowedDomains: params.allowedDomains,
         maxSteps: params.maxSteps,
         maxRuntimeS: params.maxRuntimeSeconds,

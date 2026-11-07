@@ -792,8 +792,10 @@ type ValidateGrantResponse struct {
 	// is refused.
 	BudgetMintedAtUnix int64 `protobuf:"varint,44,opt,name=budget_minted_at_unix,json=budgetMintedAtUnix,proto3" json:"budget_minted_at_unix,omitempty"`
 	// Same values as AcquireGrantResponse (WS8.C).
-	PolicyMode        string                 `protobuf:"bytes,50,opt,name=policy_mode,json=policyMode,proto3" json:"policy_mode,omitempty"`
-	DeniedDomains     []string               `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	PolicyMode string `protobuf:"bytes,50,opt,name=policy_mode,json=policyMode,proto3" json:"policy_mode,omitempty"`
+	// Hosts this grant may never reach; same meaning as AcquireGrantResponse.denied_domains.
+	DeniedDomains []string `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
+	// Hard backstop a renewal can never pass; see AcquireGrantResponse.absolute_expires_at.
 	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
 	// The run an "attach" grant is bound to; empty for every other kind.
 	ResourceId string `protobuf:"bytes,53,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
@@ -1026,6 +1028,7 @@ func (x *ValidateGrantResponse) GetKeyId() string {
 	return ""
 }
 
+// Request to derive a run grant from an active session grant.
 type DeriveRunGrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The session grant the run derives from. It must be active, of kind
@@ -1184,10 +1187,14 @@ func (x *DeriveRunGrantRequest) GetResourceId() string {
 	return ""
 }
 
+// The run grant derived by DeriveRunGrant.
 type DeriveRunGrantResponse struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	GrantId   string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
-	Endpoint  string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Identifier of the derived run grant.
+	GrantId string `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	// Browser endpoint of the run grant (CDP URL or local ws).
+	Endpoint string `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	// Expiry of the run grant; never later than the parent grant's expiry.
 	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	// Canonical hosts of the run grant.
 	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
@@ -1340,6 +1347,7 @@ func (x *DeriveRunGrantResponse) GetResourceId() string {
 	return ""
 }
 
+// Request to extend a renewable grant by one TTL.
 type RenewGrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The grant to extend: kind "session" or "human_browse", owned by the caller.
@@ -1394,6 +1402,7 @@ func (x *RenewGrantRequest) GetOrgId() string {
 	return ""
 }
 
+// Result of RenewGrant: the new expiry and the hard backstop.
 type RenewGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The new expiry: min(now + the broker TTL, absolute_expires_at).

@@ -39,6 +39,8 @@ use crate::{
 // Declared here, as sse.rs declares its own helpers, so this slice stays inside the files it owns.
 #[path = "connector_reads.rs"]
 pub mod connector_reads;
+#[path = "connector_suggestion.rs"]
+pub mod connector_suggestion;
 
 /// Default max tool rounds before forcing a final, tool-free answer.
 ///
@@ -434,6 +436,8 @@ pub(crate) fn tool_artifact_events(
             authored_artifact_events(outcome, known_kind)
         }
         "code_interpreter" => code_interpreter_events(outcome, office),
+        // The manifest as a `deck` artifact, then the built pptx through the arm above (EP-5 S2).
+        "deck" => crate::deck_tool::deck_events(outcome, office),
         _ => (Vec::new(), None),
     }
 }
@@ -542,7 +546,7 @@ fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bo
 /// exact wording, and `Deserializer::from_str(..).into_iter().next()` stops
 /// after the first value so trailing text (a trailing newline, or anything
 /// else appended after the JSON) cannot fail the parse either.
-fn extract_json_object(s: &str) -> Option<Value> {
+pub(crate) fn extract_json_object(s: &str) -> Option<Value> {
     let start = s.find('{')?;
     serde_json::Deserializer::from_str(&s[start..])
         .into_iter::<Value>()
@@ -603,6 +607,9 @@ fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification> 
 const PREVIEW_PDF_MAX_BASE64: usize = 2_796_204;
 /// The thumbnails a preview carries, the same cap the verifier applies.
 const PREVIEW_MAX_THUMBS: usize = 3;
+/// The thumbnails a deck's preview carries: one per slide, up to the verifier's page cap (EP-5 S9). The verifier keeps
+/// them in page order and never moves one onto another page, so index `i` is always slide `i + 1`.
+const PREVIEW_MAX_DECK_THUMBS: usize = 40;
 
 /// The render the verifier made of the delivered file `name`, when it made one. The PDF and the thumbnails are the
 /// verifier's copies; the download stays the sandbox's bytes. A preview with no report has no page count or font
@@ -618,13 +625,17 @@ fn office_preview_for(payload: &Value, name: &str) -> Option<AttachmentPreview> 
         return None;
     }
     let report = office_report_for(payload, name)?;
+    let cap = match OfficeKind::from_file_name(name) {
+        Some(OfficeKind::Pptx) => PREVIEW_MAX_DECK_THUMBS,
+        _ => PREVIEW_MAX_THUMBS,
+    };
     let thumbs = element
         .get("thumbs_b64")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .take(PREVIEW_MAX_THUMBS)
+        .take(cap)
         .map(|thumb| format!("data:image/png;base64,{thumb}"))
         .collect();
     Some(AttachmentPreview {
@@ -646,7 +657,7 @@ const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as 
 /// the user has it.
 const WITHHELD_FILES_NOTE: &str = "\nThe files listed under files_withheld failed the structural Office check and were NOT delivered to the user: do not say the user has them, and regenerate each one with code_interpreter before you mention it again. A file listed under files_delivered was delivered as a downloadable artifact, which already appears as a download card below your message. Confirm what you produced in plain text, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for a file — no such link exists and it will not work.";
 
-fn code_interpreter_events(
+pub(crate) fn code_interpreter_events(
     outcome: &ToolOutcome,
     office: &mut OfficeDelivery,
 ) -> (Vec<ChatEvent>, Option<String>) {
@@ -3175,7 +3186,7 @@ pub async fn dispatch_tool(
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None, None,
     ).await
 }
 
@@ -3191,17 +3202,177 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
+/// `reattach_skill` at the version this run pinned (EP-11 S3). `None` leaves the
+/// recovery to the current row: pins off, no pin for this skill in this run, the
+/// row absent or disabled (recovery says so itself), or the row's text unchanged
+/// since the run pinned it. A version that no longer exists is reported, never
+/// replaced by the current text; a failed read is an error, for the same reason.
+async fn pinned_skill_recovery(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    session_bearer: &str,
+    skills: &[mp_contracts::model_plane::v1::AgentSkill],
+    name: &str,
+) -> Option<Result<String, &'static str>> {
+    use mp_contracts::model_plane::v1::{AgentSkill, GetAgentSkillVersionRequest};
+
+    if !crate::skills::skill_pins_enabled() {
+        return None;
+    }
+    let wanted = name.trim().to_lowercase();
+    let current = skills
+        .iter()
+        .find(|skill| skill.enabled && skill.name.trim().to_lowercase() == wanted)?;
+    let pin = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &current.id)?;
+    if !crate::skills::pin_needs_version_read(&pin, current) {
+        return None;
+    }
+    let request = with_authorization(
+        GetAgentSkillVersionRequest {
+            org_id: org_id.to_owned(),
+            skill_id: pin.skill_id.clone(),
+            version: pin.version,
+            for_user_id: String::new(),
+        },
+        session_bearer,
+    );
+    let response = match state
+        .skill_version_client
+        .clone()
+        .get_agent_skill_version(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "reattach_skill: pinned version read failed");
+            return Some(Err(
+                "reattach_skill could not read the version of this skill this run used right now",
+            ));
+        }
+    };
+    let Some(version) = response.version.filter(|_| !response.gone) else {
+        return Some(Ok(crate::skills::render_pinned_skill_gone(&current.name)));
+    };
+    // The pinned body through the same bounded rendering as the current row.
+    let pinned = AgentSkill {
+        id: version.skill_id,
+        name: version.name,
+        description: version.description,
+        content: version.content,
+        enabled: true,
+        ..Default::default()
+    };
+    Some(Ok(crate::skills::render_recovered_skill(
+        &mp_contracts::skill_recovery::recover_skill(std::slice::from_ref(&pinned), &pinned.name),
+    )))
+}
+
+/// Which bundle `skill_file` reads for a skill in this run (EP-11 S5).
+#[derive(Debug, PartialEq, Eq)]
+enum PinnedBundle {
+    /// The live bundle: pins off, no pin for this skill in this run, or the skill
+    /// unchanged since the run pinned it.
+    Live,
+    /// The bundle the pinned version named, by its manifest digest.
+    At(String),
+    /// The pinned version had no bundle.
+    NoBundle,
+    /// The pinned version no longer exists (the skill was deleted or erased).
+    Gone,
+}
+
+/// Whether the skill moved since the run pinned it, so the pinned version's
+/// bundle must be looked up. A pin without a version (a builtin, or a row from
+/// before versions) has nothing to look up.
+fn pin_moved(
+    pin: &mp_contracts::model_plane::v1::SkillPin,
+    skill: &mp_contracts::model_plane::v1::Skill,
+) -> bool {
+    pin.version > 0 && pin.skill_id == skill.id && pin.digest != skill.digest
+}
+
+/// The bundle a pinned version names, from session-core's answer.
+fn bundle_of_version(
+    gone: bool,
+    version: Option<&mp_contracts::model_plane::v1::AgentSkillVersion>,
+) -> PinnedBundle {
+    match version.filter(|_| !gone) {
+        None => PinnedBundle::Gone,
+        Some(version) if version.bundle_sha256.is_empty() => PinnedBundle::NoBundle,
+        Some(version) => PinnedBundle::At(version.bundle_sha256.clone()),
+    }
+}
+
+/// The bundle `skill_file` reads for `skill` in this run (EP-11 S5): the live one
+/// unless the run pinned a version of the skill that has since changed, in which
+/// case the bundle that version named. Off (`MODEL_GATEWAY_SKILL_PINS` unset) it is
+/// always the live one, with no read. A failed version read is an error, never the
+/// live bundle, because the live files may not be the ones the run started with.
+async fn pinned_bundle(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    session_bearer: &str,
+    skill: &mp_contracts::model_plane::v1::Skill,
+) -> Result<PinnedBundle, &'static str> {
+    use mp_contracts::model_plane::v1::GetAgentSkillVersionRequest;
+
+    if !crate::skills::skill_pins_enabled() {
+        return Ok(PinnedBundle::Live);
+    }
+    let Some(pin) = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &skill.id) else {
+        return Ok(PinnedBundle::Live);
+    };
+    if !pin_moved(&pin, skill) {
+        return Ok(PinnedBundle::Live);
+    }
+    let request = with_authorization(
+        GetAgentSkillVersionRequest {
+            org_id: org_id.to_owned(),
+            skill_id: pin.skill_id.clone(),
+            version: pin.version,
+            for_user_id: String::new(),
+        },
+        session_bearer,
+    );
+    match state
+        .skill_version_client
+        .clone()
+        .get_agent_skill_version(request)
+        .await
+    {
+        Ok(response) => {
+            let response = response.into_inner();
+            Ok(bundle_of_version(response.gone, response.version.as_ref()))
+        }
+        Err(error) => {
+            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "skill_file: pinned version read failed");
+            Err("skill_file could not read the version of this skill this run used right now")
+        }
+    }
+}
+
+/// What `skill_file` says when the bundle of the version this run pinned is not
+/// kept any more. The model must not read the current files as if they were it.
+const PINNED_BUNDLE_GONE: &str = "the bundle of the version of this skill this run used is no \
+     longer available; do not guess at its files";
+
 /// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
 ///
 /// Every refusal that needs no I/O comes first (the switch, the name, the path,
 /// the credential), so a bad call costs no capability-core read. The path is
 /// checked against the bundle's own manifest, so only a file the bundle holds can
-/// be read, and bytes whose digest differs from the manifest are refused.
+/// be read, and bytes whose digest differs from the manifest are refused. A run
+/// that pinned an older version of the skill reads that version's bundle (EP-11 S5).
+#[allow(clippy::too_many_arguments)]
 async fn skill_file_outcome(
     state: &AppState,
     enabled: bool,
     org_id: &str,
     user_id: &str,
+    run_id: &str,
+    session_bearer: &str,
     capability_bearer: Option<&str>,
     call: &ToolCall,
 ) -> ToolOutcome {
@@ -3250,24 +3421,50 @@ async fn skill_file_outcome(
             "no skill by that name is available to this user; use a skill name exactly as its block shows it",
         ));
     };
+    let no_bundle = || {
+        answer(crate::skills::render_bundle_status(
+            "no_bundle",
+            &skill.name,
+            "this skill has no bundle; its instructions are all there is",
+        ))
+    };
+    let pinned_gone = || {
+        answer(crate::skills::render_bundle_status(
+            "not_available",
+            &skill.name,
+            PINNED_BUNDLE_GONE,
+        ))
+    };
+    let pinned = match pinned_bundle(state, org_id, run_id, session_bearer, &skill).await {
+        Ok(PinnedBundle::Live) => String::new(),
+        Ok(PinnedBundle::At(digest)) => digest,
+        Ok(PinnedBundle::NoBundle) => return no_bundle(),
+        Ok(PinnedBundle::Gone) => return pinned_gone(),
+        Err(message) => return err_outcome(call, message),
+    };
     let manifest = match state
         .capability_client
         .clone()
         .get_skill_bundle_manifest(with_authorization(
             GetSkillBundleManifestRequest {
                 skill_id: skill.id.clone(),
+                manifest_sha256: pinned.clone(),
             },
             bearer,
         ))
         .await
     {
+        // A capability-core that does not keep bundles answers with the live one: that is
+        // not the pinned version's, so it is not read.
+        Ok(response) if !pinned.is_empty() && response.get_ref().manifest_sha256 != pinned => {
+            return pinned_gone();
+        }
         Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound && !pinned.is_empty() => {
+            return pinned_gone();
+        }
         Err(status) if status.code() == tonic::Code::NotFound => {
-            return answer(crate::skills::render_bundle_status(
-                "no_bundle",
-                &skill.name,
-                "this skill has no bundle; its instructions are all there is",
-            ));
+            return no_bundle();
         }
         Err(status) => {
             tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle manifest read failed");
@@ -3358,7 +3555,8 @@ fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 
-fn skill_bundle_mounts_enabled() -> bool {
+/// Whether the `/skills` mount is switched on; the `deck` tool's template mount needs it too.
+pub(crate) fn skill_bundle_mounts_enabled() -> bool {
     skill_bundle_mounts_enabled_from(std::env::var(SKILL_BUNDLE_MOUNT_ENV).ok().as_deref())
 }
 
@@ -3454,11 +3652,12 @@ async fn skill_mounts_for_turn(
         return Vec::new();
     }
     let mut matched: Vec<(String, String)> = Vec::new();
-    for skill_id in &record.skill_ids {
+    for skill_ref in &record.skill_ids {
         let request = GetSkillRequest {
             request_id: String::new(),
             org_id: org_id.to_owned(),
-            skill_id: skill_id.clone(),
+            // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the id.
+            skill_id: crate::chat_turn_registry::skill_id_of_ref(skill_ref).to_owned(),
         };
         let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
             .ok()
@@ -3516,6 +3715,9 @@ async fn dispatch_tool_with_cost(
     // The turn's batched-search refs: `Some` only on a chat turn with batched web search on. `None` leaves
     // `web_search` single-query and `fetch_url` url-only, exactly as they were.
     turn_refs: Option<&TurnRefs>,
+    // The turn's web-search provenance record (EP-9 W1): `Some` only on a live chat stream with the line switched
+    // on. `None` leaves the `web_search` arm exactly as it was.
+    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -3624,6 +3826,28 @@ async fn dispatch_tool_with_cost(
                 Err(e) => err_outcome(call, e),
             }
         }
+        // Typed slide operations on a gateway-owned manifest; a build is a code_interpreter step the
+        // gateway writes itself, sent with the same credentials as the arm above (EP-5 S2).
+        "deck" => {
+            crate::deck_tool::dispatch(
+                &crate::deck_tool::DeckTurn {
+                    state,
+                    execution_bearer,
+                    data_plane_bearer,
+                    sandbox_bearer,
+                    inference_bearer,
+                    session_bearer,
+                    run_id,
+                    org_id,
+                    user_id,
+                    space_id,
+                    thread_id,
+                    zdr,
+                },
+                call,
+            )
+            .await
+        }
         // The canvas tools do no I/O: they validate, then hand the content back
         // for the loop to turn into an `artifact` event. Keeping them in
         // `dispatch_tool` (rather than special-casing them in the loop) means
@@ -3665,6 +3889,10 @@ async fn dispatch_tool_with_cost(
                     };
                     if state.artifact_versions.kind_of(thread_id, &id).is_some_and(|existing| existing != kind) {
                         return err_outcome(call, "an existing artifact cannot change kind; use update_artifact to revise its content");
+                    }
+                    // A create that resolves to the artifact a selection edit holds is a rewrite of it (EP-3 S6).
+                    if let Err(message) = crate::selection_guard::check_update(run_id, &id, &content) {
+                        return err_outcome(call, message);
                     }
                     let version = state.artifact_versions.next_version(thread_id, &id);
                     state
@@ -3766,6 +3994,11 @@ async fn dispatch_tool_with_cost(
                         crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
                     ),
                 );
+            }
+            // A rewrite under a selection edit keeps the text outside the selected range (EP-3 S6). A refused
+            // write records no revision, and the model is told what to change.
+            if let Err(message) = crate::selection_guard::check_update(run_id, id, &content) {
+                return err_outcome(call, message);
             }
             // Kind is intentionally NOT re-supplied on update: an artifact that
             // changed kind mid-history would break the client's renderer
@@ -3933,6 +4166,28 @@ async fn dispatch_tool_with_cost(
                     Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
                 }
             }
+            // The org's domain rules drop a hit on a host the org does not allow, before any hit is recorded or shown (EP-9
+            // W3). Under `off` nothing is read and nothing is dropped.
+            crate::site_policy_client::drop_denied_replies(
+                crate::site_policy_client::policy_mode(),
+                crate::site_policy_client::shared_checker(),
+                &crate::site_policy_client::SiteOwner::of(state),
+                org_id,
+                &mut replies,
+            )
+            .await;
+            // The line names every search the turn answered, so it is recorded only once the whole call has
+            // answered: a failed batch returned above, and its hits never reached the model.
+            if let Some(provenance) = search_provenance {
+                for reply in &replies {
+                    let sources: Vec<&str> = reply
+                        .results
+                        .iter()
+                        .map(|result| result.source.as_str())
+                        .collect();
+                    provenance.record(&reply.provider, &sources);
+                }
+            }
             // Each hit carries the rerank report the edge sent for this search, so the
             // relevance gate can say in its coverage line what the reranker did. The keys
             // and the rule for omitting each one live with the projection, in
@@ -4070,6 +4325,20 @@ async fn dispatch_tool_with_cost(
                 Ok(url) => url,
                 Err(message) => return err_outcome(call, message),
             };
+            // The org's domain rules come before the fetch: a host the org does not allow is refused by name, and no page
+            // is read (EP-9 W3). Under `off` nothing is read.
+            if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+                crate::site_policy_client::policy_mode(),
+                crate::site_policy_client::shared_checker(),
+                &crate::site_policy_client::SiteOwner::of(state),
+                org_id,
+                &[url.as_str()],
+                &call.name,
+            )
+            .await
+            {
+                return err_outcome(call, refusal);
+            }
             // `scrape_readable`, not `scrape`: it resolves Quarry's
             // artifact-referenced page text and escalates once to the
             // browser driver when a plain fetch yields nothing. Deep
@@ -4179,6 +4448,22 @@ async fn dispatch_tool_with_cost(
                 Ok(args) => args,
                 Err(message) => return err_outcome(call, format!("extract_structured: {message}")),
             };
+            // The org's domain rules come before any page is read, for every URL the call names (EP-9 W3).
+            let refusal = {
+                let urls: Vec<&str> = args.urls.iter().map(String::as_str).collect();
+                crate::site_policy_client::fetch_refusal(
+                    crate::site_policy_client::policy_mode(),
+                    crate::site_policy_client::shared_checker(),
+                    &crate::site_policy_client::SiteOwner::of(state),
+                    org_id,
+                    &urls,
+                    &call.name,
+                )
+                .await
+            };
+            if let Some(refusal) = refusal {
+                return err_outcome(call, refusal);
+            }
             if !state.quarry.available() {
                 return err_outcome(call, "extract_structured: the page reader is not configured");
             }
@@ -4498,6 +4783,28 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // The read-only thread reference tools (EP-3 S7). Off by default. The model names a thread only by
+        // its position among the threads the person attached to this run; the gate, the screening and the
+        // framing live in the module, and what it reads is prior conversation, never instructions.
+        crate::thread_reference_tools::OUTLINE_TOOL
+        | crate::thread_reference_tools::SEARCH_TOOL
+        | crate::thread_reference_tools::READ_TOOL => {
+            crate::thread_reference_tools::outcome(
+                state,
+                call,
+                &crate::thread_reference_tools::ThreadReferenceCaller {
+                    org_id,
+                    user_id,
+                    thread_id,
+                    run_id,
+                    session_bearer,
+                    capability_bearer,
+                    zdr,
+                    retention_mode: data_plane_mode.is_some(),
+                },
+            )
+            .await
+        }
         // Recover a skill the per-prompt budget cut. `skill_budget` degrades
         // before dropping and marks what it cut — honest, and until now
         // unrecoverable: the model read "truncated" and had no way to obtain the
@@ -4529,6 +4836,8 @@ async fn dispatch_tool_with_cost(
                     // distinction is only available if it comes back.
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
                 session_bearer,
             );
@@ -4555,9 +4864,24 @@ async fn dispatch_tool_with_cost(
                     );
                 }
             };
-            let output = crate::skills::render_recovered_skill(
-                &mp_contracts::skill_recovery::recover_skill(&skills, &name),
-            );
+            // EP-11 S3: a skill this run pinned is recovered at the pinned version, so an
+            // edit made mid-run does not change what the run reads back.
+            let output = match pinned_skill_recovery(
+                state,
+                org_id,
+                run_id,
+                session_bearer,
+                &skills,
+                &name,
+            )
+            .await
+            {
+                Some(Ok(output)) => output,
+                Some(Err(message)) => return err_outcome(call, message),
+                None => crate::skills::render_recovered_skill(
+                    &mp_contracts::skill_recovery::recover_skill(&skills, &name),
+                ),
+            };
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
@@ -4577,6 +4901,8 @@ async fn dispatch_tool_with_cost(
                 mp_contracts::skill_bundle::enabled(),
                 org_id,
                 user_id,
+                run_id,
+                session_bearer,
                 capability_bearer,
                 call,
             )
@@ -4596,6 +4922,14 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // The connected-app suggestion (EP-10 S8): it reads nothing, and the loop turns the first
+        // accepted call of a turn into the card.
+        mp_contracts::connector_suggest::TOOL_NAME => connector_suggestion::outcome(
+            connector_suggestion::enabled(),
+            zdr,
+            !space_id.is_empty(),
+            call,
+        ),
         // Knowledge-base RAG — searches the org's OWN ingested documents via
         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
         // verified request org, never model input, so a tool call can't read
@@ -4611,8 +4945,11 @@ async fn dispatch_tool_with_cost(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            let request =
+            let mut request =
                 knowledge_search_request(org_id, &query, top_k, data_plane_mode.clone(), sovereign_required);
+            // The documents the person attached to this turn narrow the search (EP-3 S5). Only the
+            // ids travel; the Data Plane applies the viewer's own ACL. `None` for every other turn.
+            request.filters = crate::context_refs::knowledge_filters(run_id);
             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
                 Ok(request) => request,
                 Err(error) => {
@@ -5577,7 +5914,7 @@ fn writes_document(tool: &str) -> bool {
 /// read. A document write finishes in place, and a browser run or sandbox job
 /// has its own lifecycle, which no longer waiting for it would not end.
 fn stops_at_validation_deadline(tool: &str) -> bool {
-    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter")
+    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
 }
 
 /// What the model is told about a read cut off at that deadline.
@@ -5699,6 +6036,9 @@ async fn dispatch_audited_tool(
     retry_sink: Option<&crate::sse_events::RichEventSink>,
     // The turn's batched-search refs (see `dispatch_tool_with_cost`). `None` for every caller but the chat loop.
     turn_refs: Option<&TurnRefs>,
+    // The turn's web-search provenance record (see `dispatch_tool_with_cost`). `None` for every caller but the
+    // chat loop and the forced pre-loop search.
+    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -5765,6 +6105,7 @@ async fn dispatch_audited_tool(
             classifier_budget,
             connector,
             turn_refs,
+            search_provenance,
         )
     });
     let outcome = until_read_deadline(call, read_deadline, attempts).await;
@@ -5898,6 +6239,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Deep research's searches are single queries and issue no refs: batched search is a chat-turn feature.
         None,
+        // Deep research's searches are not on the chat turn's "Searched via" line: the line is the chat turn's own.
+        None,
     )
     .await
 }
@@ -5938,7 +6281,7 @@ pub const MAX_READ_ARTIFACT_CHARS: usize = 24_000;
 /// A task-scoped source boundary, also enforced against the final offered tool
 /// set before dispatch. Calculation runs in the existing networkless sandbox.
 pub fn conversation_tool_allowed(name: &str) -> bool {
-    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file")
+    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file" | "deck")
 }
 
 /// The public-web-search half of the retrieval-scope tool buckets
@@ -5963,8 +6306,18 @@ const ORG_CLASS_TOOLS: &[&str] = &[
 ];
 
 /// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
-/// DEC-26), so a source-filtered turn never sees the read.
-const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+/// DEC-26), so a source-filtered turn never sees the read, nor the suggestion that leads to it (EP-10 S8).
+const CONNECTOR_CLASS_TOOLS: &[&str] = &[
+    mp_contracts::provider_reads::READ_TOOL_NAME,
+    mp_contracts::connector_suggest::TOOL_NAME,
+];
+
+/// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
+/// retrieval scope already calls web, so the two gates never disagree about what counts as the web.
+#[must_use]
+pub fn is_public_web_tool(name: &str) -> bool {
+    WEB_CLASS_TOOLS.contains(&name)
+}
 
 /// Whether `name` may be offered under a per-turn `RetrievalScope`
 /// (chat-wave2 scope spec §2.3), the same enforcement chokepoint
@@ -6051,6 +6404,8 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
 fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
     let mut defs = builtin_tool_defs_with(crate::web_extraction::extract_tool_enabled());
     advertise_batched_search(&mut defs, batch);
+    // Last, and only while its switch is on, so the list is unchanged when it is off (EP-5 S2).
+    crate::deck_tool::offer(&mut defs, crate::deck_tool::enabled());
     defs
 }
 
@@ -7189,7 +7544,9 @@ pub async fn run_forced_web_search_for_model(
         // A forced `web_search` and nothing else, so no Data Plane retrieval is
         // reachable from here — same reasoning as `dispatch_web_tool_audited`.
         mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
-        paid_providers_allowed(requested_model, zdr),
+        // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) can only take the grant away.
+        paid_providers_allowed(requested_model, zdr)
+            && crate::org_agent_policy::org_allows_paid_providers(org_id),
         &call,
         None,
         // web_search only: code_interpreter, the sole reader of the sandbox
@@ -7214,6 +7571,8 @@ pub async fn run_forced_web_search_for_model(
         None,
         // A forced search runs before the turn's tool loop and issues no refs: batched search is a loop feature.
         None,
+        // The forced search is one of the turn's searches, so the "Searched via" line counts it.
+        sink.and_then(crate::sse_events::RichEventSink::search_provenance),
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -7609,6 +7968,7 @@ fn web_search_citations(
                 start: None,
                 end: None,
                 origin: "web".to_owned(),
+                passage: None,
             })
         })
         .collect()
@@ -8099,6 +8459,7 @@ fn finish_web_search_gate(
                     start: None,
                     end: None,
                     origin: "web".to_owned(),
+                    passage: None,
                 }],
                 short_circuit: Some(answer),
             };
@@ -8503,7 +8864,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
-    let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) is read with the entitlement, once per turn.
+    let allow_paid_providers =
+        paid_providers_allowed(requested_model, zdr) && crate::org_agent_policy::org_allows_paid_providers(org_id);
     // Batched web search is decided once for the turn, so every call of the turn agrees, and its refs live only in
     // this map, dropped with the turn. `None` (the switch off) leaves every web-search path as it was.
     let turn_refs = web_search_batch_enabled().then(TurnRefs::default);
@@ -8524,18 +8887,43 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    // The turn's web-search provenance record, read from the sink as the connected-account selection is. Every
+    // answered search records on it, so the one line after the tool phase names them all.
+    let search_provenance = sink.and_then(crate::sse_events::RichEventSink::search_provenance);
+    // The org's connected-app policy may hold the read back to Do mode (EP-10-S7). It is read only on a turn
+    // that already offers the read, so every other turn makes no extra call.
     let connector_offered = connector_reads::offered(
         connector_reads::enabled(),
         zdr,
         !space_id.is_empty(),
         connector_turn,
-    );
+    ) && connector_reads::read_policy(state, org_id, user_id, capability_bearer)
+        .await
+        .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The connected-app suggestion (EP-10 S8) is offered on a turn that selected no account, read from
+    // the same sink selection. With its switch off the list is left as it was.
+    let suggestion_offered = connector_suggestion::offered(
+        connector_suggestion::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let tools = connector_suggestion::tools_for_turn(tools, suggestion_offered);
     // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
     // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.
     let reader_offered =
         crate::page_reader::enabled() && external_parking_allowed(zdr || data_plane_mode.is_some());
     let tools = tools_for_web_reader(tools, reader_offered);
+    // The thread reference tools (EP-3 S7) are offered only on a run whose person attached earlier
+    // conversations, and never on a ZDR or waived turn. With the switch off the list is left as it was.
+    let thread_refs_offered = crate::thread_reference_tools::offered_count(
+        crate::thread_reference_tools::enabled(),
+        run_id,
+        zdr,
+        data_plane_mode.is_some(),
+    );
+    let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -8570,6 +8958,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
+    // Whether this turn has shown its one connected-app suggestion card (EP-10 S8).
+    let mut suggestion_turn = connector_suggestion::SuggestionTurn::default();
     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
     let guard_mode = loop_guard_mode();
@@ -8809,7 +9199,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         // A recognised dated-post revision may be answered with that post's
         // section alone (opt-in `dated_post_section_only`): this round then
         // offers the section-only `update_artifact` and adds its notice below.
-        let section_only = section_only_revision(state.latency_levers, &state.artifact_versions, thread_id, &turn_question, new_note_pending, &round_tools);
+        // A selection edit sends the whole artifact, so the section-only wording is not offered to it (EP-3 S6).
+        let section_only = !crate::selection_guard::active(run_id)
+            && section_only_revision(state.latency_levers, &state.artifact_versions, thread_id, &turn_question, new_note_pending, &round_tools);
         if section_only { offer_section_only_update(&mut round_tools); }
         let document_pending = pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction);
         if document_pending && !round_tools.iter().any(|tool| matches!(tool.name.as_str(), "create_artifact" | "update_artifact")) {
@@ -8837,6 +9229,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             if !kept.is_empty() {
                 decision_messages.push(ChatMessage { role: "system".into(), content: section_only_subheadings_notice(&kept), ..Default::default() });
             }
+        }
+        // A run that holds a selection edit carries its instruction into every decision round (EP-3 S6).
+        if let Some(notice) = crate::selection_guard::prompt_notice(run_id) {
+            decision_messages.push(ChatMessage { role: "system".into(), content: notice, ..Default::default() });
         }
         // A new note's only possible prior source, or a scoped revision's
         // sole document, is read before the first model round, through the
@@ -9457,6 +9853,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     connector_turn,
                     retry_sink,
                     turn_refs_ref,
+                    search_provenance,
                 )
                 .await
             },
@@ -9482,6 +9879,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         for result in dispatched {
             let mut outcome = result?;
             if outcome.name == "count_words" { count_calls += 1; }
+            // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
+            let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
+            let suggestion = suggestion_turn.settle(&mut outcome, answered_call);
             // Artifact-producing tools return their payload through `output`,
             // which would otherwise be appended to the conversation verbatim —
             // a generated .xlsx or a long document would consume the entire
@@ -9626,6 +10026,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // (WS23-S5). The parking happens off ZDR only, as it always does.
             for source in connector_reads::settle(&mut outcome, state, org_id, user_id, zdr) {
                 events.push(source).await;
+            }
+            // The suggestion card follows its tool result, as a read's sources do.
+            if let Some(card) = suggestion {
+                events.push(card).await;
             }
             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
             for notice_event in retrieval_notice_events(&outcome) {
@@ -9786,6 +10190,11 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             }
         }
 
+        // The second refused rewrite of a selection edit ends the turn here, so no later round can revise the
+        // artifact (EP-3 S6).
+        if crate::selection_guard::rejected(run_id) {
+            return Err(crate::selection_guard::REJECTED_REASON);
+        }
         // "There is no need to search more when the answer is so easily
         // available." The remaining rounds would each cost an inference and a
         // search, and their only effect on an answer already carried by a dated
@@ -9797,6 +10206,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         }
     }
 
+    // A selection edit refused twice ends the turn on every exit from the loop, including a stop by the loop guard (EP-3 S6).
+    if crate::selection_guard::rejected(run_id) {
+        return Err(crate::selection_guard::REJECTED_REASON);
+    }
     if pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction) {
         return Err(crate::result_validation::VALIDATION_FAILED);
     }
@@ -13851,6 +14264,7 @@ mod tests {
                 title,
                 content,
                 version,
+                ..
             } => {
                 assert_eq!(id, "q3-rapport");
                 assert_eq!(kind, "document");
@@ -14202,6 +14616,33 @@ mod tests {
             }],
         });
         assert!(office_preview_for(&over_cap, "budget.xlsx").is_none());
+    }
+
+    /// A deck's preview keeps one thumbnail per slide up to the page cap, in page order, so a deck arrives with
+    /// its pictures in slide order. Any other kind keeps three, however many the verifier sent.
+    #[test]
+    fn deck_thumbs_cap() {
+        let thumbs: Vec<String> = (1..=45).map(|index| format!("thumb{index}")).collect();
+        let preview_of = |name: &str, kind: &str| {
+            let payload = serde_json::json!({
+                "verification": [{
+                    "name": name,
+                    "kind": kind,
+                    "level": "passed",
+                    "checks": [],
+                    "stats": { "render_pages": 45 },
+                }],
+                "previews": [{ "name": name, "pdf_b64": "JVBERi0=", "thumbs_b64": thumbs }],
+            });
+            office_preview_for(&payload, name).expect("a preview with a report")
+        };
+        let deck = preview_of("kvartal.pptx", "pptx");
+        assert_eq!(deck.thumbs.len(), PREVIEW_MAX_DECK_THUMBS);
+        assert_eq!(deck.thumbs.first().map(String::as_str), Some("data:image/png;base64,thumb1"));
+        assert_eq!(deck.thumbs.last().map(String::as_str), Some("data:image/png;base64,thumb40"));
+        assert_eq!(deck.url, "data:application/pdf;base64,JVBERi0=");
+        let sheet = preview_of("budget.xlsx", "xlsx");
+        assert_eq!(sheet.thumbs.len(), PREVIEW_MAX_THUMBS);
     }
 
     /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.
@@ -15845,6 +16286,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call(
                 "skill_file",
@@ -15868,6 +16311,8 @@ mod tests {
             false,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -15886,6 +16331,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             None,
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -15906,6 +16353,8 @@ mod tests {
             true,
             "org_test",
             "user_test",
+            "run_test",
+            "session-bearer",
             Some("capability-bearer"),
             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
         )
@@ -15913,6 +16362,65 @@ mod tests {
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let output: serde_json::Value = serde_json::from_str(&outcome.output).expect("valid JSON");
         assert_eq!(output["status"], "not_found");
+    }
+
+    /// EP-11 S5: a run that pinned a version of a skill that has since changed
+    /// reads the bundle that version named; an unchanged skill, a builtin pin and
+    /// another skill's pin read the live bundle.
+    #[test]
+    fn skill_file_reads_pinned_bundle() {
+        use mp_contracts::model_plane::v1::{AgentSkillVersion, Skill, SkillPin};
+
+        let skill = Skill {
+            id: "sk-1".into(),
+            name: "Deploy Runbook".into(),
+            version: 3,
+            digest: "c".repeat(64),
+            ..Default::default()
+        };
+        let pin = |skill_id: &str, version: i32, digest: String| SkillPin {
+            skill_id: skill_id.into(),
+            version,
+            digest,
+            source: "matched".into(),
+        };
+        assert!(pin_moved(&pin("sk-1", 2, "b".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-1", 3, "c".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-1", 0, "b".repeat(64)), &skill));
+        assert!(!pin_moved(&pin("sk-2", 2, "b".repeat(64)), &skill));
+
+        let version = |bundle: &str| AgentSkillVersion {
+            skill_id: "sk-1".into(),
+            version: 2,
+            bundle_sha256: bundle.into(),
+            ..Default::default()
+        };
+        let kept_bundle = "a".repeat(64);
+        assert_eq!(
+            bundle_of_version(false, Some(&version(&kept_bundle))),
+            PinnedBundle::At(kept_bundle.clone())
+        );
+        assert_eq!(bundle_of_version(false, Some(&version(""))), PinnedBundle::NoBundle);
+        assert_eq!(bundle_of_version(true, Some(&version(&kept_bundle))), PinnedBundle::Gone);
+        assert_eq!(bundle_of_version(false, None), PinnedBundle::Gone);
+    }
+
+    /// With pins off the live bundle is read and no version is looked up, so a
+    /// deployment without `MODEL_GATEWAY_SKILL_PINS` reads bundles as before.
+    #[tokio::test]
+    async fn skill_file_reads_the_live_bundle_while_pins_are_off() {
+        if crate::skills::skill_pins_enabled() {
+            return;
+        }
+        let state = crate::state::AppState::new();
+        let skill = mp_contracts::model_plane::v1::Skill {
+            id: "sk-1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            pinned_bundle(&state, "org_test", "run_test", "session-bearer", &skill).await,
+            Ok(PinnedBundle::Live)
+        );
     }
 
     #[test]
@@ -16619,6 +17127,7 @@ mod tests {
             None,
             None,
             refs,
+            None,
         )
         .await
     }
@@ -16661,6 +17170,86 @@ mod tests {
             .map(|request| serde_json::from_slice(&request.body).expect("a JSON search body"))
             .collect();
         (outcome, bodies)
+    }
+
+    /// A `web_search` call records the provider behind each answered hit on the turn's record. A hit that names
+    /// no provider of its own takes the envelope's, so the line never loses a hit to a missing key (EP-9 W1).
+    #[tokio::test]
+    async fn a_search_records_each_hits_provider_on_the_turn_record() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/search"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "provider": "smart_router",
+                "results": [
+                    {"url": "https://a.test/1", "title": "A", "snippet": "a", "source": "brave"},
+                    {"url": "https://b.test/2", "title": "B", "snippet": "b", "source": "searxng"},
+                    {"url": "https://c.test/3", "title": "C", "snippet": "c"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: server.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        let turn = crate::search_provenance::SearchProvenanceTurn::new(
+            crate::search_provenance::Route::FreeChain,
+        );
+        let call = tool_call("web_search", r#"{"query":"alpha query"}"#);
+        let outcome = dispatch_tool_with_cost(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            false,
+            &call,
+            None,
+            None,
+            None,
+            None,
+            &crate::turn_attachments::ValidatedAttachments::none(),
+            &[],
+            None,
+            None,
+            None,
+            Some(&turn),
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(
+            turn.take_provenance().map(|provenance| provenance.providers),
+            Some(vec![
+                crate::search_provenance::ProviderUse {
+                    id: "brave",
+                    label: "Brave Search",
+                    hits: 1,
+                },
+                crate::search_provenance::ProviderUse {
+                    id: "searxng",
+                    label: "SearXNG metasearch",
+                    hits: 1,
+                },
+                crate::search_provenance::ProviderUse {
+                    id: "verevon",
+                    label: "Verevon search",
+                    hits: 1,
+                },
+            ])
+        );
     }
 
     /// Every query of a batched call is searched with the turn's own paid-provider entitlement, and no other.
@@ -17756,6 +18345,17 @@ mod connector_scope_tests {
             "the one connected-account read is dispatchable"
         );
     }
+
+    /// The suggestion leads to a connected-account read, so it follows the read's source scope (EP-10 S8).
+    #[test]
+    fn connector_suggestion_is_allowed_only_under_auto_and_is_dispatchable() {
+        use crate::normalize::RetrievalScope;
+        use mp_contracts::connector_suggest::TOOL_NAME;
+        assert!(tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::Auto));
+        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::KnowledgeOnly));
+        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::WebOnly));
+        assert!(inline_tool_allowed(TOOL_NAME));
+    }
 }
 
 #[cfg(test)]
@@ -17773,6 +18373,7 @@ mod skill_mount_tests {
             total_bytes: 10,
             created_by: "admin".to_owned(),
             created_at: "2026-10-01T00:00:00Z".to_owned(),
+            deck_template: false,
         }
     }
 

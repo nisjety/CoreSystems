@@ -47,17 +47,26 @@ service MemoryService {
   // an empty answer with skip_reason "zdr", never an error. Refused with
   // failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
   // is off.
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc GetUserProfile(GetUserProfileRequest) returns (UserProfileResponse);
 
   // Replace the profile text with the person's own edit. User callers only, for
   // themselves; a stale expected_revision is refused (failed_precondition
   // "profile_revision_stale"); a ZDR or waived credential is refused
   // zdr_feature_not_supported (feature "user_profile").
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc SetUserProfile(SetUserProfileRequest) returns (UserProfileResponse);
 
   // Rebuild the profile from the person's accepted memories. Refused while
   // memory is paused, off or disabled; an edited profile is kept unless force
   // is set. Same caller and ZDR rules as SetUserProfile.
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc RebuildUserProfile(RebuildUserProfileRequest) returns (UserProfileResponse);
 }
 
@@ -330,6 +339,7 @@ message DeleteMemoryResponse {
 
 // MemoryState — the user's own choice about their memory (build plan WS07 S1).
 enum MemoryState {
+  // Unset state, the zero value. Setting it is refused.
   MEMORY_STATE_UNSPECIFIED = 0;
 
   // The default. Memory is used and learned from.
@@ -343,6 +353,7 @@ enum MemoryState {
   MEMORY_STATE_OFF = 3;
 }
 
+// Request to read one user's memory controls.
 message GetMemoryControlsRequest {
   // Tenant context.
   string org_id = 1;
@@ -351,6 +362,7 @@ message GetMemoryControlsRequest {
   string user_id = 2;
 }
 
+// Request to set one user's memory state.
 message SetMemoryControlsRequest {
   // Tenant context.
   string org_id = 1;
@@ -399,14 +411,19 @@ message MemoryControls {
   google.protobuf.Timestamp updated_at = 9;
 }
 
+// Response carrying one user's memory controls.
 message GetMemoryControlsResponse {
+  // The user's memory controls.
   MemoryControls controls = 1;
 }
 
+// Response to a set, carrying the user's memory controls.
 message SetMemoryControlsResponse {
+  // The user's memory controls.
   MemoryControls controls = 1;
 }
 
+// Request to erase one user's durable memory; confirm must be true.
 message ResetMemoryRequest {
   // Tenant context.
   string org_id = 1;
@@ -419,6 +436,7 @@ message ResetMemoryRequest {
   bool confirm = 3;
 }
 
+// Counts of rows erased by a memory reset, and whether any copy is unconfirmed.
 message ResetMemoryResponse {
   // How many durable rows were erased (current rows and retired ancestors).
   uint32 durable_deleted = 1;
@@ -460,6 +478,7 @@ message UserProfile {
   uint32 sources_deleted_since_edit = 6;
 }
 
+// Request to read one user's profile.
 message GetUserProfileRequest {
   // Tenant context.
   string org_id = 1;
@@ -468,6 +487,7 @@ message GetUserProfileRequest {
   string user_id = 2;
 }
 
+// Request to replace one user's profile text with an edit.
 message SetUserProfileRequest {
   // Tenant context.
   string org_id = 1;
@@ -482,6 +502,7 @@ message SetUserProfileRequest {
   uint64 expected_revision = 4;
 }
 
+// Request to rebuild one user's profile from their accepted memories.
 message RebuildUserProfileRequest {
   // Tenant context.
   string org_id = 1;
@@ -493,6 +514,7 @@ message RebuildUserProfileRequest {
   bool force = 3;
 }
 
+// The user's profile, and why it is not used in conversations.
 message UserProfileResponse {
   // The profile, unset when none exists or it is hidden (see skip_reason).
   UserProfile profile = 1;

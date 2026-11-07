@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "model_plane/v1/thread_export.proto";
+
+// Thread share snapshots (Wave 3 EP-12 S14, decision D10; ADR
+// docs/decisions/conversation-share-model.md, proposed).
+//
+// The owner of a thread takes an immutable copy of its active branch: the
+// thread export (EP-12 S9) with the redacted profile, stored in session-core.
+// Later turns never reach a snapshot, and reading one calls no model,
+// connector or tool. Creating one follows the export's refusals: a
+// zero-retention or waived caller is refused (`zdr_feature_not_supported`,
+// feature `conversation_share`), and so is a thread that holds any run whose
+// retention class is not `persistent` or that belongs to a Space
+// (`failed_precondition` `thread_not_exportable`, the reason in the
+// `x-mp-error-reason` trailer). Revoking deletes the body; a revoked snapshot
+// reads as not found to everyone. A snapshot is erased with its thread and
+// with the org purge.
+//
+// Reads are owner-only in this version: Control has no grant decision for the
+// `conversation_snapshot` type that session-core can verify yet, so another
+// member's read is not found. A separate file and service (integration round
+// B, C-B6) so that SessionCore and every implementation or test double of it
+// stay source-compatible. Switch `SESSION_THREAD_SHARES_ENABLED`, default off;
+// while it is off every RPC answers `unavailable` `thread_shares_disabled`.
+
+// EP-12 S14. One snapshot as its owner sees it, without its body.
+message ThreadShareSnapshot {
+  // The snapshot's id, `snap_<ulid>`; the resource id a Control grant on
+  // `conversation_snapshot` names.
+  string snapshot_id = 1;
+  // The thread the snapshot copies.
+  string thread_id = 2;
+  // The thread's title when the snapshot was taken; empty when it had none.
+  string title = 3;
+  // When the snapshot was taken.
+  google.protobuf.Timestamp created_at = 4;
+  // `sha256:<hex>` of the stored body; empty once revoked.
+  string body_digest = 5;
+  // When the owner revoked the snapshot; unset while it is live.
+  google.protobuf.Timestamp revoked_at = 6;
+}
+
+// EP-12 S14. Take a snapshot of one thread the caller owns.
+message CreateSnapshotRequest {
+  // The thread to copy, in the caller's own org.
+  string thread_id = 1;
+}
+
+// EP-12 S14. The snapshot just taken.
+message CreateSnapshotResponse {
+  // The new snapshot, without its body.
+  ThreadShareSnapshot snapshot = 1;
+}
+
+// EP-12 S14. List the caller's live snapshots of one thread.
+message ListSnapshotsRequest {
+  // The thread whose snapshots to list; another person's thread lists none.
+  string thread_id = 1;
+}
+
+// EP-12 S14. The caller's live snapshots of the thread, newest first.
+message ListSnapshotsResponse {
+  // At most 20 snapshots, the per-thread cap; revoked ones are left out.
+  repeated ThreadShareSnapshot snapshots = 1;
+}
+
+// EP-12 S14. Read one live snapshot with its body.
+message GetSnapshotRequest {
+  // The snapshot to read.
+  string snapshot_id = 1;
+}
+
+// EP-12 S14. One snapshot and the copy it holds.
+message GetSnapshotResponse {
+  // The snapshot, without its body.
+  ThreadShareSnapshot snapshot = 1;
+  // The redacted export the snapshot froze, exactly as it was taken.
+  ExportThreadResponse body = 2;
+}
+
+// EP-12 S14. Revoke one of the caller's snapshots.
+message RevokeSnapshotRequest {
+  // The snapshot to revoke; another person's or a revoked one is not found.
+  string snapshot_id = 1;
+}
+
+// EP-12 S14. The snapshot as revoked: no digest, `revoked_at` set.
+message RevokeSnapshotResponse {
+  // The revoked snapshot; its body is already deleted.
+  ThreadShareSnapshot snapshot = 1;
+}
+
+// EP-12 S14. The snapshot store. See the file comment for every refusal.
+service ThreadShareService {
+  // Take an immutable, redacted snapshot of a thread the caller owns.
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  // List the caller's live snapshots of one thread.
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  // Read one live snapshot with its body; owner-only in this version.
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+  // Revoke a snapshot: its body and digest are deleted in the same statement.
+  rpc RevokeSnapshot(RevokeSnapshotRequest) returns (RevokeSnapshotResponse);
+}

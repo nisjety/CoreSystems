@@ -92,6 +92,7 @@ fn variant_and_token(code: CauseCode) -> (&'static str, &'static str) {
         CauseCode::AutoPostureProviderWrite => {
             ("AutoPostureProviderWrite", "auto_posture_provider_write")
         }
+        CauseCode::BrowserHumanAssist => ("BrowserHumanAssist", "browser_human_assist"),
         CauseCode::UnclassifiedGate => ("UnclassifiedGate", "unclassified_gate"),
     }
 }

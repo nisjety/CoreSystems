@@ -82,6 +82,70 @@ func (SandboxLifecycleState) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{0}
 }
 
+// Sandbox egress tiers (EP-9 D-E3), ordered by reach: each tier admits
+// strictly more hosts than the one before. A reader that meets a value it
+// does not know treats it as OFF, never as a wider reach.
+type SandboxEgressTier int32
+
+const (
+	// Not set; read as OFF.
+	SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED SandboxEgressTier = 0
+	// No network: the sandbox has no route out at all.
+	SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF SandboxEgressTier = 1
+	// A fixed, reviewed list of package registries.
+	SandboxEgressTier_SANDBOX_EGRESS_TIER_REGISTRIES SandboxEgressTier = 2
+	// The registries plus the Space's own allow-list.
+	SandboxEgressTier_SANDBOX_EGRESS_TIER_ALLOWLIST SandboxEgressTier = 3
+	// Unrestricted. In the vocabulary but not storable in Wave 3: Control
+	// refuses it and sandbox-manager never records it.
+	SandboxEgressTier_SANDBOX_EGRESS_TIER_ALL SandboxEgressTier = 4
+)
+
+// Enum value maps for SandboxEgressTier.
+var (
+	SandboxEgressTier_name = map[int32]string{
+		0: "SANDBOX_EGRESS_TIER_UNSPECIFIED",
+		1: "SANDBOX_EGRESS_TIER_OFF",
+		2: "SANDBOX_EGRESS_TIER_REGISTRIES",
+		3: "SANDBOX_EGRESS_TIER_ALLOWLIST",
+		4: "SANDBOX_EGRESS_TIER_ALL",
+	}
+	SandboxEgressTier_value = map[string]int32{
+		"SANDBOX_EGRESS_TIER_UNSPECIFIED": 0,
+		"SANDBOX_EGRESS_TIER_OFF":         1,
+		"SANDBOX_EGRESS_TIER_REGISTRIES":  2,
+		"SANDBOX_EGRESS_TIER_ALLOWLIST":   3,
+		"SANDBOX_EGRESS_TIER_ALL":         4,
+	}
+)
+
+func (x SandboxEgressTier) Enum() *SandboxEgressTier {
+	p := new(SandboxEgressTier)
+	*p = x
+	return p
+}
+
+func (x SandboxEgressTier) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SandboxEgressTier) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_sandboxes_proto_enumTypes[1].Descriptor()
+}
+
+func (SandboxEgressTier) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[1]
+}
+
+func (x SandboxEgressTier) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SandboxEgressTier.Descriptor instead.
+func (SandboxEgressTier) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{1}
+}
+
 // Lifecycle of one background process. The numeric values are stored directly
 // in sandbox_processes.state (migration 0003), the same way
 // SandboxLifecycleState's are stored in leases.state.
@@ -140,11 +204,11 @@ func (x ProcessState) String() string {
 }
 
 func (ProcessState) Descriptor() protoreflect.EnumDescriptor {
-	return file_model_plane_v1_sandboxes_proto_enumTypes[1].Descriptor()
+	return file_model_plane_v1_sandboxes_proto_enumTypes[2].Descriptor()
 }
 
 func (ProcessState) Type() protoreflect.EnumType {
-	return &file_model_plane_v1_sandboxes_proto_enumTypes[1]
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[2]
 }
 
 func (x ProcessState) Number() protoreflect.EnumNumber {
@@ -153,7 +217,7 @@ func (x ProcessState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProcessState.Descriptor instead.
 func (ProcessState) EnumDescriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{1}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{2}
 }
 
 // The strongest termination signal a caller has asked for. Ordered so an
@@ -194,11 +258,11 @@ func (x ProcessSignal) String() string {
 }
 
 func (ProcessSignal) Descriptor() protoreflect.EnumDescriptor {
-	return file_model_plane_v1_sandboxes_proto_enumTypes[2].Descriptor()
+	return file_model_plane_v1_sandboxes_proto_enumTypes[3].Descriptor()
 }
 
 func (ProcessSignal) Type() protoreflect.EnumType {
-	return &file_model_plane_v1_sandboxes_proto_enumTypes[2]
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[3]
 }
 
 func (x ProcessSignal) Number() protoreflect.EnumNumber {
@@ -207,7 +271,7 @@ func (x ProcessSignal) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProcessSignal.Descriptor instead.
 func (ProcessSignal) EnumDescriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{2}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{3}
 }
 
 // Which stream an output chunk came from.
@@ -252,11 +316,11 @@ func (x ProcessStream) String() string {
 }
 
 func (ProcessStream) Descriptor() protoreflect.EnumDescriptor {
-	return file_model_plane_v1_sandboxes_proto_enumTypes[3].Descriptor()
+	return file_model_plane_v1_sandboxes_proto_enumTypes[4].Descriptor()
 }
 
 func (ProcessStream) Type() protoreflect.EnumType {
-	return &file_model_plane_v1_sandboxes_proto_enumTypes[3]
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[4]
 }
 
 func (x ProcessStream) Number() protoreflect.EnumNumber {
@@ -265,7 +329,7 @@ func (x ProcessStream) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ProcessStream.Descriptor instead.
 func (ProcessStream) EnumDescriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{3}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{4}
 }
 
 // Why a lease could not do what was asked. The numeric values are stored in leases.failure_cause
@@ -336,11 +400,11 @@ func (x SandboxFailureCause) String() string {
 }
 
 func (SandboxFailureCause) Descriptor() protoreflect.EnumDescriptor {
-	return file_model_plane_v1_sandboxes_proto_enumTypes[4].Descriptor()
+	return file_model_plane_v1_sandboxes_proto_enumTypes[5].Descriptor()
 }
 
 func (SandboxFailureCause) Type() protoreflect.EnumType {
-	return &file_model_plane_v1_sandboxes_proto_enumTypes[4]
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[5]
 }
 
 func (x SandboxFailureCause) Number() protoreflect.EnumNumber {
@@ -349,7 +413,7 @@ func (x SandboxFailureCause) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SandboxFailureCause.Descriptor instead.
 func (SandboxFailureCause) EnumDescriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{4}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{5}
 }
 
 type AcquireLeaseRequest struct {
@@ -493,8 +557,17 @@ type AcquireLeaseResponse struct {
 	// `RegisterProcess` will deny; the registry's own check remains the
 	// authoritative one. Always false for a non-Space lease.
 	ProcessesPermitted bool `protobuf:"varint,6,opt,name=processes_permitted,json=processesPermitted,proto3" json:"processes_permitted,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The sandbox egress tier this lease permits (EP-9 E3): the tier Control
+	// granted for the claim, persisted on the lease row like
+	// processes_permitted. A backend that claims egress the Space is not
+	// entitled to gets its lease at OFF rather than a refusal (D-E2).
+	// execution-core enforces the tier per call at its socket proxy and never
+	// goes above it. A non-Space lease is OFF. UNSPECIFIED (an older
+	// sandbox-manager, or its SANDBOX_MANAGER_EGRESS_TIERS switch off) is read
+	// as OFF.
+	EgressTier    SandboxEgressTier `protobuf:"varint,7,opt,name=egress_tier,json=egressTier,proto3,enum=model_plane.v1.SandboxEgressTier" json:"egress_tier,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcquireLeaseResponse) Reset() {
@@ -567,6 +640,13 @@ func (x *AcquireLeaseResponse) GetProcessesPermitted() bool {
 		return x.ProcessesPermitted
 	}
 	return false
+}
+
+func (x *AcquireLeaseResponse) GetEgressTier() SandboxEgressTier {
+	if x != nil {
+		return x.EgressTier
+	}
+	return SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED
 }
 
 type ReleaseLeaseRequest struct {
@@ -3671,7 +3751,7 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\bspace_id\x18\x05 \x01(\tR\aspaceId\x12/\n" +
 	"\x13capability_decision\x18\x06 \x01(\tR\x12capabilityDecision\x124\n" +
 	"\x16capability_claims_json\x18\a \x01(\tR\x14capabilityClaimsJson\x12\x10\n" +
-	"\x03zdr\x18\b \x01(\bR\x03zdr\"\x95\x02\n" +
+	"\x03zdr\x18\b \x01(\bR\x03zdr\"\xd9\x02\n" +
 	"\x14AcquireLeaseResponse\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -3680,7 +3760,9 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"backend_id\x18\x04 \x01(\tR\tbackendId\x12;\n" +
 	"\x05state\x18\x05 \x01(\x0e2%.model_plane.v1.SandboxLifecycleStateR\x05state\x12/\n" +
-	"\x13processes_permitted\x18\x06 \x01(\bR\x12processesPermitted\"O\n" +
+	"\x13processes_permitted\x18\x06 \x01(\bR\x12processesPermitted\x12B\n" +
+	"\vegress_tier\x18\a \x01(\x0e2!.model_plane.v1.SandboxEgressTierR\n" +
+	"egressTier\"O\n" +
 	"\x13ReleaseLeaseRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
@@ -3944,7 +4026,13 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"\x06ACTIVE\x10\x02\x12\x10\n" +
 	"\fSNAPSHOTTING\x10\x03\x12\r\n" +
-	"\tDESTROYED\x10\x04*\xcb\x01\n" +
+	"\tDESTROYED\x10\x04*\xb9\x01\n" +
+	"\x11SandboxEgressTier\x12#\n" +
+	"\x1fSANDBOX_EGRESS_TIER_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17SANDBOX_EGRESS_TIER_OFF\x10\x01\x12\"\n" +
+	"\x1eSANDBOX_EGRESS_TIER_REGISTRIES\x10\x02\x12!\n" +
+	"\x1dSANDBOX_EGRESS_TIER_ALLOWLIST\x10\x03\x12\x1b\n" +
+	"\x17SANDBOX_EGRESS_TIER_ALL\x10\x04*\xcb\x01\n" +
 	"\fProcessState\x12\x1d\n" +
 	"\x19PROCESS_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16PROCESS_STATE_STARTING\x10\x01\x12\x19\n" +
@@ -4007,143 +4095,145 @@ func file_model_plane_v1_sandboxes_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_sandboxes_proto_rawDescData
 }
 
-var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
 var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_model_plane_v1_sandboxes_proto_goTypes = []any{
 	(SandboxLifecycleState)(0),                  // 0: model_plane.v1.SandboxLifecycleState
-	(ProcessState)(0),                           // 1: model_plane.v1.ProcessState
-	(ProcessSignal)(0),                          // 2: model_plane.v1.ProcessSignal
-	(ProcessStream)(0),                          // 3: model_plane.v1.ProcessStream
-	(SandboxFailureCause)(0),                    // 4: model_plane.v1.SandboxFailureCause
-	(*AcquireLeaseRequest)(nil),                 // 5: model_plane.v1.AcquireLeaseRequest
-	(*AcquireLeaseResponse)(nil),                // 6: model_plane.v1.AcquireLeaseResponse
-	(*ReleaseLeaseRequest)(nil),                 // 7: model_plane.v1.ReleaseLeaseRequest
-	(*ReleaseLeaseResponse)(nil),                // 8: model_plane.v1.ReleaseLeaseResponse
-	(*SnapshotRequest)(nil),                     // 9: model_plane.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),                    // 10: model_plane.v1.SnapshotResponse
-	(*ActivateLeaseRequest)(nil),                // 11: model_plane.v1.ActivateLeaseRequest
-	(*ActivateLeaseResponse)(nil),               // 12: model_plane.v1.ActivateLeaseResponse
-	(*GetWorkspaceManifestRequest)(nil),         // 13: model_plane.v1.GetWorkspaceManifestRequest
-	(*WorkspaceManifestEntry)(nil),              // 14: model_plane.v1.WorkspaceManifestEntry
-	(*GetWorkspaceManifestResponse)(nil),        // 15: model_plane.v1.GetWorkspaceManifestResponse
-	(*WorkspaceChangedFile)(nil),                // 16: model_plane.v1.WorkspaceChangedFile
-	(*PromoteWorkspaceRequest)(nil),             // 17: model_plane.v1.PromoteWorkspaceRequest
-	(*PromoteWorkspaceResponse)(nil),            // 18: model_plane.v1.PromoteWorkspaceResponse
-	(*SandboxHealthRequest)(nil),                // 19: model_plane.v1.SandboxHealthRequest
-	(*SandboxHealthResponse)(nil),               // 20: model_plane.v1.SandboxHealthResponse
-	(*RedactedCommand)(nil),                     // 21: model_plane.v1.RedactedCommand
-	(*Process)(nil),                             // 22: model_plane.v1.Process
-	(*ProcessOutputChunk)(nil),                  // 23: model_plane.v1.ProcessOutputChunk
-	(*RegisterProcessRequest)(nil),              // 24: model_plane.v1.RegisterProcessRequest
-	(*RegisterProcessResponse)(nil),             // 25: model_plane.v1.RegisterProcessResponse
-	(*ProcessStarted)(nil),                      // 26: model_plane.v1.ProcessStarted
-	(*ProcessSignalRequested)(nil),              // 27: model_plane.v1.ProcessSignalRequested
-	(*ProcessExited)(nil),                       // 28: model_plane.v1.ProcessExited
-	(*UpdateProcessStateRequest)(nil),           // 29: model_plane.v1.UpdateProcessStateRequest
-	(*UpdateProcessStateResponse)(nil),          // 30: model_plane.v1.UpdateProcessStateResponse
-	(*AppendProcessOutputRequest)(nil),          // 31: model_plane.v1.AppendProcessOutputRequest
-	(*AppendProcessOutputResponse)(nil),         // 32: model_plane.v1.AppendProcessOutputResponse
-	(*ReconcileProcessesRequest)(nil),           // 33: model_plane.v1.ReconcileProcessesRequest
-	(*ReconcileProcessesResponse)(nil),          // 34: model_plane.v1.ReconcileProcessesResponse
-	(*GetProcessRequest)(nil),                   // 35: model_plane.v1.GetProcessRequest
-	(*GetProcessResponse)(nil),                  // 36: model_plane.v1.GetProcessResponse
-	(*ListProcessesRequest)(nil),                // 37: model_plane.v1.ListProcessesRequest
-	(*ListProcessesResponse)(nil),               // 38: model_plane.v1.ListProcessesResponse
-	(*ReadProcessOutputRequest)(nil),            // 39: model_plane.v1.ReadProcessOutputRequest
-	(*ReadProcessOutputResponse)(nil),           // 40: model_plane.v1.ReadProcessOutputResponse
-	(*ThreadWorkspaceEntry)(nil),                // 41: model_plane.v1.ThreadWorkspaceEntry
-	(*GetThreadWorkspaceRequest)(nil),           // 42: model_plane.v1.GetThreadWorkspaceRequest
-	(*GetThreadWorkspaceResponse)(nil),          // 43: model_plane.v1.GetThreadWorkspaceResponse
-	(*ThreadDeletedPath)(nil),                   // 44: model_plane.v1.ThreadDeletedPath
-	(*ApplyThreadWorkspaceChangesRequest)(nil),  // 45: model_plane.v1.ApplyThreadWorkspaceChangesRequest
-	(*ApplyThreadWorkspaceChangesResponse)(nil), // 46: model_plane.v1.ApplyThreadWorkspaceChangesResponse
-	(*DeleteThreadWorkspaceRequest)(nil),        // 47: model_plane.v1.DeleteThreadWorkspaceRequest
-	(*DeleteThreadWorkspaceResponse)(nil),       // 48: model_plane.v1.DeleteThreadWorkspaceResponse
-	(*GetLeaseStatusRequest)(nil),               // 49: model_plane.v1.GetLeaseStatusRequest
-	(*GetLeaseStatusResponse)(nil),              // 50: model_plane.v1.GetLeaseStatusResponse
-	(*durationpb.Duration)(nil),                 // 51: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),               // 52: google.protobuf.Timestamp
+	(SandboxEgressTier)(0),                      // 1: model_plane.v1.SandboxEgressTier
+	(ProcessState)(0),                           // 2: model_plane.v1.ProcessState
+	(ProcessSignal)(0),                          // 3: model_plane.v1.ProcessSignal
+	(ProcessStream)(0),                          // 4: model_plane.v1.ProcessStream
+	(SandboxFailureCause)(0),                    // 5: model_plane.v1.SandboxFailureCause
+	(*AcquireLeaseRequest)(nil),                 // 6: model_plane.v1.AcquireLeaseRequest
+	(*AcquireLeaseResponse)(nil),                // 7: model_plane.v1.AcquireLeaseResponse
+	(*ReleaseLeaseRequest)(nil),                 // 8: model_plane.v1.ReleaseLeaseRequest
+	(*ReleaseLeaseResponse)(nil),                // 9: model_plane.v1.ReleaseLeaseResponse
+	(*SnapshotRequest)(nil),                     // 10: model_plane.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),                    // 11: model_plane.v1.SnapshotResponse
+	(*ActivateLeaseRequest)(nil),                // 12: model_plane.v1.ActivateLeaseRequest
+	(*ActivateLeaseResponse)(nil),               // 13: model_plane.v1.ActivateLeaseResponse
+	(*GetWorkspaceManifestRequest)(nil),         // 14: model_plane.v1.GetWorkspaceManifestRequest
+	(*WorkspaceManifestEntry)(nil),              // 15: model_plane.v1.WorkspaceManifestEntry
+	(*GetWorkspaceManifestResponse)(nil),        // 16: model_plane.v1.GetWorkspaceManifestResponse
+	(*WorkspaceChangedFile)(nil),                // 17: model_plane.v1.WorkspaceChangedFile
+	(*PromoteWorkspaceRequest)(nil),             // 18: model_plane.v1.PromoteWorkspaceRequest
+	(*PromoteWorkspaceResponse)(nil),            // 19: model_plane.v1.PromoteWorkspaceResponse
+	(*SandboxHealthRequest)(nil),                // 20: model_plane.v1.SandboxHealthRequest
+	(*SandboxHealthResponse)(nil),               // 21: model_plane.v1.SandboxHealthResponse
+	(*RedactedCommand)(nil),                     // 22: model_plane.v1.RedactedCommand
+	(*Process)(nil),                             // 23: model_plane.v1.Process
+	(*ProcessOutputChunk)(nil),                  // 24: model_plane.v1.ProcessOutputChunk
+	(*RegisterProcessRequest)(nil),              // 25: model_plane.v1.RegisterProcessRequest
+	(*RegisterProcessResponse)(nil),             // 26: model_plane.v1.RegisterProcessResponse
+	(*ProcessStarted)(nil),                      // 27: model_plane.v1.ProcessStarted
+	(*ProcessSignalRequested)(nil),              // 28: model_plane.v1.ProcessSignalRequested
+	(*ProcessExited)(nil),                       // 29: model_plane.v1.ProcessExited
+	(*UpdateProcessStateRequest)(nil),           // 30: model_plane.v1.UpdateProcessStateRequest
+	(*UpdateProcessStateResponse)(nil),          // 31: model_plane.v1.UpdateProcessStateResponse
+	(*AppendProcessOutputRequest)(nil),          // 32: model_plane.v1.AppendProcessOutputRequest
+	(*AppendProcessOutputResponse)(nil),         // 33: model_plane.v1.AppendProcessOutputResponse
+	(*ReconcileProcessesRequest)(nil),           // 34: model_plane.v1.ReconcileProcessesRequest
+	(*ReconcileProcessesResponse)(nil),          // 35: model_plane.v1.ReconcileProcessesResponse
+	(*GetProcessRequest)(nil),                   // 36: model_plane.v1.GetProcessRequest
+	(*GetProcessResponse)(nil),                  // 37: model_plane.v1.GetProcessResponse
+	(*ListProcessesRequest)(nil),                // 38: model_plane.v1.ListProcessesRequest
+	(*ListProcessesResponse)(nil),               // 39: model_plane.v1.ListProcessesResponse
+	(*ReadProcessOutputRequest)(nil),            // 40: model_plane.v1.ReadProcessOutputRequest
+	(*ReadProcessOutputResponse)(nil),           // 41: model_plane.v1.ReadProcessOutputResponse
+	(*ThreadWorkspaceEntry)(nil),                // 42: model_plane.v1.ThreadWorkspaceEntry
+	(*GetThreadWorkspaceRequest)(nil),           // 43: model_plane.v1.GetThreadWorkspaceRequest
+	(*GetThreadWorkspaceResponse)(nil),          // 44: model_plane.v1.GetThreadWorkspaceResponse
+	(*ThreadDeletedPath)(nil),                   // 45: model_plane.v1.ThreadDeletedPath
+	(*ApplyThreadWorkspaceChangesRequest)(nil),  // 46: model_plane.v1.ApplyThreadWorkspaceChangesRequest
+	(*ApplyThreadWorkspaceChangesResponse)(nil), // 47: model_plane.v1.ApplyThreadWorkspaceChangesResponse
+	(*DeleteThreadWorkspaceRequest)(nil),        // 48: model_plane.v1.DeleteThreadWorkspaceRequest
+	(*DeleteThreadWorkspaceResponse)(nil),       // 49: model_plane.v1.DeleteThreadWorkspaceResponse
+	(*GetLeaseStatusRequest)(nil),               // 50: model_plane.v1.GetLeaseStatusRequest
+	(*GetLeaseStatusResponse)(nil),              // 51: model_plane.v1.GetLeaseStatusResponse
+	(*durationpb.Duration)(nil),                 // 52: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),               // 53: google.protobuf.Timestamp
 }
 var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
-	51, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	52, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
+	52, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	53, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.AcquireLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	16, // 3: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
-	0,  // 4: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	14, // 5: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
-	21, // 6: model_plane.v1.Process.command:type_name -> model_plane.v1.RedactedCommand
-	1,  // 7: model_plane.v1.Process.state:type_name -> model_plane.v1.ProcessState
-	2,  // 8: model_plane.v1.Process.signal_requested:type_name -> model_plane.v1.ProcessSignal
-	52, // 9: model_plane.v1.Process.term_requested_at:type_name -> google.protobuf.Timestamp
-	52, // 10: model_plane.v1.Process.expires_at:type_name -> google.protobuf.Timestamp
-	52, // 11: model_plane.v1.Process.started_at:type_name -> google.protobuf.Timestamp
-	52, // 12: model_plane.v1.Process.ended_at:type_name -> google.protobuf.Timestamp
-	52, // 13: model_plane.v1.Process.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	52, // 14: model_plane.v1.Process.created_at:type_name -> google.protobuf.Timestamp
-	52, // 15: model_plane.v1.Process.updated_at:type_name -> google.protobuf.Timestamp
-	3,  // 16: model_plane.v1.ProcessOutputChunk.stream:type_name -> model_plane.v1.ProcessStream
-	52, // 17: model_plane.v1.ProcessOutputChunk.captured_at:type_name -> google.protobuf.Timestamp
-	21, // 18: model_plane.v1.RegisterProcessRequest.command:type_name -> model_plane.v1.RedactedCommand
-	22, // 19: model_plane.v1.RegisterProcessResponse.process:type_name -> model_plane.v1.Process
-	2,  // 20: model_plane.v1.ProcessSignalRequested.signal:type_name -> model_plane.v1.ProcessSignal
-	1,  // 21: model_plane.v1.ProcessExited.state:type_name -> model_plane.v1.ProcessState
-	26, // 22: model_plane.v1.UpdateProcessStateRequest.started:type_name -> model_plane.v1.ProcessStarted
-	27, // 23: model_plane.v1.UpdateProcessStateRequest.signal:type_name -> model_plane.v1.ProcessSignalRequested
-	28, // 24: model_plane.v1.UpdateProcessStateRequest.exited:type_name -> model_plane.v1.ProcessExited
-	23, // 25: model_plane.v1.AppendProcessOutputRequest.chunks:type_name -> model_plane.v1.ProcessOutputChunk
-	22, // 26: model_plane.v1.GetProcessResponse.process:type_name -> model_plane.v1.Process
-	22, // 27: model_plane.v1.ListProcessesResponse.processes:type_name -> model_plane.v1.Process
-	23, // 28: model_plane.v1.ReadProcessOutputResponse.chunks:type_name -> model_plane.v1.ProcessOutputChunk
-	1,  // 29: model_plane.v1.ReadProcessOutputResponse.state:type_name -> model_plane.v1.ProcessState
-	41, // 30: model_plane.v1.GetThreadWorkspaceResponse.entries:type_name -> model_plane.v1.ThreadWorkspaceEntry
-	16, // 31: model_plane.v1.ApplyThreadWorkspaceChangesRequest.changes:type_name -> model_plane.v1.WorkspaceChangedFile
-	44, // 32: model_plane.v1.ApplyThreadWorkspaceChangesRequest.deleted:type_name -> model_plane.v1.ThreadDeletedPath
-	0,  // 33: model_plane.v1.GetLeaseStatusResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	4,  // 34: model_plane.v1.GetLeaseStatusResponse.failure_cause:type_name -> model_plane.v1.SandboxFailureCause
-	52, // 35: model_plane.v1.GetLeaseStatusResponse.last_activity_at:type_name -> google.protobuf.Timestamp
-	52, // 36: model_plane.v1.GetLeaseStatusResponse.heartbeat_at:type_name -> google.protobuf.Timestamp
-	52, // 37: model_plane.v1.GetLeaseStatusResponse.expires_at:type_name -> google.protobuf.Timestamp
-	5,  // 38: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
-	7,  // 39: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
-	9,  // 40: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
-	11, // 41: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
-	13, // 42: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
-	17, // 43: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
-	24, // 44: model_plane.v1.SandboxManager.RegisterProcess:input_type -> model_plane.v1.RegisterProcessRequest
-	29, // 45: model_plane.v1.SandboxManager.UpdateProcessState:input_type -> model_plane.v1.UpdateProcessStateRequest
-	31, // 46: model_plane.v1.SandboxManager.AppendProcessOutput:input_type -> model_plane.v1.AppendProcessOutputRequest
-	33, // 47: model_plane.v1.SandboxManager.ReconcileProcesses:input_type -> model_plane.v1.ReconcileProcessesRequest
-	35, // 48: model_plane.v1.SandboxManager.GetProcess:input_type -> model_plane.v1.GetProcessRequest
-	37, // 49: model_plane.v1.SandboxManager.ListProcesses:input_type -> model_plane.v1.ListProcessesRequest
-	39, // 50: model_plane.v1.SandboxManager.ReadProcessOutput:input_type -> model_plane.v1.ReadProcessOutputRequest
-	19, // 51: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
-	42, // 52: model_plane.v1.SandboxManager.GetThreadWorkspace:input_type -> model_plane.v1.GetThreadWorkspaceRequest
-	45, // 53: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:input_type -> model_plane.v1.ApplyThreadWorkspaceChangesRequest
-	47, // 54: model_plane.v1.SandboxManager.DeleteThreadWorkspace:input_type -> model_plane.v1.DeleteThreadWorkspaceRequest
-	49, // 55: model_plane.v1.SandboxManager.GetLeaseStatus:input_type -> model_plane.v1.GetLeaseStatusRequest
-	6,  // 56: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
-	8,  // 57: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
-	10, // 58: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
-	12, // 59: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
-	15, // 60: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
-	18, // 61: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
-	25, // 62: model_plane.v1.SandboxManager.RegisterProcess:output_type -> model_plane.v1.RegisterProcessResponse
-	30, // 63: model_plane.v1.SandboxManager.UpdateProcessState:output_type -> model_plane.v1.UpdateProcessStateResponse
-	32, // 64: model_plane.v1.SandboxManager.AppendProcessOutput:output_type -> model_plane.v1.AppendProcessOutputResponse
-	34, // 65: model_plane.v1.SandboxManager.ReconcileProcesses:output_type -> model_plane.v1.ReconcileProcessesResponse
-	36, // 66: model_plane.v1.SandboxManager.GetProcess:output_type -> model_plane.v1.GetProcessResponse
-	38, // 67: model_plane.v1.SandboxManager.ListProcesses:output_type -> model_plane.v1.ListProcessesResponse
-	40, // 68: model_plane.v1.SandboxManager.ReadProcessOutput:output_type -> model_plane.v1.ReadProcessOutputResponse
-	20, // 69: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
-	43, // 70: model_plane.v1.SandboxManager.GetThreadWorkspace:output_type -> model_plane.v1.GetThreadWorkspaceResponse
-	46, // 71: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:output_type -> model_plane.v1.ApplyThreadWorkspaceChangesResponse
-	48, // 72: model_plane.v1.SandboxManager.DeleteThreadWorkspace:output_type -> model_plane.v1.DeleteThreadWorkspaceResponse
-	50, // 73: model_plane.v1.SandboxManager.GetLeaseStatus:output_type -> model_plane.v1.GetLeaseStatusResponse
-	56, // [56:74] is the sub-list for method output_type
-	38, // [38:56] is the sub-list for method input_type
-	38, // [38:38] is the sub-list for extension type_name
-	38, // [38:38] is the sub-list for extension extendee
-	0,  // [0:38] is the sub-list for field type_name
+	1,  // 3: model_plane.v1.AcquireLeaseResponse.egress_tier:type_name -> model_plane.v1.SandboxEgressTier
+	17, // 4: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
+	0,  // 5: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	15, // 6: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
+	22, // 7: model_plane.v1.Process.command:type_name -> model_plane.v1.RedactedCommand
+	2,  // 8: model_plane.v1.Process.state:type_name -> model_plane.v1.ProcessState
+	3,  // 9: model_plane.v1.Process.signal_requested:type_name -> model_plane.v1.ProcessSignal
+	53, // 10: model_plane.v1.Process.term_requested_at:type_name -> google.protobuf.Timestamp
+	53, // 11: model_plane.v1.Process.expires_at:type_name -> google.protobuf.Timestamp
+	53, // 12: model_plane.v1.Process.started_at:type_name -> google.protobuf.Timestamp
+	53, // 13: model_plane.v1.Process.ended_at:type_name -> google.protobuf.Timestamp
+	53, // 14: model_plane.v1.Process.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	53, // 15: model_plane.v1.Process.created_at:type_name -> google.protobuf.Timestamp
+	53, // 16: model_plane.v1.Process.updated_at:type_name -> google.protobuf.Timestamp
+	4,  // 17: model_plane.v1.ProcessOutputChunk.stream:type_name -> model_plane.v1.ProcessStream
+	53, // 18: model_plane.v1.ProcessOutputChunk.captured_at:type_name -> google.protobuf.Timestamp
+	22, // 19: model_plane.v1.RegisterProcessRequest.command:type_name -> model_plane.v1.RedactedCommand
+	23, // 20: model_plane.v1.RegisterProcessResponse.process:type_name -> model_plane.v1.Process
+	3,  // 21: model_plane.v1.ProcessSignalRequested.signal:type_name -> model_plane.v1.ProcessSignal
+	2,  // 22: model_plane.v1.ProcessExited.state:type_name -> model_plane.v1.ProcessState
+	27, // 23: model_plane.v1.UpdateProcessStateRequest.started:type_name -> model_plane.v1.ProcessStarted
+	28, // 24: model_plane.v1.UpdateProcessStateRequest.signal:type_name -> model_plane.v1.ProcessSignalRequested
+	29, // 25: model_plane.v1.UpdateProcessStateRequest.exited:type_name -> model_plane.v1.ProcessExited
+	24, // 26: model_plane.v1.AppendProcessOutputRequest.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	23, // 27: model_plane.v1.GetProcessResponse.process:type_name -> model_plane.v1.Process
+	23, // 28: model_plane.v1.ListProcessesResponse.processes:type_name -> model_plane.v1.Process
+	24, // 29: model_plane.v1.ReadProcessOutputResponse.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	2,  // 30: model_plane.v1.ReadProcessOutputResponse.state:type_name -> model_plane.v1.ProcessState
+	42, // 31: model_plane.v1.GetThreadWorkspaceResponse.entries:type_name -> model_plane.v1.ThreadWorkspaceEntry
+	17, // 32: model_plane.v1.ApplyThreadWorkspaceChangesRequest.changes:type_name -> model_plane.v1.WorkspaceChangedFile
+	45, // 33: model_plane.v1.ApplyThreadWorkspaceChangesRequest.deleted:type_name -> model_plane.v1.ThreadDeletedPath
+	0,  // 34: model_plane.v1.GetLeaseStatusResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	5,  // 35: model_plane.v1.GetLeaseStatusResponse.failure_cause:type_name -> model_plane.v1.SandboxFailureCause
+	53, // 36: model_plane.v1.GetLeaseStatusResponse.last_activity_at:type_name -> google.protobuf.Timestamp
+	53, // 37: model_plane.v1.GetLeaseStatusResponse.heartbeat_at:type_name -> google.protobuf.Timestamp
+	53, // 38: model_plane.v1.GetLeaseStatusResponse.expires_at:type_name -> google.protobuf.Timestamp
+	6,  // 39: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
+	8,  // 40: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
+	10, // 41: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
+	12, // 42: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
+	14, // 43: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
+	18, // 44: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
+	25, // 45: model_plane.v1.SandboxManager.RegisterProcess:input_type -> model_plane.v1.RegisterProcessRequest
+	30, // 46: model_plane.v1.SandboxManager.UpdateProcessState:input_type -> model_plane.v1.UpdateProcessStateRequest
+	32, // 47: model_plane.v1.SandboxManager.AppendProcessOutput:input_type -> model_plane.v1.AppendProcessOutputRequest
+	34, // 48: model_plane.v1.SandboxManager.ReconcileProcesses:input_type -> model_plane.v1.ReconcileProcessesRequest
+	36, // 49: model_plane.v1.SandboxManager.GetProcess:input_type -> model_plane.v1.GetProcessRequest
+	38, // 50: model_plane.v1.SandboxManager.ListProcesses:input_type -> model_plane.v1.ListProcessesRequest
+	40, // 51: model_plane.v1.SandboxManager.ReadProcessOutput:input_type -> model_plane.v1.ReadProcessOutputRequest
+	20, // 52: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
+	43, // 53: model_plane.v1.SandboxManager.GetThreadWorkspace:input_type -> model_plane.v1.GetThreadWorkspaceRequest
+	46, // 54: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:input_type -> model_plane.v1.ApplyThreadWorkspaceChangesRequest
+	48, // 55: model_plane.v1.SandboxManager.DeleteThreadWorkspace:input_type -> model_plane.v1.DeleteThreadWorkspaceRequest
+	50, // 56: model_plane.v1.SandboxManager.GetLeaseStatus:input_type -> model_plane.v1.GetLeaseStatusRequest
+	7,  // 57: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
+	9,  // 58: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
+	11, // 59: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
+	13, // 60: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
+	16, // 61: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
+	19, // 62: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
+	26, // 63: model_plane.v1.SandboxManager.RegisterProcess:output_type -> model_plane.v1.RegisterProcessResponse
+	31, // 64: model_plane.v1.SandboxManager.UpdateProcessState:output_type -> model_plane.v1.UpdateProcessStateResponse
+	33, // 65: model_plane.v1.SandboxManager.AppendProcessOutput:output_type -> model_plane.v1.AppendProcessOutputResponse
+	35, // 66: model_plane.v1.SandboxManager.ReconcileProcesses:output_type -> model_plane.v1.ReconcileProcessesResponse
+	37, // 67: model_plane.v1.SandboxManager.GetProcess:output_type -> model_plane.v1.GetProcessResponse
+	39, // 68: model_plane.v1.SandboxManager.ListProcesses:output_type -> model_plane.v1.ListProcessesResponse
+	41, // 69: model_plane.v1.SandboxManager.ReadProcessOutput:output_type -> model_plane.v1.ReadProcessOutputResponse
+	21, // 70: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
+	44, // 71: model_plane.v1.SandboxManager.GetThreadWorkspace:output_type -> model_plane.v1.GetThreadWorkspaceResponse
+	47, // 72: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:output_type -> model_plane.v1.ApplyThreadWorkspaceChangesResponse
+	49, // 73: model_plane.v1.SandboxManager.DeleteThreadWorkspace:output_type -> model_plane.v1.DeleteThreadWorkspaceResponse
+	51, // 74: model_plane.v1.SandboxManager.GetLeaseStatus:output_type -> model_plane.v1.GetLeaseStatusResponse
+	57, // [57:75] is the sub-list for method output_type
+	39, // [39:57] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sandboxes_proto_init() }
@@ -4164,7 +4254,7 @@ func file_model_plane_v1_sandboxes_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sandboxes_proto_rawDesc), len(file_model_plane_v1_sandboxes_proto_rawDesc)),
-			NumEnums:      5,
+			NumEnums:      6,
 			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   1,

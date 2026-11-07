@@ -62,6 +62,8 @@ type CapabilityCoreClient interface {
 	// List the skill bundles an org holds, optionally narrowed to some skills.
 	ListSkillBundles(ctx context.Context, in *ListSkillBundlesRequest, opts ...grpc.CallOption) (*ListSkillBundlesResponse, error)
 	// Read one skill bundle manifest: its files, digests and sizes.
+	// The response is the shared SkillBundleManifest message; renaming it would break generated code.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetSkillBundleManifest(ctx context.Context, in *GetSkillBundleManifestRequest, opts ...grpc.CallOption) (*SkillBundleManifest, error)
 	// Read one blob of a skill bundle by its sha256 digest.
 	GetSkillBlob(ctx context.Context, in *GetSkillBlobRequest, opts ...grpc.CallOption) (*GetSkillBlobResponse, error)
@@ -206,6 +208,8 @@ type CapabilityCoreServer interface {
 	// List the skill bundles an org holds, optionally narrowed to some skills.
 	ListSkillBundles(context.Context, *ListSkillBundlesRequest) (*ListSkillBundlesResponse, error)
 	// Read one skill bundle manifest: its files, digests and sizes.
+	// The response is the shared SkillBundleManifest message; renaming it would break generated code.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	GetSkillBundleManifest(context.Context, *GetSkillBundleManifestRequest) (*SkillBundleManifest, error)
 	// Read one blob of a skill bundle by its sha256 digest.
 	GetSkillBlob(context.Context, *GetSkillBlobRequest) (*GetSkillBlobResponse, error)

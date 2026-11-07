@@ -3,7 +3,11 @@
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApprovalRuleProposals } from '@/features/settings/components/ApprovalRuleProposals'
+import {
+  ApprovalRuleProposals,
+  proposalLabel,
+  type RuleProposalCard,
+} from '@/features/settings/components/ApprovalRuleProposals'
 import {
   ruleConfirmationRequest,
   type ApprovalRuleProposal,
@@ -50,6 +54,28 @@ describe('ApprovalRuleProposals', () => {
     fireEvent.click(screen.getByRole('button', { name: /avvis|dismiss/i }))
     flush()
     expect(onDismiss).toHaveBeenCalledWith(proposal)
+  })
+
+  it('names a shell proposal by its rule, never the command it came from', () => {
+    const shell: RuleProposalCard = {
+      id: 'arp_02',
+      capabilityId: 'cap.command.shell',
+      toolName: 'shell',
+      toolDigest: '',
+      createdAt: '2026-11-04T10:00:00Z',
+      ruleText: 'git commit',
+    }
+    expect(proposalLabel(shell)).toBe('git commit')
+    expect(proposalLabel({ ...shell, ruleText: '  ' })).toBe('shell')
+    expect(proposalLabel(proposal)).toBe('mcp__notes__create_note')
+
+    render(() => (
+      <ApprovalRuleProposals proposals={[shell, proposal]} onConfirm={vi.fn()} onDismiss={vi.fn()} />
+    ))
+    flush()
+    expect(screen.getByText('git commit')).toBeTruthy()
+    expect(screen.getByText('mcp__notes__create_note')).toBeTruthy()
+    expect(screen.queryByText('shell')).toBeNull()
   })
 
   it('renders nothing when no rule has been proposed', () => {

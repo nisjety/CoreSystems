@@ -3,7 +3,9 @@ import {
   actionRegistry,
   getActionDescriptor,
   integrationsBrowseConnectionInput,
+  integrationsConnectorPoliciesOutput,
   integrationsFetchConnectionContentInput,
+  integrationsSetConnectorPolicyInput,
 } from '@/shared/actions/action-registry'
 import { spaceActions } from '@/shared/actions/domains/spaces'
 import { chatProjectSchema } from '@/shared/actions/chat-project'
@@ -338,6 +340,82 @@ describe('action registry', () => {
     }
   })
 
+  it('takes an edit with an approval only, within the mail limits (EP-10-S6)', () => {
+    const fingerprint = 'a'.repeat(64)
+    const edit = { patch: { subject: 'New subject' }, baseFingerprint: fingerprint }
+    for (const id of ['approvals.decide', 'orchestration.decide_approval'] as const) {
+      const schema = getActionDescriptor(id)?.inputSchema
+      const base = { approvalId: 'appr_1', decision: 'approve' as const }
+
+      expect(schema?.safeParse({ ...base, edit }).success).toBe(true)
+      expect(
+        schema?.safeParse({
+          ...base,
+          edit: { patch: { to: ['a@example.com'], bodyText: 'Hei' }, baseFingerprint: fingerprint },
+        }).success,
+      ).toBe(true)
+
+      // A rejection sends nothing, so it carries no edit.
+      expect(schema?.safeParse({ ...base, decision: 'reject', edit }).success).toBe(false)
+      // The draft the person saw is named by its 64-hex fingerprint.
+      expect(schema?.safeParse({ ...base, edit: { ...edit, baseFingerprint: 'abc' } }).success).toBe(false)
+      // Only recipients, subject and body: the connection, operation and threading are frozen.
+      for (const forged of [{ connectionId: 'conn-2' }, { operation: 'gmail.delete' }, { threadId: 't' }, { bodyHtml: '<b>x</b>' }]) {
+        expect(schema?.safeParse({ ...base, edit: { ...edit, patch: { ...edit.patch, ...forged } } }).success).toBe(false)
+      }
+      expect(schema?.safeParse({ ...base, edit: { ...edit, extra: true } }).success).toBe(false)
+      // An empty patch, a header-breaking subject, no recipients and too many are refused.
+      for (const patch of [
+        {},
+        { subject: 'a\r\nBcc: x@example.com' },
+        { to: [] },
+        { to: Array.from({ length: 51 }, (_, i) => `r${i}@example.com`) },
+        { bodyText: 'x'.repeat(48 * 1024 + 1) },
+      ]) {
+        expect(schema?.safeParse({ ...base, edit: { patch, baseFingerprint: fingerprint } }).success).toBe(false)
+      }
+    }
+  })
+
+  it('registers the approval preview as a low-risk read the model cannot execute (EP-10-S1)', () => {
+    const preview = getActionDescriptor('approvals.preview')
+
+    expect(preview?.ownerPlane).toBe('model')
+    expect(preview?.risk).toBe('low')
+    expect(preview?.requiresApproval).toBe(false)
+    expect(isModelExecutableAction('approvals.preview')).toBe(false)
+    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(
+      'approvals.preview',
+    )
+    const description = preview?.description ?? ''
+    expect(description).toContain('approval_not_found')
+    expect(description).toContain('preview_unavailable')
+    expect(description).toContain('Never model-executable')
+
+    // The approval id is the one input: the org and the owner are the credential's.
+    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1' }).success).toBe(true)
+    expect(preview?.inputSchema.safeParse({ approvalId: '' }).success).toBe(false)
+    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1', orgId: 'org_x' }).success).toBe(false)
+
+    const shaped = {
+      kind: 'mail_send',
+      provider: 'google',
+      operation: 'gmail.send',
+      connectionId: 'conn-1',
+      to: ['a@example.com'],
+      subject: 'S',
+      bodyText: 'Hei',
+      hasHtml: false,
+      isReply: false,
+      rawOnly: false,
+      editableFields: ['to', 'subject', 'body_text'],
+      actionFingerprint: 'f'.repeat(64),
+      revision: 0,
+    }
+    expect(preview?.outputSchema.safeParse(shaped).success).toBe(true)
+    expect(preview?.outputSchema.safeParse({ ...shaped, kind: 'calendar_event' }).success).toBe(false)
+  })
+
   it('registers the tool policy and the tool approval as high-risk, owner-only actions the model cannot execute', () => {
     for (const id of ['tools.set_policy', 'mcp.approve_tool'] as const) {
       const action = getActionDescriptor(id)
@@ -417,6 +495,44 @@ describe('action registry', () => {
       ...base,
       roles: { member: { allow_mode: 'some' } },
     }).success).toBe(false)
+  })
+
+  it('keeps the retention window and legal holds approval-gated, high risk and out of reach of the model', () => {
+    for (const id of ['org.set_retention', 'org.place_legal_hold', 'org.release_legal_hold'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane).toBe('control')
+      expect(action?.risk).toBe('high')
+      expect(action?.requiresApproval).toBe(true)
+      // A model must not shorten what its org keeps, nor lift a hold on evidence.
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    expect(getActionDescriptor('org.release_legal_hold')?.reversible).toBe(false)
+
+    const setRetention = getActionDescriptor('org.set_retention')
+    const base = { orgId: 'org_1', expected_revision: 0, thread_days: 90 }
+    expect(setRetention?.inputSchema.safeParse(base).success).toBe(true)
+    // Null is keep; the bounds are org-core's 30..3650 days.
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: null }).success).toBe(true)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 29 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 3651 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 90.5 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ orgId: 'org_1', thread_days: 90 }).success).toBe(false)
+    expect(setRetention?.inputSchema.safeParse({ ...base, days: 90 }).success).toBe(false)
+
+    const place = getActionDescriptor('org.place_legal_hold')
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'Matter 17' }).success).toBe(true)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', thread_id: 'thr_1', hold_ref: 'Matter 17' }).success).toBe(true)
+    // An org hold names no thread; a thread hold must name one; the reference is required.
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', thread_id: 'thr_1', hold_ref: 'M' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', hold_ref: 'M' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: '  ' }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'r'.repeat(201) }).success).toBe(false)
+    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'space', hold_ref: 'M' }).success).toBe(false)
+
+    const release = getActionDescriptor('org.release_legal_hold')
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'a'.repeat(32)}` }).success).toBe(true)
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: 'lh_short' }).success).toBe(false)
+    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'A'.repeat(32)}` }).success).toBe(false)
   })
 
   it('takes the whole router policy, the ladder and the role table included, so a save through the action resets neither', () => {
@@ -560,6 +676,55 @@ describe('action registry', () => {
     expect(content?.safeParse({ connectionId: 'conn-1', operation: 'mail.send', params: {} }).success).toBe(false)
   })
 
+  it('registers the connected-app levels as low-risk model-plane contracts the model cannot execute (EP-10 S7)', () => {
+    for (const id of ['integrations.set_connector_policy', 'integrations.list_connector_policies'] as const) {
+      const action = getActionDescriptor(id)
+
+      expect(action).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+      expect(isModelExecutableAction(id)).toBe(false)
+      expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(id)
+      expect(action?.description ?? '').toContain('Never model-executable')
+    }
+  })
+
+  it('takes only tightening levels, never an allow, and nothing a client does not own', () => {
+    const set = integrationsSetConnectorPolicyInput
+    for (const level of ['use_without_asking', 'ask_first', 'off']) {
+      expect(set.safeParse({ kind: 'read', level }).success).toBe(true)
+    }
+    for (const level of ['always_ask', 'off']) {
+      expect(set.safeParse({ kind: 'write', level }).success).toBe(true)
+    }
+    // A write is never released from asking, and an ask is not a separate level for it.
+    expect(set.safeParse({ kind: 'write', level: 'use_without_asking' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'write', level: 'ask_first' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'read', level: 'always_ask' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'read', level: 'allow' }).success).toBe(false)
+    expect(set.safeParse({ kind: 'delete', level: 'off' }).success).toBe(false)
+    for (const forged of [{ scope: 'org' }, { orgId: 'org_x' }, { userId: 'user_x' }, { capabilityId: 'cap.x' }]) {
+      expect(set.safeParse({ kind: 'read', level: 'off', ...forged }).success).toBe(false)
+    }
+
+    expect(
+      integrationsConnectorPoliciesOutput.safeParse({
+        enforced: false,
+        read: 'ask_first',
+        write: 'always_ask',
+        orgRead: 'use_without_asking',
+        orgWrite: 'off',
+      }).success,
+    ).toBe(true)
+    expect(
+      integrationsConnectorPoliciesOutput.safeParse({
+        enforced: true,
+        read: 'ask_first',
+        write: 'ask_first',
+        orgRead: 'use_without_asking',
+        orgWrite: 'always_ask',
+      }).success,
+    ).toBe(false)
+  })
+
   it('registers the connected-app choice as a model-plane action the model cannot execute, and bounds it like the gateway', () => {
     const scope = getActionDescriptor('chat.set_connector_scope')
 
@@ -577,6 +742,82 @@ describe('action registry', () => {
     expect(schema?.safeParse({ connectionIds: ['x'.repeat(129)] }).success).toBe(false)
     // The user, the org and the turn are the server's, never a client input.
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the connected-app suggestion card as a low-risk model-plane action the model cannot execute', () => {
+    const accept = getActionDescriptor('chat.accept_connector_suggestion')
+
+    expect(accept).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.accept_connector_suggestion')).toBe(false)
+    expect(accept?.description ?? '').toContain('Never model-executable')
+
+    const schema = accept?.inputSchema
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google' }).success).toBe(true)
+    expect(
+      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'microsoft', connectionId: 'conn_1' }).success,
+    ).toBe(true)
+    // The provider list is closed, as the gateway's is.
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'slack' }).success).toBe(false)
+    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'Google' }).success).toBe(false)
+    // Using an account names it; connecting does not.
+    expect(schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
+    expect(
+      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn_1' }).success,
+    ).toBe(false)
+    expect(
+      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn 1' }).success,
+    ).toBe(false)
+    expect(schema?.safeParse({ path: 'rank', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
+    expect(schema?.safeParse({ path: 'connect', suggestionId: '', provider: 'google' }).success).toBe(false)
+    // The org and the person come from the session.
+    expect(
+      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', orgId: 'org_x' }).success,
+    ).toBe(false)
+  })
+
+  it('registers the context chips as model-plane actions the model cannot execute, and bounds them like the gateway', () => {
+    const set = getActionDescriptor('chat.set_context_refs')
+    expect(set).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_context_refs')).toBe(false)
+    expect(set?.description ?? '').toContain('Never model-executable')
+
+    const schema = set?.inputSchema
+    const doc = { kind: 'document', id: 'doc-1', label: 'Budsjett' }
+    expect(schema?.safeParse({ contextRefs: [] }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: [doc, { kind: 'skill', id: 'skill.a', label: 'Skriv' }] }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: Array.from({ length: 20 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(true)
+    expect(schema?.safeParse({ contextRefs: Array.from({ length: 21 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [doc, doc] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, id: 'a b' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, label: 'x'.repeat(121) }] }).success).toBe(false)
+    // A conversation and a selection are not chips yet (EP-3 S6/S7), and a reference carries no content.
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'thread' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'artifact_selection' }] }).success).toBe(false)
+    expect(schema?.safeParse({ contextRefs: [{ ...doc, content: 'text' }] }).success).toBe(false)
+
+    const pick = getActionDescriptor('chat.pick_context_ref')
+    expect(pick).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+    expect(isModelExecutableAction('chat.pick_context_ref')).toBe(false)
+    expect(pick?.inputSchema.safeParse({ tab: 'documents' }).success).toBe(true)
+    expect(pick?.inputSchema.safeParse({ tab: 'threads' }).success).toBe(false)
+  })
+
+  it('registers the selection edit as a model-plane action the model cannot execute, and bounds its range like the gateway', () => {
+    const edit = getActionDescriptor('chat.edit_artifact_selection')
+    expect(edit).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.edit_artifact_selection')).toBe(false)
+    expect(edit?.description ?? '').toContain('Never model-executable')
+
+    const schema = edit?.inputSchema
+    const valid = { artifactId: 'art-1', version: 2, start: 0, end: 5, quoteSha256: 'a'.repeat(64), instruction: 'Gjør formelt' }
+    expect(schema?.safeParse(valid).success).toBe(true)
+    expect(schema?.safeParse({ ...valid, quoteSha256: 'A'.repeat(64) }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, quoteSha256: 'a'.repeat(63) }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, start: -1 }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, version: 0 }).success).toBe(false)
+    expect(schema?.safeParse({ ...valid, instruction: '' }).success).toBe(false)
+    // The text of the selection is never an input: only its hash rides in the request.
+    expect(schema?.safeParse({ ...valid, text: 'Første avsnitt' }).success).toBe(false)
   })
 
   it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
@@ -615,6 +856,375 @@ describe('action registry', () => {
     expect(schema?.safeParse({ transcriptDensity: 'minimal', userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the request inspector as a low-risk, read-only model action the model cannot execute (EP-14-S7)', () => {
+    const inspect = getActionDescriptor('chat.inspect_run_request')
+
+    expect(inspect).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.inspect_run_request')).toBe(false)
+    expect(MODEL_ACCESS['chat.inspect_run_request']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = inspect?.inputSchema
+    expect(schema?.safeParse({ runId: 'run_01H', callSeq: 1 }).success).toBe(true)
+    for (const input of [
+      { runId: 'run.1', callSeq: 1 },
+      { runId: '', callSeq: 1 },
+      { runId: 'run_1', callSeq: 0 },
+      { runId: 'run_1', callSeq: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // The owner is read from the session, never named by a client.
+    expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the thread export as a low-risk, owner-only model-plane read the model cannot execute (EP-12-S11)', () => {
+    const exportThread = getActionDescriptor('thread.export')
+
+    expect(exportThread).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('thread.export')).toBe(false)
+    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain('thread.export')
+    expect(MODEL_ACCESS['thread.export']).toMatchObject({ access: 'none', eligible: false, sideEffectClass: 'read' })
+    expect(exportThread?.description ?? '').toContain('Never model-executable')
+    expect(exportThread?.description ?? '').toContain('redacted')
+
+    // Both choices are named, the thread is named, and nothing else: the owner is the session's.
+    const schema = exportThread?.inputSchema
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'markdown', profile: 'redacted' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json' }).success).toBe(false)
+    expect(schema?.safeParse({ threadId: 'thread-1', format: 'csv', profile: 'full' }).success).toBe(false)
+    expect(schema?.safeParse({ threadId: '', format: 'json', profile: 'full' }).success).toBe(false)
+    for (const forged of [{ userId: 'user_x' }, { orgId: 'org_x' }]) {
+      expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full', ...forged }).success).toBe(false)
+    }
+
+    // The answer is the file: its media type and download name, not a JSON envelope.
+    expect(exportThread?.outputSchema.safeParse({
+      contentType: 'text/markdown; charset=utf-8',
+      filename: 'verevon-thread-thread-1.md',
+    }).success).toBe(true)
+    expect(exportThread?.outputSchema.safeParse({ status: 'ok' }).success).toBe(false)
+  })
+
+  it('registers the thread goal actions as person-only writes with the server bounds (EP-7-S1)', () => {
+    for (const id of ['chat.set_goal', 'chat.update_goal', 'chat.clear_goal'] as const) {
+      expect(getActionDescriptor(id)).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    expect(getActionDescriptor('chat.continue_goal')).toMatchObject({
+      ownerPlane: 'model',
+      risk: 'medium',
+      requiresApproval: false,
+    })
+    expect(isModelExecutableAction('chat.continue_goal')).toBe(false)
+
+    const set = getActionDescriptor('chat.set_goal')?.inputSchema
+    expect(set?.safeParse({ threadId: 't1', objective: 'Ship the report', successCriteria: ['Reconciled'] }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', objective: '' },
+      { threadId: 't1', objective: 'x'.repeat(2001) },
+      { threadId: 't1', objective: 'aim', successCriteria: Array.from({ length: 9 }, (_, i) => `c${i}`) },
+      { threadId: 't1', objective: 'aim', successCriteria: ['x'.repeat(501)] },
+      { threadId: 't1', objective: 'aim', maxTurns: 51 },
+      // The owner is read from the session, never named by a client.
+      { threadId: 't1', objective: 'aim', userId: 'user_x' },
+    ]) {
+      expect(set?.safeParse(input).success).toBe(false)
+    }
+
+    const update = getActionDescriptor('chat.update_goal')?.inputSchema
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', expectedRevision: 2, status: 'paused' }).success).toBe(true)
+    // A person never writes `met` or a stop state; the server does.
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', expectedRevision: 2, status: 'met' }).success).toBe(false)
+    expect(update?.safeParse({ threadId: 't1', goalId: 'goal_1', status: 'paused' }).success).toBe(false)
+
+    const go = getActionDescriptor('chat.continue_goal')?.inputSchema
+    expect(go?.safeParse({ threadId: 't1', goalId: 'goal_1' }).success).toBe(true)
+    expect(go?.safeParse({ threadId: 't1' }).success).toBe(false)
+  })
+
+  it('registers Keep going as a person-only switch that grants nothing (EP-7-S4)', () => {
+    expect(getActionDescriptor('chat.goal_auto_toggle')).toMatchObject({
+      ownerPlane: 'model',
+      risk: 'medium',
+      requiresApproval: false,
+      reversible: true,
+    })
+    // A goal never continues itself: the model can neither run the pump nor turn it on.
+    expect(isModelExecutableAction('chat.goal_auto_toggle')).toBe(false)
+
+    const toggle = getActionDescriptor('chat.goal_auto_toggle')?.inputSchema
+    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: true }).success).toBe(true)
+    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: false }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', goalId: 'goal_1' },
+      { threadId: 't1', on: true },
+      { threadId: 't1', goalId: 'goal_1', on: 'true' },
+      // A switch carries no approval: the pump never decides anything for the person.
+      { threadId: 't1', goalId: 'goal_1', on: true, approve: true },
+    ]) {
+      expect(toggle?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers artifact edit and restore as reversible person-only writes (EP-3-S4)', () => {
+    const save = getActionDescriptor('chat.save_artifact_revision')
+    const restore = getActionDescriptor('chat.restore_artifact_revision')
+
+    expect(save).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: true })
+    expect(restore).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.save_artifact_revision')).toBe(false)
+    expect(isModelExecutableAction('chat.restore_artifact_revision')).toBe(false)
+    expect(MODEL_ACCESS['chat.save_artifact_revision']).toMatchObject({ access: 'none' })
+    expect(MODEL_ACCESS['chat.restore_artifact_revision']).toMatchObject({ access: 'none' })
+
+    const saveSchema = save?.inputSchema
+    expect(saveSchema?.safeParse({ threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 2 }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', artifactId: 'report', content: '', expectedVersion: 2 },
+      { threadId: 't1', artifactId: 'report', content: 'x'.repeat(200_001), expectedVersion: 2 },
+      { threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 0 },
+      { threadId: 't1', artifactId: 'report', content: 'text' },
+      { threadId: '', artifactId: 'report', content: 'text', expectedVersion: 2 },
+      // The owner is read from the session, never named by a client.
+      { threadId: 't1', artifactId: 'report', content: 'text', expectedVersion: 2, userId: 'user_x' },
+    ]) {
+      expect(saveSchema?.safeParse(input).success).toBe(false)
+    }
+
+    const restoreSchema = restore?.inputSchema
+    expect(restoreSchema?.safeParse({ threadId: 't1', artifactId: 'report', version: 1, expectedVersion: 3 }).success).toBe(true)
+    for (const input of [
+      { threadId: 't1', artifactId: 'report', version: 0, expectedVersion: 3 },
+      { threadId: 't1', artifactId: 'report', version: 1 },
+      { threadId: 't1', artifactId: 'report', version: 1, expectedVersion: 3, content: 'x' },
+    ]) {
+      expect(restoreSchema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers saving an artifact version to knowledge as an irreversible person-only Data write (EP-3-S8)', () => {
+    const promote = getActionDescriptor('chat.save_artifact_to_knowledge')
+
+    expect(promote).toMatchObject({ ownerPlane: 'data', risk: 'medium', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('chat.save_artifact_to_knowledge')).toBe(false)
+    expect(MODEL_ACCESS['chat.save_artifact_to_knowledge']).toMatchObject({ access: 'none' })
+
+    const schema = promote?.inputSchema
+    const valid = { threadId: 't1', artifactId: 'report', version: 2, title: 'Rapport', content: 'tekst' }
+    expect(schema?.safeParse(valid).success).toBe(true)
+    for (const input of [
+      { ...valid, version: 0 },
+      { ...valid, version: 1.5 },
+      { ...valid, threadId: '' },
+      { ...valid, artifactId: 'x'.repeat(257) },
+      { ...valid, content: '   ' },
+      { ...valid, content: 'x'.repeat(200_001) },
+      { threadId: 't1', artifactId: 'report', title: 'Rapport', content: 'tekst' },
+      // The owner is read from the person's token, never named by a client.
+      { ...valid, orgId: 'org_x' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the cited-passage viewer as a low-risk read the model cannot execute (EP-2-S4)', () => {
+    const open = getActionDescriptor('chat.open_cited_passage')
+
+    expect(open).toMatchObject({ ownerPlane: 'data', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_cited_passage')).toBe(false)
+    expect(MODEL_ACCESS['chat.open_cited_passage']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = open?.inputSchema
+    expect(schema?.safeParse({ citationId: 'dr-1' }).success).toBe(true)
+    expect(schema?.safeParse({ citationId: 'doc-1', documentId: 'doc-1', chunkIndex: 2 }).success).toBe(true)
+    for (const input of [
+      { citationId: '' },
+      { citationId: 'doc-1', chunkIndex: -1 },
+      { citationId: 'doc-1', chunkIndex: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // Data Plane reads the viewer from the session; a client never names whose grants apply.
+    expect(schema?.safeParse({ citationId: 'doc-1', orgId: 'org_x' }).success).toBe(false)
+  })
+
+  it('registers the artifact revision history as a low-risk read the model cannot execute (EP-3-S3)', () => {
+    const history = getActionDescriptor('chat.list_artifact_revisions')
+
+    expect(history).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.list_artifact_revisions')).toBe(false)
+    expect(MODEL_ACCESS['chat.list_artifact_revisions']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = history?.inputSchema
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report' }).success).toBe(true)
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', beforeVersion: 3, limit: 20 }).success).toBe(true)
+    for (const input of [
+      { threadId: '', artifactId: 'report' },
+      { threadId: 'thread-1', artifactId: '' },
+      { threadId: 'thread-1', artifactId: 'report', beforeVersion: 0 },
+      { threadId: 'thread-1', artifactId: 'report', limit: 21 },
+      { threadId: 'thread-1', artifactId: 'report', limit: 1.5 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+    // The owner is read from the session, never named by a client.
+    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', userId: 'user_x' }).success).toBe(false)
+  })
+
+  it('registers the deck template picker as low-risk actions the model cannot execute (EP-5-S7)', () => {
+    const list = getActionDescriptor('chat.list_deck_templates')
+    const apply = getActionDescriptor('chat.apply_deck_template')
+
+    expect(list).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(apply).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.list_deck_templates')).toBe(false)
+    expect(isModelExecutableAction('chat.apply_deck_template')).toBe(false)
+    expect(MODEL_ACCESS['chat.list_deck_templates']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+    expect(MODEL_ACCESS['chat.apply_deck_template']).toMatchObject({ access: 'none' })
+
+    // The org comes from the session: the list takes nothing a client could name.
+    const listSchema = list?.inputSchema
+    expect(listSchema?.safeParse({}).success).toBe(true)
+    expect(listSchema?.safeParse({ orgId: 'org_x' }).success).toBe(false)
+
+    const schema = apply?.inputSchema
+    expect(schema?.safeParse({ skillId: 'skill-brand' }).success).toBe(true)
+    expect(schema?.safeParse({ skillId: 'org:brand.v2_1', threadId: 'thread-1' }).success).toBe(true)
+    for (const input of [
+      {},
+      { skillId: '' },
+      { skillId: '../blob' },
+      { skillId: 'a b' },
+      { skillId: 'x'.repeat(129) },
+      { skillId: 'skill-brand', name: 'Aquatiq brand' },
+      { skillId: 'skill-brand', orgId: 'org_x' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the deck slide open as a low-risk read the model cannot execute (EP-5-S4)', () => {
+    const open = getActionDescriptor('chat.open_deck_slide')
+
+    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_deck_slide')).toBe(false)
+    expect(MODEL_ACCESS['chat.open_deck_slide']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = open?.inputSchema
+    expect(schema?.safeParse({ artifactId: 'artifact-deck', slideId: 's3' }).success).toBe(true)
+    for (const input of [
+      { artifactId: '', slideId: 's3' },
+      { artifactId: 'artifact-deck', slideId: '' },
+      { artifactId: 'artifact-deck', slideId: 's 3' },
+      { artifactId: 'artifact-deck', slideId: '../s3' },
+      { artifactId: 'artifact-deck', slideId: 'x'.repeat(65) },
+      // The deck is read from the panel's manifest: a client never names a thread, an owner or an index.
+      { artifactId: 'artifact-deck', slideId: 's3', threadId: 'thread-1' },
+      { artifactId: 'artifact-deck', slideId: 's3', index: 2 },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the deck presentation as a low-risk read the model cannot execute (EP-5-S5)', () => {
+    const present = getActionDescriptor('chat.present_deck')
+
+    expect(present).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.present_deck')).toBe(false)
+    expect(MODEL_ACCESS['chat.present_deck']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = present?.inputSchema
+    expect(schema?.safeParse({ artifactId: 'artifact-deck' }).success).toBe(true)
+    for (const input of [
+      { artifactId: '' },
+      // The slides, the pages and the gate come from the panel's manifest: a client never names a slide, an index or a thread.
+      { artifactId: 'artifact-deck', slideId: 's3' },
+      { artifactId: 'artifact-deck', index: 2 },
+      { artifactId: 'artifact-deck', threadId: 'thread-1' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the widget bridge as low-risk actions the model cannot execute (EP-4-S3)', () => {
+    const stage = getActionDescriptor('chat.stage_widget_followup')
+    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.stage_widget_followup')).toBe(false)
+    expect(stage?.description ?? '').toContain('Never model-executable')
+    expect(stage?.inputSchema.safeParse({ text: 'Vis for 25 år' }).success).toBe(true)
+    expect(stage?.inputSchema.safeParse({ text: 'x'.repeat(500) }).success).toBe(true)
+    for (const input of [
+      { text: '' },
+      { text: 'x'.repeat(501) },
+      // The widget, the answer and the thread are the host's: a caller names only the text.
+      { text: 'Neste', threadId: 'thread-1' },
+      { text: 'Neste', send: true },
+    ]) {
+      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
+    }
+
+    const link = getActionDescriptor('chat.open_widget_link')
+    expect(link).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_widget_link')).toBe(false)
+    expect(link?.description ?? '').toContain('Never model-executable')
+    for (const url of ['https://example.com/rente', 'http://example.com', 'mailto:ola@example.com']) {
+      expect(link?.inputSchema.safeParse({ url }).success).toBe(true)
+    }
+    for (const url of ['javascript:alert(1)', 'data:text/html,x', '/api/v1/me', '//evil.example', 'https://a.example/\nx', `https://a.example/${'x'.repeat(8 * 1024)}`]) {
+      expect(link?.inputSchema.safeParse({ url }).success).toBe(false)
+    }
+  })
+
+  it('registers the MCP App host as low-risk actions the model cannot execute (EP-4-S9)', () => {
+    const open = getActionDescriptor('chat.open_mcp_app')
+    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_mcp_app')).toBe(false)
+    expect(open?.description ?? '').toContain('Never model-executable')
+    expect(open?.inputSchema.safeParse({ serverId: 'srv-1', tool: 'show_chart' }).success).toBe(true)
+    for (const input of [
+      { serverId: '', tool: 'show_chart' },
+      { serverId: 'srv-1', tool: '' },
+      // The org and viewer are the session's: a caller names only the server and the tool.
+      { serverId: 'srv-1', tool: 'show_chart', orgId: 'org-2' },
+      { serverId: 'srv-1', tool: 'show_chart', uri: 'ui://other/app' },
+    ]) {
+      expect(open?.inputSchema.safeParse(input).success).toBe(false)
+    }
+
+    const stage = getActionDescriptor('chat.stage_mcp_app_message')
+    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.stage_mcp_app_message')).toBe(false)
+    expect(stage?.description ?? '').toContain('Never model-executable')
+    expect(stage?.inputSchema.safeParse({ text: 'Vis som tabell' }).success).toBe(true)
+    for (const input of [{ text: '' }, { text: 'x'.repeat(501) }, { text: 'Neste', send: true }]) {
+      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
+    }
+  })
+
+  it('registers the app-initiated MCP tool call as a medium-risk action the model cannot execute (EP-4-S10)', () => {
+    const call = getActionDescriptor('chat.mcp_app_tool_call')
+    expect(call).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('chat.mcp_app_tool_call')).toBe(false)
+    expect(call?.description ?? '').toContain('Never model-executable')
+    expect(call?.description ?? '').toContain('app_call_requires_chat')
+    const valid = { runId: 'run-1', serverId: 'srv-1', tool: 'echo_read', arguments: { q: 'x' }, frameNonce: 'frame-0123456789abcdef' }
+    expect(call?.inputSchema.safeParse(valid).success).toBe(true)
+    for (const input of [
+      { ...valid, runId: '' },
+      { ...valid, tool: '' },
+      // A server id with `__` would name another server's tool.
+      { ...valid, serverId: 'srv__other' },
+      { ...valid, arguments: [1] },
+      { ...valid, frameNonce: 'short' },
+      // The org, the viewer and the permission posture are never the caller's to name.
+      { ...valid, orgId: 'org-2' },
+      { ...valid, permissionMode: 'auto' },
+    ]) {
+      expect(call?.inputSchema.safeParse(input).success).toBe(false)
+    }
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -631,10 +1241,48 @@ describe('action registry', () => {
       expect(isModelExecutableAction(id), id).toBe(false)
       expect(registered(id)?.description ?? '', id).toContain('model-executable')
     }
-    for (const id of ['org.set_agent_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
+    for (const id of ['org.set_agent_policy', 'org.set_web_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
       expect(registered(id), id).toMatchObject({ risk: 'high' })
     }
     expect(registered('org.preview_effective_policy')).toMatchObject({ risk: 'low' })
+  })
+
+  it('registers the organization web access switch as a model-plane action the model cannot execute', () => {
+    expect(registered('org.set_web_policy'), 'org.set_web_policy').toMatchObject({
+      ownerPlane: 'model',
+      requiresApproval: false,
+      reversible: true,
+    })
+    expect(isModelExecutableAction('org.set_web_policy')).toBe(false)
+    expect(registered('org.set_web_policy')?.description ?? '').toContain('model-executable')
+  })
+
+  it('takes the two web switches from the client, never cached_only, and no organization', () => {
+    const setWeb = registered('org.set_web_policy')?.inputSchema
+
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on' }).success).toBe(true)
+    expect(setWeb?.safeParse({ revision: 4, webMode: 'live', paidProviders: 'off' }).success).toBe(true)
+    // cached_only is reserved on the server until Quarry ships it, so the client does not offer it.
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'cached_only', paidProviders: 'on' }).success).toBe(false)
+    // The revision is required, and the organization is the session's, never the body's.
+    expect(setWeb?.safeParse({ webMode: 'off', paidProviders: 'on' }).success).toBe(false)
+    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on', orgId: 'org_1' }).success).toBe(false)
+  })
+
+  it('registers the effective-policy read as a model-plane action the model cannot execute, taking only a thread', () => {
+    expect(registered('policy.read_effective'), 'policy.read_effective').toMatchObject({
+      ownerPlane: 'model',
+      risk: 'low',
+      requiresApproval: false,
+      reversible: true,
+    })
+    expect(isModelExecutableAction('policy.read_effective')).toBe(false)
+    const input = registered('policy.read_effective')?.inputSchema
+
+    expect(input?.safeParse({ threadId: 'thread_1' }).success).toBe(true)
+    // The organization is the session's: a body that names one, or no thread at all, is refused.
+    expect(input?.safeParse({ threadId: 'thread_1', orgId: 'org_1' }).success).toBe(false)
+    expect(input?.safeParse({}).success).toBe(false)
   })
 
   it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
@@ -925,6 +1573,25 @@ describe('action registry', () => {
     })
   })
 
+  it('registers Run now as a high-risk model-plane action the model can never press (EP-6-S2)', () => {
+    const action = getActionDescriptor('schedule.run_now')
+    expect(action).toMatchObject({ ownerPlane: 'model', risk: 'high', requiresApproval: false, reversible: false })
+    expect(isModelExecutableAction('schedule.run_now')).toBe(false)
+    // A model that could fire its own schedule on demand would spend the creator's stored authority.
+    expect(MODEL_ACCESS['schedule.run_now']).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
+
+    // The schedule and a client request id, nothing else: the creator and the org come from the session.
+    const requestId = '6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10'
+    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1' }).success).toBe(false)
+    for (const bad of ['short', 'has/slash-0123456789', 'x'.repeat(65)]) {
+      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId: bad }).success, bad).toBe(false)
+    }
+    for (const extra of ['creator_subject_id', 'orgId', 'task_template']) {
+      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId, [extra]: 'x' }).success, extra).toBe(false)
+    }
+  })
+
   it('registers the agent installations read as a low-risk, ungated application contract the model cannot execute', () => {
     const action = getActionDescriptor('agents.installations.list')
     expect(action).toMatchObject({ ownerPlane: 'application', risk: 'low', requiresApproval: false, reversible: true })
@@ -984,6 +1651,81 @@ describe('action registry', () => {
     expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
   })
 
+  it('registers templates and presets as person-only writes whose preset settings are the closed schema (EP-11-S6)', () => {
+    for (const id of ['templates.create', 'templates.update', 'presets.create', 'presets.update'] as const) {
+      const descriptor = getActionDescriptor(id)
+      expect(descriptor?.ownerPlane).toBe('model')
+      expect(descriptor?.risk).toBe('low')
+      expect(MODEL_ACCESS[id].eligible).toBe(false)
+    }
+    const create = getActionDescriptor('presets.create')
+    const preset = { name: 'Research', content: 'Research {{input}}', settings: { modeId: 'research', browseWeb: true, planMode: true } }
+    expect(create?.inputSchema.safeParse(preset).success).toBe(true)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { planMode: false } }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { persona: 'pirate' } }).success).toBe(false)
+    expect(create?.inputSchema.safeParse({ ...preset, settings: { skillIds: ['a', 'b', 'c', 'd', 'e'] } }).success).toBe(false)
+    const template = getActionDescriptor('templates.create')
+    expect(template?.inputSchema.safeParse({ name: 'Ukesrapport', content: 'Rapport for {{input}}' }).success).toBe(true)
+    expect(template?.inputSchema.safeParse({ name: '', content: 'x' }).success).toBe(false)
+  })
+
+  it('registers the skill draft lifecycle as person-only writes the model cannot execute (EP-11-S5)', () => {
+    for (const id of ['skills.draft.save', 'skills.publish', 'skills.draft.discard', 'skills.version.restore'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action?.ownerPlane).toBe('model')
+      expect(action?.requiresApproval).toBe(false)
+      expect(MODEL_ACCESS[id].access).toBe('none')
+    }
+    const restore = getActionDescriptor('skills.version.restore')
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 2 }).success).toBe(true)
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 0 }).success).toBe(false)
+    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 1.5 }).success).toBe(false)
+    const save = getActionDescriptor('skills.draft.save')
+    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'Nye steg' }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'x'.repeat(32_001) }).success).toBe(false)
+    expect(getActionDescriptor('skills.publish')?.outputSchema.safeParse({ id: 'sk-1', version: 3, published: true }).success).toBe(true)
+  })
+
+  it('registers skill import as a person-only write bounded by the bundle cap (EP-11-S8)', () => {
+    const importAction = getActionDescriptor('skills.import')
+    expect(importAction?.ownerPlane).toBe('model')
+    expect(importAction?.requiresApproval).toBe(false)
+    expect(MODEL_ACCESS['skills.import'].access).toBe('none')
+    expect(importAction?.inputSchema.safeParse({ fileName: 'SKILL.md', sizeBytes: 120 }).success).toBe(true)
+    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 9 * 1024 * 1024 }).success).toBe(false)
+    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 10, orgId: 'org-2' }).success).toBe(false)
+    expect(importAction?.outputSchema.safeParse({ id: 'skill_1', draft: true, enabled: false }).success).toBe(true)
+  })
+
+  it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
+    const save = getActionDescriptor('skills.save_from_message')
+    expect(save?.ownerPlane).toBe('model')
+    expect(save?.risk).toBe('low')
+    expect(save?.requiresApproval).toBe(false)
+    expect(MODEL_ACCESS['skills.save_from_message'].access).toBe('none')
+    expect(MODEL_ACCESS['skills.save_from_message'].eligible).toBe(false)
+
+    const valid = {
+      threadId: 'thread-1',
+      messageId: 'msg-1',
+      name: 'Utrulling',
+      description: 'Kort',
+      content: '1. Kjør testene',
+      enabled: true,
+    }
+    expect(save?.inputSchema.safeParse(valid).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ ...valid, name: ' Utrulling ' }).success).toBe(true)
+    expect(save?.inputSchema.safeParse({ ...valid, name: 'x'.repeat(65) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, content: '   ' }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, content: 'x'.repeat(32_001) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, description: 'x'.repeat(301) }).success).toBe(false)
+    expect(save?.inputSchema.safeParse({ ...valid, messageId: '' }).success).toBe(false)
+    // The owner and the organisation come from the session, never from the body.
+    const parsed = save?.inputSchema.parse({ ...valid, orgId: 'org-forged', owner_user_id: 'user-2' }) as Record<string, unknown>
+    expect(parsed).not.toHaveProperty('orgId')
+    expect(parsed).not.toHaveProperty('owner_user_id')
+  })
+
   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
     const ids: string[] = actionRegistry.map((action) => action.id)
     expect(new Set(ids).size).toBe(ids.length)
@@ -1002,9 +1744,43 @@ describe('action registry', () => {
     // ingestions and monitoring domains (job_control, start_agent_run, create_monitor, delete_monitor),
     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
-    // 270 after W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
     // 272 after W3-E3.2-g1 registered browser.get_org_policy and browser.set_org_policy (Settings > Browser).
-    expect(ids).toHaveLength(272)
+    // 320 after main EP-2/EP-3/EP-4/EP-6/EP-7/EP-9/EP-10/EP-11/EP-12/EP-14 (chat/skills/templates/policy/widget/thread actions).
+    // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
+    // 271 after EP-6-S2 registered schedule.run_now.
+    // 273 after EP-10-S7 registered integrations.list_connector_policies and integrations.set_connector_policy.
+    // 274 after main's W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
+    // 275 after EP-2-S4 registered chat.open_cited_passage, the cited-passage viewer read.
+    // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.
+    // +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.
+    // +1 after EP-3-S3 registered chat.list_artifact_revisions, the Output panel's stored history read.
+    // +2 after EP-3-S4 registered chat.save_artifact_revision and chat.restore_artifact_revision.
+    // +2 after EP-3-S5 registered chat.set_context_refs and chat.pick_context_ref, the composer's context chips.
+    // +2 after EP-2-S5 registered chat.research_plan_start and chat.research_plan_cancel, the deep-research plan card.
+    // +1 after EP-2-S9 registered chat.wide_research_retry_item, the wide-research grid's per-item retry.
+    // +1 after EP-3-S8 registered chat.save_artifact_to_knowledge, the Output panel's copy to knowledge.
+    // +2 after EP-5-S7 registered chat.list_deck_templates and chat.apply_deck_template, the template picker.
+    // +4 after EP-7-S1 registered chat.set_goal, chat.update_goal, chat.clear_goal and chat.continue_goal.
+    // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+    // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
+    // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
+    // +1 after EP-5-S5 registered chat.present_deck, the deck's present mode.
+    // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
+    // +3 after EP-9-C1 registered org.set_retention, org.place_legal_hold and org.release_legal_hold.
+    // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
+    // +1 after EP-9-T2 registered policy.read_effective, the thread's effective-policy read.
+    // +2 after EP-4-S3 registered chat.stage_widget_followup and chat.open_widget_link, the widget bridge.
+    // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
+    // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
+    // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+    // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
+    // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
+    // +1 after EP-4-S10 registered chat.mcp_app_tool_call, an app's read tool call on its own server.
+    // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
+    // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
+    // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
+    // Union with HEAD (W3-E3.2-g1 browser.get/set_org_policy): 320 + 2 = 322.
+    expect(ids).toHaveLength(322)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

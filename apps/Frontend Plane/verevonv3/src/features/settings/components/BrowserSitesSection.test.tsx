@@ -72,12 +72,29 @@ describe('browser site labels', () => {
   it('names each level, decision and source in Norwegian by default', () => {
     const tr = (no: string) => no
     expect(levelLabel('read', tr)).toBe('Bare lesing')
-    expect(decisionLabel('ask', tr)).toBe('Du blir spurt før første bruk')
+    expect(decisionLabel('ask', tr)).toBe('Ingen tilgang valgt ennå')
     expect(sourceLabel('org_block', tr)).toBe('Blokkert av administrator')
   })
 })
 
 describe('BrowserSitesSection', () => {
+  it('prefills a denied hostname for review without saving a choice', async () => {
+    const originalUrl = window.location.href
+    window.history.replaceState(null, '', '/settings/browser-sites?host=www.example.com')
+    try {
+      vi.stubEnv('VITE_BROWSER_SITES', 'true')
+      const calls = stubGateway(() => undefined)
+      signIn('member')
+      render(() => <BrowserSitesSection />)
+      await waitFor(() => expect(calls).toHaveLength(1))
+      expect((screen.getByLabelText('Legg til nettside') as HTMLInputElement).value).toBe('www.example.com')
+      expect((screen.getByLabelText('Hvorfor åpnes eller åpnes ikke en side?') as HTMLInputElement).value).toBe('www.example.com')
+      expect(calls[0]?.method).toBe('GET')
+    } finally {
+      window.history.replaceState(null, '', originalUrl)
+    }
+  })
+
   it('is absent, and reads nothing, unless the build switches browser sites on', () => {
     const calls = stubGateway(() => undefined)
     signIn('member')
@@ -95,6 +112,10 @@ describe('BrowserSitesSection', () => {
     signIn('member')
     render(() => <BrowserSitesSection />)
     await waitFor(() => expect(screen.getByText('shop.example.com')).toBeTruthy())
+    // The hub names what is governed (browsing only is user-settable).
+    const capabilities = screen.getByTestId('browser-sites-capability-list')
+    expect(capabilities.textContent).toContain('Nettlesing')
+    expect(capabilities.textContent).toContain('Opplastinger')
     click(screen.getByRole('button', { name: /Glem/ }))
     await waitFor(() =>
       expect(

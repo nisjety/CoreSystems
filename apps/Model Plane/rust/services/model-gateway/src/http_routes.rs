@@ -196,6 +196,42 @@ mod stream_body_limit_tests {
     }
 }
 
+#[cfg(test)]
+mod run_question_origin_tests {
+    use super::run_question_value;
+    use mp_contracts::model_plane::v1::RunQuestion;
+
+    /// A model question reads as it always has: no origin keys, whether its origin is `model` or unset
+    /// (empty, as a session-core older than the column leaves it) (EP-4 S6).
+    #[test]
+    fn run_question_value_omits_model_origin() {
+        for origin in ["", "model"] {
+            let question = RunQuestion {
+                id: "q_model".into(),
+                origin: origin.into(),
+                ..Default::default()
+            };
+            let value = run_question_value(&question);
+            assert!(value.get("origin").is_none(), "origin {origin:?} must not reach the card");
+            assert!(value.get("origin_label").is_none());
+        }
+    }
+
+    /// A server's question names the server that asked, for the card's origin line and its notice.
+    #[test]
+    fn run_question_value_names_a_server_origin() {
+        let question = RunQuestion {
+            id: "q_server".into(),
+            origin: "mcp_elicitation".into(),
+            origin_label: "Fixture".into(),
+            ..Default::default()
+        };
+        let value = run_question_value(&question);
+        assert_eq!(value["origin"], "mcp_elicitation");
+        assert_eq!(value["origin_label"], "Fixture");
+    }
+}
+
 /// Build the axum router without binding a socket. Useful for tests.
 pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> Router {
     let grpc_readiness = GrpcReadiness::new();
@@ -248,6 +284,13 @@ pub fn build_router_with_readiness(
 /// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
 /// policy alone, to prove every route here answers to it (INNH-10 MP-3).
 fn authed_routes() -> Router<AppState> {
+    authed_routes_with(crate::agent_api_routes::enabled())
+}
+
+/// [`authed_routes`] with the Agent API switch passed in (EP-12 S5): its routes are merged only
+/// while it is on, and the route-fence test merges them to prove a key reaches none of them
+/// without the switch and its scope.
+fn authed_routes_with(agent_api: bool) -> Router<AppState> {
     Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
@@ -314,6 +357,14 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
         // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
+        // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
+        .merge(crate::thread_goal_routes::router())
+        // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
+        .merge(crate::thread_export_routes::router())
+        // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
+        .merge(crate::thread_share_routes::router())
+        // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
+        .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -393,15 +444,27 @@ fn authed_routes() -> Router<AppState> {
         .route("/v1/runs/:run_id/trace", get(get_run_trace))
         // EP-14 S5: the run's durable, content-free timing and tool-call times, owner only.
         .route("/v1/runs/:run_id/timing", get(get_run_timing))
+        // EP-14 S7: one model call's request snapshot, owner only, D3-filtered by Session Core.
+        .route("/v1/runs/:run_id/requests/:call_seq", get(get_run_request))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
         // Quarry evidence; Quarry remains the only executor/capture layer.
         .route("/v1/browser/suggest-action", post(browser_suggest_action))
+        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts. Pure compute;
+        // 404 while WIDE_RESEARCH_ENTRY_ENABLED is off.
+        .route(
+            "/v1/research/wide/estimate",
+            post(wide_research_estimate_route),
+        )
         // Durable browser-agent run (Phase 2) — start/pause/resume/stop a
         // bounded multi-step browser-agent loop; progress streams over the
         // existing `/v1/runs/:run_id/events` route above.
         .merge(crate::browser_run::router())
+        // A durable navigation run for the Verevon assistant (behind its flag).
+        .merge(crate::assistant_navigation::router(
+            crate::assistant_navigation::enabled(),
+        ))
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
         // Space room routes /v1/spaces/* (one file per feature under space_routes/).
@@ -436,6 +499,14 @@ fn authed_routes() -> Router<AppState> {
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
+        // Wave 3 EP-3 S3: artifact revision history and the composer's capability read.
+        .merge(crate::artifact_revision_routes::router())
+        // Wave 3 EP-11 S7: /learn, a person's request to distil one of their threads into a skill
+        // proposal. capability-core runs it and answers 404 while LEARN_COMMAND_ENABLED is off.
+        .route("/v1/learning/learn", post(learn_from_thread))
+        // Wave 3 EP-12 S5: the Agent API read and control routes, for API keys only; absent
+        // while MODEL_GATEWAY_AGENT_API is off.
+        .merge(crate::agent_api_routes::router(agent_api))
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -474,6 +545,10 @@ fn orchestration_routes() -> Router<AppState> {
             get(get_quarantine_preview),
         )
         .route(
+            "/v1/orchestration/approvals/:approval_id/preview",
+            get(get_approval_preview),
+        )
+        .route(
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
@@ -501,6 +576,9 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/runs/:run_id/continue",
             post(crate::sse::continue_run),
         )
+        // The org's brand deck templates for the picker (Wave 3 EP-5 S7); 404 while
+        // SKILL_DECK_TEMPLATES_ENABLED is off.
+        .route("/v1/deck-templates", get(list_deck_templates))
 }
 
 /// App-Plane proxy routes (`/v1/capabilities`, `/v1/tasks`, `/v1/cron`,
@@ -555,6 +633,12 @@ fn proxy_routes() -> Router<AppState> {
             "/v1/org/agent-policy/effective",
             get(get_org_agent_policy_effective_proxy),
         )
+        // The effective policy of one thread (Wave 3 EP-9 T2). Mounted always: the handler answers 404 while its switch
+        // is off, so the route fence below still reaches it.
+        .route(
+            "/v1/policy/effective",
+            get(crate::policy_effective::get_policy_effective),
+        )
         .route(
             "/v1/org/hooks",
             get(list_org_hooks_proxy).post(create_org_hook_proxy),
@@ -578,6 +662,7 @@ fn proxy_routes() -> Router<AppState> {
                 .delete(delete_cron_proxy),
         )
         .route("/v1/cron/:id/fires", get(list_cron_fires_proxy))
+        .route("/v1/cron/:id/run", post(run_cron_now_proxy))
         // Memory
         .route(
             "/v1/memory",
@@ -595,10 +680,21 @@ fn proxy_routes() -> Router<AppState> {
             get(list_skills_proxy).post(create_skill_proxy),
         )
         .route(
+            "/v1/skills/import",
+            post(import_skill_proxy).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/v1/skills/:id",
             get(get_skill_proxy)
                 .patch(patch_skill_proxy)
                 .delete(delete_skill_proxy),
+        )
+        .route("/v1/skills/:id/versions", get(list_skill_versions_proxy))
+        .route("/v1/skills/:id/publish", post(publish_skill_proxy))
+        .route("/v1/skills/:id/draft", delete(discard_skill_draft_proxy))
+        .route(
+            "/v1/skills/:id/versions/:version/restore",
+            post(restore_skill_version_proxy),
         )
         // Plugins
         .route(
@@ -621,6 +717,348 @@ fn proxy_routes() -> Router<AppState> {
                 .post(create_run_watcher_proxy)
                 .delete(delete_run_watcher_proxy),
         )
+        // The HTML app an MCP tool declares, read with the viewer's authority and never stored
+        // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
+        .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
+        // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
+        .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-5 S7: `GET /v1/deck-templates` - the org's brand deck templates for the picker.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/deck-templates` - see [`deck_templates_listing`].
+async fn list_deck_templates(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    deck_templates_listing(state, claims, bearer, crate::deck_templates::enabled()).await
+}
+
+/// The deck templates the caller may pick, `{data: {templates: [{skill_id, name, description, colors,
+/// fonts}]}}`, display fields only (`crate::deck_templates`). With the switch off the route is a 404 as if
+/// it did not exist, decided before the bearer is looked at. A zero-retention bearer is refused before
+/// anything is read, with feature `skills`: a ZDR turn never mounts or applies a template, so there is
+/// nothing to pick. capability-core takes the org from the caller's verified capability bearer; no org
+/// from a header, query or body is read here.
+async fn deck_templates_listing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::deck_templates::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "listing deck templates needs a verified capability credential",
+        ));
+    };
+    let templates = crate::deck_templates::list_for_caller(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|status| grpc_status_to_http(&status))?;
+    Ok(Json(json!({ "data": { "templates": templates } })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S8: `GET /v1/mcp-apps/resource` - an MCP tool's `ui://` app document.
+// ---------------------------------------------------------------------------
+
+/// `?server_id=&tool=`. Both default to empty so a missing one is answered by the handler, after
+/// the switch, not by the extractor.
+#[derive(Debug, Default, Deserialize)]
+struct McpAppResourceQuery {
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    tool: String,
+}
+
+/// `GET /v1/mcp-apps/resource` - see [`mcp_app_resource`].
+async fn get_mcp_app_resource(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: Query<McpAppResourceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    mcp_app_resource(state, claims, bearer, query, crate::mcp_apps::enabled()).await
+}
+
+/// The app document `tool` on `server_id` declares, `{data: {uri, html, needs_network}}`
+/// (`crate::mcp_apps`). With the switch off the route is a 404 as if it did not exist, decided
+/// before anything else. A zero-retention bearer is refused before any read, with feature
+/// `mcp_execution`: the read egresses to the MCP server as a tool call does. The org and the viewer
+/// come from the verified claims only; the registry is refreshed from capability-core with the
+/// caller's capability bearer, so a fresh replica answers from the system of record.
+async fn mcp_app_resource(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Query(query): Query<McpAppResourceQuery>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_apps::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let server_id = query.server_id.trim();
+    let tool = query.tool.trim();
+    if [server_id, tool]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > crate::mcp_apps::MAX_NAME_BYTES)
+    {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "server_id and tool are required",
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "reading an MCP app needs a verified capability credential",
+        ));
+    };
+    if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
+        &state.mcp,
+        &state.ownership,
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        bearer.as_str(),
+    )
+    .await
+    {
+        warn!(org_id = %claims.org_id, %error, "MCP catalog hydration failed for an app read");
+        return Err(run_trace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_unavailable",
+            "capability registry is unavailable",
+        ));
+    }
+    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+        &state.http_client,
+        &state.capability_core_base_url,
+        &state.mcp_oauth_service_token,
+        &claims.org_id,
+        server_id,
+    )
+    .await;
+    let resource = crate::mcp_apps::read_app_resource(
+        &state.mcp,
+        &state.ownership,
+        crate::mcp_apps::AppResourceCache::global(),
+        &claims.org_id,
+        &claims.user_id,
+        server_id,
+        tool,
+        oauth_token.as_deref(),
+    )
+    .await
+    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
+    Ok(Json(json!({
+        "data": {
+            "uri": resource.uri,
+            "html": resource.html,
+            "needs_network": resource.needs_network,
+        }
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S10: `POST /v1/mcp-apps/tool-call` - a read tool an MCP App calls on its own server.
+// ---------------------------------------------------------------------------
+
+/// The viewer's delegated bearers an app call needs, each optional so a missing one is answered by
+/// the handler, after the switch, with the typed envelope.
+struct McpAppCallBearers {
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+}
+
+/// `POST /v1/mcp-apps/tool-call` - see [`mcp_app_tool_call`].
+async fn post_mcp_app_tool_call(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    let bearers = McpAppCallBearers {
+        capability,
+        session,
+        execution,
+        data_plane,
+        inference,
+    };
+    mcp_app_tool_call(
+        state,
+        claims,
+        bearers,
+        body,
+        crate::mcp_app_calls::enabled(),
+    )
+    .await
+}
+
+/// Call `tool` on the app's own `server_id` for the run `run_id`, `{data: {output, truncated}}`
+/// (`crate::mcp_app_calls`). With the switch off the route is a 404 as if it did not exist, decided
+/// before the body is read. A zero-retention or waived bearer is refused before anything else, with
+/// feature `mcp_execution`: the call carries the app's arguments to the MCP server. The org and the
+/// viewer come from the verified claims only; the body names the run, the server, the tool, its
+/// arguments and the frame nonce, and nothing that scopes the call.
+async fn mcp_app_tool_call(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearers: McpAppCallBearers,
+    body: Bytes,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr || claims.zdr_waiver.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_app_calls::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let parsed: crate::mcp_app_calls::AppCallBody =
+        serde_json::from_slice(&body).map_err(|_| {
+            run_trace_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the body must be a JSON object",
+            )
+        })?;
+    let call = crate::mcp_app_calls::validate(parsed).map_err(mcp_app_call_error)?;
+    let (Some(capability), Some(session), Some(execution), Some(data_plane), Some(inference)) = (
+        non_empty_bearer(
+            bearers
+                .capability
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .session
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .execution
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .data_plane
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .inference
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+    ) else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "delegated_credential_required",
+            "an app tool call needs the viewer's verified capability, session, execution, data-plane and inference credentials",
+        ));
+    };
+    let output = crate::mcp_app_calls::call_app_tool(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        &call,
+        &crate::mcp_app_calls::ViewerBearers {
+            capability,
+            session,
+            execution,
+            data_plane,
+            inference,
+        },
+    )
+    .await
+    .map_err(mcp_app_call_error)?;
+    Ok(Json(json!({
+        "data": {
+            "output": output.output,
+            "truncated": output.truncated,
+        }
+    })))
+}
+
+/// An app call's refusal in the typed envelope; the message is the module's own, never upstream text.
+fn mcp_app_call_error(error: crate::mcp_app_calls::AppCallError) -> HttpJsonError {
+    run_trace_error(error.status(), error.code(), error.message())
+}
+
+/// A bearer the auth layer verified and that is not blank.
+fn non_empty_bearer(bearer: Option<&str>) -> Option<&str> {
+    bearer.filter(|value| !value.trim().is_empty())
 }
 
 /// Request body cap for the two audio routes, `/v1/ai/dictate` and
@@ -1366,7 +1804,7 @@ fn question_state_token(state: i32) -> &'static str {
 
 /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
 pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
-    json!({
+    let mut value = json!({
         "id": question.id,
         "run_id": question.run_id,
         "thread_id": question.thread_id,
@@ -1393,7 +1831,15 @@ pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
             "text": answer.text,
         })).collect::<Vec<_>>(),
         "answered_message_id": empty_to_null(&question.answered_message_id),
-    })
+    });
+    // A question the run's model asked keeps the shape the card has always read. Only a server's question
+    // names its origin, so the card can say who asked it (EP-4 S6).
+    let origin = question.origin.as_str();
+    if !origin.is_empty() && origin != mp_contracts::user_question::ORIGIN_MODEL {
+        value["origin"] = json!(origin);
+        value["origin_label"] = json!(question.origin_label);
+    }
+    value
 }
 
 /// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is
@@ -1546,6 +1992,121 @@ async fn get_quarantine_preview(
             "format": "plain_text",
         }
     })))
+}
+
+/// The full-draft preview switch (EP-10-S1). Off: the route answers 404 `preview_unavailable` and
+/// nothing reaches Session Core. Only the literal `true` enables it.
+const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
+
+fn approval_write_preview_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WRITE_PREVIEW_ENV).ok().as_deref())
+}
+
+/// `GET /v1/orchestration/approvals/{id}/preview` - see [`approval_preview`].
+async fn get_approval_preview(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    approval_preview(state, claims, bearer, path, approval_write_preview_enabled()).await
+}
+
+/// The full draft a pending approval would release, `{data: {preview}}` (EP-10-S1, decision D4).
+/// Session Core decrypts the descriptor for the run's owner only and shapes it; the gateway adds
+/// nothing and logs nothing of it. A zero-retention bearer is refused before anything is read
+/// (`continuation_gate`, as for a decision), and Session Core refuses a waived one. The org is the
+/// verified JWT org. Every way of not seeing a draft reads as the same 404.
+async fn approval_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "preview_unavailable",
+            "the approval preview is not available",
+        ));
+    }
+    crate::zdr_posture::continuation_gate(&claims)?;
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_approval_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetApprovalPreviewRequest {
+                approval_id,
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| approval_preview_status_to_http(&status))?
+        .into_inner();
+    let preview = response
+        .preview
+        .as_ref()
+        .ok_or_else(|| approval_preview_status_to_http(&tonic::Status::not_found("no preview")))?;
+    let mut value = approval_preview_value(preview);
+    value["can_edit"] = json!(preview_can_edit(preview, approval_edit_enabled()));
+    Ok(Json(json!({ "data": { "preview": value } })))
+}
+
+/// Whether the card may offer edit mode (EP-10-S6): the edit switch is on and the draft is a mail
+/// send that Session Core shaped with fields a person may change. A decision with an edit is
+/// refused while the switch is off, so the card never offers one then.
+fn preview_can_edit(
+    preview: &mp_contracts::model_plane::v1::ApprovalPreview,
+    edit_enabled: bool,
+) -> bool {
+    edit_enabled
+        && !preview.editable_fields.is_empty()
+        && !preview.raw_only
+        && preview.kind == "mail_send"
+}
+
+/// Session Core's answer to a preview read. A typed ZDR refusal keeps its catalogue body; another
+/// owner's approval, a decided or expired one and an older Session Core all read as one 404.
+fn approval_preview_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return grpc_status_to_http(status);
+    }
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "approval_not_found",
+                "no such pending approval",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_approval_preview",
+            "the approval id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+fn approval_preview_value(preview: &mp_contracts::model_plane::v1::ApprovalPreview) -> Value {
+    json!({
+        "kind": preview.kind,
+        "provider": preview.provider,
+        "operation": preview.operation,
+        "connection_id": preview.connection_id,
+        "to": preview.to,
+        "subject": preview.subject,
+        "body_text": preview.body_text,
+        "has_html": preview.has_html,
+        "is_reply": preview.is_reply,
+        "raw_only": preview.raw_only,
+        "editable_fields": preview.editable_fields,
+        "action_fingerprint": preview.action_fingerprint,
+        "revision": preview.revision,
+        "format": "plain_text",
+    })
 }
 
 async fn get_subagent_lineage(
@@ -2109,6 +2670,127 @@ async fn get_run_timing(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// EP-14 S7: `GET /v1/runs/:run_id/requests/:call_seq` - the request inspector.
+// ---------------------------------------------------------------------------
+
+/// The inspector switch. Off: the route answers 404 as if it did not exist. Only the literal `true` enables it.
+const REQUEST_INSPECTOR_ENV: &str = "MODEL_GATEWAY_REQUEST_INSPECTOR";
+
+fn request_inspector_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(REQUEST_INSPECTOR_ENV).ok().as_deref())
+}
+
+/// A stored JSON text as the value it holds; text that does not parse is reported as absent, never raw.
+fn stored_json(raw: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(raw).ok()
+}
+
+/// Session Core's answer to an inspector read. Every way of not seeing a call (another user's run, an org
+/// admin, no such call, the read switched off) reads as 404, so the route confirms nothing.
+fn run_request_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "run_request_not_found",
+                "no such request",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "the run id or call number was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/requests/:call_seq` - see [`run_request_inspection`].
+async fn get_run_request(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<(String, String)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    run_request_inspection(state, claims, bearer, path, request_inspector_enabled()).await
+}
+
+/// One model call as the inspector shows it: `{data: {call_seq, call_purpose, snapshot, system_sections,
+/// tools, tools_truncated, system_truncated, dropped}}`. Session Core checks that the caller is the user who
+/// owns the run and applies decision D3 (platform sections carry no text); the gateway adds nothing to it. With
+/// the switch off the route is a 404; a zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`.
+async fn run_request_inspection(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((run_id, call_seq)): Path<(String, String)>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    let call_seq = call_seq.trim().parse::<u32>().ok().filter(|seq| *seq > 0);
+    let (true, Some(call_seq)) = (valid_trace_run_id(run_id), call_seq) else {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-] and call_seq a number from 1",
+        ));
+    };
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_request_snapshot(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRequestSnapshotRequest {
+                run_id: run_id.to_owned(),
+                call_seq,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_request_status_to_http(&status))?
+        .into_inner();
+    let sections: Vec<Value> = response
+        .system_sections
+        .iter()
+        .map(|section| {
+            json!({
+                "label": section.label,
+                "source": section.source,
+                "digest": section.digest,
+                "chars": section.chars,
+                "text": (!section.text.is_empty()).then_some(section.text.as_str()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "data": {
+            "run_id": run_id,
+            "call_seq": call_seq,
+            "call_purpose": response.call_purpose,
+            "snapshot": stored_json(&response.snapshot_json),
+            "system_sections": sections,
+            "tools": (!response.tools_json.is_empty()).then(|| stored_json(&response.tools_json)).flatten(),
+            "tools_truncated": response.tools_truncated,
+            "system_truncated": response.system_truncated,
+            "dropped": response.dropped,
+        },
+    })))
+}
+
 /// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
 /// value for that row, so it replays as `EVENT_TYPE_UNSPECIFIED` and only the
 /// payload discriminator identifies it (as in `durable_thread_event_type`).
@@ -2155,6 +2837,11 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
     let event_type = EventType::try_from(event.event_type)
         .map(|kind| kind.as_str_name().to_owned())
         .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
+    if event_type == "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR" {
+        // Session accepts events from an owner; an unsigned audit record is
+        // not sufficient to authorize a live attachment projection.
+        return None;
+    }
     if let Some(status) = run_terminal_status(&event_type, &event) {
         if event.resource_ref != format!("run:{run_id}") && event.correlation_id != run_id {
             return None;
@@ -2210,6 +2897,20 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
         .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok())?;
     if payload.get("run_id").and_then(Value::as_str) != Some(run_id) {
         return None;
+    }
+    if event_type == "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
+        && payload.get("action_id").and_then(Value::as_str) == Some(crate::browser_attach_compat::ACTION_ID)
+    {
+        let plan = payload.get("plan_id").and_then(Value::as_str)?;
+        let envelope = payload.get("status").and_then(Value::as_str)?;
+        let receipt = crate::browser_attach_compat::verify_configured(envelope, run_id, plan)?;
+        return Some(DurableRunEventProjection {
+            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            event_id: event.event_id,
+            event_type: "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR".to_owned(),
+            payload: json!({ "run_id": receipt.run_id, "plan_id": receipt.plan_id,
+                "session_run_id": receipt.session_run_id, "attach_id": receipt.attach_id, "tab_id": receipt.tab_id }),
+        });
     }
     Some(DurableRunEventProjection {
         at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
@@ -2340,6 +3041,149 @@ struct DecideApprovalBody {
     /// carries one reads exactly as it did before the switch existed.
     #[serde(default)]
     promote: Value,
+    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send, granted with
+    /// the approval in one act. Refused while APPROVAL_EDIT_ENABLED is off; absent, the decision is
+    /// exactly what it was before edits existed.
+    #[serde(default)]
+    edit: Option<DecideEditBody>,
+}
+
+/// The edit a decision may carry (EP-10-S4). `patch` holds only `to`, `subject` and `bodyText`;
+/// Session Core refuses any other key, so this gateway forwards it as the person wrote it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideEditBody {
+    patch: Value,
+    base_fingerprint: String,
+}
+
+/// The approve-with-edits switch (EP-10-S4). Off: a decision carrying an edit is refused with 403
+/// `approval_edit_disabled` before anything reaches Session Core. Only the literal `true` enables
+/// it.
+const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+
+fn approval_edit_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+}
+
+/// The largest patch an edit may carry: the 48 KiB body cap plus room for recipients and subject.
+const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
+
+fn edit_refusal(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Check a decision's edit before any upstream call (EP-10-S4, decision D1): the switch, a grant,
+/// the `once` scope with no "Always", a JSON object patch and a 64-hex base fingerprint. `None`
+/// when the body carries no edit, whatever the switch says.
+fn checked_decision_edit(
+    edit: Option<&DecideEditBody>,
+    body_scope: &str,
+    promote: bool,
+    target: ApprovalState,
+    enabled: bool,
+) -> Result<Option<mp_contracts::model_plane::v1::ApprovalEdit>, HttpJsonError> {
+    let Some(edit) = edit else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(edit_refusal(
+            StatusCode::FORBIDDEN,
+            "approval_edit_disabled",
+            "Editing before approving is not enabled on this deployment.",
+        ));
+    }
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_grant",
+            "An edit is sent with an approval only.",
+        ));
+    }
+    if !matches!(body_scope, "" | SCOPE_ONCE) || promote {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_once",
+            "An edited action is approved for this one time only.",
+        ));
+    }
+    if !edit.patch.is_object() {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_patch",
+            "The edit is not in the expected shape.",
+        ));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_base_fingerprint",
+            "The edit does not say which draft it changes.",
+        ));
+    }
+    let patch_json = edit.patch.to_string();
+    if patch_json.len() > MAX_EDIT_PATCH_BYTES {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_too_large",
+            "The edited message is too long.",
+        ));
+    }
+    Ok(Some(mp_contracts::model_plane::v1::ApprovalEdit {
+        patch_json,
+        base_fingerprint: base.to_owned(),
+    }))
+}
+
+/// The HTTP form of a decision that carried an edit (EP-10-S4). Session Core sends the closed code
+/// as the status message: a changed approval is 409, a refused patch 422, a switch or owner refusal
+/// 403. A typed ZDR refusal and every other status keep the shared mapping.
+fn edit_decision_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(error).is_some() {
+        return grpc_status_to_http(error);
+    }
+    let code = error.message();
+    let contract_code = mp_contracts::approval_edit::EditError::ALL
+        .iter()
+        .any(|known| known.code() == code);
+    match (error.code(), code) {
+        (tonic::Code::Aborted, "approval_changed") => edit_refusal(
+            StatusCode::CONFLICT,
+            "approval_changed",
+            "This approval changed since you opened it. Review it again.",
+        ),
+        (tonic::Code::FailedPrecondition, "revision_limit") => edit_refusal(
+            StatusCode::CONFLICT,
+            "revision_limit",
+            "This action was edited too many times.",
+        ),
+        (tonic::Code::FailedPrecondition, "not_editable") => edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_editable",
+            "This action cannot be edited; approve or reject it as drafted.",
+        ),
+        (tonic::Code::InvalidArgument, code)
+            if contract_code
+                || matches!(code, "invalid_patch" | "edit_requires_once" | "edit_requires_grant") =>
+        {
+            edit_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                "The edit was not accepted.",
+            )
+        }
+        (tonic::Code::FailedPrecondition, "approval_edit_disabled")
+        | (tonic::Code::PermissionDenied, "edit_owner_only") => edit_refusal(
+            StatusCode::FORBIDDEN,
+            code,
+            "Editing this approval is not available.",
+        ),
+        _ => grpc_status_to_http(error),
+    }
 }
 
 /// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
@@ -2587,6 +3431,15 @@ async fn decide_approval(
             ))
         }
     };
+    // Approve with edits (EP-10-S4): refused before any upstream call unless it is a `once` grant
+    // under the switch. A body without `edit` takes exactly the path it always did.
+    let edit = checked_decision_edit(
+        body.edit.as_ref(),
+        &body.scope,
+        body.promote == Value::Bool(true),
+        target_state,
+        approval_edit_enabled(),
+    )?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -2645,23 +3498,29 @@ async fn decide_approval(
             }
         }
     }
+    let edited = edit.is_some();
+    let mut decision = user_decision_request(
+        approval_id,
+        target_state,
+        &claims.user_id,
+        &claims.org_id,
+        body.reason,
+        scope,
+        asks_rule,
+    );
+    decision.edit = edit;
     let resp = state
         .orchestration_client
         .clone()
-        .decide_approval(authenticated_session_request(
-            user_decision_request(
-                approval_id,
-                target_state,
-                &claims.user_id,
-                &claims.org_id,
-                body.reason,
-                scope,
-                asks_rule,
-            ),
-            &session_bearer,
-        )?)
+        .decide_approval(authenticated_session_request(decision, &session_bearer)?)
         .await
-        .map_err(|e| grpc_status_to_http(&e))?
+        .map_err(|e| {
+            if edited {
+                edit_decision_status_to_http(&e)
+            } else {
+                grpc_status_to_http(&e)
+            }
+        })?
         .into_inner();
     let approval = resp
         .approval
@@ -3071,6 +3930,8 @@ struct AiImagesRequest {
 #[derive(Debug, Default, Deserialize)]
 struct BrowserSuggestActionRequest {
     #[serde(default)]
+    mode: BrowserSuggestionMode,
+    #[serde(default)]
     goal: String,
     #[serde(default)]
     url: String,
@@ -3078,6 +3939,10 @@ struct BrowserSuggestActionRequest {
     title: String,
     #[serde(default)]
     observation: Value,
+    #[serde(default)]
+    history: Value,
+    #[serde(default)]
+    zdr: bool,
     #[serde(default)]
     visual_observation: Value,
     #[serde(default)]
@@ -3091,6 +3956,16 @@ struct BrowserSuggestActionRequest {
     #[serde(default)]
     provider: Option<String>,
 }
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BrowserSuggestionMode {
+    #[default]
+    Quarry,
+    Desktop,
+}
+
+mod desktop_browser_planner;
 
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
@@ -3247,17 +4122,28 @@ async fn browser_suggest_action(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<BrowserSuggestActionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolDefinition};
 
     let request_id = new_ulid();
+    let desktop = req.mode == BrowserSuggestionMode::Desktop;
     // A waived token names one connection, so it is refused here as a route mismatch (see `zdr_posture`).
-    crate::zdr_posture::zdr_or_refuse(
+    let effective_zdr = crate::zdr_posture::zdr_or_refuse(
         &claims,
-        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, desktop && req.zdr),
     )?;
-    let visual_summary =
-        browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
-    let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+    let (visual_summary, evidence, instructions, schema) = if desktop {
+        (
+            None,
+            desktop_browser_planner::evidence(&req)?,
+            desktop_browser_planner::instructions(),
+            desktop_browser_planner::ACTION_SCHEMA,
+        )
+    } else {
+        let visual_summary =
+            browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
+        let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+        (visual_summary, evidence, browser_suggest_system_prompt(), BROWSER_ACTION_SCHEMA)
+    };
 
     let resp = state
         .inference_client
@@ -3267,13 +4153,15 @@ async fn browser_suggest_action(
                 purpose: InferPurpose::BrowserPlanner as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
-                model: req.model.clone().unwrap_or_default(),
+                model: req.model.clone().unwrap_or_else(|| {
+                    if desktop { "verevon-balance".to_owned() } else { String::new() }
+                }),
                 provider_hint: req.provider.clone().unwrap_or_default(),
                 messages: vec![
                     ChatMessage {
                         compaction_summary: String::new(),
                         role: "system".to_owned(),
-                        content: browser_suggest_system_prompt(),
+                        content: instructions,
                         name: String::new(),
                     },
                     ChatMessage {
@@ -3285,8 +4173,18 @@ async fn browser_suggest_action(
                 ],
                 temperature: 0.2,
                 max_tokens: 700,
-                structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
-                zdr: true,
+                structured_output_schema: if desktop { String::new() } else { schema.to_owned() },
+                tools: if desktop {
+                    vec![ToolDefinition {
+                        name: desktop_browser_planner::TOOL_NAME.to_owned(),
+                        description: "Propose one bounded desktop browser step from the current evidence.".to_owned(),
+                        parameters_json: schema.to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                tool_choice: if desktop { desktop_browser_planner::TOOL_NAME.to_owned() } else { String::new() },
+                zdr: !desktop || effective_zdr,
                 ..Default::default()
             },
             &inference_bearer,
@@ -3295,15 +4193,23 @@ async fn browser_suggest_action(
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
-    let parsed: Value = serde_json::from_str(resp.content.trim()).map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "error": format!("browser planner returned invalid JSON: {e}")
-            })),
-        )
-    })?;
-    let suggestion = browser_suggestion_value(&parsed);
+    let parsed = if desktop {
+        desktop_browser_planner::parse_reply(&resp)?
+    } else {
+        serde_json::from_str(resp.content.trim()).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("browser planner returned invalid JSON: {e}")
+                })),
+            )
+        })?
+    };
+    let suggestion = if desktop {
+        desktop_browser_planner::suggestion(&parsed, &req.observation)?
+    } else {
+        browser_suggestion_value(&parsed)
+    };
 
     Ok(Json(json!({
         "id": request_id,
@@ -7127,6 +8033,9 @@ async fn delete_org_hook_proxy(
 #[derive(Debug, Default, Deserialize)]
 struct CronListQuery {
     space_ref: Option<String>,
+    /// `self` narrows the list to the caller's own schedules (EP-6-S2). Any
+    /// other value is dropped, never forwarded.
+    creator: Option<String>,
 }
 
 /// Query for both process routes. `space_ref` and the two decision fields
@@ -7490,12 +8399,22 @@ async fn list_cron_proxy(
             Json(json!({ "error": "space_ref must be URL-safe" })),
         ));
     }
-    let path = if space_ref.is_empty() {
-        format!("cron?org_id={}", c.org_id)
-    } else {
-        format!("cron?org_id={}&space_ref={space_ref}", c.org_id)
-    };
+    let path = cron_list_path(&c.org_id, space_ref, query.creator.as_deref());
     proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// The upstream list path. Only the literal `creator=self` is forwarded:
+/// capability-core compares it to the verified actor, so it can only narrow.
+fn cron_list_path(org_id: &str, space_ref: &str, creator: Option<&str>) -> String {
+    let mut path = if space_ref.is_empty() {
+        format!("cron?org_id={org_id}")
+    } else {
+        format!("cron?org_id={org_id}&space_ref={space_ref}")
+    };
+    if creator == Some("self") {
+        path.push_str("&creator=self");
+    }
+    path
 }
 async fn create_cron_proxy(
     State(s): State<AppState>,
@@ -7503,6 +8422,11 @@ async fn create_cron_proxy(
     bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // A template naming a thread goal is a goal-bound schedule (EP-7 S6): admitted first, since
+    // session-core binds it to the goal at insert.
+    if crate::goal_unattended::names_goal(&b) {
+        crate::goal_unattended::admit(&c, &b)?;
+    }
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "cron", "POST", Some(&b)).await
 }
@@ -7578,6 +8502,76 @@ mod cron_fires_path_tests {
     }
 }
 
+/// Run now (EP-6-S2): one manual fire of a schedule. Only the caller's
+/// `request_id` is forwarded; capability-core checks the creator, asks Control
+/// for a fresh fire decision and answers 404 while `CRON_RUN_NOW_ENABLED` is off.
+async fn run_cron_now_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = cron_run_path(&id)?;
+    let body = json!({ "request_id": b.get("request_id").cloned().unwrap_or(Value::Null) });
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&body)).await
+}
+
+/// The upstream run path. The id is decoded from the request path, so an
+/// encoded `/` or `?` would otherwise address a different upstream route.
+fn cron_run_path(id: &str) -> Result<String, HttpJsonError> {
+    let url_safe = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+    if !url_safe {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "code": "invalid_cron_id",
+                "message": "cron id must be URL-safe",
+                "details": {}
+            }})),
+        ));
+    }
+    Ok(format!("cron/{id}/run"))
+}
+
+#[cfg(test)]
+mod cron_run_now_path_tests {
+    use super::{cron_list_path, cron_run_path};
+
+    #[test]
+    fn cron_run_path_forwards_only_the_id() {
+        assert_eq!(cron_run_path("cron_1").unwrap(), "cron/cron_1/run");
+        for bad in ["", ".", "..", "cron_1/fires", "cron_1?creator=x", "cron 1", "cron_1#x"] {
+            let (status, _) = cron_run_path(bad).unwrap_err();
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn cron_list_forwards_only_creator_self() {
+        assert_eq!(cron_list_path("org-1", "", None), "cron?org_id=org-1");
+        assert_eq!(
+            cron_list_path("org-1", "", Some("self")),
+            "cron?org_id=org-1&creator=self"
+        );
+        assert_eq!(
+            cron_list_path("org-1", "space-1", Some("self")),
+            "cron?org_id=org-1&space_ref=space-1&creator=self"
+        );
+        for other in ["someone-else", "SELF", "self&org_id=org-2", ""] {
+            assert_eq!(
+                cron_list_path("org-1", "space-1", Some(other)),
+                "cron?org_id=org-1&space_ref=space-1"
+            );
+        }
+    }
+}
+
 async fn list_memory_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
@@ -7623,16 +8617,26 @@ async fn delete_memory_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "DELETE", None).await
 }
 
+/// EP-11 S6: the `&kind=` suffix for a skills read, forwarded only when it is exactly one of the
+/// authored kinds so nothing else from the caller's query string reaches capability-core.
+fn authored_kind_suffix(q: &std::collections::HashMap<String, String>) -> String {
+    match q.get("kind").map(String::as_str) {
+        Some(kind @ ("skill" | "template" | "preset")) => format!("&kind={kind}"),
+        _ => String::new(),
+    }
+}
+
 async fn list_skills_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
         &c,
         &bearer,
-        &format!("skills?org_id={}", c.org_id),
+        &format!("skills?org_id={}{}", c.org_id, authored_kind_suffix(&q)),
         "GET",
         None,
     )
@@ -7647,13 +8651,27 @@ async fn create_skill_proxy(
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "skills", "POST", Some(&b)).await
 }
+/// EP-11 S8: a skill imported from a SKILL.md or a zip, sent as base64 inside JSON; capability-core
+/// answers 404 while SKILL_IMPORT_ENABLED is off. 12 MiB carries the largest bundle in base64.
+const SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+async fn import_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "skills/import", "POST", Some(&b)).await
+}
 async fn get_skill_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "GET", None).await
+    // The single-row read takes the kind as its only query parameter, so the suffix's `&` becomes `?`.
+    let kind = authored_kind_suffix(&q).replacen('&', "?", 1);
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}{kind}"), "GET", None).await
 }
 async fn patch_skill_proxy(
     State(s): State<AppState>,
@@ -7671,6 +8689,77 @@ async fn delete_skill_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
+}
+/// EP-11 S5: publish a skill's pending draft as its next version
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn publish_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}/publish"), "POST", None).await
+}
+/// EP-11 S5: discard a skill's pending draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn discard_skill_draft_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/draft"),
+        "DELETE",
+        None,
+    )
+    .await
+}
+/// EP-11 S5: restore an earlier version as the skill's draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn restore_skill_version_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, version)): Path<(String, u32)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/versions/{version}/restore"),
+        "POST",
+        None,
+    )
+    .await
+}
+/// EP-11 S2: a skill's immutable versions (capability-core
+/// `GET /api/v1/skills/{id}/versions`, 404 while SKILL_VERSIONS_API is off).
+/// Only the paging parameters pass, and only as plain digits.
+async fn list_skill_versions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let mut path = format!("skills/{id}/versions");
+    let paging: Vec<String> = ["limit", "before_version"]
+        .iter()
+        .filter_map(|key| {
+            q.get(*key)
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                .map(|v| format!("{key}={v}"))
+        })
+        .collect();
+    if !paging.is_empty() {
+        path.push('?');
+        path.push_str(&paging.join("&"));
+    }
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
 
 /// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this
@@ -7894,6 +8983,35 @@ fn not_found(message: &str) -> HttpJsonError {
 /// semantics. Every other code — including transport failures (`Unavailable`,
 /// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
 /// default for these routes.
+/// EP-9 C4: an erase refused by a legal hold, or by a hold check that could not be made, keeps
+/// its typed code from the `x-mp-error-code` trailer; without it `FailedPrecondition` would read
+/// as `thread_persistence_not_permitted` and the SPA would never see the hold.
+fn thread_erase_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.metadata().get("x-mp-error-code").and_then(|value| value.to_str().ok()) {
+        Some("erasure_blocked_legal_hold") => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": "erasure_blocked_legal_hold",
+                    "message": error.message(),
+                    "details": {"retryable": false},
+                }
+            })),
+        ),
+        Some("erasure_hold_check_unavailable") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "erasure_hold_check_unavailable",
+                    "message": "Legal holds could not be checked, so nothing was deleted.",
+                    "details": {"retryable": true},
+                }
+            })),
+        ),
+        _ => session_thread_error(context, error),
+    }
+}
+
 pub(crate) fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     match error.code() {
         tonic::Code::InvalidArgument => (
@@ -8083,7 +9201,13 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
-fn run_detail_value(run: &RunDetail) -> Value {
+pub(crate) fn run_detail_value(run: &RunDetail) -> Value {
+    run_detail_value_with(run, run_origin_field_enabled())
+}
+
+/// `run_detail_value` with the origin switch passed in, so a test can name either
+/// setting without touching the process environment.
+fn run_detail_value_with(run: &RunDetail, origin_field: bool) -> Value {
     let mut value = json!({
         "run_id": run.run_id,
         "thread_id": run.thread_id,
@@ -8107,7 +9231,22 @@ fn run_detail_value(run: &RunDetail) -> Value {
     if !run.owner_subject_id.is_empty() {
         value["owner_subject_id"] = json!(run.owner_subject_id);
     }
+    // EP-12 S1: the origin the run was stamped with, at the top level, so the Agent
+    // API and the trigger chip read one field. It is read from the metadata projected
+    // above, and a stamp outside the closed token set projects as null, not a guess.
+    if origin_field {
+        value["origin"] = mp_contracts::run_origin::RunOrigin::from_metadata(&value["metadata"])
+            .map_or(Value::Null, |origin| json!(origin.as_str()));
+    }
     value
+}
+
+/// The switch that adds the top-level `origin` to a run projection (EP-12 S1). Default
+/// off; the strict parser the other gateway switches share reads it.
+const RUN_ORIGIN_FIELD_ENV: &str = "MODEL_GATEWAY_RUN_ORIGIN_FIELD";
+
+fn run_origin_field_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(RUN_ORIGIN_FIELD_ENV).ok().as_deref())
 }
 
 #[cfg(test)]
@@ -8140,6 +9279,64 @@ mod run_detail_value_tests {
         // The projection still says what it always said.
         assert_eq!(value["run_id"], "run-1");
         assert_eq!(value["status"], "awaiting_approval");
+    }
+
+    /// A run whose stored metadata carries `stamp` as its origin, the shape Session Core returns.
+    fn run_stamped(stamp: &str) -> RunDetail {
+        RunDetail {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            metadata: Some(prost_types::Struct {
+                fields: [(
+                    "origin".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(stamp.to_owned())),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// With the switch on, the top-level `origin` names the run's stamp, and a run
+    /// with no stamp reads as chat.
+    #[test]
+    fn run_detail_value_names_origin_when_switch_on() {
+        for (stamp, origin) in [("api", "api"), ("schedule", "schedule"), ("chat", "chat")] {
+            let value = run_detail_value_with(&run_stamped(stamp), true);
+            assert_eq!(value["origin"], origin, "{stamp}");
+        }
+        let unstamped = RunDetail {
+            run_id: "run-2".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(run_detail_value_with(&unstamped, true)["origin"], "chat");
+    }
+
+    /// With the switch off the projection is what it was: no `origin` key, and the
+    /// metadata unchanged.
+    #[test]
+    fn run_detail_value_unchanged_when_switch_off() {
+        let run = run_stamped("api");
+        let off = run_detail_value_with(&run, false);
+        let object = off.as_object().expect("a run is a JSON object");
+        assert!(!object.contains_key("origin"), "{off}");
+        assert_eq!(off["metadata"]["origin"], "api");
+        // Switching the field on adds exactly one key and changes nothing else.
+        let mut expected = off.clone();
+        expected["origin"] = json!("api");
+        assert_eq!(run_detail_value_with(&run, true), expected);
+    }
+
+    /// A stamp outside the closed token set projects as null, and the metadata still
+    /// shows what was stored.
+    #[test]
+    fn unknown_origin_stamp_projects_null() {
+        let value = run_detail_value_with(&run_stamped("sheduled"), true);
+        assert!(value["origin"].is_null(), "{value}");
+        assert_eq!(value["metadata"]["origin"], "sheduled");
     }
 }
 
@@ -8229,7 +9426,7 @@ fn todo_value(todo: &Todo) -> Value {
 }
 
 pub(crate) fn approval_value(approval: &Approval) -> Value {
-    json!({
+    let mut value = json!({
         "id": approval.id,
         "run_id": approval.run_id,
         "step_id": empty_to_null(&approval.step_id),
@@ -8259,7 +9456,13 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
         })),
         "grant_ref": empty_to_null(&approval.grant_ref),
         "turn_origin": empty_to_null(&approval.turn_origin),
-    })
+    });
+    // EP-10-S4: present only for an approval the person edited before granting, so every other
+    // approval projects exactly as before.
+    if approval.revision > 0 {
+        value["revision"] = json!(approval.revision);
+    }
+    value
 }
 
 /// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
@@ -8284,6 +9487,9 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "effect_class": empty_to_null(&cause.effect_class),
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
+        "assist_kind": empty_to_null(&cause.assist_kind),
+        "assist_origin": empty_to_null(&cause.assist_origin),
+        "host": empty_to_null(&cause.host),
         "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
@@ -8661,6 +9867,162 @@ mod approval_rule_tests {
 }
 
 #[cfg(test)]
+mod approval_edit_route_tests {
+    //! EP-10-S4: the gateway half of approve-with-edits. Every check runs before an upstream call;
+    //! the switch is off by default and a body without `edit` is untouched by it.
+    use super::*;
+
+    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn edit_body() -> DecideEditBody {
+        DecideEditBody {
+            patch: json!({ "subject": "New subject" }),
+            base_fingerprint: BASE.to_owned(),
+        }
+    }
+
+    fn code_of(error: &HttpJsonError) -> (StatusCode, String) {
+        (error.0, error.1 .0["error"]["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    #[test]
+    fn approval_edit_switch_is_off_by_default_and_strict() {
+        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
+        for value in [None, Some("1"), Some("yes"), Some("on"), Some("")] {
+            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn edit_off_by_default_is_forbidden() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Granted, false)
+                .expect_err("off");
+        assert_eq!(code_of(&refused), (StatusCode::FORBIDDEN, "approval_edit_disabled".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object(), "details is an object");
+    }
+
+    #[test]
+    fn a_decision_without_an_edit_is_unchanged_by_the_switch() {
+        for enabled in [false, true] {
+            assert!(checked_decision_edit(None, "thread", true, ApprovalState::Denied, enabled)
+                .expect("no edit")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn edit_with_scope_thread_is_refused() {
+        for (scope, promote) in [("thread", false), ("run", false), ("", true)] {
+            let refused =
+                checked_decision_edit(Some(&edit_body()), scope, promote, ApprovalState::Granted, true)
+                    .expect_err("wide scope");
+            assert_eq!(
+                code_of(&refused),
+                (StatusCode::UNPROCESSABLE_ENTITY, "edit_requires_once".to_owned()),
+                "{scope} {promote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejection_with_an_edit_is_refused() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Denied, true)
+                .expect_err("rejection");
+        assert_eq!(code_of(&refused).1, "edit_requires_grant");
+    }
+
+    #[test]
+    fn an_edit_is_forwarded_as_its_patch_and_base() {
+        let edit = checked_decision_edit(Some(&edit_body()), "once", false, ApprovalState::Granted, true)
+            .expect("accepted")
+            .expect("an edit");
+        assert_eq!(edit.base_fingerprint, BASE);
+        let patch: Value = serde_json::from_str(&edit.patch_json).expect("json");
+        assert_eq!(patch, json!({ "subject": "New subject" }));
+    }
+
+    #[test]
+    fn a_malformed_edit_is_refused_before_the_upstream() {
+        let mut not_object = edit_body();
+        not_object.patch = json!(["subject"]);
+        let refused = checked_decision_edit(Some(&not_object), "", false, ApprovalState::Granted, true)
+            .expect_err("array patch");
+        assert_eq!(code_of(&refused).1, "invalid_patch");
+
+        let mut short = edit_body();
+        short.base_fingerprint = "abc".to_owned();
+        let refused = checked_decision_edit(Some(&short), "", false, ApprovalState::Granted, true)
+            .expect_err("short base");
+        assert_eq!(code_of(&refused).1, "invalid_base_fingerprint");
+
+        let mut large = edit_body();
+        large.patch = json!({ "bodyText": "x".repeat(MAX_EDIT_PATCH_BYTES) });
+        let refused = checked_decision_edit(Some(&large), "", false, ApprovalState::Granted, true)
+            .expect_err("large");
+        assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, "edit_too_large".to_owned()));
+    }
+
+    #[test]
+    fn decide_body_parses_an_edit_and_refuses_unknown_edit_keys() {
+        let body: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "edit": { "patch": { "to": ["a@example.com"] }, "base_fingerprint": BASE },
+        }))
+        .expect("an edit parses");
+        assert!(body.edit.is_some());
+        let plain: DecideApprovalBody =
+            serde_json::from_value(json!({ "decision": "approve" })).expect("no edit");
+        assert!(plain.edit.is_none());
+        assert!(serde_json::from_value::<DecideApprovalBody>(json!({
+            "decision": "approve",
+            "edit": { "patch": {}, "base_fingerprint": BASE, "connection_id": "conn-2" },
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn approval_changed_is_409() {
+        let refused = edit_decision_status_to_http(&tonic::Status::aborted("approval_changed"));
+        assert_eq!(code_of(&refused), (StatusCode::CONFLICT, "approval_changed".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object());
+    }
+
+    #[test]
+    fn edit_refusals_map_to_typed_statuses() {
+        for error in mp_contracts::approval_edit::EditError::ALL {
+            let refused =
+                edit_decision_status_to_http(&tonic::Status::invalid_argument(error.code()));
+            assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, error.code().to_owned()));
+        }
+        let cases = [
+            (tonic::Status::failed_precondition("not_editable"), StatusCode::UNPROCESSABLE_ENTITY),
+            (tonic::Status::failed_precondition("revision_limit"), StatusCode::CONFLICT),
+            (tonic::Status::failed_precondition("approval_edit_disabled"), StatusCode::FORBIDDEN),
+            (tonic::Status::permission_denied("edit_owner_only"), StatusCode::FORBIDDEN),
+        ];
+        for (status, http) in cases {
+            let refused = edit_decision_status_to_http(&status);
+            assert_eq!(code_of(&refused), (http, status.message().to_owned()));
+        }
+        let other = edit_decision_status_to_http(&tonic::Status::not_found("approval not found"));
+        assert_eq!(other.0, StatusCode::NOT_FOUND, "everything else keeps the shared mapping");
+    }
+
+    #[test]
+    fn an_edited_approval_projects_its_revision_and_an_unedited_one_does_not() {
+        let mut approval = Approval {
+            id: "appr_1".to_owned(),
+            ..Approval::default()
+        };
+        assert!(approval_value(&approval).get("revision").is_none());
+        approval.revision = 1;
+        assert_eq!(approval_value(&approval)["revision"], 1);
+    }
+}
+
+#[cfg(test)]
 mod approval_value_tests {
     use super::*;
 
@@ -8981,14 +10343,31 @@ fn lineage_value(lineage: &SubagentLineage) -> Value {
     json!({
         "thread_id": lineage.thread_id,
         "max_depth": lineage.max_depth,
-        "edges": lineage.edges.iter().map(|edge| {
-            json!({
-                "parent_run_id": edge.parent_run_id,
-                "child_run_id": edge.child_run_id,
-                "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
-            })
-        }).collect::<Vec<_>>(),
+        "edges": lineage.edges.iter().map(lineage_edge_value).collect::<Vec<_>>(),
     })
+}
+
+/// One lineage edge. The goal, batch and edge status (Wave 3 EP-2 S9) are added only when
+/// session-core returned them, so an edge without them serialises exactly as it did before: a
+/// reloaded wide-research panel groups its cards by `batch_id` and titles them by `goal_summary`.
+fn lineage_edge_value(edge: &mp_contracts::model_plane::v1::LineageEdge) -> Value {
+    let mut value = json!({
+        "parent_run_id": edge.parent_run_id,
+        "child_run_id": edge.child_run_id,
+        "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
+    });
+    if let Some(object) = value.as_object_mut() {
+        for (key, field) in [
+            ("goal_summary", &edge.goal_summary),
+            ("batch_id", &edge.batch_id),
+            ("status", &edge.status),
+        ] {
+            if !field.is_empty() {
+                object.insert(key.to_owned(), Value::String(field.clone()));
+            }
+        }
+    }
+    value
 }
 
 fn empty_to_null(value: &str) -> Value {
@@ -9425,6 +10804,18 @@ pub struct InvokeRequest {
     /// its tool set, whether or not the Search toggle is also on.
     #[serde(default, alias = "deepResearch")]
     pub deep_research: bool,
+    /// Wave 3 EP-2 S5 — which turn of a two-turn deep research this is: `"plan"` ends with an
+    /// editable plan and searches nothing, `"run"` runs the plan in `research_plan`. Absent is
+    /// today's one-shot. Kept as raw JSON and read only on a deep-research turn while
+    /// `DEEP_RESEARCH_PLAN_TURN` is on (`deep_research::research_phase`), so a body carrying it is
+    /// parsed exactly as before with the switch off.
+    #[serde(default, alias = "researchPhase")]
+    pub research_phase: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S5 — the edited plan a run turn carries:
+    /// `{sub_queries: [string], answers: [{question, answer}]}`. Untrusted: the gateway re-clamps
+    /// every sub-query and bounds the answers before anything is searched.
+    #[serde(default, alias = "researchPlan")]
+    pub research_plan: Option<serde_json::Value>,
     /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
     /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
     /// when `conversation_only` is in effect — that mode already excludes both
@@ -9639,6 +11030,652 @@ pub struct InvokeRequest {
     /// only narrows a delegated child's tools.
     #[serde(default)]
     pub agent_roles: Option<serde_json::Value>,
+    /// EP-6 S9 — the mentioned agent's definition id (Convex), stamped by the BFF gateway with
+    /// `AGENT_VERSION_PINNING` on, from the binding it re-resolved; any client copy is stripped
+    /// there first. The five `agent_*` pin fields below are kept as raw JSON for the same reason
+    /// as `agent_roles`: they are read and typed only while `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST`
+    /// is on (`sse::agent_pin`), so a body carrying them parses exactly as before with it off.
+    #[serde(default)]
+    pub agent_ref: Option<serde_json::Value>,
+    /// EP-6 S9 — the definition version this turn runs (the binding's pin, else the published
+    /// one), from 1.
+    #[serde(default)]
+    pub agent_version: Option<serde_json::Value>,
+    /// EP-6 S9 — `sha256:` digest of that version's canonical body, so a log line names exactly
+    /// what answered.
+    #[serde(default)]
+    pub agent_digest: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's tool allowlist (WS05 capability ids). Only ever narrows the turn's
+    /// tools; absent means the definition states none.
+    #[serde(default)]
+    pub agent_tool_capability_ids: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's autonomy cap (`read_only`, `ask_first` or `auto`), one more input
+    /// to the WS25-S6 strictest-wins mode resolve, so it can only lower the result.
+    #[serde(default)]
+    pub agent_autonomy_cap: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
+    /// `{item_cap, items}`, or a one-item retry `{retry_of_child_run_id, batch_id}` (EP-2 S9).
+    /// Kept as raw JSON and read only on an agentic turn while
+    /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
+    /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
+    /// `item_cap` to the org's `research.max_fan_out_items`.
+    #[serde(default, alias = "wideResearch")]
+    pub wide_research: Option<serde_json::Value>,
+    /// Wave 3 EP-3 S5 — the typed context references the composer attached: `[{kind, id, label,
+    /// selection?}]`, selectors only, never content. Kept as raw JSON and read only while
+    /// `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` is on ([`crate::context_refs::resolve`]), so a body
+    /// carrying it parses exactly as before with the switch off. A ZDR turn carrying any is refused
+    /// with the `context_references` feature whatever the switch says.
+    #[serde(default, alias = "contextRefs")]
+    pub context_refs: Option<serde_json::Value>,
+    /// Wave 3 EP-5 S7 — the brand deck template the person picked: a skill id, never a name the
+    /// model chose (decision D5). Kept as raw JSON and read only while `SKILL_DECK_TEMPLATES_ENABLED`
+    /// is on ([`crate::deck_templates::requested`]), so a body carrying it parses exactly as before
+    /// with the switch off. The turn checks it with [`crate::deck_templates::resolve`] before use; a
+    /// ZDR turn carrying one is refused with the `skills` feature.
+    #[serde(default, alias = "deckTemplate")]
+    pub deck_template: Option<serde_json::Value>,
+    /// Wave 3 EP-7 S1 — the thread goal a Continue turn works toward (`goal_...`). Read only on a
+    /// Do turn while `MODEL_GATEWAY_THREAD_GOALS_ENABLED` is on
+    /// ([`crate::thread_goal_routes::turn_goal_recitation`]): a goal that is not the thread's
+    /// active goal is refused `thread_goal_mismatch` before any run exists. A ZDR turn carrying one
+    /// is refused with the `thread_goal` feature whatever the switch says.
+    #[serde(default, alias = "goalId")]
+    pub goal_id: Option<String>,
+    /// Wave 3 EP-7 S4 — the turn was sent by the goal bar's "Keep going" pump after its countdown,
+    /// not typed. It grants nothing: it marks the run for audit (`runs.metadata.goal_auto`, through
+    /// [`crate::goal_auto::mark`]) and is refused `goal_auto_disabled` before any run exists unless
+    /// `MODEL_GATEWAY_GOAL_AUTO_CONTINUE` is on ([`crate::goal_auto::refusal`]). Every goal turn is
+    /// still claimed by session-core, which refuses while a decision waits on the owner.
+    #[serde(default, alias = "goalAuto")]
+    pub goal_auto: bool,
+}
+
+/// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
+/// it. Off, `POST /v1/research/wide/estimate` answers 404 and `InvokeRequest.wide_research` is never
+/// read, so a run is exactly what it was before the switch existed.
+pub const WIDE_RESEARCH_ENTRY_ENV: &str = "WIDE_RESEARCH_ENTRY_ENABLED";
+
+/// Whether the wide-research entry is on in this process.
+#[must_use]
+pub fn wide_research_entry_enabled() -> bool {
+    wide_research_entry_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn wide_research_entry_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(WIDE_RESEARCH_ENTRY_ENV).is_some_and(|value| value.trim() == "true")
+}
+
+/// The most items one wide-research run fans out: the hard maximum of the org policy key and of
+/// execution-core's `subagent::MAX_WIDE_RESEARCH_ITEMS`.
+pub const MAX_WIDE_RESEARCH_ITEMS: u32 = mp_contracts::org_agent_policy::MAX_FAN_OUT_ITEMS;
+
+/// Most items a wide-research request may carry, kept and dropped together (execution-core reads
+/// no more than this many either).
+const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+
+/// Longest item forwarded; execution-core cuts at the same length.
+const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Longest child run id a retry may name (EP-2 S9); run ids are ULID-based and far shorter.
+const MAX_WIDE_RESEARCH_RUN_ID_CHARS: usize = 128;
+
+/// Longest batch id a retry may name (EP-2 S9): a batch id is the fan-out call's step id.
+const MAX_WIDE_RESEARCH_BATCH_ID_CHARS: usize = 256;
+
+/// Whether a retry's run or batch id is one execution-core may look up: non-empty, at most `max`
+/// characters, printable ASCII with no whitespace. Anything else is not an id this platform minted.
+fn wide_research_retry_id_ok(id: &str, max: usize) -> bool {
+    !id.is_empty() && id.len() <= max && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
+/// default. The gateway cannot read that executor's environment, so the estimate states this.
+const WIDE_RESEARCH_CONCURRENCY: u32 = 4;
+
+/// The org's wide-research item cap and where it came from: the org's own policy, or the key's
+/// platform default when the policy switch does not enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchCap {
+    pub items: u32,
+    pub source: &'static str,
+}
+
+impl WideResearchCap {
+    /// The cap a run is held to: the org's value when the policy is enforced (`Some`), else the
+    /// key's default, never above [`MAX_WIDE_RESEARCH_ITEMS`].
+    #[must_use]
+    pub fn of(org_cap: Option<u32>) -> Self {
+        match org_cap {
+            Some(items) => Self {
+                items: items.min(MAX_WIDE_RESEARCH_ITEMS),
+                source: "org_policy",
+            },
+            None => Self {
+                items: mp_contracts::org_agent_policy::DEFAULT_MAX_FAN_OUT_ITEMS,
+                source: "platform_default",
+            },
+        }
+    }
+}
+
+/// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
+///
+/// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
+/// `{item_cap?, items?}` or a retry `{retry_of_child_run_id, batch_id?}` (EP-2 S9). Items are trimmed, blank ones skipped, each cut to 500 characters and at
+/// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
+/// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
+/// run: wide research is off for that org.
+#[must_use]
+pub fn wide_research_request(
+    enabled: bool,
+    raw: Option<&Value>,
+    zdr_or_waived: bool,
+    cap: WideResearchCap,
+) -> Option<mp_contracts::model_plane::v1::WideResearchRequest> {
+    #[derive(Deserialize)]
+    struct Input {
+        #[serde(default)]
+        item_cap: Option<u32>,
+        #[serde(default)]
+        items: Vec<String>,
+        #[serde(default)]
+        retry_of_child_run_id: Option<String>,
+        #[serde(default)]
+        batch_id: Option<String>,
+    }
+
+    if !enabled || zdr_or_waived {
+        return None;
+    }
+    let input = raw
+        .filter(|raw| raw.is_object())
+        .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
+    // A one-item retry (EP-2 S9): execution-core reads the item back from the child run, owner
+    // checked, so the body's items are not forwarded; the cap is one item, and an org with wide
+    // research off is still sent 0. A malformed id is no request at all, never a fresh fan-out.
+    if let Some(child_run_id) = input.retry_of_child_run_id.as_deref() {
+        let batch_id = input.batch_id.as_deref().unwrap_or_default();
+        if !wide_research_retry_id_ok(child_run_id, MAX_WIDE_RESEARCH_RUN_ID_CHARS)
+            || !(batch_id.is_empty()
+                || wide_research_retry_id_ok(batch_id, MAX_WIDE_RESEARCH_BATCH_ID_CHARS))
+        {
+            return None;
+        }
+        return Some(mp_contracts::model_plane::v1::WideResearchRequest {
+            item_cap: cap.items.min(1),
+            items: Vec::new(),
+            batch_id: batch_id.to_owned(),
+            retry_of_child_run_id: child_run_id.to_owned(),
+        });
+    }
+    let items: Vec<String> = input
+        .items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
+        .map(|item| item.chars().take(MAX_WIDE_RESEARCH_ITEM_CHARS).collect())
+        .collect();
+    let asked = input
+        .item_cap
+        .filter(|&count| count > 0)
+        .or_else(|| u32::try_from(items.len()).ok().filter(|&count| count > 0))
+        .unwrap_or(cap.items);
+    Some(mp_contracts::model_plane::v1::WideResearchRequest {
+        item_cap: asked.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS),
+        items,
+        ..Default::default()
+    })
+}
+
+/// `POST /v1/research/wide/estimate` body: how many items the person means to research, and on
+/// which model and route.
+#[derive(Debug, Deserialize)]
+pub struct WideResearchEstimateRequest {
+    pub item_count: u32,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The route the run would be pinned to, as the composer sends it on the turn; a subscription
+    /// route has no per-token price.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub subscription_connection_id: Option<String>,
+}
+
+/// What one research round is assumed to read and write, for the USD range only: a researcher's
+/// round reads a page or a result list and writes a short note. A range, never a promise.
+const ESTIMATE_INPUT_TOKENS_PER_ROUND: (u32, u32) = (6_000, 18_000);
+const ESTIMATE_OUTPUT_TOKENS_PER_ROUND: (u32, u32) = (500, 1_500);
+
+/// Seconds one item round is assumed to take, low and high, for the wall-clock range.
+const ESTIMATE_SECONDS_PER_ROUND: (u64, u64) = (30, 90);
+
+/// What a wide-research run of some items would look like before it starts (Wave 3 EP-2 S8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchEstimate {
+    pub items_requested: u32,
+    pub items_after_cap: u32,
+    pub concurrency: u32,
+    pub rounds_per_item: u32,
+    pub minutes_low: u64,
+    pub minutes_high: u64,
+    pub cap: WideResearchCap,
+}
+
+impl WideResearchEstimate {
+    /// The pure part of the estimate. `max_rounds` is the run's round budget and `deadline_secs`
+    /// its wall clock, resolved server-side exactly as a real run's are.
+    #[must_use]
+    pub fn compute(
+        item_count: u32,
+        cap: WideResearchCap,
+        max_rounds: u32,
+        deadline_secs: u64,
+    ) -> Self {
+        let items = item_count.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS);
+        let concurrency = WIDE_RESEARCH_CONCURRENCY.min(items.max(1));
+        // The parent spends its first round calling the fan-out and keeps one to answer with
+        // (execution-core's `PARENT_SYNTHESIS_RESERVE`); the rest is divided between the items.
+        let rounds_per_item = if items == 0 {
+            0
+        } else {
+            max_rounds.saturating_sub(2) / items
+        };
+        let waves = u64::from(items.div_ceil(concurrency));
+        let rounds = u64::from(rounds_per_item.max(1));
+        let deadline_minutes = deadline_secs.div_ceil(60);
+        Self {
+            items_requested: item_count,
+            items_after_cap: items,
+            concurrency,
+            rounds_per_item,
+            minutes_low: (waves * ESTIMATE_SECONDS_PER_ROUND.0)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            minutes_high: (waves * rounds * ESTIMATE_SECONDS_PER_ROUND.1)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            cap,
+        }
+    }
+
+    /// The USD range on a metered, priced route; `None` (null on the wire) on a subscription
+    /// route or for a model the catalogue does not name, never a borrowed figure.
+    #[must_use]
+    pub fn usd(&self, list: Option<&crate::pricing::ListPrice>) -> Option<(f64, f64)> {
+        let list = list?;
+        let rounds = f64::from(self.items_after_cap) * f64::from(self.rounds_per_item.max(1));
+        let cost = |input: u32, output: u32| {
+            rounds
+                * (f64::from(input) * list.input_per_million
+                    + f64::from(output) * list.output_per_million)
+                / 1_000_000.0
+        };
+        Some((
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.0,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.0,
+            ),
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.1,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.1,
+            ),
+        ))
+    }
+
+    /// The `data` of the estimate answer.
+    #[must_use]
+    pub fn json(&self, usd: Option<(f64, f64)>, basis: crate::pricing::CostBasis) -> Value {
+        json!({
+            "items_requested": self.items_requested,
+            "items_after_cap": self.items_after_cap,
+            "concurrency": self.concurrency,
+            "rounds_per_item": self.rounds_per_item,
+            "minutes_low": self.minutes_low,
+            "minutes_high": self.minutes_high,
+            "usd_low": usd.map(|(low, _)| low),
+            "usd_high": usd.map(|(_, high)| high),
+            "cost_basis": basis.as_str(),
+            "cap": self.cap.items,
+            "cap_source": self.cap.source,
+        })
+    }
+}
+
+/// A typed error of the estimate route; `details` is always an object.
+fn wide_research_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// `POST /v1/research/wide/estimate` (Wave 3 EP-2 S8): what a wide-research run of `item_count`
+/// items would look like, before it is started. Pure compute: nothing is stored and nothing is
+/// started. 404 while `WIDE_RESEARCH_ENTRY_ENABLED` is off. A zero-retention caller is refused with
+/// the typed `agentic` refusal, because the run it estimates is refused under ZDR. The org's cap is
+/// read as a Do run's is; a policy that is enforced and cannot be read answers
+/// `org_policy_unavailable`. USD is null unless the route is metered and the model priced.
+async fn wide_research_estimate_route(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Json(req): Json<WideResearchEstimateRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !wide_research_entry_enabled() {
+        return Err(wide_research_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not found",
+        ));
+    }
+    wide_research_estimate_posture(&claims)?;
+    let org_cap = wide_research_org_cap(&state, &claims.org_id, capability_bearer.as_deref())
+        .await
+        .map_err(|code| {
+            wide_research_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
+            )
+        })?;
+    let basis = crate::pricing::CostBasis::of_route(
+        req.provider.as_deref().unwrap_or_default(),
+        req.subscription_connection_id.as_deref().unwrap_or_default(),
+    );
+    let pinned = basis == crate::pricing::CostBasis::Subscription;
+    let estimate = WideResearchEstimate::compute(
+        req.item_count,
+        WideResearchCap::of(org_cap),
+        crate::run_budget::run_budget_from_env(pinned).max_rounds,
+        crate::sse::agentic_run_deadline_secs(pinned),
+    );
+    let model = req.model.as_deref().map(str::trim).unwrap_or_default();
+    let list = if model.is_empty() {
+        None
+    } else {
+        state.pricing.snapshot().await.list_price(basis, model)
+    };
+    Ok(Json(json!({
+        "data": estimate.json(estimate.usd(list.as_ref()), basis)
+    })))
+}
+
+/// The estimate's ZDR gate: a zero-retention caller is refused with the `agentic` feature (the run
+/// it estimates is refused the same way); a waiver, which names one chat connection, is answered as
+/// a Do run of its org would be, since the estimate names no connection and stores nothing.
+///
+/// # Errors
+///
+/// The typed refusal as an HTTP answer.
+fn wide_research_estimate_posture(claims: &Claims) -> Result<(), HttpJsonError> {
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(posture) if posture.zdr() => Err(crate::zdr_posture::http(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic"),
+        )),
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH => {
+            Ok(())
+        }
+        Err(refusal) => Err(crate::zdr_posture::http(&refusal)),
+    }
+}
+
+/// The org's `research.max_fan_out_items` as the policy switch reads it: `None` when the switch
+/// does not enforce (the platform default applies), the org's value when it does.
+///
+/// # Errors
+///
+/// [`crate::org_agent_policy::POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be
+/// read inside its bound, as a Do run would be refused.
+pub(crate) async fn wide_research_org_cap(
+    state: &AppState,
+    org_id: &str,
+    capability_bearer: Option<&VerifiedCapabilityBearer>,
+) -> Result<Option<u32>, &'static str> {
+    use crate::org_agent_policy::{policy_mode, shared_cache, PolicyMode};
+
+    if policy_mode() != PolicyMode::Enforce {
+        return Ok(None);
+    }
+    crate::org_agent_policy::ensure(
+        shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        org_id,
+        capability_bearer.map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map(|policy| Some(policy.max_fan_out_items))
+    .map_err(|error| {
+        tracing::warn!(%org_id, %error, "org agent policy cannot be read for a wide-research estimate");
+        crate::org_agent_policy::POLICY_UNAVAILABLE_CODE
+    })
+}
+
+#[cfg(test)]
+mod wide_research_tests {
+    use super::*;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": zdr,
+            "org_zdr": zdr,
+        }))
+        .expect("a minted token's payload is valid Claims")
+    }
+
+    fn org(items: u32) -> WideResearchCap {
+        WideResearchCap::of(Some(items))
+    }
+
+    #[test]
+    fn wide_research_entry_switch_is_only_the_literal_true() {
+        for (value, on) in [
+            (None, false),
+            (Some("false"), false),
+            (Some("1"), false),
+            (Some("TRUE"), false),
+            (Some("true"), true),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert_eq!(wide_research_entry_enabled_with(&get), on, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn wide_research_request_is_absent_with_the_switch_off_and_under_zdr() {
+        let body = json!({"item_cap": 5, "items": ["a"]});
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+        assert_eq!(wide_research_request(true, None, false, org(8)), None);
+        assert_eq!(
+            wide_research_request(true, Some(&json!(["a"])), false, org(8)),
+            None
+        );
+    }
+
+    #[test]
+    fn wide_research_request_clamps_the_ask_to_the_org_cap() {
+        // Org cap 5, ten items asked: the run is held to 5 and carries all ten items, so
+        // execution-core can name the five it drops.
+        let items: Vec<String> = (0..10).map(|n| format!("item {n}")).collect();
+        let request = wide_research_request(true, Some(&json!({"items": items})), false, org(5))
+            .expect("the switch is on");
+        assert_eq!(request.item_cap, 5);
+        assert_eq!(request.items.len(), 10);
+        // A count preset with no list asks for that many, never more than the org allows.
+        let preset = wide_research_request(true, Some(&json!({"item_cap": 16})), false, org(8))
+            .expect("the switch is on");
+        assert_eq!(preset.item_cap, 8);
+        assert!(preset.items.is_empty());
+        // A narrower ask stays narrower.
+        let narrow =
+            wide_research_request(true, Some(&json!({"item_cap": 3})), false, org(8)).expect("on");
+        assert_eq!(narrow.item_cap, 3);
+        // An org with wide research off is sent 0, and execution-core refuses the run.
+        let off = wide_research_request(true, Some(&json!({"items": ["a"]})), false, org(0))
+            .expect("on");
+        assert_eq!(off.item_cap, 0);
+    }
+
+    #[test]
+    fn wide_research_request_bounds_and_cleans_items() {
+        let long = "y".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 10);
+        let many: Vec<String> = (0..80).map(|n| format!("q{n}")).collect();
+        let request = wide_research_request(
+            true,
+            Some(&json!({"items": ["  a  ", "", "   ", long]})),
+            false,
+            org(16),
+        )
+        .expect("on");
+        assert_eq!(request.items[0], "a");
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
+        let flood = wide_research_request(true, Some(&json!({"items": many})), false, org(16))
+            .expect("on");
+        assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
+    }
+
+    #[test]
+    fn a_wide_research_retry_is_one_item_named_by_its_child_run() {
+        let body = json!({
+            "retry_of_child_run_id": "run-01jchild",
+            "batch_id": "run-1:tool_1_fan-1",
+            "items": ["ignored"],
+            "item_cap": 9,
+        });
+        let retry = wide_research_request(true, Some(&body), false, org(8)).expect("on");
+        assert_eq!(retry.item_cap, 1);
+        assert!(retry.items.is_empty(), "execution-core reads the item back itself");
+        assert_eq!(retry.retry_of_child_run_id, "run-01jchild");
+        assert_eq!(retry.batch_id, "run-1:tool_1_fan-1");
+        // An org with wide research off is still refused by execution-core.
+        let off = wide_research_request(true, Some(&body), false, org(0)).expect("on");
+        assert_eq!(off.item_cap, 0);
+        // A retry is a non-ZDR, switched-on request like any other.
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+    }
+
+    #[test]
+    fn a_wide_research_retry_with_a_malformed_id_is_no_request() {
+        for body in [
+            json!({"retry_of_child_run_id": ""}),
+            json!({"retry_of_child_run_id": "run 1"}),
+            json!({"retry_of_child_run_id": "r".repeat(MAX_WIDE_RESEARCH_RUN_ID_CHARS + 1)}),
+            json!({"retry_of_child_run_id": "run-1", "batch_id": "a\nb"}),
+        ] {
+            assert_eq!(
+                wide_research_request(true, Some(&body), false, org(8)),
+                None,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lineage_edge_adds_goal_batch_and_status_only_when_stored() {
+        let lineage = SubagentLineage {
+            thread_id: "thread-1".to_owned(),
+            max_depth: 1,
+            edges: vec![
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-old".to_owned(),
+                    role: SubagentRole::Generic as i32,
+                    ..Default::default()
+                },
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-item".to_owned(),
+                    role: SubagentRole::Researcher as i32,
+                    goal_summary: "look up carrier docs".to_owned(),
+                    batch_id: "run-p:tool_1_fan-1".to_owned(),
+                    status: "attached".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let value = lineage_value(&lineage);
+        // An edge without the readback fields serialises exactly as before them.
+        assert_eq!(
+            value["edges"][0],
+            json!({
+                "parent_run_id": "run-p",
+                "child_run_id": "run-old",
+                "role": SubagentRole::Generic.as_str_name(),
+            })
+        );
+        assert_eq!(value["edges"][1]["goal_summary"], "look up carrier docs");
+        assert_eq!(value["edges"][1]["batch_id"], "run-p:tool_1_fan-1");
+        assert_eq!(value["edges"][1]["status"], "attached");
+    }
+
+    #[test]
+    fn wide_research_cap_without_an_enforced_policy_is_the_platform_default() {
+        let platform = WideResearchCap::of(None);
+        assert_eq!(platform.items, 8);
+        assert_eq!(platform.source, "platform_default");
+        let held = WideResearchCap::of(Some(40));
+        assert_eq!(held.items, MAX_WIDE_RESEARCH_ITEMS);
+        assert_eq!(held.source, "org_policy");
+    }
+
+    #[test]
+    fn wide_research_estimate_clamps_to_the_org_cap_and_bounds_minutes_by_the_deadline() {
+        let estimate = WideResearchEstimate::compute(10, org(5), 12, 600);
+        assert_eq!(estimate.items_requested, 10);
+        assert_eq!(estimate.items_after_cap, 5);
+        assert_eq!(estimate.concurrency, 4);
+        assert_eq!(estimate.rounds_per_item, 2, "(12 - 2) rounds over 5 items");
+        assert!(estimate.minutes_low <= estimate.minutes_high);
+        assert!(estimate.minutes_high <= 10, "never past the 600 s deadline");
+        let off = WideResearchEstimate::compute(10, org(0), 12, 600);
+        assert_eq!(off.items_after_cap, 0);
+        assert_eq!(off.rounds_per_item, 0);
+    }
+
+    #[test]
+    fn wide_research_estimate_usd_is_null_without_a_list_price() {
+        let estimate = WideResearchEstimate::compute(4, org(8), 12, 600);
+        assert_eq!(estimate.usd(None), None);
+        let body = estimate.json(None, crate::pricing::CostBasis::Subscription);
+        assert!(body["usd_low"].is_null() && body["usd_high"].is_null(), "{body}");
+        assert_eq!(body["cost_basis"], "subscription");
+        assert_eq!(body["cap_source"], "org_policy");
+
+        let list = crate::pricing::ListPrice {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            currency: "USD".to_owned(),
+            source: crate::pricing::PriceSource::Exact,
+        };
+        let (low, high) = estimate.usd(Some(&list)).expect("a priced, metered route");
+        assert!(low > 0.0 && low < high, "{low} {high}");
+    }
+
+    /// The golden case `e_zdr_token_wide_research_estimate_refused` (EP-2 S8): a feature refusal,
+    /// so it lives here and in the ZDR feature table, not as a posture-matrix row.
+    #[test]
+    fn wide_research_estimate_refuses_a_zdr_caller_with_the_agentic_feature() {
+        let (status, Json(body)) =
+            wide_research_estimate_posture(&claims(true)).expect_err("a ZDR caller is refused");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["feature"], "agentic", "{body}");
+        assert!(wide_research_estimate_posture(&claims(false)).is_ok());
+    }
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -12102,7 +14139,7 @@ async fn delete_thread(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_thread failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_thread failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadResponse {
@@ -12132,7 +14169,7 @@ async fn delete_threads(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_threads failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_threads failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadsResponse {
@@ -13875,6 +15912,303 @@ async fn undo_learning_entry(
         "skill_id": response.skill_id,
         "revision": response.revision,
     })))
+}
+
+/// The ZDR feature key a `/learn` refusal names (`zdr-refusals.json`, EP-11 S7).
+pub const LEARN_COMMAND_ZDR_FEATURE: &str = "learn_command";
+
+/// The longest note a `/learn` carries, in characters. capability-core refuses a longer one too;
+/// it is checked here so an oversized body never crosses the hop.
+const LEARN_NOTE_MAX_CHARS: usize = 500;
+
+/// The longest thread id a `/learn` names, as the SPA's action contract bounds it.
+const LEARN_THREAD_ID_MAX_BYTES: usize = 128;
+
+/// `current_thread_id` of the thread check below. The check reuses the thread reference read, which
+/// refuses reading the thread a turn runs in; no turn is reading here, so this names no thread.
+const LEARN_PROBE_CURRENT_THREAD: &str = "learn-command";
+
+/// Whether a `/learn` caller's posture is refused, before anything is read. A ZDR credential and a
+/// waived one are refused with the `learn_command` feature: a review sends the transcript to the
+/// review model and keeps what it distils, which neither posture allows (DEC-32). Any other
+/// posture refusal is answered as the resolver words it.
+#[must_use]
+pub fn learn_command_refusal(claims: &Claims) -> Option<mp_contracts::zdr_refusal::Refusal> {
+    use crate::zdr_posture::{decide_for, Route, TurnPosture};
+    use mp_contracts::zdr_refusal::{code, Refusal};
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(TurnPosture::Persistent) => None,
+        Ok(TurnPosture::Zdr { .. } | TurnPosture::Waived { .. }) => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        // A waiver binds one chat route; on this route it is a waived caller like any other.
+        Err(refusal) if refusal.code() == code::WAIVER_ROUTE_MISMATCH => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        Err(refusal) => Some(refusal),
+    }
+}
+
+fn learn_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Session Core's answer to the thread check, as `/learn` answers it. A thread that holds a ZDR or
+/// waived run is the catalogue's `learn_command` refusal; a Space, agent or other non-chat thread and
+/// an archived one are not a person's conversation to learn from; a thread the caller does not own
+/// reads as one that does not exist.
+fn learn_thread_refusal(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::FailedPrecondition, "thread_reference_retention") => {
+            crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                LEARN_COMMAND_ZDR_FEATURE,
+            ))
+        }
+        (tonic::Code::FailedPrecondition, "thread_reference_not_chat") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_not_chat",
+            "only your own chat conversations can be learned from",
+        ),
+        (tonic::Code::FailedPrecondition, "thread_reference_archived") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_archived",
+            "an archived conversation is not learned from",
+        ),
+        (tonic::Code::NotFound | tonic::Code::PermissionDenied, _) => learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_thread_not_found",
+            "no such conversation",
+        ),
+        _ => learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LearnFromThreadBody {
+    thread_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The body forwarded to capability-core, or the refusal of a malformed one. Only the thread and
+/// the trimmed note cross; whose thread it is comes from the verified claims on both sides.
+fn learn_forward_body(body: &LearnFromThreadBody) -> Result<Value, HttpJsonError> {
+    let thread_id = body.thread_id.trim();
+    if thread_id.is_empty() || thread_id.len() > LEARN_THREAD_ID_MAX_BYTES {
+        return Err(learn_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_thread_id",
+            "thread_id is required",
+        ));
+    }
+    let note = body.note.as_deref().map_or("", str::trim);
+    if note.chars().count() > LEARN_NOTE_MAX_CHARS {
+        return Err(learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_note_too_long",
+            "the note is longer than 500 characters",
+        ));
+    }
+    Ok(json!({ "thread_id": thread_id, "note": note }))
+}
+
+/// `/learn` (EP-11 S7): the signed-in person asks Verevon to distil one of their own chat threads
+/// into a skill proposal for their learning inbox. The caller's posture is refused first, then
+/// Session Core confirms on the person's own credential that the thread is theirs, a chat thread,
+/// not archived and holds no ZDR or waived run (the thread reference read applies exactly those
+/// rules, and refuses before it reads a turn). capability-core then runs the learning review's own
+/// gates and answers 202 `{ data: { state: "queued" } }` or a typed refusal, relayed unchanged; it
+/// answers 404 while `LEARN_COMMAND_ENABLED` is off there.
+async fn learn_from_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    capability_bearer: VerifiedCapabilityBearer,
+    Json(body): Json<LearnFromThreadBody>,
+) -> Result<(StatusCode, Json<Value>), HttpJsonError> {
+    use mp_contracts::model_plane::v1::{ReadThreadForReferenceRequest, ThreadReferenceMode};
+    if let Some(refusal) = learn_command_refusal(&claims) {
+        return Err(crate::zdr_posture::http(&refusal));
+    }
+    let forward = learn_forward_body(&body)?;
+    let thread_id = forward["thread_id"].as_str().unwrap_or_default().to_owned();
+
+    // One outline line is the smallest read the RPC offers; it is discarded, and every refusal
+    // above comes before Session Core reads a turn.
+    state
+        .thread_reference_client
+        .clone()
+        .read_thread_for_reference(authenticated_session_request(
+            ReadThreadForReferenceRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id,
+                mode: ThreadReferenceMode::Outline as i32,
+                before_message_id: String::new(),
+                limit: 1,
+                current_thread_id: LEARN_PROBE_CURRENT_THREAD.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| learn_thread_refusal(&error))?;
+
+    if state.capability_core_base_url.is_empty() {
+        return Err(learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ));
+    }
+    let url = format!("{}/api/v1/learning/learn", state.capability_core_base_url);
+    let response = state
+        .http_client
+        .post(url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&forward)
+        .send()
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "capability-core /learn unavailable");
+            learn_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+                "learning from a conversation is unavailable",
+            )
+        })?;
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    match response.json::<Value>().await {
+        Ok(body) if status.is_success() => Ok((status, Json(body))),
+        Ok(body) => Err((status, Json(body))),
+        // The mux's own 404 (the switch is off there) and any other bodiless answer keep their
+        // status with a typed body.
+        Err(_) if status == StatusCode::NOT_FOUND => Err(learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_command_disabled",
+            "learning from a conversation is not enabled on this deployment",
+        )),
+        Err(_) => Err(learn_error(
+            StatusCode::BAD_GATEWAY,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod learn_command_tests {
+    use super::*;
+
+    fn claims(payload: Value) -> Claims {
+        let mut base = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+        });
+        if let (Some(base), Some(extra)) = (base.as_object_mut(), payload.as_object()) {
+            base.extend(extra.clone());
+        }
+        serde_json::from_value(base).expect("a minted token's payload is valid Claims")
+    }
+
+    #[test]
+    fn a_persistent_caller_is_not_refused() {
+        assert!(learn_command_refusal(&claims(json!({ "zdr": false, "org_zdr": false }))).is_none());
+    }
+
+    #[test]
+    fn a_zdr_or_waived_caller_is_refused_with_the_learn_command_feature() {
+        let waiver = json!({
+            "version": 1,
+            "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+            "connection": "conn-1",
+        });
+        for token in [
+            claims(json!({ "zdr": true })),
+            claims(json!({ "zdr": false, "org_zdr": true, "zdr_waiver": waiver })),
+        ] {
+            let refusal = learn_command_refusal(&token).expect("refused");
+            assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+            assert_eq!(refusal.feature(), Some(LEARN_COMMAND_ZDR_FEATURE));
+        }
+    }
+
+    #[test]
+    fn learn_thread_refusals_are_typed() {
+        let cases = [
+            (
+                tonic::Status::failed_precondition("thread_reference_retention"),
+                StatusCode::PRECONDITION_FAILED,
+                "zdr_feature_not_supported",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_not_chat"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_not_chat",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_archived"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_archived",
+            ),
+            (
+                tonic::Status::not_found("thread not found"),
+                StatusCode::NOT_FOUND,
+                "learn_thread_not_found",
+            ),
+            (
+                tonic::Status::unavailable("down"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+            ),
+        ];
+        for (error, status, code) in cases {
+            let (got_status, Json(body)) = learn_thread_refusal(&error);
+            assert_eq!(got_status, status, "{error:?}");
+            assert_eq!(body["error"]["code"], code, "{error:?}");
+        }
+        let (_, Json(body)) =
+            learn_thread_refusal(&tonic::Status::failed_precondition("thread_reference_retention"));
+        assert_eq!(body["error"]["feature"], LEARN_COMMAND_ZDR_FEATURE);
+    }
+
+    #[test]
+    fn learn_forward_body_carries_only_the_thread_and_the_trimmed_note() {
+        let body = LearnFromThreadBody {
+            thread_id: " thread-1 ".to_owned(),
+            note: Some("  keep the steps  ".to_owned()),
+        };
+        assert_eq!(
+            learn_forward_body(&body).expect("valid"),
+            json!({ "thread_id": "thread-1", "note": "keep the steps" })
+        );
+        let blank = LearnFromThreadBody {
+            thread_id: "  ".to_owned(),
+            note: None,
+        };
+        assert_eq!(learn_forward_body(&blank).unwrap_err().0, StatusCode::BAD_REQUEST);
+        let long = LearnFromThreadBody {
+            thread_id: "thread-1".to_owned(),
+            note: Some("å".repeat(LEARN_NOTE_MAX_CHARS + 1)),
+        };
+        let (status, Json(refusal)) = learn_forward_body(&long).unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refusal["error"]["code"], "learn_note_too_long");
+        assert!(refusal["error"]["details"].is_object());
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -19266,6 +21600,28 @@ mod run_replay_projection_tests {
     const RUN_TERMINAL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
 
     #[test]
+    fn compat_attach_replay_requires_signature_and_matching_run() {
+        let key = "test-only-compat-key-32-characters-long";
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let receipt = crate::browser_attach_compat::Receipt { run_id: "run-1".into(), plan_id: "plan-1".into(), session_run_id: "session-1".into(), attach_id: "attach-1".into(), tab_id: "tab-1".into(), issued_at: now };
+        let envelope = crate::browser_attach_compat::sign(key.as_bytes(), &receipt).unwrap();
+        let payload = json!({"run_id":"run-1","plan_id":"plan-1","action_id":crate::browser_attach_compat::ACTION_ID,"status":envelope}).to_string();
+        let make_event = || event(EventType::BrowserObservationReceived as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserObservationReceived", &payload);
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "0".repeat(37));
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        assert!(project_run_replay_event("run-other", make_event()).is_none());
+        let projected = project_run_replay_event("run-1", make_event()).unwrap();
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload, json!({"run_id":"run-1","plan_id":"plan-1","session_run_id":"session-1","attach_id":"attach-1","tab_id":"tab-1"}));
+        let forged = event(EventType::BrowserAttachSharedJar as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar", r#"{"run_id":"run-1"}"#);
+        assert!(project_run_replay_event("run-1", forged).is_none(), "unsigned typed event must not become proof");
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+    }
+
+    #[test]
     fn a_managed_run_failed_is_projected_exactly() {
         let projected = project_run_replay_event(
             "run-1",
@@ -19379,7 +21735,7 @@ mod run_replay_projection_tests {
     }
 
     #[test]
-    fn an_attach_shared_jar_event_is_replayed_for_its_run() {
+    fn an_unsigned_attach_shared_jar_event_is_not_replayed() {
         let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
         let projected = project_run_replay_event(
             "run-1",
@@ -19390,10 +21746,8 @@ mod run_replay_projection_tests {
                 "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
                 payload,
             ),
-        )
-        .expect("a reconnecting client replays the attach audit event");
-        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
-        assert_eq!(projected.payload["attach_id"], "att-1");
+        );
+        assert!(projected.is_none(), "unsigned audit event must not become attachment proof");
         // Another run's attach event is not replayed.
         let other = event(
             EventType::BrowserAttachSharedJar as i32,
@@ -20080,7 +22434,9 @@ mod api_key_route_fence_tests {
         let mut state = AppState::new();
         // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
         state.browser_key_grants = Some(true);
-        let router = authed_routes()
+        // With the Agent API routes merged, so the scan proves a key reaches none of them while
+        // the switch is off (EP-12 S5; this test leaves the environment unset).
+        let router = authed_routes_with(true)
             .layer(middleware::from_fn(auth::authorize_principal_route))
             .layer(Extension(key_claims()))
             .with_state(state);
@@ -20477,7 +22833,8 @@ mod run_timing_route_tests {
     use mp_contracts::model_plane::v1::{
         run_ledger_service_client::RunLedgerServiceClient,
         run_ledger_service_server::{RunLedgerService, RunLedgerServiceServer},
-        GetRunTimingRequest, GetRunTimingResponse, RecordRequestSnapshotRequest,
+        GetRequestSnapshotRequest, GetRequestSnapshotResponse, GetRunTimingRequest,
+        GetRunTimingResponse, PromptSection, RecordRequestSnapshotRequest,
         RecordRequestSnapshotResponse, RecordRunTimingRequest, RecordRunTimingResponse,
         RunActionTiming, RunTimingRecorded,
     };
@@ -20487,6 +22844,7 @@ mod run_timing_route_tests {
     #[derive(Clone, Default)]
     struct FakeRunLedger {
         seen: Arc<Mutex<Vec<(GetRunTimingRequest, Option<String>)>>>,
+        inspected: Arc<Mutex<Vec<GetRequestSnapshotRequest>>>,
         failure: Option<tonic::Code>,
     }
 
@@ -20552,6 +22910,45 @@ mod run_timing_route_tests {
                 truncated: false,
             }))
         }
+
+        /// Call 1 of `run_1` is user-a's; Session Core has already dropped the platform section's text.
+        async fn get_request_snapshot(
+            &self,
+            request: tonic::Request<GetRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<GetRequestSnapshotResponse>, tonic::Status> {
+            let request = request.into_inner();
+            self.inspected.lock().unwrap().push(request.clone());
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" || request.call_seq != 1 {
+                return Err(tonic::Status::not_found("request snapshot not found"));
+            }
+            Ok(tonic::Response::new(GetRequestSnapshotResponse {
+                snapshot_json: r#"{"schema":"request-snapshot-v1","model":"gpt-5.1"}"#.to_owned(),
+                system_sections: vec![
+                    PromptSection {
+                        label: "stable".to_owned(),
+                        source: "platform".to_owned(),
+                        digest: "a".repeat(64),
+                        chars: 40,
+                        text: String::new(),
+                    },
+                    PromptSection {
+                        label: "Memory".to_owned(),
+                        source: "memory".to_owned(),
+                        digest: "b".repeat(64),
+                        chars: 30,
+                        text: "The user prefers metric units.".to_owned(),
+                    },
+                ],
+                tools_json: r#"[{"name":"web_search"}]"#.to_owned(),
+                dropped: 2,
+                tools_truncated: false,
+                system_truncated: false,
+                call_purpose: "answer".to_owned(),
+            }))
+        }
     }
 
     fn claims(zdr: bool) -> Claims {
@@ -20577,6 +22974,29 @@ mod run_timing_route_tests {
             .unwrap();
         Router::new()
             .route("/v1/runs/:run_id/timing", get(get_run_timing))
+            // The inspector with its switch on, and with it off; the env read stays out of parallel tests.
+            .route(
+                "/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, false)
+                    },
+                ),
+            )
             .with_state(state)
             .layer(Extension(claims(zdr)))
             .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
@@ -20647,5 +23067,569 @@ mod run_timing_route_tests {
         assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
         assert_eq!(body["error"]["feature"], "run_inspection");
         assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_route_serves_the_owner_the_filtered_call() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["call_seq"], 1);
+        assert_eq!(data["call_purpose"], "answer");
+        assert_eq!(data["snapshot"]["model"], "gpt-5.1");
+        assert_eq!(data["system_sections"][0]["source"], "platform");
+        assert_eq!(data["system_sections"][0]["text"], Value::Null, "no platform text");
+        assert_eq!(data["system_sections"][1]["text"], "The user prefers metric units.");
+        assert_eq!(data["tools"][0]["name"], "web_search");
+        assert_eq!(data["dropped"], 2);
+
+        // Another user's run, an org admin and an unknown call all read as one 404.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+
+        for bad in ["/v1/runs/run.1/requests/1", "/v1/runs/run_1/requests/0", "/v1/runs/run_1/requests/x"] {
+            let (status, _) = get_json(app(fake.clone(), false).await, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inspector_route_off_is_a_404() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/off/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_route_tests {
+    //! EP-10-S1: the full-draft preview route. Off and zero-retention answers are decided before
+    //! anything reaches Session Core, so these tests need no Session Core at all.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    /// The orchestration client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool) -> Router {
+        Router::new()
+            .route(
+                "/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, true),
+                ),
+            )
+            .route(
+                "/off/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, false),
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn preview_route_off_by_default() {
+        for unset in [None, Some(""), Some("1"), Some("yes"), Some("on")] {
+            assert!(
+                !mp_contracts::loop_fold::switch_from(unset),
+                "{unset:?} must not enable the preview"
+            );
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        let (status, body) =
+            get_json(app(false), "/off/v1/orchestration/approvals/appr_1/preview").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "preview_unavailable");
+        assert!(body["error"]["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn preview_route_refuses_zdr_token() {
+        let (status, body) =
+            get_json(app(true), "/v1/orchestration/approvals/appr_1/preview").await;
+        let (expected_status, Json(expected)) =
+            crate::zdr_posture::continuation_gate(&claims(true)).expect_err("a ZDR bearer is refused");
+        assert_eq!(status, expected_status);
+        assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
+        assert!(body["error"]["code"].is_string());
+    }
+
+    #[test]
+    fn preview_route_maps_not_found() {
+        for status in [
+            tonic::Status::not_found("approval not found"),
+            tonic::Status::permission_denied("user-bound approval credential required"),
+            tonic::Status::unimplemented("older session-core"),
+        ] {
+            let (code, Json(body)) = approval_preview_status_to_http(&status);
+            assert_eq!(code, StatusCode::NOT_FOUND, "{status:?}");
+            assert_eq!(body["error"]["code"], "approval_not_found");
+        }
+        let (code, Json(body)) =
+            approval_preview_status_to_http(&tonic::Status::invalid_argument("approval_id is required"));
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_approval_preview");
+
+        // A waived caller's typed refusal from Session Core keeps its catalogue body.
+        let refused = mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH
+            .grpc_status(tonic::Code::PermissionDenied);
+        let (code, Json(body)) = approval_preview_status_to_http(&refused);
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH.json_body(),
+            "not flattened into a 404"
+        );
+    }
+
+    #[test]
+    fn preview_value_is_the_shaped_draft_as_plain_text() {
+        let preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            provider: "google".to_owned(),
+            operation: "gmail.send".to_owned(),
+            connection_id: "conn-1".to_owned(),
+            to: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
+            subject: "S".to_owned(),
+            body_text: "<b>not markup</b>".to_owned(),
+            has_html: true,
+            is_reply: false,
+            raw_only: false,
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            action_fingerprint: "f".repeat(64),
+            revision: 0,
+        };
+        let value = approval_preview_value(&preview);
+        assert_eq!(value["kind"], "mail_send");
+        assert_eq!(value["to"], json!(["a@example.com", "b@example.com"]));
+        assert_eq!(value["body_text"], "<b>not markup</b>");
+        assert_eq!(value["format"], "plain_text");
+        assert_eq!(value["editable_fields"], json!(["to", "subject", "body_text"]));
+        assert_eq!(value["revision"], 0);
+    }
+
+    #[test]
+    fn preview_can_edit_follows_the_edit_switch() {
+        let mut preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            ..Default::default()
+        };
+        assert!(!preview_can_edit(&preview, false), "the switch off never offers an edit");
+        assert!(preview_can_edit(&preview, true));
+        preview.raw_only = true;
+        assert!(!preview_can_edit(&preview, true), "a raw-only draft is not editable");
+        preview.raw_only = false;
+        preview.editable_fields.clear();
+        assert!(!preview_can_edit(&preview, true), "no editable fields, no edit mode");
+        preview.editable_fields = vec!["to".to_owned()];
+        preview.kind = "calendar_create".to_owned();
+        assert!(!preview_can_edit(&preview, true), "only a mail send is editable");
+    }
+}
+
+#[cfg(test)]
+mod deck_templates_route_tests {
+    //! Wave 3 EP-5 S7: the deck template list route. The switch, the zero-retention refusal and the
+    //! missing credential are all decided before capability-core is asked, so these tests need none;
+    //! which bundles are listed is covered by `deck_templates::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests. The
+    /// capability client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller and a caller with no credential too.
+        for (zdr, with_bearer) in [(false, true), (true, true), (false, false)] {
+            let (status, body) = get_json(app(zdr, with_bearer), "/off/v1/deck-templates").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "skills");
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_needs_a_capability_credential() {
+        let (status, body) = get_json(app(false, false), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+
+    #[test]
+    fn deck_templates_invoke_field_parses_as_before_and_takes_the_spa_spelling() {
+        let base = json!({ "content": "Lag en presentasjon", "zdr": false });
+        let plain: InvokeRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(plain.deck_template.is_none());
+        let mut picked = base.clone();
+        picked["deckTemplate"] = json!("skill-brand");
+        let picked: InvokeRequest = serde_json::from_value(picked).unwrap();
+        assert_eq!(
+            crate::deck_templates::requested(picked.deck_template.as_ref()),
+            Some("skill-brand")
+        );
+        // A value of the wrong type still parses, as the field did not exist before: it is never a pick.
+        let mut odd = base;
+        odd["deck_template"] = json!({ "id": "skill-brand" });
+        let odd: InvokeRequest = serde_json::from_value(odd).unwrap();
+        assert_eq!(crate::deck_templates::requested(odd.deck_template.as_ref()), None);
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_resource_route_tests {
+    //! Wave 3 EP-4 S8: the MCP app resource route. The switch, the zero-retention refusal, the
+    //! query and the missing credential are all decided before capability-core or an MCP server is
+    //! asked, so these tests need neither; the read itself is covered by `mcp_apps::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    const QUERY: &str = "?server_id=srv-1&tool=show_chart";
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no query.
+        for (zdr, with_bearer, query) in [(false, true, QUERY), (true, true, QUERY), (false, false, "")] {
+            let (status, body) =
+                get_json(app(zdr, with_bearer), &format!("/off/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn server_and_tool_are_required() {
+        for query in ["", "?server_id=srv-1", "?tool=show_chart", "?server_id=%20&tool=show_chart"] {
+            let (status, body) =
+                get_json(app(false, true), &format!("/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_a_capability_credential() {
+        let (status, body) =
+            get_json(app(false, false), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_tool_call_route_tests {
+    //! Wave 3 EP-4 S10: the app tool-call route. The switch, the zero-retention refusal, the body
+    //! and the missing credentials are all decided before session-core, capability-core,
+    //! execution-core or an MCP server is asked, so these tests need none of them; the gate itself is
+    //! covered by `mcp_app_calls::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on (`/v1/...`) and off (`/off/v1/...`); the env read stays out of
+    /// parallel tests.
+    fn app(zdr: bool, with_bearers: bool) -> Router {
+        fn route(enabled: bool) -> axum::routing::MethodRouter<AppState> {
+            post(
+                move |state: State<AppState>,
+                      claims: Extension<Claims>,
+                      capability: Option<Extension<VerifiedCapabilityBearer>>,
+                      session: Option<Extension<VerifiedModelBearer>>,
+                      execution: Option<Extension<VerifiedExecutionBearer>>,
+                      data_plane: Option<Extension<VerifiedBearer>>,
+                      inference: Option<Extension<VerifiedInferenceBearer>>,
+                      body: Bytes| {
+                    let bearers = McpAppCallBearers {
+                        capability,
+                        session,
+                        execution,
+                        data_plane,
+                        inference,
+                    };
+                    mcp_app_tool_call(state, claims, bearers, body, enabled)
+                },
+            )
+        }
+        let router = Router::new()
+            .route("/v1/mcp-apps/tool-call", route(true))
+            .route("/off/v1/mcp-apps/tool-call", route(false))
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearers {
+            router
+                .layer(Extension(VerifiedCapabilityBearer::for_test(
+                    "capability-bearer",
+                )))
+                .layer(Extension(VerifiedModelBearer::for_test("session-bearer")))
+                .layer(Extension(VerifiedExecutionBearer::for_test(
+                    "execution-bearer",
+                )))
+                .layer(Extension(VerifiedBearer::for_test("data-plane-bearer")))
+                .layer(Extension(VerifiedInferenceBearer::for_test(
+                    "inference-bearer",
+                )))
+        } else {
+            router
+        }
+    }
+
+    async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    const BODY: &str = r#"{"run_id":"run-1","server_id":"srv-1","tool":"echo_read","arguments":{"q":"x"},"frame_nonce":"frame-0123456789abcdef"}"#;
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no body.
+        for (zdr, with_bearers, body) in
+            [(false, true, BODY), (true, true, BODY), (false, false, "")]
+        {
+            let (status, response) =
+                post_json(app(zdr, with_bearers), "/off/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "zdr={zdr} bearers={with_bearers}"
+            );
+            assert_eq!(response["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_refused() {
+        let (status, body) = post_json(app(true, true), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn the_body_must_be_a_valid_call() {
+        for body in [
+            "",
+            "not json",
+            "[]",
+            r#"{"server_id":"srv-1","tool":"echo_read","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv__x","tool":"t","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","arguments":[1],"frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","frame_nonce":"short"}"#,
+        ] {
+            let (status, response) =
+                post_json(app(false, true), "/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_every_delegated_credential() {
+        let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "delegated_credential_required");
     }
 }

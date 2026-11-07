@@ -42,7 +42,7 @@ import type {
   LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
-import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import type { Approval, ApprovalDecision, ApprovalEdit } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
 import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
@@ -125,6 +125,8 @@ export type ConversationNode =
       excludedTools: string[];
       knowledge?: import('@/shared/api/chat-client').ChatKnowledgeReceipt;
     }
+  /** Which search service answered the turn's web searches (EP-9 W1); absent when the turn searched nothing. */
+  | { kind: 'search-provenance'; provenance: import('@/shared/api/chat-client').ChatSearchProvenanceEvent }
   /**
    * What the gateway did to this turn while it ran (retries, compaction, context changes, a reduced answer).
    * One node per turn, holding every notice in arrival order, so the transcript keys it once.
@@ -185,6 +187,8 @@ export type ConversationNodeContext = {
   /** Open the contextual attachment canvas without replacing the transcript. */
   onViewAttachments?: (attachmentId: string) => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6). Absent: the card offers no edit mode. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   /**
    * Grant this turn's run the authority to execute its plan. `steps` is the
    * user's (possibly edited) step list, in final order — omitted/undefined

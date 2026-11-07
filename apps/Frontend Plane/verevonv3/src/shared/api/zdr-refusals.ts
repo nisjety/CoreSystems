@@ -52,6 +52,7 @@ export type ZdrFeatureKey =
   | 'browser_run'
   | 'browser_run_control'
   | 'browser_tool'
+  | 'browser_human_assist'
   | 'translation'
   | 'document_analysis'
   | 'language_analysis'
@@ -66,6 +67,8 @@ export type ZdrFeatureKey =
   | 'conversation_share'
   | 'conversation_import'
   | 'run_inspection'
+  | 'context_references'
+  | 'thread_goal'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -73,7 +76,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = '025c8c19838b969d4c8ac667d15b6b3d7893a2d368f534602b6acadc0a9ad724'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ae4473ce0a3ddd3d6d104aad3f90509014da63b60e2db27766983956708437d7'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -186,6 +189,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   browser_run: { no: 'nettleserkjøringer', en: 'browser runs' },
   browser_run_control: { no: 'kontroll av nettleserkjøringer', en: 'browser run controls' },
   browser_tool: { no: 'nettleserverktøy', en: 'browser tools' },
+  browser_human_assist: { no: 'hjelpeforespørsler i nettleseren', en: 'browser help requests' },
   translation: { no: 'oversettelse', en: 'translation' },
   document_analysis: { no: 'dokumentanalyse', en: 'document analysis' },
   language_analysis: { no: 'språkanalyse', en: 'language analysis' },
@@ -200,6 +204,8 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   conversation_share: { no: 'deling av samtaler', en: 'conversation sharing' },
   conversation_import: { no: 'import av samtaler', en: 'conversation import' },
   run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
+  context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },
+  thread_goal: { no: 'varige mål', en: 'persistent goals' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

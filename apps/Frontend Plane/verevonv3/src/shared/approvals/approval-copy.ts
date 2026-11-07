@@ -28,6 +28,7 @@ export const APPROVAL_CAUSE_CODES = [
   'hook_ask',
   'browser_action_risk',
   'auto_posture_provider_write',
+  'browser_human_assist',
   'unclassified_gate',
 ] as const
 
@@ -42,6 +43,25 @@ export type ApprovalCause = {
   ruleId?: string
   scopeOptions: string[]
   stepUpRequired: boolean
+  /**
+   * A `browser_human_assist` pause only (EP-1): which wall the page showed (`login`, `captcha`,
+   * `consent`, `waf`) or `user_takeover`, who started it (`agent` or `person`), and the host of
+   * the session the run holds. The host is the server's record, never text from the page.
+   */
+  assistKind?: string
+  assistOrigin?: string
+  host?: string
+}
+
+/** The walls the agent may ask the person for help with (EP-1 S2, D4). */
+export const BROWSER_ASSIST_KINDS = ['login', 'captcha', 'consent', 'waf'] as const
+
+export type BrowserAssistKind = (typeof BROWSER_ASSIST_KINDS)[number]
+
+/** The wall a help request names, `undefined` for a takeover or a cause that is not a help request. */
+export function browserAssistKindOf(cause: ApprovalCause | undefined): BrowserAssistKind | undefined {
+  if (cause?.code !== 'browser_human_assist' || cause.assistOrigin !== 'agent') return undefined
+  return BROWSER_ASSIST_KINDS.find((kind) => kind === cause.assistKind)
 }
 
 /** A code from the wire as one of the closed set; anything else is `unclassified_gate`. */
@@ -101,6 +121,86 @@ export function browserApprovalStatusLabel(
 }
 
 type CauseCopy = { headline: string; reason: string }
+
+// The words of a help request (EP-1 S2), one entry per wall. The host is the approval record's, so a
+// page cannot name another site here. A sign-in that leaves the run's sites ends in the browser's
+// own refusal (D9), so the sign-in card says that such a sign-in is not supported yet.
+const BROWSER_ASSIST_COPY: Record<
+  BrowserAssistKind,
+  (i18n: ApprovalCopyI18n, host: string | undefined) => CauseCopy
+> = {
+  login: (i18n, host) => ({
+    headline: i18n.tr('Nettstedet ber deg logge inn', 'The site asks you to sign in'),
+    reason: host
+      ? i18n.tr(
+          `Nettstedet ber deg logge inn på ${host}. Ta over, logg inn, og gi tilbake. Innlogging via et annet nettsted støttes ikke ennå.`,
+          `The site asks you to sign in on ${host}. Take over, sign in, then give back. Signing in through another site is not supported yet.`,
+        )
+      : i18n.tr(
+          'Nettstedet ber deg logge inn. Ta over, logg inn, og gi tilbake. Innlogging via et annet nettsted støttes ikke ennå.',
+          'The site asks you to sign in. Take over, sign in, then give back. Signing in through another site is not supported yet.',
+        ),
+  }),
+  captcha: (i18n, host) => ({
+    headline: i18n.tr('Nettstedet ber om en menneskelig sjekk', 'The site asks for a human check'),
+    reason: host
+      ? i18n.tr(
+          `${host} viser en sjekk som bare et menneske kan svare på. Ta over, svar på den, og gi tilbake.`,
+          `${host} shows a check only a person can answer. Take over, answer it, then give back.`,
+        )
+      : i18n.tr(
+          'Nettstedet viser en sjekk som bare et menneske kan svare på. Ta over, svar på den, og gi tilbake.',
+          'The site shows a check only a person can answer. Take over, answer it, then give back.',
+        ),
+  }),
+  consent: (i18n, host) => ({
+    headline: i18n.tr('Nettstedet ber om et samtykkevalg', 'The site asks for a consent choice'),
+    reason: host
+      ? i18n.tr(
+          `${host} ber deg velge hva det får lagre. Ta over, velg selv, og gi tilbake.`,
+          `${host} asks you to choose what it may store. Take over, make your choice, then give back.`,
+        )
+      : i18n.tr(
+          'Nettstedet ber deg velge hva det får lagre. Ta over, velg selv, og gi tilbake.',
+          'The site asks you to choose what it may store. Take over, make your choice, then give back.',
+        ),
+  }),
+  waf: (i18n, host) => ({
+    headline: i18n.tr('Nettstedet stoppet den automatiske nettleseren', 'The site stopped the automated browser'),
+    reason: host
+      ? i18n.tr(
+          `${host} slipper bare inn en person. Ta over, fortsett selv, og gi tilbake.`,
+          `${host} only lets a person through. Take over, continue by hand, then give back.`,
+        )
+      : i18n.tr(
+          'Nettstedet slipper bare inn en person. Ta over, fortsett selv, og gi tilbake.',
+          'The site only lets a person through. Take over, continue by hand, then give back.',
+        ),
+  }),
+}
+
+/** The two answers a help request offers: take the browser, or let the agent leave the site. */
+export function browserAssistActionLabel(action: 'take_over' | 'skip', i18n: ApprovalCopyI18n): string {
+  return action === 'take_over'
+    ? i18n.tr('Ta over', 'Take over')
+    : i18n.tr('Hopp over dette nettstedet', 'Skip this site')
+}
+
+/** What a help request says where the person cannot take the browser yet (EP-1 D1). */
+export function browserAssistNoTakeOverLine(i18n: ApprovalCopyI18n): string {
+  return i18n.tr(
+    'Du kan ikke ta over denne nettleseren ennå. Hopp over nettstedet, så bruker agenten en annen kilde.',
+    'You cannot take over this browser yet. Skip this site and the agent uses another source.',
+  )
+}
+
+/**
+ * The attention rail label and Web Push text of a help request. It names no site: push text can
+ * show on a lock screen, so the host stays on the card the person opens.
+ */
+export function browserAssistAttentionLine(i18n: ApprovalCopyI18n): string {
+  return i18n.tr('Verevon trenger deg i nettleseren', 'Verevon needs you in the browser')
+}
 
 // Total over the closed set: adding a code to `APPROVAL_CAUSE_CODES` without words here does not
 // compile, and the test pins the set to the contract file.
@@ -170,6 +270,19 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
       'Chat mode approves writes to connected services automatically. This is a record, not a choice you have to make.',
     ),
   }),
+  // EP-1: the person took the agent's browser (the approval is the give-back, not a risk decision),
+  // or the agent asks the person to clear a wall on the page (S2), in words for that wall.
+  browser_human_assist: (i18n, cause) => {
+    const kind = browserAssistKindOf(cause)
+    if (kind) return BROWSER_ASSIST_COPY[kind](i18n, cause.host?.trim() || undefined)
+    return {
+      headline: i18n.tr('Nettleseren er hos deg', 'The browser is with you'),
+      reason: i18n.tr(
+        'Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.',
+        'You have control of the browser. Press Give back when you are done.',
+      ),
+    }
+  },
   unclassified_gate: (i18n) => ({
     headline: i18n.tr('Agenten venter på godkjenning', 'The agent is waiting for approval'),
     reason: i18n.tr(

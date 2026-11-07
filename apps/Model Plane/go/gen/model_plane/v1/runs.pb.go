@@ -159,6 +159,7 @@ func (RunContextState) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{1}
 }
 
+// Request to cancel a run through its Space, with the Control decision for it.
 type CancelRunAsRoomManagerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The run to stop.
@@ -166,7 +167,8 @@ type CancelRunAsRoomManagerRequest struct {
 	// The Space the run's thread belongs to.
 	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	// Control `model.run.control` decision reference and token (audience model-plane).
-	SpaceControlDecisionRef   string `protobuf:"bytes,3,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	SpaceControlDecisionRef string `protobuf:"bytes,3,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	// Token for the Control decision reference above.
 	SpaceControlDecisionToken string `protobuf:"bytes,4,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
 	// Must equal the idempotency key the decision was issued for.
 	IdempotencyKey string `protobuf:"bytes,5,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
@@ -248,6 +250,7 @@ func (x *CancelRunAsRoomManagerRequest) GetReason() string {
 	return ""
 }
 
+// Result of a room-manager cancel: whether this call cancelled the run, and its receipt.
 type CancelRunAsRoomManagerResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// True if this call cancelled the run; false if it was already terminal (idempotent).
@@ -255,7 +258,8 @@ type CancelRunAsRoomManagerResponse struct {
 	// The durable RUN_CANCELLED event id (the existing one when already terminal).
 	ReceiptId string `protobuf:"bytes,2,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
 	// The run owner's org and user, for stopping that owner's live producer. Never shown to members.
-	OwnerOrgId    string `protobuf:"bytes,3,opt,name=owner_org_id,json=ownerOrgId,proto3" json:"owner_org_id,omitempty"`
+	OwnerOrgId string `protobuf:"bytes,3,opt,name=owner_org_id,json=ownerOrgId,proto3" json:"owner_org_id,omitempty"`
+	// The run owner's user id, for stopping that owner's live producer.
 	OwnerUserId   string `protobuf:"bytes,4,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -319,6 +323,7 @@ func (x *CancelRunAsRoomManagerResponse) GetOwnerUserId() string {
 	return ""
 }
 
+// Request for a member to watch a run in a Space, with the Space read decision for it.
 type AuthorizeRoomRunAttachRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The run the member wants to watch.
@@ -390,6 +395,7 @@ func (x *AuthorizeRoomRunAttachRequest) GetSpaceReadDecisionToken() string {
 	return ""
 }
 
+// Verdict on a member's attach to a run, with the run's details and how long it holds.
 type AuthorizeRoomRunAttachResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	RunId    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -407,7 +413,8 @@ type AuthorizeRoomRunAttachResponse struct {
 	// The provider and connection of the route the run names, for the posture the gateway decides on
 	// that route. Set only for a zero-retention-waived run bound to the caller's own waiver (the same
 	// connection and acknowledgement); empty for a persistent run, which names no connection.
-	Provider      string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
+	Provider string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
+	// Connection of the run's route; empty for a persistent run.
 	Connection    string `protobuf:"bytes,9,opt,name=connection,proto3" json:"connection,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -620,8 +627,10 @@ type ScheduledStepContext struct {
 	Status   string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
 	// Stored-consent contract for this scheduled step (WS20 S5). Empty when the
 	// schedule has no contract; the digest and expiry are re-verified per step.
-	ContractJson      string `protobuf:"bytes,6,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
-	ContractDigest    string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractJson string `protobuf:"bytes,6,opt,name=contract_json,json=contractJson,proto3" json:"contract_json,omitempty"`
+	// Digest of the stored-consent contract, re-verified per step.
+	ContractDigest string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	// Expiry of the stored-consent contract, re-verified per step.
 	ContractExpiresAt string `protobuf:"bytes,8,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -1472,9 +1481,10 @@ func (x *ResolveRunActionAuthorityResponse) GetRunStatus() string {
 // ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read
 // from the durable rows.
 type ResolveApprovalAuthorityRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ApprovalId    string                 `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	OrgId         string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The approval to resolve.
+	ApprovalId    string `protobuf:"bytes,1,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	OrgId         string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1526,11 +1536,12 @@ func (x *ResolveApprovalAuthorityRequest) GetOrgId() string {
 // ResolveApprovalAuthorityResponse carries identifiers, kinds and revisions only. `resolved=false`
 // has no authority and every other field is empty/default. A zero-retention run never resolves.
 type ResolveApprovalAuthorityResponse struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Resolved   bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
-	ApprovalId string                 `protobuf:"bytes,2,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	RunId      string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	OrgId      string                 `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Resolved bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	// The approval this authority answer is for.
+	ApprovalId string `protobuf:"bytes,2,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	RunId      string `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	OrgId      string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// The run owner: the subject the approved action runs as.
 	RequesterSubjectId string `protobuf:"bytes,5,opt,name=requester_subject_id,json=requesterSubjectId,proto3" json:"requester_subject_id,omitempty"`
 	ThreadId           string `protobuf:"bytes,6,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
@@ -1546,11 +1557,12 @@ type ResolveApprovalAuthorityResponse struct {
 	// `direct`, `ambient` or `automation`; empty reads as `direct`.
 	TurnOrigin string `protobuf:"bytes,12,opt,name=turn_origin,json=turnOrigin,proto3" json:"turn_origin,omitempty"`
 	// Approval expiry; empty when none.
-	ExpiresAt                      string `protobuf:"bytes,13,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	RecipientAudienceRef           string `protobuf:"bytes,14,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
-	RecipientAudienceRevision      uint64 `protobuf:"varint,15,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
-	RecipientAudienceHash          string `protobuf:"bytes,16,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
-	PrivacyPolicyRef               string `protobuf:"bytes,17,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	ExpiresAt                 string `protobuf:"bytes,13,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	RecipientAudienceRef      string `protobuf:"bytes,14,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
+	RecipientAudienceRevision uint64 `protobuf:"varint,15,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	RecipientAudienceHash     string `protobuf:"bytes,16,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
+	PrivacyPolicyRef          string `protobuf:"bytes,17,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	// Reference to the thread resource authorization.
 	ThreadResourceAuthorizationRef string `protobuf:"bytes,18,opt,name=thread_resource_authorization_ref,json=threadResourceAuthorizationRef,proto3" json:"thread_resource_authorization_ref,omitempty"`
 	AuthorityRevision              uint64 `protobuf:"varint,19,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
 	unknownFields                  protoimpl.UnknownFields
@@ -1854,7 +1866,8 @@ type ResolveScheduledStepAuthorityResponse struct {
 	RunStatus      string                 `protobuf:"bytes,14,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
 	// Control-signed contract digest and expiry for this scheduled step (WS20 S5).
 	// Empty for a schedule without a contract.
-	ContractDigest    string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	ContractDigest string `protobuf:"bytes,15,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
+	// Expiry of the Control-signed contract for this step; empty without a contract.
 	ContractExpiresAt string `protobuf:"bytes,16,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -2297,7 +2310,10 @@ type RunContextStatus struct {
 	// The bounded prior turns of the thread.
 	History *RunContextPart `protobuf:"bytes,2,opt,name=history,proto3" json:"history,omitempty"`
 	// The prefetched memory block.
-	Memory        *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
+	Memory *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
+	// EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
+	// numbers and hashes only, so the pin is allowed wherever the run record is.
+	Skills        []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2351,6 +2367,87 @@ func (x *RunContextStatus) GetMemory() *RunContextPart {
 		return x.Memory
 	}
 	return nil
+}
+
+func (x *RunContextStatus) GetSkills() []*SkillPin {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+// EP-11 S3: one skill version a run used. Recovery inside the run reads this
+// version even when the skill changed mid-run; feedback names it.
+type SkillPin struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The skill id (session-core `agent_skills.id`, or the builtin skill's id).
+	SkillId string `protobuf:"bytes,1,opt,name=skill_id,json=skillId,proto3" json:"skill_id,omitempty"`
+	// The immutable version number; 0 for a builtin skill.
+	Version int32 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	// sha256 hex digest of the version (of the embedded SKILL.md for a builtin).
+	Digest string `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	// How the skill reached the run: "matched" | "requested" | "builtin".
+	Source        string `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SkillPin) Reset() {
+	*x = SkillPin{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SkillPin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SkillPin) ProtoMessage() {}
+
+func (x *SkillPin) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SkillPin.ProtoReflect.Descriptor instead.
+func (*SkillPin) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *SkillPin) GetSkillId() string {
+	if x != nil {
+		return x.SkillId
+	}
+	return ""
+}
+
+func (x *SkillPin) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *SkillPin) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *SkillPin) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
 }
 
 var File_model_plane_v1_runs_proto protoreflect.FileDescriptor
@@ -2557,11 +2654,17 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
 	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
 	"\aomitted\x18\x03 \x01(\rR\aomitted\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xc8\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xfa\x01\n" +
 	"\x10RunContextStatus\x12B\n" +
 	"\finstructions\x18\x01 \x01(\v2\x1e.model_plane.v1.RunContextPartR\finstructions\x128\n" +
 	"\ahistory\x18\x02 \x01(\v2\x1e.model_plane.v1.RunContextPartR\ahistory\x126\n" +
-	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory*\x93\x01\n" +
+	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory\x120\n" +
+	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\"o\n" +
+	"\bSkillPin\x12\x19\n" +
+	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x16\n" +
+	"\x06source\x18\x04 \x01(\tR\x06source*\x93\x01\n" +
 	"\fAutonomyRung\x12\x1d\n" +
 	"\x19AUTONOMY_RUNG_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17AUTONOMY_RUNG_READ_ONLY\x10\x01\x12!\n" +
@@ -2604,7 +2707,7 @@ func file_model_plane_v1_runs_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_runs_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_model_plane_v1_runs_proto_goTypes = []any{
 	(AutonomyRung)(0),                             // 0: model_plane.v1.AutonomyRung
 	(RunContextState)(0),                          // 1: model_plane.v1.RunContextState
@@ -2633,47 +2736,49 @@ var file_model_plane_v1_runs_proto_goTypes = []any{
 	(*RunDetail)(nil),                             // 24: model_plane.v1.RunDetail
 	(*RunContextPart)(nil),                        // 25: model_plane.v1.RunContextPart
 	(*RunContextStatus)(nil),                      // 26: model_plane.v1.RunContextStatus
-	(*timestamppb.Timestamp)(nil),                 // 27: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                       // 28: google.protobuf.Struct
+	(*SkillPin)(nil),                              // 27: model_plane.v1.SkillPin
+	(*timestamppb.Timestamp)(nil),                 // 28: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 29: google.protobuf.Struct
 }
 var file_model_plane_v1_runs_proto_depIdxs = []int32{
 	24, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
-	27, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
-	27, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
-	28, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
+	28, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
+	28, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
+	29, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
 	1,  // 4: model_plane.v1.RunContextPart.state:type_name -> model_plane.v1.RunContextState
 	25, // 5: model_plane.v1.RunContextStatus.instructions:type_name -> model_plane.v1.RunContextPart
 	25, // 6: model_plane.v1.RunContextStatus.history:type_name -> model_plane.v1.RunContextPart
 	25, // 7: model_plane.v1.RunContextStatus.memory:type_name -> model_plane.v1.RunContextPart
-	6,  // 8: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
-	7,  // 9: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
-	9,  // 10: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
-	12, // 11: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	11, // 12: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
-	14, // 13: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
-	16, // 14: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
-	18, // 15: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
-	20, // 16: model_plane.v1.RunService.ResolveApprovalAuthority:input_type -> model_plane.v1.ResolveApprovalAuthorityRequest
-	22, // 17: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
-	4,  // 18: model_plane.v1.RunService.AuthorizeRoomRunAttach:input_type -> model_plane.v1.AuthorizeRoomRunAttachRequest
-	2,  // 19: model_plane.v1.RunService.CancelRunAsRoomManager:input_type -> model_plane.v1.CancelRunAsRoomManagerRequest
-	24, // 20: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
-	8,  // 21: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
-	10, // 22: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
-	13, // 23: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	10, // 24: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
-	15, // 25: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
-	17, // 26: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
-	19, // 27: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
-	21, // 28: model_plane.v1.RunService.ResolveApprovalAuthority:output_type -> model_plane.v1.ResolveApprovalAuthorityResponse
-	23, // 29: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
-	5,  // 30: model_plane.v1.RunService.AuthorizeRoomRunAttach:output_type -> model_plane.v1.AuthorizeRoomRunAttachResponse
-	3,  // 31: model_plane.v1.RunService.CancelRunAsRoomManager:output_type -> model_plane.v1.CancelRunAsRoomManagerResponse
-	20, // [20:32] is the sub-list for method output_type
-	8,  // [8:20] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	27, // 8: model_plane.v1.RunContextStatus.skills:type_name -> model_plane.v1.SkillPin
+	6,  // 9: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
+	7,  // 10: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
+	9,  // 11: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
+	12, // 12: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	11, // 13: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
+	14, // 14: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
+	16, // 15: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
+	18, // 16: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
+	20, // 17: model_plane.v1.RunService.ResolveApprovalAuthority:input_type -> model_plane.v1.ResolveApprovalAuthorityRequest
+	22, // 18: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
+	4,  // 19: model_plane.v1.RunService.AuthorizeRoomRunAttach:input_type -> model_plane.v1.AuthorizeRoomRunAttachRequest
+	2,  // 20: model_plane.v1.RunService.CancelRunAsRoomManager:input_type -> model_plane.v1.CancelRunAsRoomManagerRequest
+	24, // 21: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
+	8,  // 22: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
+	10, // 23: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
+	13, // 24: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	10, // 25: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
+	15, // 26: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
+	17, // 27: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
+	19, // 28: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
+	21, // 29: model_plane.v1.RunService.ResolveApprovalAuthority:output_type -> model_plane.v1.ResolveApprovalAuthorityResponse
+	23, // 30: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
+	5,  // 31: model_plane.v1.RunService.AuthorizeRoomRunAttach:output_type -> model_plane.v1.AuthorizeRoomRunAttachResponse
+	3,  // 32: model_plane.v1.RunService.CancelRunAsRoomManager:output_type -> model_plane.v1.CancelRunAsRoomManagerResponse
+	21, // [21:33] is the sub-list for method output_type
+	9,  // [9:21] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_runs_proto_init() }
@@ -2687,7 +2792,7 @@ func file_model_plane_v1_runs_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_runs_proto_rawDesc), len(file_model_plane_v1_runs_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   25,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

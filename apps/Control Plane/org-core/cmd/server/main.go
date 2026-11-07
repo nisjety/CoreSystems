@@ -27,6 +27,7 @@ import (
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/redis"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
 )
 
 func main() {
@@ -179,6 +180,18 @@ func main() {
 	// Agent-browser site policy (WS21-S3). Read by the browser broker at grant mint;
 	// administered and chosen through the /api/v1 browser-sites routes.
 	server.SetBrowserSites(browsersites.NewService(browsersites.NewRepository(db), time.Now))
+	// Retention policy and legal holds (EP-9 C1); read by session-core's sweeper. No thread
+	// retention reader yet: thread holds are placed without the ZDR receipt check.
+	// The typed-nil guard matters: a nil *nats.Client inside the interface is non-nil.
+	var retentionPublisher retention.AuditPublisher
+	if natsClient != nil {
+		retentionPublisher = natsClient
+	}
+	retentionService := retention.NewService(retention.NewRepository(db), nil, retentionPublisher)
+	server.SetRetention(retentionService)
+	if natsClient != nil {
+		go runRetentionAuditOutbox(ctx, retentionService, 5*time.Second)
+	}
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 	metricsServer := metricsserver.NewServer(cfg.MetricsPort)
 
@@ -307,6 +320,35 @@ func runSIEMAuditOutbox(ctx context.Context, service *orgcore.Service, interval 
 		if result.Published > 0 || result.DeadLettered > 0 {
 			log.Printf(
 				"org-core SIEM audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runRetentionAuditOutbox publishes the audit rows of retention policy and legal hold changes
+// (EP-9 C1). It runs whatever ORG_RETENTION_POLICY_ENABLED says, so rows still pending when the
+// switch is turned off drain.
+func runRetentionAuditOutbox(ctx context.Context, service *retention.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core retention audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core retention audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
 		}

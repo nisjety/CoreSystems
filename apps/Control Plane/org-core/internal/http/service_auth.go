@@ -28,6 +28,7 @@ const (
 	domainReaderPrincipal     = "auth-core"
 	scimEdgePrincipal         = "verevon-scim-edge"
 	quarryEdgePrincipal       = "quarry-edge"
+	sessionCorePrincipal      = "session-core"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -96,6 +97,10 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// auth-core alone, which folds it into the web_policy token claim (WS7.I,
 	// WEB_POLICY_CLAIM_ENABLED). Unread until WS7.H registers the route.
 	"org:web-policy:read:any": {},
+	// Read-only access to one org's retention window and active legal holds, through
+	// POST /internal/orgs/:orgId/retention/check and nothing else (EP-9 C1). Held by
+	// session-core alone, whose sweeper drops every held thread.
+	"org:retention-policy:read:any": {},
 }
 
 type serviceCredential struct {
@@ -209,6 +214,11 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// The web policy read feeds a token claim that bounds what agents may do, so
 		// it is pinned to the one principal that mints it (WS7.H, WS7.I).
 		if scope == "org:web-policy:read:any" && credential.Principal != authCorePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The check decides which threads the retention sweeper may delete, so it is
+		// pinned to the sweeper's principal (EP-9 C1).
+		if scope == "org:retention-policy:read:any" && credential.Principal != sessionCorePrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		// The key scopes hand out plaintext data keys of ANY org, so they are
@@ -403,6 +413,15 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodGet && rest[1] == "website":
 		return []string{"org:website:read"}
+	// Retention window and legal holds (EP-9 C1), on behalf of a signed user only.
+	case len(rest) == 2 && method == http.MethodGet && (rest[1] == "retention" || rest[1] == "legal-holds"):
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "retention":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodPost && rest[1] == "legal-holds":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 4 && method == http.MethodPost && rest[1] == "legal-holds" && rest[3] == "release":
+		return []string{"org:settings:write:self"}
 	default:
 		return nil
 	}
@@ -521,6 +540,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:browser-site:read:any"}
 	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
 		return []string{"org:web-policy:read:any"}
+	case len(rest) == 3 && rest[1] == "retention" && rest[2] == "check" && method == http.MethodPost:
+		return []string{"org:retention-policy:read:any"}
 	// Key custody (WS17.E2). The admin and destroy scopes are deliberately not in
 	// orgServiceScopeAllowlist yet, so no credential holds them and rotate,
 	// metadata and crypto-shred answer 403 until a reviewed registry change.

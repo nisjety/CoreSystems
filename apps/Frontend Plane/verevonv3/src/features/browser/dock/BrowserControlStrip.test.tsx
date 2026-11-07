@@ -17,6 +17,22 @@ afterEach(() => {
 })
 
 describe('BrowserControlStrip (WS9.I)', () => {
+  it('describes a personal browsing session without inventing a paused agent', () => {
+    const onChangeMode = vi.fn()
+    render(() => <BrowserControlStrip controlMode="human_takeover" controlEpoch={5} personalBrowsing onChangeMode={onChangeMode} />)
+    expect(strip().textContent).toContain('Du styrer nettleseren.')
+    expect(strip().textContent).not.toContain('pause')
+    expect(action().textContent).toContain('Gi agenten kontroll')
+    fireEvent.click(action())
+    expect(onChangeMode).toHaveBeenCalledWith('agent_control', 5)
+  })
+
+  it('still describes the agent as paused when a live agent run is paused by takeover', () => {
+    render(() => <BrowserControlStrip controlMode="human_takeover" controlEpoch={5} personalBrowsing agentWorking onChangeMode={vi.fn()} />)
+    expect(strip().textContent).toContain('Agenten er satt på pause')
+    expect(action().textContent).toContain('Gi tilbake')
+  })
+
   it('when the agent has control, Take over sends the epoch the strip rendered', () => {
     const onChangeMode = vi.fn()
     render(() => (

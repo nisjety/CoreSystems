@@ -49,6 +49,11 @@
       "scope_options": ["once"]
     },
     {
+      "code": "browser_human_assist",
+      "raised_by": "execution-core browser gate: the person took the browser, or the agent asked for help",
+      "scope_options": ["once"]
+    },
+    {
       "code": "unclassified_gate",
       "raised_by": "ExecuteStep, pause_for_approval, and every code outside this list; a request that states no cause stores none",
       "scope_options": ["once"]

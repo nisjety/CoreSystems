@@ -55,6 +55,14 @@ impl TabEgressPolicy {
         self.session.allows_url(raw)
             && self.tab.as_ref().map_or(true, |tab| tab.allows_url(raw))
     }
+
+    /// Each layer can independently refuse a credentialless asset.
+    pub fn allows_public_asset(&self, raw: &str) -> bool {
+        let allows = |policy: &BrowserEgressPolicy| {
+            policy.allows_url(raw) || policy.allows_public_asset(raw)
+        };
+        allows(&self.session) && self.tab.as_ref().map_or(true, allows)
+    }
 }
 
 /// The egress policy for a request made from one tab: the session policy met with
@@ -126,6 +134,32 @@ mod tests {
         let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
         assert!(resolved.allows_url("https://agent.example/page"));
         assert!(!resolved.allows_url("https://third.example/page"));
+    }
+
+    #[test]
+    fn credentialless_public_assets_respect_session_and_tab_boundaries() {
+        let cdn = "https://cdn.example/site.css";
+        let session = policy(&["shop.example"]).with_public_assets();
+        let tab = policy(&["shop.example"]).with_public_assets();
+        let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
+        assert!(resolved.allows_public_asset(cdn));
+        assert!(!resolved.allows_url(cdn));
+        assert!(!resolved.allows_public_asset("http://cdn.example/site.css"));
+        assert!(!resolved.allows_public_asset("https://127.0.0.1/site.css"));
+
+        let deny_all = BrowserEgressPolicy::deny_all().with_public_assets();
+        let narrowed = policy(&["shop.example"]);
+        let denied_cdn = tab
+            .clone()
+            .with_denied_domains(&["cdn.example".to_owned()]);
+        for restrictive_tab in [&deny_all, &narrowed, &denied_cdn] {
+            assert!(!resolve_tab_egress_policy(Some(restrictive_tab), Some(&session))
+                .allows_public_asset(cdn));
+        }
+        for restrictive_session in [None, Some(&deny_all), Some(&narrowed), Some(&denied_cdn)] {
+            assert!(!resolve_tab_egress_policy(Some(&tab), restrictive_session)
+                .allows_public_asset(cdn));
+        }
     }
 
     #[test]

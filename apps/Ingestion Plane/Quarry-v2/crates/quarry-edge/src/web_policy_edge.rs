@@ -228,7 +228,7 @@ pub fn gate_urls<'a>(
 
 /// A malformed ask. An unknown capability is named (capped); anything else is a
 /// generic invalid policy with no echo of the caller's value.
-fn ask_error(error: LayerError) -> QuarryError {
+pub(crate) fn ask_error(error: LayerError) -> QuarryError {
     match error {
         LayerError::UnknownCapability(raw) => {
             let capability: String = raw.chars().take(ECHO_LIMIT).collect();

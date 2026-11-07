@@ -96,6 +96,15 @@ export type BrowserActionDispatchedEvent = {
   at?: string
 }
 
+/** An owner-run attach receipt; identity correlation only, not a viewer grant. */
+export type BrowserAttachSharedJarEvent = {
+  runId: string
+  planId: string
+  attachId: string
+  sessionRunId: string
+  tabId: string
+}
+
 export type BrowserObservationReceivedEvent = {
   runId?: string
   planId?: string
@@ -228,6 +237,7 @@ export type RunEventHandlers = {
   onSubagentAttached?: (event: SubagentAttachedEvent) => void
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
+  onBrowserAttachSharedJar?: (event: BrowserAttachSharedJarEvent) => void
   onBrowserObservation?: (event: BrowserObservationReceivedEvent) => void
   onBrowserRunPaused?: (event: BrowserRunPausedEvent) => void
   onBrowserRunResumed?: (event: BrowserRunResumedEvent) => void
@@ -241,6 +251,11 @@ export type RunEventHandlers = {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function attachmentId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && /^[A-Za-z0-9_.:-]+$/.test(value)
+    ? value : undefined
 }
 
 function nonNegativeInt(value: unknown): number | undefined {
@@ -348,6 +363,17 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         at: str(payload.at),
       })
       break
+    case 'browser_attach_shared_jar': {
+      const runId = attachmentId(payload.run_id)
+      const planId = attachmentId(payload.plan_id)
+      const attachId = attachmentId(payload.attach_id)
+      const sessionRunId = attachmentId(payload.session_run_id)
+      const tabId = attachmentId(payload.tab_id)
+      if (runId && planId && attachId && sessionRunId && tabId) {
+        handlers.onBrowserAttachSharedJar?.({ runId, planId, attachId, sessionRunId, tabId })
+      }
+      break
+    }
     case 'browser_action_dispatched':
       handlers.onBrowserAction?.({
         runId: str(payload.run_id) ?? str(payload.runId),
@@ -614,6 +640,87 @@ export async function getRunTiming(runId: string, signal?: AbortSignal): Promise
       .map(normalizeRunActionTiming)
       .filter((action): action is RunActionTiming => action !== null),
     truncated: data?.truncated === true,
+  }
+}
+
+// ── Request inspector (EP-14 S7) ────────────────────────────────────────────
+// `GET /api/v1/agents/runs/:run_id/requests/:call_seq` reads what one model call of the run was
+// sent and offered. The server already applied decision D3: a platform-authored prompt section
+// arrives as label, digest and length with no text, so the client never holds platform text to
+// hide. Owner only (anyone else gets 404); a zero-retention caller is refused with the
+// `run_inspection` feature, and the route is a 404 while the inspector switch is off.
+
+export type RunRequestSectionSource = 'platform' | 'org' | 'user' | 'memory'
+
+export type RunRequestSection = {
+  label: string
+  source: RunRequestSectionSource
+  /** The sha256 of the section's text: its version. */
+  digest: string
+  chars: number
+  /** Present only for org, user and memory sections whose text matched its digest. */
+  text?: string
+}
+
+export type RunRequestSnapshot = {
+  runId: string
+  callSeq: number
+  callPurpose: string
+  /** The `request-snapshot-v1` object: parameters, routed model, digests, message manifest. */
+  snapshot: Record<string, unknown> | null
+  sections: RunRequestSection[]
+  /** The tool catalogue offered, or null when none was offered or it was cut unreadably. */
+  tools: unknown[] | null
+  toolsTruncated: boolean
+  systemTruncated: boolean
+  /** Model calls of this run that were never captured; above 0 the record is incomplete. */
+  dropped: number
+}
+
+const SECTION_SOURCES: ReadonlySet<string> = new Set(['platform', 'org', 'user', 'memory'])
+
+function normalizeRunRequestSection(raw: unknown): RunRequestSection | null {
+  const item = objectRecord(raw)
+  const label = str(item?.label)
+  const digest = str(item?.digest)
+  if (!item || !label || !digest) return null
+  // An unknown source is treated as platform: the client never promotes text it cannot place.
+  const rawSource = str(item.source) ?? ''
+  const source = (SECTION_SOURCES.has(rawSource) ? rawSource : 'platform') as RunRequestSectionSource
+  const text = source === 'platform' ? undefined : str(item.text)
+  return {
+    label,
+    source,
+    digest,
+    chars: nonNegativeInt(item.chars) ?? 0,
+    ...(text ? { text } : {}),
+  }
+}
+
+/** Fetch one model call's request snapshot. Sections the client cannot read are dropped, never guessed. */
+export async function getRunRequestSnapshot(
+  runId: string,
+  callSeq: number,
+  signal?: AbortSignal,
+): Promise<RunRequestSnapshot> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/agents/runs/${encodeURIComponent(runId)}/requests/${encodeURIComponent(String(callSeq))}`,
+    { signal },
+  )
+  const data = objectRecord(objectRecord(raw)?.data)
+  const sections = Array.isArray(data?.system_sections) ? data.system_sections : []
+  return {
+    runId: str(data?.run_id) ?? runId,
+    callSeq: nonNegativeInt(data?.call_seq) ?? callSeq,
+    callPurpose: str(data?.call_purpose) ?? 'unspecified',
+    snapshot: objectRecord(data?.snapshot),
+    sections: sections
+      .map(normalizeRunRequestSection)
+      .filter((section): section is RunRequestSection => section !== null),
+    tools: Array.isArray(data?.tools) ? data.tools : null,
+    toolsTruncated: data?.tools_truncated === true,
+    systemTruncated: data?.system_truncated === true,
+    dropped: nonNegativeInt(data?.dropped) ?? 0,
   }
 }
 

@@ -3,7 +3,8 @@
  * the record the reader picked, with copy buttons for the request id and the run id.
  *
  * It shows only what the Trace already holds. A time that was not recorded reads as such and is never
- * filled in. Copying takes no focus away from the list.
+ * filled in. Copying takes no focus away from the list. With `VITE_CHAT_REQUEST_INSPECTOR` on, a turn
+ * with a run id also offers the request inspector (EP-14 S7).
  */
 
 import { createSignal, For, Show } from 'solid-js'
@@ -12,6 +13,7 @@ import { uiEventLabel } from '@/shared/chat/verevon-ui-events'
 import { useI18n } from '@/shared/i18n'
 import { formatLatency } from './chat-media-markdown'
 import { formatClock, recordAt, spanMs, type LedgerRecord, type LedgerTurn } from '../lib/run-ledger'
+import { RequestInspector, requestInspectorEnabled } from './RequestInspector'
 
 type CopyState = 'request' | 'run' | 'failed' | null
 
@@ -127,6 +129,14 @@ export function LedgerInspector(props: {
             </p>
           )}
         </For>
+      </Show>
+      <Show when={requestInspectorEnabled && props.turn.runId}>
+        {(runId) => (
+          <>
+            <h4>{i18n.tr('Forespørsel', 'Request')}</h4>
+            <RequestInspector runId={runId()} />
+          </>
+        )}
       </Show>
       <p class="verevon-chat-ledger__copy-status" role="status">{copyMessage()}</p>
     </aside>

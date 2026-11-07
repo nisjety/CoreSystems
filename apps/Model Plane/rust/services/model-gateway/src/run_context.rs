@@ -802,6 +802,8 @@ pub fn compose(input: Composition<'_>) -> RunContext {
         user_profile: input.user_profile.unwrap_or_default(),
         // Never composed here: the Do launch adds the role catalogue after `prepare` (EP-6 S10).
         agent_roles: Vec::new(),
+        // Never composed here: the Do launch adds the thread goal after `prepare` (EP-7 S1).
+        goal_recitation: String::new(),
     }
 }
 
@@ -928,14 +930,14 @@ async fn load_memory(
 
 /// Stamp how the context was assembled on the run record. Best-effort by
 /// contract: a run must not fail because its record could not be annotated, so a
-/// failure is logged and the run goes on.
+/// failure is logged and the run goes on. Returns whether the stamp landed.
 pub async fn record_status(
     state: &AppState,
     org_id: &str,
     run_id: &str,
     bearer: &VerifiedSessionBearer,
     status: &RunContextStatus,
-) {
+) -> bool {
     let Ok(request) = crate::sse::authenticated_session_request(
         RecordRunContextRequest {
             run_id: run_id.to_owned(),
@@ -945,7 +947,7 @@ pub async fn record_status(
         bearer,
     ) else {
         tracing::warn!(%run_id, "run context: session credential is not forwardable; status not recorded");
-        return;
+        return false;
     };
     match tokio::time::timeout(
         RECORD_TIMEOUT,
@@ -953,13 +955,44 @@ pub async fn record_status(
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => true,
         Ok(Err(error)) => {
             tracing::warn!(%error, %run_id, "run context: status not recorded (best-effort)");
+            false
         }
         Err(_elapsed) => {
             tracing::warn!(%run_id, "run context: recording the status timed out (best-effort)");
+            false
         }
+    }
+}
+
+/// The status an Ask turn stamps for its skill pins (EP-11 S3): only `skills`,
+/// so the record does not claim the three parts were unspecified; session-core
+/// merges it beside any parts already stamped.
+#[must_use]
+pub fn skill_pins_status(pins: Vec<mp_contracts::model_plane::v1::SkillPin>) -> RunContextStatus {
+    RunContextStatus {
+        skills: pins,
+        ..Default::default()
+    }
+}
+
+/// Stamp the skill versions an Ask turn injected on its run record (EP-11 S3).
+/// Best-effort like [`record_status`]: a lost pin costs the durable record of
+/// which version steered the turn, never the turn, and is counted.
+pub async fn record_skill_pins(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    bearer: &VerifiedSessionBearer,
+    pins: Vec<mp_contracts::model_plane::v1::SkillPin>,
+) {
+    if pins.is_empty() {
+        return;
+    }
+    if !record_status(state, org_id, run_id, bearer, &skill_pins_status(pins)).await {
+        metrics::counter!("skill_pin_record_failed_total").increment(1);
     }
 }
 
@@ -1089,7 +1122,8 @@ pub async fn prepare(
         "run context composed"
     );
     if facts.records_status() {
-        record_status(state, org_id, &run.run_id, bearer, &status).await;
+        // Best-effort: a status that did not land is already logged.
+        let _recorded = record_status(state, org_id, &run.run_id, bearer, &status).await;
     }
     composed
 }
@@ -1981,5 +2015,34 @@ mod tests {
         .encode_to_vec();
         // Field 7, wire type 2 (length-delimited): tag byte (7 << 3) | 2.
         assert_eq!(wire.first(), Some(&0x3a));
+    }
+
+    // EP-11 S3 golden: the Ask path's pins-only stamp is ids, numbers and hashes.
+    #[test]
+    fn the_ask_pin_stamp_carries_only_content_free_skills() {
+        use mp_contracts::model_plane::v1::SkillPin;
+
+        let digest = "f".repeat(64);
+        let status = skill_pins_status(vec![SkillPin {
+            skill_id: "01HSKILL".to_owned(),
+            version: 2,
+            digest: digest.clone(),
+            source: "matched".to_owned(),
+        }]);
+        assert!(status.instructions.is_none() && status.history.is_none() && status.memory.is_none());
+        assert_eq!(
+            mp_contracts::run_context::status_json(&status),
+            serde_json::json!({
+                "skills": [{ "id": "01HSKILL", "version": 2, "digest": digest, "source": "matched" }]
+            })
+        );
+    }
+
+    #[test]
+    fn a_composed_do_status_stamps_no_skills() {
+        // The Do launch composes no skills here (execution-core injects its own), so
+        // its stamp is the one recorded before EP-11 S3.
+        let status = RunContextStatus::default();
+        assert!(mp_contracts::run_context::status_json(&status).get("skills").is_none());
     }
 }

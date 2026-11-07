@@ -513,7 +513,12 @@ mod tests {
             subscription_connection_id: "connection".into(),
             ..Default::default()
         };
-        assert_eq!(judge_metered_tokens(&response, &subscription_route), 0);
+        // The provider that served decides the basis, so the subscription answer names it.
+        let subscription_response = InferResponse {
+            provider_used: "openai-codex-subscription".into(),
+            ..response.clone()
+        };
+        assert_eq!(judge_metered_tokens(&subscription_response, &subscription_route), 0);
         let negative = InferResponse {
             input_tokens: -5,
             output_tokens: 10,

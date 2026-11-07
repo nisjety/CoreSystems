@@ -61,6 +61,8 @@ type decisionProofClaims struct {
 	ApprovalFloor   string `json:"approval_floor"`
 	PolicySource    string `json:"policy_source"`
 	ToolDigest      string `json:"tool_digest"`
+	// Present only when the policy store was successfully read for this call.
+	ToolPolicyChecked bool `json:"tool_policy_checked,omitempty"`
 }
 
 type DecisionProofSigner struct {
@@ -158,6 +160,7 @@ func decisionProofClaimsFor(reqFields decisionProofRequest, response *decisionPr
 		ApprovalFloor:     response.approvalFloor,
 		PolicySource:      response.policySource,
 		ToolDigest:        response.toolDigest,
+		ToolPolicyChecked: response.toolPolicyChecked,
 	}
 }
 
@@ -181,4 +184,5 @@ type decisionProofResponse struct {
 	approvalFloor     string
 	policySource      string
 	toolDigest        string
+	toolPolicyChecked bool
 }

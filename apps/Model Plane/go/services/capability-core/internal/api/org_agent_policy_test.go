@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,6 +173,13 @@ func TestOrgAgentPolicyValidationRefusesBeforeTheRegistryIsTouched(t *testing.T)
 		{name: "ids under a mode that names none", body: `{"settings":{"ext.mcp_servers":{"mode":"any","ids":["srv.one"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an id that is not an identifier", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["has space"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
 		{name: "an allow-list with an extra field", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["srv.one"],"extra":1}}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap written as text", body: `{"settings":{"research.max_fan_out_items":"8"}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap that is a fraction", body: `{"settings":{"research.max_fan_out_items":8.5}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a negative fan-out cap", body: `{"settings":{"research.max_fan_out_items":-1}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a fan-out cap past sixteen", body: `{"settings":{"research.max_fan_out_items":17}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a reserved web mode", body: `{"settings":{"web.mode":"cached_only"}}`, status: http.StatusUnprocessableEntity, code: "not_enforced"},
+		{name: "a web mode outside its order", body: `{"settings":{"web.mode":"full"}}`, status: http.StatusBadRequest, code: "invalid_value"},
+		{name: "a paid switch written as a bool", body: `{"settings":{"web.paid_providers":true}}`, status: http.StatusBadRequest, code: "invalid_value"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,8 +323,59 @@ func TestOrgAgentPolicyDigestFollowsTheDocument(t *testing.T) {
 	}
 }
 
+// The wide-research item cap (EP-2 S8) is a whole number: its default is 8, a stored value reads
+// back as the same token, 0 turns wide research off, and a value above the ceiling is refused.
+func TestOrgAgentPolicyFanOutItemsIsATightenOnlyCount(t *testing.T) {
+	const key = "research.max_fan_out_items"
+	if got := orgAgentPolicyDefaults()[key]; !reflect.DeepEqual(got, 8) {
+		t.Fatalf("default = %#v, want 8", got)
+	}
+	ceiling := loosestOrgAgentCeiling()
+	if ceiling[key] != "16" {
+		t.Fatalf("loosest = %q, want 16", ceiling[key])
+	}
+	// encoding/json hands the handler a float64, as a PUT body decodes.
+	settings, refusal := validateOrgAgentSettings(map[string]any{key: float64(0)}, ceiling)
+	if refusal != nil || !reflect.DeepEqual(settings[key], 0) {
+		t.Fatalf("0 = %#v %v, want the stored count 0", settings[key], refusal)
+	}
+	if token := orgAgentTokenOf(float64(5)); token != "5" {
+		t.Fatalf("a stored 5 reads back as %q", token)
+	}
+	ceiling[key] = "4"
+	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(10)}, ceiling); refusal == nil || refusal.code != "exceeds_platform_ceiling" {
+		t.Fatalf("10 under a ceiling of 4 = %v, want exceeds_platform_ceiling", refusal)
+	}
+	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(3)}, ceiling); refusal != nil {
+		t.Fatalf("3 under a ceiling of 4 refused: %s", refusal.code)
+	}
+}
+
+// The org's web switches (EP-9 W2) are two enforced keys: web access takes off or live, paid search
+// takes off or on, and cached_only is refused until Quarry ships it. A write looser than the ceiling is refused.
+func TestOrgAgentPolicyWebSwitchesTakeOffOrLive(t *testing.T) {
+	ceiling := loosestOrgAgentCeiling()
+	for _, body := range []map[string]any{
+		{"web.mode": "off"},
+		{"web.mode": "live", "web.paid_providers": "off"},
+	} {
+		if _, refusal := validateOrgAgentSettings(body, ceiling); refusal != nil {
+			t.Fatalf("%v refused: %s", body, refusal.code)
+		}
+	}
+	settings, refusal := validateOrgAgentSettings(map[string]any{"web.mode": "off"}, ceiling)
+	if refusal != nil || settings["web.paid_providers"] != "on" {
+		t.Fatalf("settings = %v, refusal = %v; paid search should take its default on", settings, refusal)
+	}
+	strict := loosestOrgAgentCeiling()
+	strict["web.mode"] = "off"
+	if _, refusal := validateOrgAgentSettings(map[string]any{"web.mode": "live"}, strict); refusal == nil || refusal.code != "exceeds_platform_ceiling" {
+		t.Fatalf("live under an off ceiling = %v, want exceeds_platform_ceiling", refusal)
+	}
+}
+
 // The golden holds the schema as data. This table must match it key by key, in order,
-// with the same kinds, orders, defaults, fail-closed values and status.
+// with the same kinds, orders, defaults, fail-closed values, status and reserved values.
 func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
 	raw, err := os.ReadFile("../../../../../api/contracts/org-agent-policy-schema.json")
 	if err != nil {
@@ -330,6 +389,7 @@ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
 			Default         string   `json:"default"`
 			FailClosedValue string   `json:"fail_closed_value"`
 			Status          string   `json:"status"`
+			ReservedValues  []string `json:"reserved_values"`
 		} `json:"settings"`
 		Refusals []string `json:"refusals"`
 	}
@@ -348,6 +408,9 @@ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
 		if row.Key != def.key || row.Kind != def.kind || !reflect.DeepEqual(row.StrictnessOrder, def.order) ||
 			row.Default != def.def || row.FailClosedValue != def.failClose || row.Status != status {
 			t.Fatalf("key %s differs from the golden row %+v", def.key, row)
+		}
+		if !slices.Equal(row.ReservedValues, def.reservedValues) {
+			t.Fatalf("reserved values of %s differ from the golden: %v", def.key, row.ReservedValues)
 		}
 	}
 	codes := []string{orgAgentRefuseUnknownKey.code, orgAgentRefuseInvalidValue.code, orgAgentRefuseNotEnforced.code, orgAgentRefuseExceedsCeiling.code}

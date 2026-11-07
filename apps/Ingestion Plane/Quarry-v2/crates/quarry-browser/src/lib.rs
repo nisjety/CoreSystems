@@ -46,6 +46,8 @@ pub struct BrowserEgressPolicy {
     /// Only consulted in `OpenWeb` mode. Canonical, lower-case, dot-suffix
     /// matched; a host equal to or under an entry is refused.
     denied_domains: Vec<String>,
+    public_assets: bool,
+    only_origin: Option<url::Origin>,
     /// The URL reputation hook (E3.8.7, D2-100). `None` (the default, and
     /// always when the mode is `Off`) never consults a list.
     reputation: Option<ReputationHook>,
@@ -204,6 +206,8 @@ impl BrowserEgressPolicy {
             restricted: true,
             mode: EgressMode::Allowlist,
             denied_domains: Vec::new(),
+            public_assets: false,
+            only_origin: None,
             reputation: None,
         }
     }
@@ -251,6 +255,8 @@ impl BrowserEgressPolicy {
             restricted,
             mode: EgressMode::Allowlist,
             denied_domains: Vec::new(),
+            public_assets: false,
+            only_origin: None,
             reputation: None,
         }
     }
@@ -270,8 +276,32 @@ impl BrowserEgressPolicy {
             restricted: true,
             mode: EgressMode::OpenWeb,
             denied_domains,
+            public_assets: false,
+            only_origin: None,
             reputation: None,
         }
+    }
+
+    /// Limit credentialed traffic in a borrowed tab to the origin the owner approved.
+    pub fn with_only_origin(mut self, origin: url::Origin) -> Self {
+        self.only_origin = Some(origin);
+        self
+    }
+
+    /// Allow the request guard to render a public asset through its
+    /// credentialless fetcher. This does not permit a proxy connection.
+    pub fn with_public_assets(mut self) -> Self {
+        // A policy narrowed to an empty allowlist grants no network authority.
+        self.public_assets = !(self.mode == EgressMode::Allowlist
+            && self.restricted
+            && self.allowed_domains.is_empty());
+        self
+    }
+
+    pub fn allows_public_asset(&self, raw: &str) -> bool {
+        self.public_assets
+            && raw.starts_with("https://")
+            && open_web_url_allowed(raw, &self.denied_domains)
     }
 
     /// Add hosts the run may never reach, in any mode (WS7.G). A host equal to or under an
@@ -371,17 +401,12 @@ impl BrowserEgressPolicy {
         else {
             return false;
         };
-        self.denied_domains.iter().any(|domain| {
-            host == *domain
-                || host
-                    .strip_suffix(domain.as_str())
-                    .is_some_and(|prefix| prefix.ends_with('.'))
-        })
+        self.denied_domains.iter().any(|entry| matches_denied_host(&host, entry))
     }
 
     /// Validate a broker's denied list for an open-web grant: empty is allowed,
-    /// at most `MAX_DENIED_DOMAINS` entries, each canonical (no wildcard, no IP
-    /// literal, at least one dot), sorted and unique. A non-canonical list is an
+    /// at most `MAX_DENIED_DOMAINS` entries, each a canonical DNS name or a
+    /// leading-dot suffix, sorted and unique. A non-canonical list is an
     /// error, never repaired, the same rule as `canonical_broker_domains`.
     pub fn canonical_denied_domains(domains: &[String]) -> Result<Vec<String>, String> {
         if domains.len() > MAX_DENIED_DOMAINS {
@@ -390,7 +415,8 @@ impl BrowserEgressPolicy {
         let mut canonical = BTreeSet::new();
         for raw in domains {
             let domain = raw.trim().to_ascii_lowercase();
-            if !is_canonical_broker_domain(&domain) {
+            let name = domain.strip_prefix('.').unwrap_or(&domain);
+            if !is_canonical_dns_name(name) {
                 return Err("browser grant denied list contains an invalid canonical domain".to_owned());
             }
             canonical.insert(domain);
@@ -408,6 +434,11 @@ impl BrowserEgressPolicy {
         // an inline image or use an object URL it created itself.
         if raw.starts_with("data:") || raw.starts_with("blob:") {
             return true;
+        }
+        if let Some(origin) = &self.only_origin {
+            if !url::Url::parse(raw).is_ok_and(|url| url.origin() == *origin) {
+                return false;
+            }
         }
         if self.mode == EgressMode::OpenWeb {
             return open_web_url_allowed(raw, &self.denied_domains);
@@ -459,12 +490,16 @@ fn open_web_url_allowed(raw: &str, denied: &[String]) -> bool {
     if open_web_host_is_local(&host) {
         return false;
     }
-    !denied.iter().any(|domain| {
-        host == *domain
-            || host
-                .strip_suffix(domain.as_str())
-                .is_some_and(|prefix| prefix.ends_with('.'))
-    })
+    !denied.iter().any(|entry| matches_denied_host(&host, entry))
+}
+
+fn matches_denied_host(host: &str, entry: &str) -> bool {
+    if entry.starts_with('.') {
+        // A leading dot denotes a suffix below the named host.
+        host.ends_with(entry)
+    } else {
+        host == entry || host.strip_suffix(entry).is_some_and(|prefix| prefix.ends_with('.'))
+    }
 }
 
 /// Hosts an open-web policy never reaches, whatever the broker's deny list says:
@@ -518,12 +553,13 @@ fn ip_is_local(ip: IpAddr) -> bool {
 }
 
 fn is_canonical_broker_domain(domain: &str) -> bool {
+    domain.contains('.') && is_canonical_dns_name(domain)
+}
+
+fn is_canonical_dns_name(domain: &str) -> bool {
     if domain.is_empty()
         || domain.len() > 253
         || domain.parse::<IpAddr>().is_ok()
-        || !domain.contains('.')
-        || domain.starts_with('.')
-        || domain.ends_with('.')
     {
         return false;
     }
@@ -681,10 +717,23 @@ impl Default for LiveFrameOptions {
     }
 }
 
+/// Actual CDP pointer movement captured together with a live frame. Coordinates
+/// use CSS viewport pixels and identify the pinned attachment that moved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveAgentCursor {
+    pub x: u32,
+    pub y: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub tab_id: String,
+    pub attach_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveFrame {
     pub mime_type: String,
     pub data_base64: String,
+    pub agent_cursor: Option<LiveAgentCursor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -913,7 +962,26 @@ pub trait BrowserEgressProxyProvider: Send + Sync {
         policy: BrowserEgressPolicy,
     ) -> QuarryResult<()>;
 
+    /// Fetch a single public asset hop without Chromium's cookies, request
+    /// headers or body. A provider without a pinned fetch path declines.
+    async fn fetch_public_asset(
+        &self,
+        _session_key: &str,
+        _url: &url::Url,
+    ) -> QuarryResult<PublicBrowserAsset> {
+        Err(QuarryError::new(
+            ErrorCode::SecurityBlocked,
+            "credentialless browser assets unavailable",
+        ))
+    }
+
     async fn release_session(&self, session_key: &str);
+}
+
+pub struct PublicBrowserAsset {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_base64: String,
 }
 
 /// How a browser driver's own processes are doing, for `/ready`.
@@ -1079,6 +1147,17 @@ pub trait BrowserDriver: Send + Sync {
         Err(QuarryError::unsupported_action("verified_target_action"))
     }
 
+    /// Best-effort viewport bounds for an observed native target. These bounds
+    /// are presentation only and must never authorize or select an action.
+    /// Drivers without a trustworthy geometry source omit them.
+    async fn native_target_rect(
+        &self,
+        _session: &BrowserSession,
+        _target: &BrowserNativeTarget,
+    ) -> Option<quarry_core::contracts::ElementRect> {
+        None
+    }
+
     /// Attach a Quarry-internal staged artifact to one exact native file input.
     /// `staged_file` is deliberately not part of any public action contract:
     /// callers supply opaque artifact ids and this method is the sole point at
@@ -1119,6 +1198,21 @@ pub trait BrowserDriver: Send + Sync {
         let bytes = self.screenshot(session, full_page).await?;
         Ok(MaskedScreenshot::unmasked(bytes))
     }
+    /// Move the real pointer for a governed attached action. Unsupported drivers
+    /// omit the cursor; the browser action itself remains separately governed.
+    async fn move_agent_pointer(
+        &self,
+        _session: &BrowserSession,
+        _attach_id: &str,
+        _x: u32,
+        _y: u32,
+    ) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("move_agent_pointer"))
+    }
+
+    /// Hide the pointer telemetry before another operation can move the mouse.
+    async fn clear_agent_pointer(&self, _session: &BrowserSession, _attach_id: &str) {}
+
     async fn live_frame(
         &self,
         _session: &BrowserSession,
@@ -1243,6 +1337,17 @@ pub trait BrowserDriver: Send + Sync {
         _policy: BrowserEgressPolicy,
     ) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("configure_tab_egress_policy"))
+    }
+
+    /// Atomically replace a tab's override and return its previous value. Passing
+    /// `None` removes the override and leaves the session boundary in effect.
+    async fn swap_tab_egress_policy(
+        &self,
+        _session: &BrowserSession,
+        _tab_id: &str,
+        _policy: Option<BrowserEgressPolicy>,
+    ) -> QuarryResult<Option<BrowserEgressPolicy>> {
+        Err(QuarryError::unsupported_action("swap_tab_egress_policy"))
     }
 
     /// The session's active tab id, the tab an unpinned handle acts on
@@ -1472,6 +1577,20 @@ mod reputation_hook_tests {
 
     fn open() -> BrowserEgressPolicy {
         BrowserEgressPolicy::from_allowed_domains(&[])
+    }
+
+    #[test]
+    fn borrowed_tab_egress_limits_credentialed_requests_to_the_approved_origin() {
+        let origin = url::Url::parse("https://example.com").unwrap().origin();
+        let policy = BrowserEgressPolicy::from_allowed_domains(&["example.com".to_owned()])
+            .with_public_assets()
+            .with_only_origin(origin);
+
+        assert!(policy.allows_url("https://example.com/page"));
+        assert!(!policy.allows_url("http://example.com/page"));
+        assert!(!policy.allows_url("https://example.com:8443/page"));
+        assert!(!policy.allows_url("https://account.example.com/page"));
+        assert!(policy.allows_public_asset("https://cdn.example.com/style.css"));
     }
 
     #[test]

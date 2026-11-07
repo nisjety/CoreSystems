@@ -8,7 +8,7 @@ import {
   type KeyObject,
 } from 'crypto';
 import { readFileSync } from 'fs';
-import type { InteractiveRetentionPosture } from './interactive-retention-policy';
+import type { FreshExecutionRetentionProof, InteractiveRetentionPosture } from './interactive-retention-policy';
 import {
   assertWebPolicyClaimSize,
   BASELINE_WEB_POLICY_CLAIM,
@@ -333,6 +333,7 @@ type PlaneJwtClaims = {
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
+  executionRetentionProof?: FreshExecutionRetentionProof;
   /**
    * Delegated-identity token exchange (auth-core §1, `verifyPlaneSubjectToken`
    * / `/api/:audience/token-exchange`). Set only on the exchanged service
@@ -996,6 +997,21 @@ export class ConvexTokenService {
       // for a `tenant` principal, from the same organization policy resolved at
       // mint time (the caller stamps it; see `tenantTtlCapSeconds`).
       zdr,
+      // Execution's browser-attachment receipt may persist only when Control
+      // actually resolved the interactive organization's standing posture.
+      // Do not infer this claim from `zdr`: legacy user issuance can default
+      // that value to false when no posture was provided. Service principal
+      // policy and API-key posture are not proof of an interactive org choice.
+      ...(audience === 'execution-core' &&
+      principalType === 'user' &&
+      claims.retentionPosture?.authority ===
+        'interactive-org-retention-policy' &&
+      claims.retentionPosture.zdr === false &&
+      claims.executionRetentionProof?.authority === 'fresh-interactive-org-retention-policy' &&
+      claims.executionRetentionProof.orgId === claims.orgId &&
+      claims.executionRetentionProof.zdr === false
+        ? { org_zdr: false }
+        : {}),
       // WS7.I: the org web policy, beside and independent of `zdr`.
       ...(webPolicy !== undefined ? { web_policy: webPolicy } : {}),
     };

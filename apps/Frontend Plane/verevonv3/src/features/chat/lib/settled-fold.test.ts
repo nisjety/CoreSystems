@@ -43,6 +43,7 @@ const ALL_KINDS: ConversationNodeKind[] = [
   'confidence',
   'memory-recall',
   'source-scope',
+  'search-provenance',
   'lifecycle-notices',
   'truncated',
   'tool-chips',

@@ -1,4 +1,7 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it, vi } from 'vitest'
+import { deckManifestRenderer } from './ArtifactDeckView'
 import {
   type ArtifactRenderer,
   createArtifactRendererRegistry,
@@ -73,5 +76,21 @@ describe('createArtifactRendererRegistry', () => {
     const component = () => null
     registry.register({ id: 'grid', match: () => true, priority: 0, component })
     expect(registry.resolve(artifact())?.component).toBe(component)
+  })
+})
+
+describe('the deck manifest viewer (EP-5-S4)', () => {
+  it('claims the deck kind and no other, so a document, an HTML page or code keeps its own viewer', () => {
+    expect(deckManifestRenderer.match(artifact({ kind: 'deck', content: '{}' }))).toBe(true)
+    for (const kind of ['document', 'html', 'code', 'text', 'pdf', 'spreadsheet']) {
+      expect(deckManifestRenderer.match(artifact({ kind })), kind).toBe(false)
+    }
+  })
+
+  it('resolves a deck to its own viewer when it is the only extra viewer registered', () => {
+    const registry = createArtifactRendererRegistry()
+    registry.register(deckManifestRenderer)
+    expect(registry.resolve(artifact({ kind: 'deck', content: '{}' }))?.id).toBe('deck-manifest')
+    expect(registry.resolve(artifact({ kind: 'document', content: '# Rapport' }))).toBeUndefined()
   })
 })

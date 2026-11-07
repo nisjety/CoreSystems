@@ -129,7 +129,8 @@ type SessionCoreClient interface {
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//
+	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(ctx context.Context, in *GetContextAssemblyRequest, opts ...grpc.CallOption) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(ctx context.Context, in *CompactNowRequest, opts ...grpc.CallOption) (*CompactNowResponse, error)
@@ -631,7 +632,8 @@ type SessionCoreServer interface {
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//
+	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(context.Context, *GetContextAssemblyRequest) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(context.Context, *CompactNowRequest) (*CompactNowResponse, error)
@@ -2019,6 +2021,8 @@ const (
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type ThreadAutonomyClient interface {
 	// The live grant of one thread: the rung, the reason it was granted, the plan
 	// it was approved with and when it lapses. A thread with no grant, or one
@@ -2074,6 +2078,8 @@ func (c *threadAutonomyClient) BindGrantToRun(ctx context.Context, in *BindGrant
 // is, so that SessionCore and every mock of it stay source-compatible. The
 // grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
 // the same transaction as the run update.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type ThreadAutonomyServer interface {
 	// The live grant of one thread: the rung, the reason it was granted, the plan
 	// it was approved with and when it lapses. A thread with no grant, or one
@@ -2194,6 +2200,8 @@ const (
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type MessageSearchClient interface {
 	// Search the messages of threads the caller may list, with the same owner and
 	// Space-audience rules as ListThreads. Refused with unavailable
@@ -2227,6 +2235,8 @@ func (c *messageSearchClient) SearchMessages(ctx context.Context, in *SearchMess
 // MessageSearch: full-text search over the durable conversation record. A
 // separate service, as ThreadAutonomy and SessionRetentionService are, so that
 // SessionCore and every mock of it stay source-compatible. Read-only.
+// Service name is used by generated code and deployed callers; renaming it would break them.
+// buf:lint:ignore SERVICE_SUFFIX
 type MessageSearchServer interface {
 	// Search the messages of threads the caller may list, with the same owner and
 	// Space-audience rules as ListThreads. Refused with unavailable
@@ -2913,6 +2923,131 @@ var ThreadForkService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ForkThread",
 			Handler:    _ThreadForkService_ForkThread_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	ThreadReferenceService_ReadThreadForReference_FullMethodName = "/model_plane.v1.ThreadReferenceService/ReadThreadForReference"
+)
+
+// ThreadReferenceServiceClient is the client API for ThreadReferenceService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ThreadReferenceService: reads one of the owner's earlier chat threads that the person attached
+// to a turn as a reference, for the gateway's read-only thread reference tools (EP-3 S7). A
+// separate service, as ThreadForkService is, so that SessionCore and every mock of it stay
+// source-compatible.
+type ThreadReferenceServiceClient interface {
+	// Read an outline or a page of an attached thread's active path, newest first. Owner only, with
+	// `session:read`; a zero-retention credential and a service credential are refused. Refused with
+	// failed_precondition for the current thread (`thread_reference_current_thread`), a Space or
+	// non-chat thread (`thread_reference_not_chat`), an archived thread (`thread_reference_archived`)
+	// and a thread that holds a zero-retention or waived run (`thread_reference_retention`). A thread
+	// the caller does not own answers not_found, as a missing one does. Writes nothing.
+	ReadThreadForReference(ctx context.Context, in *ReadThreadForReferenceRequest, opts ...grpc.CallOption) (*ReadThreadForReferenceResponse, error)
+}
+
+type threadReferenceServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewThreadReferenceServiceClient(cc grpc.ClientConnInterface) ThreadReferenceServiceClient {
+	return &threadReferenceServiceClient{cc}
+}
+
+func (c *threadReferenceServiceClient) ReadThreadForReference(ctx context.Context, in *ReadThreadForReferenceRequest, opts ...grpc.CallOption) (*ReadThreadForReferenceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadThreadForReferenceResponse)
+	err := c.cc.Invoke(ctx, ThreadReferenceService_ReadThreadForReference_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ThreadReferenceServiceServer is the server API for ThreadReferenceService service.
+// All implementations must embed UnimplementedThreadReferenceServiceServer
+// for forward compatibility.
+//
+// ThreadReferenceService: reads one of the owner's earlier chat threads that the person attached
+// to a turn as a reference, for the gateway's read-only thread reference tools (EP-3 S7). A
+// separate service, as ThreadForkService is, so that SessionCore and every mock of it stay
+// source-compatible.
+type ThreadReferenceServiceServer interface {
+	// Read an outline or a page of an attached thread's active path, newest first. Owner only, with
+	// `session:read`; a zero-retention credential and a service credential are refused. Refused with
+	// failed_precondition for the current thread (`thread_reference_current_thread`), a Space or
+	// non-chat thread (`thread_reference_not_chat`), an archived thread (`thread_reference_archived`)
+	// and a thread that holds a zero-retention or waived run (`thread_reference_retention`). A thread
+	// the caller does not own answers not_found, as a missing one does. Writes nothing.
+	ReadThreadForReference(context.Context, *ReadThreadForReferenceRequest) (*ReadThreadForReferenceResponse, error)
+	mustEmbedUnimplementedThreadReferenceServiceServer()
+}
+
+// UnimplementedThreadReferenceServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedThreadReferenceServiceServer struct{}
+
+func (UnimplementedThreadReferenceServiceServer) ReadThreadForReference(context.Context, *ReadThreadForReferenceRequest) (*ReadThreadForReferenceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadThreadForReference not implemented")
+}
+func (UnimplementedThreadReferenceServiceServer) mustEmbedUnimplementedThreadReferenceServiceServer() {
+}
+func (UnimplementedThreadReferenceServiceServer) testEmbeddedByValue() {}
+
+// UnsafeThreadReferenceServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ThreadReferenceServiceServer will
+// result in compilation errors.
+type UnsafeThreadReferenceServiceServer interface {
+	mustEmbedUnimplementedThreadReferenceServiceServer()
+}
+
+func RegisterThreadReferenceServiceServer(s grpc.ServiceRegistrar, srv ThreadReferenceServiceServer) {
+	// If the following call panics, it indicates UnimplementedThreadReferenceServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ThreadReferenceService_ServiceDesc, srv)
+}
+
+func _ThreadReferenceService_ReadThreadForReference_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadThreadForReferenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadReferenceServiceServer).ReadThreadForReference(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadReferenceService_ReadThreadForReference_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadReferenceServiceServer).ReadThreadForReference(ctx, req.(*ReadThreadForReferenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ThreadReferenceService_ServiceDesc is the grpc.ServiceDesc for ThreadReferenceService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ThreadReferenceService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ThreadReferenceService",
+	HandlerType: (*ThreadReferenceServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ReadThreadForReference",
+			Handler:    _ThreadReferenceService_ReadThreadForReference_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

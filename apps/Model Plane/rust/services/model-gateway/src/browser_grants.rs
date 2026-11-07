@@ -62,10 +62,9 @@ const MAX_REQUEST_DOMAINS: usize = 32;
 const MAX_DOMAIN_LEN: usize = 253;
 const MAX_GRANT_ID_LEN: usize = 128;
 const REVOKE_REASON: &str = "session_closed";
-/// The only `kind` a caller may ask for besides the ordinary session grant. It
-/// is the broker that decides eligibility (user principal, policy switch); this
-/// is an allow-list so an unknown kind is a 400 here, not a broker 5xx.
+/// The broker decides eligibility for the explicitly supported grant requests.
 const KIND_HUMAN_BROWSE: &str = "human_browse";
+const KIND_ASSISTANT_TASK: &str = "assistant_task";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -83,7 +82,7 @@ struct IssueBrowserGrantRequest {
     allowed_domains: Vec<String>,
     #[serde(default)]
     mode: Option<String>,
-    /// `None` (a session grant) or `"human_browse"`.
+    /// `None` (an ordinary session), `"human_browse"` or `"assistant_task"`.
     #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
@@ -109,7 +108,7 @@ fn require_user(claims: &Claims) -> Result<(), ApiError> {
 }
 
 /// What a valid issue request asks for: the browser mode and the grant kind
-/// (`""` for an ordinary session grant, otherwise `KIND_HUMAN_BROWSE`).
+/// (`""` for an ordinary session grant).
 struct ValidatedIssue {
     mode: &'static str,
     grant_kind: &'static str,
@@ -119,6 +118,7 @@ fn validate_request(req: &IssueBrowserGrantRequest) -> Result<ValidatedIssue, Ap
     let grant_kind = match req.kind.as_deref().map(str::trim) {
         None | Some("") => "",
         Some(KIND_HUMAN_BROWSE) => KIND_HUMAN_BROWSE,
+        Some(KIND_ASSISTANT_TASK) => KIND_ASSISTANT_TASK,
         Some(_) => return Err(error(StatusCode::BAD_REQUEST, "unsupported_grant_kind")),
     };
     if grant_kind == KIND_HUMAN_BROWSE {
@@ -144,6 +144,12 @@ fn validate_request(req: &IssueBrowserGrantRequest) -> Result<ValidatedIssue, Ap
         Some("local") => "local",
         Some(_) => return Err(error(StatusCode::BAD_REQUEST, "unsupported_browser_mode")),
     };
+    if grant_kind == KIND_ASSISTANT_TASK && (mode != "cloud" || req.allowed_domains.len() != 1) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "assistant_task_requires_one_cloud_host",
+        ));
+    }
     Ok(ValidatedIssue { mode, grant_kind })
 }
 
@@ -1101,11 +1107,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_assistant_task_grant_uses_the_delegated_owner_and_one_cloud_host() {
+        let recorder = Recorder::default();
+        let router = app(recorder.clone(), user_claims(false), true).await;
+        let (status, body) = send(
+            router,
+            "POST",
+            "/v1/browser/grants",
+            json!({
+                "kind": "assistant_task",
+                "allowed_domains": ["example.com"],
+                "org_id": "org-attacker",
+                "parent_grant_id": "unrelated-grant",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let seen = recorder.acquired.lock().unwrap();
+        assert_eq!(seen[0].grant_kind, "assistant_task");
+        assert_eq!(seen[0].org_id, "org-a");
+        assert_eq!(seen[0].mode, "cloud");
+        assert_eq!(seen[0].allowed_domains, ["example.com"]);
+        assert!(seen[0].parent_grant_id.is_empty());
+    }
+
+    #[tokio::test]
     async fn issue_rejects_an_unknown_kind_and_human_browse_with_hosts() {
         for body in [
             json!({ "kind": "admin", "allowed_domains": ["example.com"] }),
             json!({ "kind": "attach" }),
             json!({ "kind": "human_browse", "allowed_domains": ["example.com"] }),
+            json!({ "kind": "assistant_task", "allowed_domains": ["example.com", "other.org"] }),
+            json!({ "kind": "assistant_task", "mode": "local", "allowed_domains": ["example.com"] }),
         ] {
             let recorder = Recorder::default();
             let router = app(recorder.clone(), user_claims(false), true).await;

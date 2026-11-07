@@ -15,6 +15,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 use mp_contracts::model_plane::v1::{
     self as pb,
     approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
+    artifact_revision_service_server::ArtifactRevisionServiceServer,
     attention_service_server::AttentionServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
@@ -30,12 +31,17 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    skill_version_service_server::SkillVersionServiceServer,
     space_attention_server::SpaceAttentionServer,
     space_events_server::SpaceEventsServer,
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
+    thread_export_service_server::ThreadExportServiceServer,
     thread_fork_service_server::ThreadForkServiceServer,
+    thread_reference_service_server::ThreadReferenceServiceServer,
+    thread_goal_service_server::ThreadGoalServiceServer,
+    thread_share_service_server::ThreadShareServiceServer,
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
@@ -924,6 +930,12 @@ pub(crate) async fn delete_thread_rows(
         "DELETE FROM dream_runs WHERE thread_id = $1
             OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM memory_index WHERE thread_id = $1",
+        // EP-3 S2: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM artifact_revisions WHERE thread_id = $1",
+        // EP-7 S1: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM thread_goals WHERE thread_id = $1",
+        // EP-12 S14: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+        "DELETE FROM thread_share_snapshots WHERE thread_id = $1",
     ] {
         sqlx::query(query)
             .bind(thread_id)
@@ -2095,10 +2107,22 @@ fn validate_scheduled_run_result_request(
 /// row learns its outcome, in one transaction. Locks run and thread, then the
 /// receipt, the order the other run writes use. A replay of the same terminal
 /// outcome returns the message the first call appended.
-#[allow(clippy::result_large_err, clippy::too_many_lines)]
+#[allow(clippy::result_large_err)]
 async fn record_scheduled_run_result_inner(
     pool: &PgPool,
     req: pb::RecordScheduledRunResultRequest,
+) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+    record_scheduled_run_result_with(pool, req, crate::thread_goals::thread_goals_enabled()).await
+}
+
+/// [`record_scheduled_run_result_inner`] with the goal ledger switch passed in. With `goal_ledger`
+/// (`SESSION_CORE_THREAD_GOALS_ENABLED`) a fire of a goal-bound schedule also writes its
+/// unattended goal turn in the same transaction (EP-7 S6); off, nothing here reads a goal.
+#[allow(clippy::result_large_err, clippy::too_many_lines)]
+async fn record_scheduled_run_result_with(
+    pool: &PgPool,
+    req: pb::RecordScheduledRunResultRequest,
+    goal_ledger: bool,
 ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
     let withheld_effects = validate_scheduled_run_result_request(&req)?;
 
@@ -2248,6 +2272,21 @@ async fn record_scheduled_run_result_inner(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    if goal_ledger {
+        record_unattended_goal_turn(
+            &mut tx,
+            &UnattendedFire {
+                schedule_id: &schedule_id,
+                org_id: &req.org_id,
+                run_id: &req.run_id,
+                scheduled_thread_id: &thread_id,
+                outcome: unattended_turn_outcome(&req.status),
+                input_tokens: i64::from(req.input_tokens),
+                output_tokens: i64::from(req.output_tokens),
+            },
+        )
+        .await?;
+    }
     tx.commit()
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
@@ -2256,6 +2295,600 @@ async fn record_scheduled_run_result_inner(
         status: req.status,
         message_id: message_id.unwrap_or_default(),
     }))
+}
+
+/// The most unattended runs one goal-bound schedule may make (EP-7 S6), and what a template that
+/// names none gets. The gateway refuses a larger cap at create; this bound holds whatever reached
+/// the table.
+const MAX_UNATTENDED_GOAL_RUNS: i32 = 20;
+
+/// One finished fire of a goal-bound schedule, as its goal turn records it: ids, a closed outcome
+/// and counts, never the answer.
+struct UnattendedFire<'a> {
+    schedule_id: &'a str,
+    org_id: &'a str,
+    run_id: &'a str,
+    scheduled_thread_id: &'a str,
+    outcome: &'static str,
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+/// The goal-turn outcome of a scheduled step status (the `thread_goal_turns` CHECK).
+fn unattended_turn_outcome(step_status: &str) -> &'static str {
+    match step_status {
+        "completed" => "completed",
+        "failed" => "failed",
+        _ => "unknown",
+    }
+}
+
+/// The counters of a goal an unattended turn was added to.
+#[derive(sqlx::FromRow)]
+struct UnattendedGoalCounters {
+    status: String,
+    token_budget: Option<i64>,
+    tokens_used: i64,
+    cost_budget_usd_micros: Option<i64>,
+    cost_used_usd_micros: i64,
+    max_turns: i32,
+    turns_used: i32,
+}
+
+/// The stop state of a goal after an unattended turn: the rule of `thread_goals::stop_state`
+/// (a spent budget is named before the turn cap; a cap not set never stops the goal), so an
+/// unattended fire closes a goal exactly as an attended settle does.
+fn unattended_stop_state(goal: &UnattendedGoalCounters) -> Option<(&'static str, &'static str)> {
+    if goal
+        .token_budget
+        .is_some_and(|budget| goal.tokens_used >= budget)
+    {
+        return Some(("budget_reached", "token_budget"));
+    }
+    if goal
+        .cost_budget_usd_micros
+        .is_some_and(|budget| goal.cost_used_usd_micros >= budget)
+    {
+        return Some(("budget_reached", "cost_budget"));
+    }
+    if goal.turns_used >= goal.max_turns {
+        return Some(("turns_reached", "max_turns"));
+    }
+    None
+}
+
+/// Ledger one fire of a goal-bound schedule on its goal (EP-7 S6), inside the scheduled result's
+/// transaction. The turn is written settled and counted, with the step's tokens as metered usage
+/// and the scheduled thread its answer went to (D9). A cap the turn reaches closes the goal, and
+/// the 0094 trigger pauses the schedule with it in this transaction; a schedule that made the runs
+/// its template allows is paused here (`goal_runs_reached`). A schedule without a goal, or whose
+/// goal is gone, writes nothing. A fire that lands after its goal closed is still ledgered: what a
+/// run spent is spent.
+#[allow(clippy::result_large_err)]
+async fn record_unattended_goal_turn(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fire: &UnattendedFire<'_>,
+) -> Result<(), Status> {
+    let internal = |error: sqlx::Error| Status::internal(error.to_string());
+    // Read without a row lock: the link and the digest-bound template never change (0094 guard),
+    // and locking the schedule before the goal would invert the goal-then-schedule order a goal
+    // close takes through the pause trigger.
+    let link: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT goal_id,
+                CASE WHEN jsonb_typeof(task_template -> 'goal_max_runs') = 'number'
+                     THEN LEAST((task_template ->> 'goal_max_runs')::numeric, 1000)::bigint END
+         FROM cron_schedules
+         WHERE id = $1 AND org_id = $2 AND goal_id IS NOT NULL",
+    )
+    .bind(fire.schedule_id)
+    .bind(fire.org_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    let Some((goal_id, max_runs)) = link else {
+        return Ok(());
+    };
+    // The goal's row lock orders this write with an attended claim or settle of the same goal.
+    let locked: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE")
+            .bind(&goal_id)
+            .bind(fire.org_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(internal)?;
+    if locked.is_none() {
+        return Ok(());
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO thread_goal_turns
+             (goal_id, turn_no, run_id, org_id, claim_expires_at, settled_at, outcome,
+              metered_input_tokens, metered_output_tokens, usage_source, counted,
+              unattended, scheduled_thread_id)
+         SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, $3, now(), now(), $4, $5, $6,
+                'run_response', true, true, $7
+         FROM thread_goal_turns WHERE goal_id = $1
+         ON CONFLICT (goal_id, run_id) WHERE run_id IS NOT NULL DO NOTHING",
+    )
+    .bind(&goal_id)
+    .bind(fire.run_id)
+    .bind(fire.org_id)
+    .bind(fire.outcome)
+    .bind(fire.input_tokens)
+    .bind(fire.output_tokens)
+    .bind(fire.scheduled_thread_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if inserted == 0 {
+        // This run's turn is ledgered already.
+        return Ok(());
+    }
+    let goal: UnattendedGoalCounters = sqlx::query_as(
+        "UPDATE thread_goals
+         SET tokens_used = tokens_used + $2, turns_used = turns_used + 1, updated_at = now()
+         WHERE id = $1
+         RETURNING status, token_budget, tokens_used, cost_budget_usd_micros,
+                   cost_used_usd_micros, max_turns, turns_used",
+    )
+    .bind(&goal_id)
+    .bind(fire.input_tokens.saturating_add(fire.output_tokens))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if matches!(goal.status.as_str(), "active" | "paused") {
+        if let Some((stop, reason)) = unattended_stop_state(&goal) {
+            sqlx::query(
+                "UPDATE thread_goals
+                 SET status = $2, status_reason = $3, revision = revision + 1,
+                     updated_at = now(), closed_at = now()
+                 WHERE id = $1 AND status IN ('active', 'paused')",
+            )
+            .bind(&goal_id)
+            .bind(stop)
+            .bind(reason)
+            .execute(&mut **tx)
+            .await
+            .map_err(internal)?;
+        }
+    }
+    let cap = max_runs
+        .and_then(|runs| i32::try_from(runs).ok())
+        .filter(|runs| (1..=MAX_UNATTENDED_GOAL_RUNS).contains(runs))
+        .unwrap_or(MAX_UNATTENDED_GOAL_RUNS);
+    let runs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM thread_goal_turns
+         WHERE goal_id = $1 AND unattended
+           AND run_id IN (SELECT run_id FROM cron_fires
+                          WHERE schedule_id = $2 AND run_id IS NOT NULL)",
+    )
+    .bind(&goal_id)
+    .bind(fire.schedule_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if runs >= i64::from(cap) {
+        sqlx::query(
+            "UPDATE cron_schedules
+             SET enabled = false, goal_paused_reason = 'goal_runs_reached', updated_at = now()
+             WHERE id = $1 AND enabled",
+        )
+        .bind(fire.schedule_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod unattended_goal_tests {
+    use super::{
+        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, unattended_stop_state,
+        unattended_turn_outcome, UnattendedGoalCounters,
+    };
+
+    fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
+        UnattendedGoalCounters {
+            status: "active".to_owned(),
+            token_budget: tokens.0,
+            tokens_used: tokens.1,
+            cost_budget_usd_micros: None,
+            cost_used_usd_micros: 0,
+            max_turns: turns.0,
+            turns_used: turns.1,
+        }
+    }
+
+    #[test]
+    fn unattended_turn_outcome_is_a_closed_token() {
+        assert_eq!(unattended_turn_outcome("completed"), "completed");
+        assert_eq!(unattended_turn_outcome("failed"), "failed");
+        assert_eq!(unattended_turn_outcome("unknown_outcome"), "unknown");
+        assert_eq!(unattended_turn_outcome("anything else"), "unknown");
+    }
+
+    #[test]
+    fn unattended_stop_names_budget_before_turns() {
+        assert_eq!(unattended_stop_state(&counters((None, 9_000), (10, 3))), None);
+        assert_eq!(
+            unattended_stop_state(&counters((Some(1_000), 1_000), (10, 10))),
+            Some(("budget_reached", "token_budget"))
+        );
+        assert_eq!(
+            unattended_stop_state(&counters((Some(1_000), 10), (3, 3))),
+            Some(("turns_reached", "max_turns"))
+        );
+    }
+
+    // The database tests below run with `--ignored` against a disposable Postgres, as the other
+    // session-core database tests do. They pass the goal ledger switch in, so no env is needed.
+
+    const OWNER: &str = "user-unattended-owner";
+
+    struct Seeded {
+        org_id: String,
+        goal_id: String,
+        schedule_id: String,
+    }
+
+    async fn connect() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    /// A personal thread with an active goal, and a schedule bound to it through the 0094 trigger.
+    async fn seed_goal_schedule(pool: &sqlx::PgPool, suffix: &str, max_runs: i64) -> Seeded {
+        let org_id = format!("unattended-org-{suffix}");
+        let thread_id = format!("unattended-thread-{suffix}");
+        let goal_id = format!("goal_{suffix}");
+        let schedule_id = format!("unattended-schedule-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO thread_goals (id, thread_id, org_id, user_id, objective, max_turns, status)
+             VALUES ($1, $2, $3, $4, 'collect the release notes', 10, 'active')",
+        )
+        .bind(&goal_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .execute(pool)
+        .await
+        .expect("seed goal");
+        sqlx::query(
+            "INSERT INTO cron_schedules
+                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
+             VALUES ($1, $2, $1, '0 * * * *', $3, $3, $4)",
+        )
+        .bind(&schedule_id)
+        .bind(&org_id)
+        .bind(OWNER)
+        .bind(serde_json::json!({
+            "kind": "cron",
+            "title": "collect the release notes",
+            "purpose": "goal",
+            "goal_id": goal_id,
+            "goal_max_runs": max_runs,
+        }))
+        .execute(pool)
+        .await
+        .expect("seed goal-bound schedule");
+        Seeded {
+            org_id,
+            goal_id,
+            schedule_id,
+        }
+    }
+
+    /// One claimed scheduled step of `seeded`'s schedule, with its fire, ready for a result.
+    async fn claimed_fire(
+        pool: &sqlx::PgPool,
+        seeded: &Seeded,
+        fire: &str,
+    ) -> pb::RecordScheduledRunResultRequest {
+        let run_id = format!("unattended-run-{fire}");
+        let thread_id = format!("unattended-scheduled-thread-{fire}");
+        let space_id = format!("unattended-space-{fire}");
+        let fire_key = format!("fire-{fire}");
+        let step_id = format!("{run_id}:step:0");
+        let idempotency_key = format!("{fire_key}:step:0");
+        let template_digest = format!("sha256:{}", "a".repeat(64));
+        let audience_hash = format!("sha256:{}", "c".repeat(64));
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$1,$2,'service:orchestrator-core',$3,$4,$5,1,$6,$7,$8,1,'space')",
+        )
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(&space_id)
+        .bind(format!("decision-{fire}"))
+        .bind(format!("audience-{fire}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{fire}"))
+        .bind(format!("resource-{fire}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO runs
+             (id, thread_id, goal, org_id, user_id, status, metadata,
+              space_id, space_decision_ref, recipient_audience_ref,
+              recipient_audience_revision, recipient_audience_hash,
+              privacy_policy_ref, resource_authorization_ref, authority_revision,
+              retention_class)
+             VALUES ($1,$2,'collect the release notes',$3,'service:orchestrator-core',
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1,'persistent')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&seeded.org_id)
+        .bind(serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": seeded.schedule_id,
+            "fire_key": fire_key,
+            "template_digest": template_digest,
+            "space_id": space_id,
+        }))
+        .bind(&space_id)
+        .bind(format!("decision-{fire}"))
+        .bind(format!("audience-{fire}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{fire}"))
+        .bind(format!("resource-{fire}"))
+        .execute(pool)
+        .await
+        .expect("seed scheduled run");
+        sqlx::query(
+            "INSERT INTO cron_fires (id, schedule_id, status, fire_key)
+             VALUES ($1, $2, 'pending', $3)",
+        )
+        .bind(format!("fire-row-{fire}"))
+        .bind(&seeded.schedule_id)
+        .bind(&fire_key)
+        .execute(pool)
+        .await
+        .expect("seed fire");
+        let claimed = claim_scheduled_step_inner(
+            pool,
+            pb::ClaimScheduledStepRequest {
+                run_id: run_id.clone(),
+                thread_id,
+                org_id: seeded.org_id.clone(),
+                space_id,
+                schedule_id: seeded.schedule_id.clone(),
+                fire_key,
+                template_digest,
+                step_id: step_id.clone(),
+                step_index: 0,
+                policy_digest: format!("sha256:{}", "b".repeat(64)),
+                idempotency_key: idempotency_key.clone(),
+            },
+        )
+        .await
+        .expect("claim scheduled step")
+        .into_inner();
+        pb::RecordScheduledRunResultRequest {
+            run_id,
+            step_id,
+            org_id: seeded.org_id.clone(),
+            idempotency_key,
+            receipt_id: claimed.receipt_id,
+            status: "completed".to_owned(),
+            output: "the release notes so far".to_owned(),
+            input_tokens: 1_200,
+            output_tokens: 300,
+            ..Default::default()
+        }
+    }
+
+    async fn schedule_state(pool: &sqlx::PgPool, schedule_id: &str) -> (bool, Option<String>) {
+        sqlx::query_as("SELECT enabled, goal_paused_reason FROM cron_schedules WHERE id = $1")
+            .bind(schedule_id)
+            .fetch_one(pool)
+            .await
+            .expect("read schedule")
+    }
+
+    /// EP-7 S6: a fire of a goal-bound schedule writes one settled, counted, unattended turn with
+    /// the step's tokens and the scheduled thread, once; a replay adds nothing, and the switch off
+    /// writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_result_with_goal_writes_unattended_turn() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let bound: Option<String> =
+            sqlx::query_scalar("SELECT goal_id FROM cron_schedules WHERE id = $1")
+                .bind(&seeded.schedule_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read link");
+        assert_eq!(bound.as_deref(), Some(seeded.goal_id.as_str()));
+
+        let off = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, off, false)
+            .await
+            .expect("result with the switch off");
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turns WHERE goal_id = $1")
+                .bind(&seeded.goal_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count turns");
+        assert_eq!(turns, 0, "the switch off writes no goal turn");
+
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, request.clone(), true)
+            .await
+            .expect("first result");
+        record_scheduled_run_result_with(&pool, request.clone(), true)
+            .await
+            .expect("replayed result");
+        let (outcome, unattended, counted, input, output, scheduled_thread): (
+            String,
+            bool,
+            bool,
+            i64,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT outcome, unattended, counted, metered_input_tokens, metered_output_tokens,
+                    scheduled_thread_id
+             FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2",
+        )
+        .bind(&seeded.goal_id)
+        .bind(&request.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("one unattended turn");
+        assert_eq!(outcome, "completed");
+        assert!(unattended && counted);
+        assert_eq!((input, output), (1_200, 300));
+        let scheduled_thread = scheduled_thread.unwrap_or_default();
+        assert!(scheduled_thread.starts_with("unattended-scheduled-thread-"));
+        let (tokens, turns): (i64, i32) =
+            sqlx::query_as("SELECT tokens_used, turns_used FROM thread_goals WHERE id = $1")
+                .bind(&seeded.goal_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read counters");
+        assert_eq!((tokens, turns), (1_500, 1), "a replay adds nothing");
+        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+    }
+
+    /// EP-7 S6: a goal that leaves `active` pauses its schedule in the same transaction, and the
+    /// schedule is re-enabled only while the goal is active; a schedule that ran its runs stays off.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn goal_close_pauses_schedule() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
+
+        sqlx::query("UPDATE thread_goals SET status = 'paused' WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("pause goal");
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_paused".to_owned()))
+        );
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a paused goal's schedule stays off");
+        sqlx::query("UPDATE thread_goals SET status = 'active' WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("resume goal");
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect("re-enable under an active goal");
+        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+
+        // goal_max_runs = 1: the first fire pauses the schedule for good.
+        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
+        record_scheduled_run_result_with(&pool, request, true)
+            .await
+            .expect("result");
+        assert_eq!(
+            schedule_state(&pool, &seeded.schedule_id).await,
+            (false, Some("goal_runs_reached".to_owned()))
+        );
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a schedule that ran its runs stays off");
+
+        // A goal closed on a cap is a close: a second schedule's goal shows it.
+        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+        sqlx::query(
+            "UPDATE thread_goals SET status = 'met', status_reason = '', closed_at = now()
+             WHERE id = $1",
+        )
+        .bind(&other.goal_id)
+        .execute(&pool)
+        .await
+        .expect("close goal");
+        assert_eq!(
+            schedule_state(&pool, &other.schedule_id).await,
+            (false, Some("goal_closed".to_owned()))
+        );
+    }
+
+    /// EP-7 S6: deleting a goal unbinds and disables its schedule, which never runs on as an
+    /// ordinary schedule; a template naming a goal the creator does not own is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn goal_link_set_null_on_goal_delete() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        sqlx::query("DELETE FROM thread_goals WHERE id = $1")
+            .bind(&seeded.goal_id)
+            .execute(&pool)
+            .await
+            .expect("delete goal");
+        let (goal_id, enabled, reason): (Option<String>, bool, Option<String>) = sqlx::query_as(
+            "SELECT goal_id, enabled, goal_paused_reason FROM cron_schedules WHERE id = $1",
+        )
+        .bind(&seeded.schedule_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read schedule");
+        assert_eq!(goal_id, None);
+        assert!(!enabled);
+        assert_eq!(reason.as_deref(), Some("goal_deleted"));
+        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
+            .bind(&seeded.schedule_id)
+            .execute(&pool)
+            .await
+            .expect_err("a schedule whose goal is gone stays off");
+
+        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
+        let refused = sqlx::query(
+            "INSERT INTO cron_schedules
+                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
+             VALUES ($1, $2, $1, '0 * * * *', 'someone-else', 'someone-else', $3)",
+        )
+        .bind(format!("foreign-{}", other.schedule_id))
+        .bind(&other.org_id)
+        .bind(serde_json::json!({ "goal_id": other.goal_id }))
+        .execute(&pool)
+        .await
+        .expect_err("a goal another person owns is never bound");
+        assert!(refused.to_string().contains("thread_goal_schedule_binding_refused"));
+    }
 }
 
 /// Append a scheduled run's answer to its thread inside the caller's transaction
@@ -2380,6 +3013,53 @@ fn skill_write_skipped(reason: &str) -> pb::UpsertAgentSkillResponse {
         skip_reason: reason.to_owned(),
         revision: 0,
     }
+}
+
+/// The skill lint mode (`SKILL_LINT_MODE`), read once. Off unless the value is
+/// exactly `report` or `enforce`.
+fn skill_lint_mode() -> mp_contracts::skill_lint::Mode {
+    static MODE: std::sync::OnceLock<mp_contracts::skill_lint::Mode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        mp_contracts::skill_lint::Mode::from_env_value(
+            env::var(mp_contracts::skill_lint::MODE_ENV).ok().as_deref(),
+        )
+    })
+}
+
+/// Runs the shared skill lint on one write. Off runs nothing; report and enforce
+/// count every finding by code; only enforce refuses, with `skill_lint:<code>` of
+/// the first error. A warning never refuses, and no finding carries the text.
+fn skill_lint_refusal(
+    mode: mp_contracts::skill_lint::Mode,
+    req: &pb::UpsertAgentSkillRequest,
+) -> Option<String> {
+    use mp_contracts::skill_lint::{first_error, lint, Mode, SkillInput, SKIP_REASON_PREFIX};
+    if mode == Mode::Off {
+        return None;
+    }
+    let findings = lint(&SkillInput {
+        name: &req.name,
+        description: &req.description,
+        content: &req.content,
+        trigger_keywords: &req.trigger_keywords,
+        tool_restrictions: &req.tool_restrictions,
+        frontmatter_name: None,
+        // This RPC writes skills only: no kind rules and no settings apply.
+        ..SkillInput::default()
+    });
+    for rule in &findings {
+        metrics::counter!(
+            "skill_lint_findings_total",
+            "code" => rule.code,
+            "severity" => rule.severity.as_str(),
+            "mode" => mode.as_str()
+        )
+        .increment(1);
+    }
+    if mode != Mode::Enforce {
+        return None;
+    }
+    first_error(&findings).map(|rule| format!("{SKIP_REASON_PREFIX}{}", rule.code))
 }
 
 /// Why a learned skill may not be written for this owner, or `None`. Their own
@@ -5272,7 +5952,9 @@ pub(crate) async fn append_message_in_tx_as(
     // thread extracts nothing and records no dream run.
     let contained =
         crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
-    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
+    // EP-12 D2: an API key has no memory, so its threads extract nothing for anyone.
+    let key_owned = crate::auth::is_api_key_owner(&thread.1);
+    let candidates = if conversation_only || post_kind == "post" || key_owned { Vec::new() } else if contained {
         crate::space::memory_scope::record_contained("append_extract");
         // EP-8 S6: with Space memory switched on, what the room states is kept for the room
         // (`scope = 'space'`, stamped with this message's audience), never for its owner; off, the
@@ -6384,17 +7066,6 @@ mod persona_db_tests {
     }
 }
 
-/// The run metadata stamped at birth (WS20 S2). A person's run is a chat run. A
-/// system owner's run gets no stamp here: a scheduled run is stamped by its own
-/// binding, and an unstamped run reads as chat.
-fn run_origin_at_birth(user_id: &str) -> serde_json::Value {
-    if crate::auth::is_system_run_owner(user_id) {
-        serde_json::json!({})
-    } else {
-        serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Chat.as_str() })
-    }
-}
-
 /// Core of `SessionCore::start_run`, factored out to keep the trait method
 /// small. Inserts the run row and its `RUN_STARTED` event in one tx.
 pub(crate) async fn start_run_inner(
@@ -6402,6 +7073,19 @@ pub(crate) async fn start_run_inner(
     req: pb::StartRunRequest,
     requested_run_id: Option<String>,
     retention: crate::retention_receipt::RunRetention,
+) -> Result<Response<pb::StartRunResponse>, Status> {
+    start_run_inner_stamped(pool, req, requested_run_id, retention, None).await
+}
+
+/// [`start_run_inner`] for a run an API key starts: `api_key` names the key in
+/// the run's origin stamp (EP-12 S4). Only `start_run` passes one, from the
+/// verified caller.
+pub(crate) async fn start_run_inner_stamped(
+    pool: &PgPool,
+    req: pb::StartRunRequest,
+    requested_run_id: Option<String>,
+    retention: crate::retention_receipt::RunRetention,
+    api_key: Option<crate::run_origin_stamp::ApiKeyStamp<'_>>,
 ) -> Result<Response<pb::StartRunResponse>, Status> {
     use crate::retention_receipt::{self, RunRetention};
     let requested_run_id = requested_run_id.filter(|value| !value.trim().is_empty());
@@ -6436,6 +7120,21 @@ pub(crate) async fn start_run_inner(
         retention.inherit_from(Some(&parent))?
     };
 
+    // EP-12 S1: a child run inherits its parent's origin token behind
+    // SESSION_RUN_ORIGIN_INHERIT. The receipt above has just verified the parent as
+    // this owner's run in this org, so the parent is read here.
+    let inherited_origin = crate::run_origin_stamp::inherited_origin(
+        &mut tx,
+        &req.org_id,
+        &req.parent_run_id,
+        crate::run_origin_stamp::inherit_enabled(
+            std::env::var(crate::run_origin_stamp::INHERIT_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .await?;
+
     // P0.4 residency: stamp the configured Model-Plane region (EU default,
     // Sweden Central) onto the run so its processing region is auditable.
     let residency = configured_residency();
@@ -6464,7 +7163,7 @@ pub(crate) async fn start_run_inner(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
-    .bind(run_origin_at_birth(&req.user_id))
+    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin, api_key))
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -8151,7 +8850,8 @@ impl SessionCore for SessionService {
             // workflow (`runs.thread_id` is NOT NULL REFERENCES threads(id)), so
             // the same allowlisted principals may own a thread. The scope is
             // shared with start_run: the thread exists only to hold the run.
-            let user_id = match caller.user_id() {
+            // An API key owns the threads it creates (EP-12 D2); its owner id is the key.
+            let user_id = match caller.owner_id() {
                 Some(user_id) => user_id.to_owned(),
                 None => authorize_system_run_owner(&caller)?,
             };
@@ -8208,7 +8908,8 @@ impl SessionCore for SessionService {
             // workflow fired by cron has no person — a Temporal activity can only
             // present a service credential, and auth-core mints no user
             // delegation — so an allowlisted service may own the run itself.
-            let owner = match caller.user_id() {
+            // An API key owns its runs like a person, in its own threads only (EP-12 D2).
+            let owner = match caller.owner_id() {
                 Some(user_id) => {
                     authorize_thread_owner(
                         &self.pool,
@@ -8245,7 +8946,8 @@ impl SessionCore for SessionService {
             // waived; a system owner is a service credential, which carries no
             // waiver, so its run is persistent.
             let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
-            start_run_inner(&self.pool, req, None, retention).await
+            let api_key = crate::run_origin_stamp::ApiKeyStamp::of(&caller);
+            start_run_inner_stamped(&self.pool, req, None, retention, api_key).await
         }
         .await;
         record_metrics("start_run", started, result.is_ok());
@@ -8882,24 +9584,19 @@ impl SessionCore for SessionService {
                 }
                 ("user", owner.to_owned(), "proposed", false)
             } else {
+                // A human write is accepted and keeps `enabled`, so only a person may
+                // make one. A service holding the write scope could otherwise write an
+                // enabled org-wide skill by claiming origin "user" (D2-509).
+                let Some(person) = caller.user_id() else {
+                    return Ok(Response::new(skill_write_skipped("origin_requires_person")));
+                };
                 match req.scope.as_str() {
                     "" | "org" => ("org", String::new(), "accepted", req.enabled),
                     "user" => {
-                        let owner = match caller.user_id() {
-                            Some(verified) => {
-                                if !req.owner_user_id.is_empty() {
-                                    caller.authorize_user(&req.owner_user_id)?;
-                                }
-                                verified.to_owned()
-                            }
-                            None => req.owner_user_id.trim().to_owned(),
-                        };
-                        if owner.is_empty() {
-                            return Err(Status::invalid_argument(
-                                "owner_user_id is required for a user-scoped skill",
-                            ));
+                        if !req.owner_user_id.is_empty() {
+                            caller.authorize_user(&req.owner_user_id)?;
                         }
-                        ("user", owner, "accepted", req.enabled)
+                        ("user", person.to_owned(), "accepted", req.enabled)
                     }
                     other => {
                         return Err(Status::invalid_argument(format!("invalid scope: {other}")));
@@ -8970,7 +9667,14 @@ impl SessionCore for SessionService {
             ) {
                 return Ok(Response::new(skill_write_skipped(&code.skill_token())));
             }
-            // The conflict key is (org, scope, owner, name). A learned skill
+            // The shared skill lint (EP-11 S4), the same rules capability-core's routes run.
+            if let Some(token) = skill_lint_refusal(skill_lint_mode(), &req) {
+                return Ok(Response::new(skill_write_skipped(&token)));
+            }
+            // The conflict key is (org, kind, scope, scope_id, owner, name), the
+            // unique index of migration 0109; this RPC writes only kind 'skill' with
+            // an empty scope_id (the column defaults), so a template or preset of the
+            // same name is never overwritten by a skill write. A learned skill
             // refreshes only a proposal it wrote itself and never touches
             // enabled, scope, owner or review_state; a human write keeps setting
             // `enabled` but cannot switch on a proposal nobody accepted.
@@ -8983,7 +9687,7 @@ impl SessionCore for SessionService {
                          scope, owner_user_id, review_state, source_run_id,
                          source_thread_id, proposal_reason, created_at, updated_at)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
-                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                     ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
@@ -9005,7 +9709,7 @@ impl SessionCore for SessionService {
                          scope, owner_user_id, review_state, source_run_id,
                          source_thread_id, proposal_reason, created_at, updated_at)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
-                     ON CONFLICT (org_id, scope, owner_user_id, name) DO UPDATE SET
+                     ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
@@ -9054,10 +9758,13 @@ impl SessionCore for SessionService {
                 }
                 None => {
                     // Only a learned write can lose a conflict. Say why: the row
-                    // is a human's, or its owner already decided on it.
+                    // is a human's, or its owner already decided on it. The row is
+                    // the one the conflict key named: a skill, never a template or
+                    // preset of the same name (EP-11 S6).
                     let existing: Option<(String, String)> = sqlx::query_as(
                         "SELECT origin, review_state FROM agent_skills
-                         WHERE org_id = $1 AND scope = $2 AND owner_user_id = $3 AND name = $4",
+                         WHERE org_id = $1 AND scope = $2 AND owner_user_id = $3 AND name = $4
+                           AND kind = 'skill' AND scope_id = ''",
                     )
                     .bind(&req.org_id)
                     .bind(scope)
@@ -9242,12 +9949,19 @@ impl SessionCore for SessionService {
             };
             caller.authorize_org(&req.org_id)?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
-            let patch = serde_json::json!({
-                "run_context": mp_contracts::run_context::status_json(status),
-            });
+            // Merged one level deeper than the other metadata keys (EP-11 S3): the
+            // Ask path stamps skill pins alone, after or before the parts, and
+            // neither stamp may erase the other. A status with the three parts
+            // writes the same keys it always did.
+            let patch = mp_contracts::run_context::status_json(status);
             let updated = sqlx::query(
                 "UPDATE runs
-                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                          || jsonb_build_object(
+                               'run_context',
+                               CASE WHEN jsonb_typeof(metadata -> 'run_context') = 'object'
+                                    THEN metadata -> 'run_context'
+                                    ELSE '{}'::jsonb END || $3::jsonb),
                         updated_at = now()
                   WHERE id = $1 AND org_id = $2",
             )
@@ -9356,6 +10070,10 @@ impl SessionCore for SessionService {
             proposal_reason: String,
             updated_at: DateTime<Utc>,
             revision: i64,
+            version: i32,
+            digest: String,
+            kind: String,
+            settings: sqlx::types::Json<serde_json::Value>,
         }
 
         let started = Instant::now();
@@ -9367,6 +10085,7 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("org_id is required"));
             }
             caller.authorize_org(&req.org_id)?;
+            let kinds = agent_skill_kinds(&req.kinds)?;
             // Ownership/sharing (SKILL-1): mirrors capability-core's
             // SkillsHandler.listOrCreate, the correct reference
             // implementation this table's scope/owner_user_id/shared_with
@@ -9387,26 +10106,43 @@ impl SessionCore for SessionService {
             } else {
                 caller.user_id().unwrap_or_default().to_owned()
             };
+            // EP-11 S9: a Space skill reaches only a turn in its own Space. The Space
+            // is read from the caller's own thread row, never taken from the request,
+            // and only while SKILL_SPACE_SCOPE is on; off, no Space row is listed.
+            let space_id = if skill_space_scope_enabled() {
+                skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id).await?
+            } else {
+                None
+            };
             // A grantee sees only a skill its owner has accepted: a proposal is
             // private to its owner even if a share was written onto the row.
-            // `scope DESC` puts a user's own skill before an org skill of the
-            // same name.
+            // `scope DESC` puts a user's own skill before a Space or org skill of
+            // the same name. A Space row has no owner, so it is kept out of the
+            // owner branch explicitly: a service caller listing with an empty user
+            // would otherwise match it. `$5` is '' when no Space was resolved, and
+            // no Space row has an empty scope_id (migration 0111).
             let rows: Vec<SkillRow> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin,
                         scope, owner_user_id, shared_with, review_state,
                         source_run_id, source_thread_id, proposal_reason, updated_at,
                         (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
-                         WHERE r.skill_id = agent_skills.id) AS revision
+                         WHERE r.skill_id = agent_skills.id) AS revision,
+                        version, digest, kind, settings
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
-                   AND (scope = 'org' OR owner_user_id = $3
-                        OR (shared_with ? $3 AND review_state = 'accepted'))
+                   AND ((scope <> 'space'
+                         AND (scope = 'org' OR owner_user_id = $3
+                              OR (shared_with ? $3 AND review_state = 'accepted')))
+                        OR (scope = 'space' AND scope_id = $5))
+                   AND kind = ANY($4)
                  ORDER BY name, scope DESC",
             )
             .bind(&req.org_id)
             .bind(req.enabled_only)
             .bind(&caller_user_id)
+            .bind(&kinds)
+            .bind(space_id.as_deref().unwrap_or_default())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -9434,9 +10170,18 @@ impl SessionCore for SessionService {
                     proposal_reason: row.proposal_reason,
                     updated_at: row.updated_at.to_rfc3339(),
                     revision: row.revision,
+                    // EP-11 S2: set by migration 0108's trigger, never by a writer.
+                    version: row.version,
+                    digest: row.digest,
+                    // EP-11 S6: only rows of a requested kind reach here.
+                    kind: row.kind,
+                    settings_json: row.settings.0.to_string(),
                 })
                 .collect();
-            Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
+            Ok(Response::new(pb::ListAgentSkillsResponse {
+                skills,
+                space_id: space_id.unwrap_or_default(),
+            }))
         }
         .await;
         record_metrics("list_agent_skills", started, result.is_ok());
@@ -10213,6 +10958,13 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             authorize_thread_deletion_owner(&self.pool, &caller, &req.thread_id).await?;
+            // EP-9 C4: a held thread, or any thread of a held org, is not erased. Asked after
+            // the owner check, so only the owner learns the thread is held, and before the
+            // transaction, so a refusal or an org-core outage changes nothing.
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, std::slice::from_ref(&req.thread_id))
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut tx = self
                 .pool
@@ -10298,6 +11050,14 @@ impl SessionCore for SessionService {
             .fetch_all(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
+            // EP-9 C4: the whole erase is refused when the org or any of these threads is
+            // held; the locks above keep the set fixed while org-core is asked, and a refusal
+            // drops the transaction, so nothing is deleted.
+            let held_candidates: Vec<String> = thread_ids.iter().map(|(id,)| id.clone()).collect();
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, &held_candidates)
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
             for (thread_id,) in &thread_ids {
@@ -11715,6 +12475,12 @@ pub async fn serve(
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
     let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
+    let thread_export = crate::thread_export::ThreadExportGrpc { pool: pool.clone() };
+    let artifact_revision_pool = pool.clone();
+    let thread_reference_pool = pool.clone();
+    let thread_goal_pool = pool.clone();
+    let thread_share_pool = pool.clone();
+    let skill_version_pool = pool.clone();
 
     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
@@ -11745,9 +12511,13 @@ pub async fn serve(
             .await;
     }
 
+    // EP-12 S4: the two services that hold `api_key` methods hand their interceptor the called
+    // path; a key is refused on every service that is not stamped.
+    let session_core = SessionCoreServer::with_interceptor(session.clone(), auth.clone());
+    let run_service = RunServiceServer::with_interceptor(runs, auth.clone());
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(SessionCoreServer::with_interceptor(session.clone(), auth.clone()))
+        .add_service(crate::auth::RpcPathStamp::new(session_core))
         .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
         .add_service(ManagedRunLifecycleServer::with_interceptor(
             managed_lifecycle,
@@ -11790,6 +12560,36 @@ pub async fn serve(
             thread_fork,
             auth.clone(),
         ))
+        // EP-12 S9: the owner's thread export; answers `unavailable` until its switch is on.
+        .add_service(ThreadExportServiceServer::with_interceptor(
+            thread_export,
+            auth.clone(),
+        ))
+        // EP-12 S14: the owner's share snapshots; answers `unavailable` until its switch is on.
+        .add_service(ThreadShareServiceServer::with_interceptor(
+            crate::thread_shares::ThreadShareGrpc { pool: thread_share_pool },
+            auth.clone(),
+        ))
+        // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
+        .add_service(ThreadReferenceServiceServer::with_interceptor(
+            crate::thread_reference::ThreadReferenceGrpc { pool: thread_reference_pool },
+            auth.clone(),
+        ))
+        // EP-3 S2: the artifact revision store; answers `unavailable` until its switch is on.
+        .add_service(ArtifactRevisionServiceServer::with_interceptor(
+            crate::artifact_revisions::ArtifactRevisionGrpc { pool: artifact_revision_pool },
+            auth.clone(),
+        ))
+        // EP-7 S1: the thread goal store; answers `unavailable` until its switch is on.
+        .add_service(ThreadGoalServiceServer::with_interceptor(
+            crate::thread_goals::ThreadGoalGrpc { pool: thread_goal_pool },
+            auth.clone(),
+        ))
+        // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.
+        .add_service(SkillVersionServiceServer::with_interceptor(
+            crate::skill_versions::SkillVersionGrpc { pool: skill_version_pool },
+            auth.clone(),
+        ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
             learning_governance,
             auth.clone(),
@@ -11824,7 +12624,7 @@ pub async fn serve(
             crate::eventlog_grpc::EventLogService::new(event_log_pool),
             auth.clone(),
         ))
-        .add_service(RunServiceServer::with_interceptor(runs, auth))
+        .add_service(crate::auth::RpcPathStamp::new(run_service))
         .serve(addr)
         .await?;
 
@@ -12269,20 +13069,27 @@ const LEDGER_MAX_LIMIT: i64 = 200;
 /// Writes a skill row back from a revision snapshot: the whole row, not only the
 /// fields a person could have edited, so an undo returns the skill to exactly the
 /// state the snapshot recorded. `org_id` in the conflict guard keeps the write
-/// inside the snapshot's own tenant.
+/// inside the snapshot's own tenant. A deleted template or preset comes back as
+/// its own kind (EP-11 S6: snapshots carry kind and settings from migration 0109
+/// on), never as a skill that would be injected; an older snapshot predates the
+/// other kinds and so is a skill. A row never changes kind, so the conflict arm
+/// leaves it alone; settings are restored like the text.
 const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
         (id, org_id, name, description, content, trigger_keywords, trigger_file_patterns,
          tool_restrictions, enabled, origin, scope, owner_user_id, shared_with, review_state,
-         source_run_id, source_thread_id, proposal_reason, created_at, updated_at)
+         source_run_id, source_thread_id, proposal_reason, created_at, updated_at,
+         kind, settings)
      SELECT r.id, r.org_id, r.name, r.description, r.content, r.trigger_keywords,
             r.trigger_file_patterns, r.tool_restrictions, r.enabled, r.origin, r.scope,
             r.owner_user_id, r.shared_with, r.review_state, r.source_run_id,
-            r.source_thread_id, r.proposal_reason, now(), now()
+            r.source_thread_id, r.proposal_reason, now(), now(),
+            COALESCE(r.kind, 'skill'), COALESCE(r.settings, '{}'::jsonb)
      FROM jsonb_to_record($1::jsonb) AS r(
             id text, org_id text, name text, description text, content text,
             trigger_keywords jsonb, trigger_file_patterns jsonb, tool_restrictions jsonb,
             enabled boolean, origin text, scope text, owner_user_id text, shared_with jsonb,
-            review_state text, source_run_id text, source_thread_id text, proposal_reason text)
+            review_state text, source_run_id text, source_thread_id text, proposal_reason text,
+            kind text, settings jsonb)
      ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
@@ -12299,6 +13106,7 @@ const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
          source_run_id = EXCLUDED.source_run_id,
          source_thread_id = EXCLUDED.source_thread_id,
          proposal_reason = EXCLUDED.proposal_reason,
+         settings = EXCLUDED.settings,
          updated_at = now()
      WHERE agent_skills.org_id = EXCLUDED.org_id";
 
@@ -12327,6 +13135,73 @@ fn ledger_kinds(kinds: &[String]) -> Result<(bool, bool), Status> {
         }
     }
     Ok((skills, memories))
+}
+
+/// The authored kinds a `ListAgentSkills` request asks for (EP-11 S6). Empty means
+/// skills only: every caller that predates templates and presets matches or injects
+/// what it lists, and a template or preset must never reach a turn as a skill.
+#[allow(clippy::result_large_err)]
+fn agent_skill_kinds(kinds: &[String]) -> Result<Vec<String>, Status> {
+    if kinds.is_empty() {
+        return Ok(vec!["skill".to_owned()]);
+    }
+    let mut wanted: Vec<String> = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        match kind.as_str() {
+            "skill" | "template" | "preset" => {
+                if !wanted.contains(kind) {
+                    wanted.push(kind.clone());
+                }
+            }
+            other => return Err(Status::invalid_argument(format!("invalid kind: {other}"))),
+        }
+    }
+    Ok(wanted)
+}
+
+/// The switch that lets `ListAgentSkills` return Space skills (EP-11 S9). Read where it is
+/// used, like the version switch; only the literal `true` turns it on.
+const SKILL_SPACE_SCOPE_ENV: &str = "SKILL_SPACE_SCOPE";
+
+fn skill_space_scope_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(SKILL_SPACE_SCOPE_ENV).ok().as_deref())
+}
+
+/// The Space whose skills a `ListAgentSkills` caller may be given: the Space of the thread
+/// it names, when that thread is in the caller's org, belongs to the caller and sits in a
+/// Space. The thread is the only input; a Space id never comes from the request, so a caller
+/// cannot ask for another Space's skills by naming it. A service caller has no thread of its
+/// own and gets none, and so does a thread that is unknown or someone else's: those answer
+/// with no Space rather than an error, because skills are advisory and the turn goes on.
+#[allow(clippy::result_large_err)]
+async fn skill_space_of_thread(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, Status> {
+    let thread_id = thread_id.trim();
+    let Some(user_id) = caller.user_id().filter(|user| !user.is_empty()) else {
+        return Ok(None);
+    };
+    if thread_id.is_empty() {
+        return Ok(None);
+    }
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT space_id FROM threads
+         WHERE id = $1 AND org_id = $2 AND user_id = $3
+           AND space_id IS NOT NULL AND space_id <> ''",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        warn!(%error, "list_agent_skills: thread Space lookup failed");
+        Status::internal(error.to_string())
+    })?;
+    Ok(row.map(|(space_id,)| space_id))
 }
 
 fn encode_ledger_cursor(at: DateTime<Utc>, id: &str) -> String {
@@ -12804,7 +13679,7 @@ mod tests {
         normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
         record_scheduled_run_result_inner, thread_revise_payload_digest,
         record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
-        resolve_residency, resolve_thread_origin, run_origin_at_birth,
+        resolve_residency, resolve_thread_origin,
         scheduled_run_execution_payload_digest,
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
         thread_create_payload_digest, valid_scheduled_run_identifier,
@@ -13082,20 +13957,6 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed fire");
-    }
-
-    /// Unit proof for WS20 S2: a person's run is stamped chat at birth, and a system
-    /// owner's run carries no stamp, so a scheduled run takes its origin from its binding.
-    #[test]
-    fn run_origin_is_stamped_at_birth_for_people_only() {
-        assert_eq!(
-            run_origin_at_birth("user-123"),
-            serde_json::json!({"origin": "chat"})
-        );
-        assert_eq!(
-            run_origin_at_birth("service:orchestrator-core"),
-            serde_json::json!({})
-        );
     }
 
     /// The immutable binding a scheduled run must carry, as `persist_scheduled_run_bindings`
@@ -15927,6 +16788,7 @@ mod tests {
             instructions: Some(pb::RunContextPart { state: pb::RunContextState::Included as i32, included: 1, omitted: 0, reason: String::new() }),
             history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
             memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
+            skills: Vec::new(),
         };
         let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
 
@@ -15960,6 +16822,65 @@ mod tests {
         let other = format!("rc-other-{sfx}");
         let foreign = svc.record_run_context(as_user(&other, "u1", request(&org))).await;
         assert!(foreign.is_err(), "a foreign org must not stamp this run");
+    }
+
+    // EP-11 S3: a pins-only stamp (the Ask path) lands beside the parts already
+    // recorded, and a later parts stamp keeps the pins; no other key is dropped.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn record_run_context_merges_skills_without_dropping_other_keys() {
+        use super::SessionService;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) = (format!("rcs-t-{sfx}"), format!("rcs-r-{sfx}"), format!("rcs-org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,metadata) VALUES ($1,$2,'g',$3,'u1','{\"autonomy_rung\":\"workspace_write\"}'::jsonb)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        };
+        let digest = "c".repeat(64);
+        let pins = pb::RunContextStatus {
+            skills: vec![pb::SkillPin { skill_id: "01HSKILL".into(), version: 2, digest: digest.clone(), source: "matched".into() }],
+            ..Default::default()
+        };
+        let parts = pb::RunContextStatus {
+            memory: Some(pb::RunContextPart { state: pb::RunContextState::Empty as i32, included: 0, omitted: 0, reason: String::new() }),
+            ..Default::default()
+        };
+        let stamp = |status: &pb::RunContextStatus| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.clone(), status: Some(status.clone()) };
+
+        svc.record_run_context(as_user(&org, "u1", stamp(&pins))).await.expect("record pins");
+        let (metadata,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("read metadata");
+        assert_eq!(metadata["autonomy_rung"], "workspace_write", "an unrelated key must survive the merge");
+        assert_eq!(metadata["run_context"]["skills"][0]["id"], "01HSKILL");
+        assert_eq!(metadata["run_context"]["skills"][0]["version"], 2);
+        assert_eq!(metadata["run_context"]["skills"][0]["digest"], digest.as_str());
+        assert_eq!(metadata["run_context"].get("memory"), None, "a pins-only stamp claims no part");
+
+        svc.record_run_context(as_user(&org, "u1", stamp(&parts))).await.expect("record parts");
+        let (after,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("re-read metadata");
+        assert_eq!(after["run_context"]["memory"]["state"], "empty");
+        assert_eq!(after["run_context"]["skills"], metadata["run_context"]["skills"], "the parts stamp keeps the pins");
+        assert_eq!(after["autonomy_rung"], "workspace_write");
     }
 
     fn as_user<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
@@ -16958,6 +17879,8 @@ mod tests {
                     org_id: org.clone(),
                     enabled_only: true,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -16977,6 +17900,8 @@ mod tests {
                     org_id: org.clone(),
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -17001,6 +17926,8 @@ mod tests {
                     org_id: other_org.clone(),
                     enabled_only: true,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 },
             ))
             .await
@@ -19606,6 +20533,7 @@ mod tests {
             "accepted_exists",
             "rejected_exists",
             "owner_required",
+            "origin_requires_person",
         ] {
             let response = super::skill_write_skipped(token);
             assert!(!response.skipped_protected && response.id.is_empty() && !response.created);
@@ -19613,6 +20541,117 @@ mod tests {
         }
         let protected = super::skill_write_skipped("protected");
         assert!(protected.skipped_protected, "a human's row keeps the old flag");
+    }
+
+    /// Counts `skill_lint_findings_total` increments by their `code` label.
+    #[derive(Default, Clone)]
+    struct LintCounts(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct LintCount {
+        code: String,
+        into: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl metrics::CounterFn for LintCount {
+        fn increment(&self, _value: u64) {
+            self.into.lock().expect("lint counts").push(self.code.clone());
+        }
+        fn absolute(&self, _value: u64) {}
+    }
+
+    impl metrics::Recorder for LintCounts {
+        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn describe_histogram(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
+        fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+            if key.name() != "skill_lint_findings_total" {
+                return metrics::Counter::noop();
+            }
+            let code = key
+                .labels()
+                .find(|label| label.key() == "code")
+                .map(|label| label.value().to_owned())
+                .unwrap_or_default();
+            metrics::Counter::from_arc(std::sync::Arc::new(LintCount {
+                code,
+                into: std::sync::Arc::clone(&self.0),
+            }))
+        }
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    fn linted_skill(content: &str) -> mp_contracts::model_plane::v1::UpsertAgentSkillRequest {
+        let mut request = skill_request("org-l", "Weekly report", content, "user", "user", "");
+        request.tool_restrictions = vec!["*".to_owned()];
+        request
+    }
+
+    #[test]
+    fn lint_off_runs_nothing() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Off, &linted_skill(""))
+        });
+        assert_eq!(refusal, None);
+        assert!(counts.0.lock().expect("lint counts").is_empty(), "off counts nothing");
+    }
+
+    #[test]
+    fn lint_report_mode_counts_and_writes() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Report, &linted_skill("User: a\nAssistant: b\nUser: c"))
+        });
+        assert_eq!(refusal, None, "report never refuses, so the write goes ahead");
+        assert_eq!(
+            *counts.0.lock().expect("lint counts"),
+            ["transcript_shape", "tool_restriction_invalid"]
+        );
+    }
+
+    #[test]
+    fn lint_enforce_refuses_with_token() {
+        use mp_contracts::skill_lint::Mode;
+        let counts = LintCounts::default();
+        let refusal = metrics::with_local_recorder(&counts, || {
+            super::skill_lint_refusal(Mode::Enforce, &linted_skill(&"x".repeat(32_001)))
+        });
+        assert_eq!(refusal.as_deref(), Some("skill_lint:content_too_long"), "the first error is named");
+        assert_eq!(
+            *counts.0.lock().expect("lint counts"),
+            ["content_too_long", "tool_restriction_invalid"]
+        );
+        let mut clean = linted_skill("steps");
+        clean.tool_restrictions.clear();
+        clean.description = String::new();
+        assert_eq!(
+            super::skill_lint_refusal(Mode::Enforce, &clean),
+            None,
+            "a missing description is a warning and never refuses"
+        );
+    }
+
+    /// The refusal sits after the content policy and before the statement, so a
+    /// refused write opens no row and keeps a stored proposal's text.
+    #[test]
+    fn upsert_agent_skill_lints_before_the_write() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn upsert_agent_skill(")
+            .expect("the handler")..];
+        let policy = handler.find("write_policy::gate_skill(").expect("the content policy");
+        let lint = handler
+            .find("skill_lint_refusal(skill_lint_mode(), &req)")
+            .expect("the lint call");
+        let insert = handler.find("INSERT INTO agent_skills").expect("the write");
+        assert!(policy < lint && lint < insert);
     }
 
     /// The learned arm of the conflict update changes content and provenance
@@ -19636,9 +20675,260 @@ mod tests {
             );
         }
         assert!(
-            source.contains("ON CONFLICT (org_id, scope, owner_user_id, name)"),
-            "the conflict key carries the owner"
+            source.contains("ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name)"),
+            "the conflict key carries the kind and the owner"
         );
+    }
+
+    /// EP-11 S6: both upsert arms name exactly the unique index of migration 0109. A
+    /// conflict target that matches no unique index fails every write at run time.
+    #[test]
+    fn upsert_conflict_uses_new_index() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn upsert_agent_skill(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_agent_skills(")
+            .unwrap_or(handler.len())];
+        let new_key = "ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name)";
+        assert_eq!(handler.matches(new_key).count(), 2, "both arms");
+        assert!(!handler.contains("ON CONFLICT (org_id, scope, owner_user_id, name)"));
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        assert!(migration.contains(
+            "ON agent_skills (org_id, kind, scope, scope_id, owner_user_id, name)"
+        ));
+    }
+
+    /// EP-11 S6: an empty `kinds` lists skills only, so no caller that predates
+    /// templates and presets can match or inject one; an unknown kind is refused.
+    #[test]
+    fn template_never_listed_for_matching() {
+        let kinds = |values: &[&str]| {
+            super::agent_skill_kinds(&values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(kinds(&[]).expect("default"), ["skill"]);
+        assert_eq!(
+            kinds(&["template", "preset", "template"]).expect("both"),
+            ["template", "preset"]
+        );
+        assert_eq!(
+            kinds(&["skill", "agent"]).expect_err("closed").code(),
+            tonic::Code::InvalidArgument
+        );
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn list_agent_skills(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_conversation(")
+            .expect("the next handler")];
+        assert!(handler.contains("AND kind = ANY($4)"));
+        assert!(handler.contains("agent_skill_kinds(&req.kinds)?"));
+    }
+
+    /// EP-11 S9: the list reads its Space from the caller's thread, only behind the switch,
+    /// and keeps Space rows out of the owner branch (a Space row has an empty owner, which
+    /// a service caller's empty user would otherwise match).
+    #[test]
+    fn space_rows_listed_only_for_the_threads_own_space() {
+        let source = include_str!("grpc.rs");
+        let handler = &source[source
+            .find("async fn list_agent_skills(")
+            .expect("the handler")..];
+        let handler = &handler[..handler
+            .find("async fn list_conversation(")
+            .expect("the next handler")];
+        assert!(handler.contains("if skill_space_scope_enabled()"));
+        assert!(handler.contains("skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id)"));
+        assert!(handler.contains("AND ((scope <> 'space'"));
+        assert!(handler.contains("OR (scope = 'space' AND scope_id = $5))"));
+        assert!(!handler.contains("req.space_id"), "a Space id is never read from the request");
+        let lookup = &source[source
+            .find("async fn skill_space_of_thread(")
+            .expect("the lookup")..];
+        let lookup = &lookup[..lookup.find("fn encode_ledger_cursor(").expect("the next fn")];
+        assert!(lookup.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3"));
+        assert!(lookup.contains("caller.user_id()"));
+        let migration = include_str!("../migrations/0111_agent_skills_space_scope.sql");
+        assert!(migration.contains("CHECK (scope IN ('org', 'user', 'space'))"));
+        assert!(migration.contains("CHECK ((scope = 'space') = (scope_id <> ''))"));
+        assert!(migration.contains("CHECK (scope <> 'space' OR owner_user_id = '')"));
+    }
+
+    #[test]
+    fn skill_space_scope_switch_reads_only_true() {
+        assert!(!mp_contracts::loop_fold::switch_from(None));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert_eq!(super::SKILL_SPACE_SCOPE_ENV, "SKILL_SPACE_SCOPE");
+    }
+
+    /// EP-11 S6: migration 0109 replaces the version body with the same field list
+    /// as 0108, reading the real `kind` and `settings`. Their column defaults equal
+    /// 0108's constants, so no existing digest moves.
+    #[test]
+    fn kind_migration_keeps_the_digest_field_list() {
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        let start = migration
+            .find("CREATE OR REPLACE FUNCTION agent_skill_version_body(s agent_skills)")
+            .expect("the body function");
+        let end = start
+            + migration[start..]
+                .find("$$ LANGUAGE sql")
+                .expect("the body function's end");
+        let body = &migration[start..end];
+        let keys: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('\''))
+            .filter_map(|line| line.split('\'').next())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "name",
+                "description",
+                "content",
+                "trigger_keywords",
+                "trigger_file_patterns",
+                "tool_restrictions",
+                "kind",
+                "settings",
+                "bundle_sha256",
+            ]
+        );
+        assert!(body.contains("'kind', s.kind,"));
+        assert!(body.contains("'settings', s.settings,"));
+        assert!(migration.contains("kind TEXT NOT NULL DEFAULT 'skill'"));
+        assert!(migration.contains("settings JSONB NOT NULL DEFAULT '{}'"));
+    }
+
+    /// EP-11 S6: an undo that re-creates a deleted template or preset brings it back as its
+    /// own kind. Without the kind in the snapshot and in the restore, it came back as a skill
+    /// and its text was injected into the owner's turns.
+    #[test]
+    fn restore_keeps_the_kind_of_a_deleted_template() {
+        let migration = include_str!("../migrations/0109_authored_behaviour_kind.sql");
+        let snapshot = &migration[migration
+            .find("CREATE OR REPLACE FUNCTION agent_skill_revision_snapshot(s agent_skills)")
+            .expect("the snapshot function")..];
+        assert!(snapshot.contains("'kind', s.kind,"));
+        assert!(snapshot.contains("'settings', s.settings"));
+        assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.kind, 'skill')"));
+        assert!(super::RESTORE_SKILL_SQL.contains("kind text, settings jsonb)"));
+        let conflict = &super::RESTORE_SKILL_SQL[super::RESTORE_SKILL_SQL
+            .find("ON CONFLICT (id) DO UPDATE SET")
+            .expect("the conflict arm")..];
+        assert!(!conflict.contains("kind ="), "a row never changes kind");
+    }
+
+    /// EP-11 S6: after 0109 a skill's digest is still the sha256 of 0108's body with the
+    /// constants 'skill' and '{}', so no version a run pinned before the migration moves.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn existing_digests_unchanged_by_kind_migration() {
+        let Some((_svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "admin-1",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at)
+             VALUES ($1, $2, 'Digest', 'body', 'org', '', now(), now())",
+            &[&id, &org],
+        )
+        .await;
+        let (version, digest, expected): (i32, String, String) = sqlx::query_as(
+            "SELECT version, digest,
+                    encode(sha256(convert_to(jsonb_build_object(
+                        'name', name,
+                        'description', description,
+                        'content', content,
+                        'trigger_keywords', trigger_keywords,
+                        'trigger_file_patterns', trigger_file_patterns,
+                        'tool_restrictions', tool_restrictions,
+                        'kind', 'skill'::text,
+                        'settings', '{}'::jsonb,
+                        'bundle_sha256', bundle_sha256
+                    )::text, 'UTF8')), 'hex')
+             FROM agent_skills WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("digest");
+        assert_eq!(version, 1);
+        assert_eq!(digest, expected);
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    /// EP-11 S6: a template may share a skill's name, the skill upsert refreshes only the
+    /// skill, and a list that names no kind never returns the template.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn same_name_skill_and_template_coexist() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        svc.upsert_agent_skill(as_user(
+            &org,
+            "user-a",
+            skill_request(&org, "Weekly", "skill v1", "user", "user", ""),
+        ))
+        .await
+        .expect("create skill");
+        let template_id = format!("sk-{}", mp_ids::new_ulid());
+        as_registry_writer(
+            &pool,
+            "user-a",
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, kind, created_at, updated_at)
+             VALUES ($1, $2, 'Weekly', 'Report for {{input}}', 'user', 'user-a', 'template', now(), now())",
+            &[&template_id, &org],
+        )
+        .await;
+        svc.upsert_agent_skill(as_user(
+            &org,
+            "user-a",
+            skill_request(&org, "Weekly", "skill v2", "user", "user", ""),
+        ))
+        .await
+        .expect("refresh skill");
+
+        let list = |kinds: Vec<String>| {
+            let svc = &svc;
+            let org = org.clone();
+            async move {
+                svc.list_agent_skills(as_user(
+                    &org,
+                    "user-a",
+                    pb::ListAgentSkillsRequest {
+                        org_id: org.clone(),
+                        enabled_only: false,
+                        for_user_id: String::new(),
+                        kinds,
+                        thread_id: String::new(),
+                    },
+                ))
+                .await
+                .expect("list")
+                .into_inner()
+                .skills
+            }
+        };
+        let skills = list(Vec::new()).await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!((skills[0].kind.as_str(), skills[0].content.as_str()), ("skill", "skill v2"));
+        let templates = list(vec!["template".to_owned()]).await;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].id, template_id);
+        assert_eq!(templates[0].content, "Report for {{input}}", "the skill write left it alone");
+        assert_eq!(templates[0].settings_json, "{}");
+
+        clear_skill_rows(&pool, &org).await;
     }
 
     async fn skills_service() -> Option<(super::SessionService, sqlx::PgPool, String)> {
@@ -20494,6 +21784,80 @@ mod tests {
         clear_skill_rows(&pool, &org).await;
     }
 
+    // -- D2-509: a human write needs a person (EP-11 S4, real Postgres) ---------
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn service_caller_cannot_write_origin_user() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        for scope in ["org", "user", ""] {
+            let refused = svc
+                .upsert_agent_skill(as_service(
+                    &org,
+                    &["session:skills:write"],
+                    skill_request(&org, "Runbook", "steps", "user", scope, "owner-a"),
+                ))
+                .await
+                .expect("a skipped write is not an error")
+                .into_inner();
+            assert_eq!(refused.skip_reason, "origin_requires_person", "scope {scope:?}");
+            assert!(!refused.created && refused.id.is_empty() && !refused.skipped_protected);
+        }
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_skills WHERE org_id = $1")
+            .bind(&org)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0, "a service claiming origin user writes nothing");
+
+        // A person still writes their own skill exactly as before.
+        let mine = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "owner-a",
+                skill_request(&org, "Runbook", "steps", "user", "user", ""),
+            ))
+            .await
+            .expect("person write")
+            .into_inner();
+        assert!(mine.created && mine.skip_reason.is_empty());
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
+    /// The learning review is the RPC's only service caller and sends
+    /// `background_review`; the D2-509 check must not refuse it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn learning_path_still_writes_proposals() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        for origin in ["background_review", ""] {
+            let name = format!("Learned {origin}");
+            let written = svc
+                .upsert_agent_skill(as_service(
+                    &org,
+                    &["session:skills:write"],
+                    skill_request(&org, &name, "steps", origin, "", "owner-a"),
+                ))
+                .await
+                .expect("proposal")
+                .into_inner();
+            assert!(written.created && written.skip_reason.is_empty(), "origin {origin:?}");
+            assert_eq!(
+                skill_row_state(&pool, &org, &name, "user", "owner-a").await,
+                Some((false, "user".into(), "owner-a".into(), "proposed".into()))
+            );
+        }
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn enable_of_learned_skill_rechecks_policy() {
@@ -20695,6 +22059,226 @@ mod tests {
     // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
     //   DATABASE_URL=… cargo test --bin session-core -- --ignored list_agent_skills_scope
 
+    // EP-11 S9: Space skills. Each test seeds its own org; they set SKILL_SPACE_SCOPE and
+    // run under the DB harness's --test-threads=1.
+
+    async fn space_skill_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    fn space_skill_service(pool: &sqlx::PgPool) -> super::SessionService {
+        super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: crate::grpc::ThreadGrantColumns::present(),
+        }
+    }
+
+    async fn seed_space_skill(pool: &sqlx::PgPool, id: &str, org_id: &str, space_id: &str) {
+        sqlx::query(
+            "INSERT INTO agent_skills
+                (id, org_id, name, description, content, trigger_keywords,
+                 trigger_file_patterns, tool_restrictions, enabled, origin,
+                 scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
+             VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user','space',$3,'','[]',now(),now())",
+        )
+        .bind(id)
+        .bind(org_id)
+        .bind(space_id)
+        .execute(pool)
+        .await
+        .expect("seed Space skill");
+    }
+
+    /// A thread of `user_id`, inside `space_id` when it is not empty.
+    async fn seed_skill_thread(pool: &sqlx::PgPool, id: &str, org_id: &str, user_id: &str, space_id: &str) {
+        if space_id.is_empty() {
+            sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1,$1,$2,$3)")
+                .bind(id)
+                .bind(org_id)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .expect("seed thread");
+            return;
+        }
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$1,$2,$3,$4,'decision-'||$1,'audience-'||$1,1,$5,
+                     'privacy-'||$1,'resource-'||$1,1,'space')",
+        )
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id)
+        .bind(space_id)
+        .bind(format!("sha256:{}", "c".repeat(64)))
+        .execute(pool)
+        .await
+        .expect("seed Space thread");
+    }
+
+    async fn list_skills_in_thread(
+        svc: &super::SessionService,
+        identity: VerifiedIdentity,
+        org_id: &str,
+        thread_id: &str,
+    ) -> pb::ListAgentSkillsResponse {
+        let mut request = Request::new(pb::ListAgentSkillsRequest {
+            org_id: org_id.to_owned(),
+            enabled_only: true,
+            for_user_id: String::new(),
+            kinds: Vec::new(),
+            thread_id: thread_id.to_owned(),
+        });
+        request.extensions_mut().insert(identity);
+        svc.list_agent_skills(request)
+            .await
+            .expect("list_agent_skills")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_needs_scope_id() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let org_id = format!("ssn-org-{sfx}");
+        let insert = |id: String, scope: &'static str, scope_id: &'static str, owner: &'static str| {
+            let pool = pool.clone();
+            let org_id = org_id.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO agent_skills
+                        (id, org_id, name, description, content, trigger_keywords,
+                         trigger_file_patterns, tool_restrictions, enabled, origin,
+                         scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
+                     VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user',$3,$4,$5,'[]',now(),now())",
+                )
+                .bind(id)
+                .bind(org_id)
+                .bind(scope)
+                .bind(scope_id)
+                .bind(owner)
+                .execute(&pool)
+                .await
+            }
+        };
+        assert!(
+            insert(format!("ssn-nospace-{sfx}"), "space", "", "").await.is_err(),
+            "a Space row must name its Space"
+        );
+        assert!(
+            insert(format!("ssn-orgwith-{sfx}"), "org", "space-a", "").await.is_err(),
+            "an org row must not name a Space"
+        );
+        assert!(
+            insert(format!("ssn-userwith-{sfx}"), "user", "space-a", "u1").await.is_err(),
+            "a user row must not name a Space"
+        );
+        assert!(
+            insert(format!("ssn-owned-{sfx}"), "space", "space-a", "u1").await.is_err(),
+            "a Space row has no owner"
+        );
+        assert!(
+            insert(format!("ssn-ok-{sfx}"), "space", "space-a", "").await.is_ok(),
+            "a Space row naming its Space, without an owner, is accepted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_not_listed_outside_its_space() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        std::env::set_var("SKILL_SPACE_SCOPE", "true");
+        let sfx = std::process::id();
+        let org_id = format!("sso-org-{sfx}");
+        let user = format!("sso-user-{sfx}");
+        let (space_a, space_b) = (format!("sso-space-a-{sfx}"), format!("sso-space-b-{sfx}"));
+        seed_space_skill(&pool, &format!("sso-skill-a-{sfx}"), &org_id, &space_a).await;
+        seed_space_skill(&pool, &format!("sso-skill-b-{sfx}"), &org_id, &space_b).await;
+        let (thread_a, personal) = (format!("sso-thread-a-{sfx}"), format!("sso-personal-{sfx}"));
+        seed_skill_thread(&pool, &thread_a, &org_id, &user, &space_a).await;
+        seed_skill_thread(&pool, &personal, &org_id, &user, "").await;
+        let svc = space_skill_service(&pool);
+        let as_user = || VerifiedIdentity::user_for_test(&org_id, &user);
+
+        let in_a = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
+        let names: Vec<&str> = in_a.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(in_a.space_id, space_a, "the Space is the thread's own");
+        assert!(names.contains(&format!("sso-skill-a-{sfx}").as_str()), "{names:?}");
+        assert!(!names.contains(&format!("sso-skill-b-{sfx}").as_str()), "another Space's skill leaked: {names:?}");
+
+        let outside = list_skills_in_thread(&svc, as_user(), &org_id, &personal).await;
+        assert!(outside.space_id.is_empty());
+        assert!(outside.skills.iter().all(|s| s.scope != "space"), "a personal thread lists no Space skill");
+        let no_thread = list_skills_in_thread(&svc, as_user(), &org_id, "").await;
+        assert!(no_thread.skills.iter().all(|s| s.scope != "space"), "no thread, no Space skill");
+        // A service caller with an empty user must not match a Space row's empty owner.
+        let service = VerifiedIdentity::service_for_test_as(&org_id, "service:capability-core", &["session:read"], false);
+        let as_service = list_skills_in_thread(&svc, service, &org_id, &thread_a).await;
+        assert!(as_service.skills.iter().all(|s| s.scope != "space"), "a service caller lists no Space skill");
+
+        std::env::set_var("SKILL_SPACE_SCOPE", "false");
+        let switched_off = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
+        assert!(switched_off.space_id.is_empty());
+        assert!(switched_off.skills.iter().all(|s| s.scope != "space"), "switch off, no Space skill");
+        std::env::remove_var("SKILL_SPACE_SCOPE");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_skill_not_listed_for_non_member_thread() {
+        let Some(pool) = space_skill_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        std::env::set_var("SKILL_SPACE_SCOPE", "true");
+        let sfx = std::process::id();
+        let org_id = format!("ssm-org-{sfx}");
+        let (member, outsider) = (format!("ssm-member-{sfx}"), format!("ssm-outsider-{sfx}"));
+        let space = format!("ssm-space-{sfx}");
+        seed_space_skill(&pool, &format!("ssm-skill-{sfx}"), &org_id, &space).await;
+        let thread = format!("ssm-thread-{sfx}");
+        seed_skill_thread(&pool, &thread, &org_id, &member, &space).await;
+        let svc = space_skill_service(&pool);
+
+        // Naming another person's Space thread does not reach that Space.
+        let outsider_view =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &outsider), &org_id, &thread).await;
+        assert!(outsider_view.space_id.is_empty());
+        assert!(outsider_view.skills.iter().all(|s| s.scope != "space"), "{:?}", outsider_view.skills);
+        // Nor does a caller of another org naming the thread.
+        let other_org = format!("ssm-other-org-{sfx}");
+        let foreign =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&other_org, &member), &other_org, &thread).await;
+        assert!(foreign.skills.iter().all(|s| s.scope != "space"));
+        let member_view =
+            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &member), &org_id, &thread).await;
+        assert_eq!(member_view.space_id, space, "the thread's owner gets its Space");
+        std::env::remove_var("SKILL_SPACE_SCOPE");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn list_agent_skills_scope_enforcement_against_real_pg() {
@@ -20800,6 +22384,8 @@ mod tests {
                     org_id: org_id.clone(),
                     enabled_only: false,
                     for_user_id: String::new(),
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 });
                 request
                     .extensions_mut()
@@ -20864,6 +22450,8 @@ mod tests {
                     org_id,
                     enabled_only: false,
                     for_user_id,
+                    kinds: Vec::new(),
+                    thread_id: String::new(),
                 });
                 request.extensions_mut().insert(identity);
                 svc.list_agent_skills(request)

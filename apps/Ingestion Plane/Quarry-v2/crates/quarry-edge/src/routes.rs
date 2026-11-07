@@ -281,6 +281,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/search/suggest", post(crate::search_routes::suggest))
         .route("/v1/map", post(crate::map_routes::map))
         .route("/v1/audit/page", post(crate::audit_page::capture))
+        .route(
+            "/v1/browser/redirect-hop",
+            post(crate::browser_redirect::probe),
+        )
         .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
         .route(

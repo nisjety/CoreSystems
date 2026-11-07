@@ -39,9 +39,15 @@ const (
 // nothing is persisted, cached or logged (query text and hit ids never reach a log).
 type SpaceHistoryServiceClient interface {
 	// Keyword search over the user and assistant messages of one Space.
+	// Request and response type names kept; renaming them would break generated code.
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SearchMessages(ctx context.Context, in *SearchSpaceMessagesRequest, opts ...grpc.CallOption) (*SearchSpaceMessagesResponse, error)
 	// Maps a message id to its thread, under the same authority. Not found, hidden by audience,
 	// another Space and another org all answer NotFound("entry not found").
+	// Request and response type names kept; renaming them would break generated code.
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	ResolveMessage(ctx context.Context, in *ResolveSpaceMessageRequest, opts ...grpc.CallOption) (*ResolveSpaceMessageResponse, error)
 }
 
@@ -89,9 +95,15 @@ func (c *spaceHistoryServiceClient) ResolveMessage(ctx context.Context, in *Reso
 // nothing is persisted, cached or logged (query text and hit ids never reach a log).
 type SpaceHistoryServiceServer interface {
 	// Keyword search over the user and assistant messages of one Space.
+	// Request and response type names kept; renaming them would break generated code.
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SearchMessages(context.Context, *SearchSpaceMessagesRequest) (*SearchSpaceMessagesResponse, error)
 	// Maps a message id to its thread, under the same authority. Not found, hidden by audience,
 	// another Space and another org all answer NotFound("entry not found").
+	// Request and response type names kept; renaming them would break generated code.
+	// buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	ResolveMessage(context.Context, *ResolveSpaceMessageRequest) (*ResolveSpaceMessageResponse, error)
 	mustEmbedUnimplementedSpaceHistoryServiceServer()
 }

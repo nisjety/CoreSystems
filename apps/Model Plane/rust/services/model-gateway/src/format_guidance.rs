@@ -14,10 +14,17 @@
 //! Later notices (staged files, a deck path) add their own function and one
 //! line to [`for_turn`], and share the same prompt slot.
 //!
+//! The widget notice (EP-4 S2) asks for a ```` ```widget ```` fence, which the
+//! web app draws in a sandboxed frame. It is added only on a turn that asks for
+//! something interactive, and only when the client can draw one (the
+//! `inline_widgets` feature) and the gateway switch `MODEL_GATEWAY_WIDGET_GUIDANCE`
+//! is on. Every other client keeps the prompt it had.
+//!
 //! [`PromptContext`]: crate::prompt_context::PromptContext
 //! [`PromptOrder`]: crate::prompt_context::PromptOrder
 
 use mp_contracts::model_plane::v1::ChatMessage;
+use std::sync::OnceLock;
 
 /// Only the start of a message is read: a request to draw a chart is a
 /// sentence, and a pasted document must not cost a scan of every word.
@@ -117,11 +124,9 @@ fn is_chart_noun(word: &str, previous: Option<&str>) -> bool {
     false
 }
 
-/// Whether the message asks for a chart: a request verb followed, within a
-/// few words, by a chart noun ("lag et søylediagram", "plot this as a line
-/// chart", "vis den som kakediagram"). A message that only mentions a chart
-/// ("the chart is wrong"), asks for a flow diagram, or has no request does not.
-fn asks_for_chart(user_text: &str) -> bool {
+/// Whether the message asks for something `is_noun` names: a request verb followed, within a few
+/// words, by such a noun. `is_noun` gets the word and the word before it, which a noun can need.
+fn asks_for(user_text: &str, is_noun: impl Fn(&str, Option<&str>) -> bool) -> bool {
     let lowered: String = user_text
         .chars()
         .take(MAX_SCAN_CHARS)
@@ -134,11 +139,19 @@ fn asks_for_chart(user_text: &str) -> bool {
     words.iter().enumerate().any(|(at, word)| {
         REQUEST_VERBS.contains(word)
             && (at + 1..words.len().min(at + 1 + MAX_WORDS_BETWEEN)).any(|candidate| {
-                words
-                    .get(candidate)
-                    .is_some_and(|noun| is_chart_noun(noun, candidate.checked_sub(1).and_then(|p| words.get(p)).copied()))
+                words.get(candidate).is_some_and(|&noun| {
+                    is_noun(noun, candidate.checked_sub(1).and_then(|p| words.get(p)).copied())
+                })
             })
     })
+}
+
+/// Whether the message asks for a chart: a request verb followed, within a
+/// few words, by a chart noun ("lag et søylediagram", "plot this as a line
+/// chart", "vis den som kakediagram"). A message that only mentions a chart
+/// ("the chart is wrong"), asks for a flow diagram, or has no request does not.
+fn asks_for_chart(user_text: &str) -> bool {
+    asks_for(user_text, is_chart_noun)
 }
 
 /// The chart notice, only when the latest user message asks for a chart.
@@ -147,11 +160,61 @@ pub fn chart_notice(user_text: &str) -> Option<&'static str> {
     asks_for_chart(user_text).then_some(CHART_NOTICE)
 }
 
-/// Every notice that applies to this turn, joined; `None` when none does,
-/// which is every ordinary turn.
+/// Words that name something a widget can be: a calculator, a slider, an interactive view, a
+/// simulation. Matched anywhere in a word, so the Norwegian compounds ("lånekalkulator",
+/// "skyveknappene") count.
+const WIDGET_NOUN_STEMS: &[&str] = &[
+    "kalkulator",
+    "calculator",
+    "interaktiv",
+    "interactive",
+    "widget",
+    "simulering",
+    "simulation",
+    "skyveknapp",
+    "slider",
+];
+
+/// Whether `word` (lowercase) names something a widget can be.
+fn is_widget_noun(word: &str) -> bool {
+    WIDGET_NOUN_STEMS.iter().any(|&stem| word.contains(stem))
+}
+
+/// Whether the message asks for something a widget can be: a request verb followed, within a few
+/// words, by a widget noun ("lag en lånekalkulator", "vis en simulering av kølengden").
+fn asks_for_widget(user_text: &str) -> bool {
+    asks_for(user_text, |word, _previous| is_widget_noun(word))
+}
+
+/// The notice added on a turn that asks for something interactive, when the client can draw a
+/// widget. It states the limits the frame enforces (`sandbox-html.ts` and `InlineWidget.tsx` in the
+/// Frontend Plane): change one and change the other.
+pub const WIDGET_NOTICE: &str = concat!(
+    "The user is asking for something interactive. Use one only where the person has something to ",
+    "do: change a value, pick an option, or run a calculation or a simulation. Write it as one fenced ",
+    "code block whose language is `widget` (not `html`), holding one self-contained HTML document or ",
+    "one SVG element. The app draws it inline in a sandbox with no network: no fetch, no external ",
+    "scripts, stylesheets, fonts or images, no forms and no links. Inline script and CSS are allowed, ",
+    "and so are inline SVG and data: URLs for images. Take colours and type from the host theme ",
+    "variables --vv-background, --vv-surface, --vv-text, --vv-muted, --vv-accent, --vv-border, ",
+    "--vv-radius, --vv-font-family and --vv-font-size, not fixed colours. Keep it under 100,000 ",
+    "characters. In the answer, add a sentence or two on what the widget does and how to use it, and ",
+    "do not repeat its code as prose. A chart or diagram the person only reads stays a `chart` or ",
+    "`mermaid` block.",
+);
+
+/// The widget notice, only when the latest user message asks for something interactive.
 #[must_use]
-pub fn for_turn(user_text: &str) -> Option<String> {
-    let notices: Vec<&str> = [chart_notice(user_text)].into_iter().flatten().collect();
+pub fn widget_notice(user_text: &str) -> Option<&'static str> {
+    asks_for_widget(user_text).then_some(WIDGET_NOTICE)
+}
+
+/// Every notice that applies to this turn, joined; `None` when none does, which is every ordinary
+/// turn. The widget notice needs `widgets_offered`: the client can draw one and the switch is on.
+#[must_use]
+pub fn for_turn(user_text: &str, widgets_offered: bool) -> Option<String> {
+    let widget = if widgets_offered { widget_notice(user_text) } else { None };
+    let notices: Vec<&str> = [chart_notice(user_text), widget].into_iter().flatten().collect();
     if notices.is_empty() {
         None
     } else {
@@ -159,13 +222,36 @@ pub fn for_turn(user_text: &str) -> Option<String> {
     }
 }
 
-/// The system message for the prompt's `format_guidance` slot.
+/// The system message for the prompt's `format_guidance` slot, for a client that may draw widgets.
 #[must_use]
-pub fn message_for_turn(user_text: &str) -> Option<ChatMessage> {
-    for_turn(user_text).map(|content| ChatMessage {
+pub fn message_for_turn_with(user_text: &str, widgets_offered: bool) -> Option<ChatMessage> {
+    for_turn(user_text, widgets_offered).map(|content| ChatMessage {
         role: "system".to_owned(),
         content,
         ..Default::default()
+    })
+}
+
+/// The system message for a client that cannot draw a widget: the prompt is what it was before.
+#[must_use]
+pub fn message_for_turn(user_text: &str) -> Option<ChatMessage> {
+    message_for_turn_with(user_text, false)
+}
+
+/// `MODEL_GATEWAY_WIDGET_GUIDANCE`: only the literal `true`, after trimming, turns it on.
+fn widget_guidance_enabled_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether this gateway may write the widget notice (EP-4 S2). Read once per process, so it cannot
+/// change under a request.
+#[must_use]
+pub fn widget_guidance_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        widget_guidance_enabled_from(
+            std::env::var("MODEL_GATEWAY_WIDGET_GUIDANCE").ok().as_deref(),
+        )
     })
 }
 
@@ -187,7 +273,8 @@ mod tests {
     fn the_saved_journey_prompts_get_no_chart_notice() {
         for prompt in JOURNEY_PROMPTS {
             assert_eq!(chart_notice(prompt), None, "{prompt}");
-            assert_eq!(for_turn(prompt), None, "{prompt}");
+            assert_eq!(for_turn(prompt, false), None, "{prompt}");
+            assert_eq!(for_turn(prompt, true), None, "{prompt}");
             assert_eq!(message_for_turn(prompt), None, "{prompt}");
         }
     }
@@ -348,5 +435,91 @@ mod tests {
             assert_eq!(out[0].content, CHART_NOTICE);
             assert_eq!(out[1], user(prompt));
         }
+    }
+
+    #[test]
+    fn widget_notice_needs_a_request() {
+        for prompt in [
+            "Lag en lånekalkulator med skyveknapp for rente",
+            "Make an interactive calculator for mortgage payments",
+            "Show a simulation of the queue",
+            "Vis en simulering av kølengden",
+            "Build a calculator widget",
+            "Lag et interaktivt diagram over sparingen",
+        ] {
+            assert_eq!(widget_notice(prompt), Some(WIDGET_NOTICE), "{prompt}");
+        }
+        for prompt in [
+            "Kalkulatoren gir feil svar",
+            "The widget is broken",
+            "Hva er en interaktiv tavle?",
+            "Vis meg tabellen igjen",
+            "Lag en tabell med omsetning",
+        ] {
+            assert_eq!(widget_notice(prompt), None, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn widget_notice_off_without_the_feature() {
+        // A client that cannot draw a widget gets no notice for a widget request.
+        let prompt = "Lag en lånekalkulator med skyveknapp for rente";
+        assert_eq!(for_turn(prompt, false), None);
+        assert_eq!(message_for_turn_with(prompt, false), None);
+        assert_eq!(message_for_turn(prompt), None);
+        assert_eq!(for_turn(prompt, true), Some(WIDGET_NOTICE.to_owned()));
+    }
+
+    #[test]
+    fn chart_notice_unchanged() {
+        // A chart request gets the chart notice alone, whether or not widgets are offered.
+        assert_eq!(for_turn("lag et søylediagram", false), Some(CHART_NOTICE.to_owned()));
+        assert_eq!(for_turn("lag et søylediagram", true), Some(CHART_NOTICE.to_owned()));
+        // A request for an interactive chart gets both notices, the chart first.
+        assert_eq!(
+            for_turn("lag et interaktivt søylediagram", true),
+            Some(format!("{CHART_NOTICE}\n\n{WIDGET_NOTICE}")),
+        );
+    }
+
+    #[test]
+    fn message_for_turn_is_unchanged_when_widgets_not_offered() {
+        let prompts = JOURNEY_PROMPTS.into_iter().chain([
+            "lag et søylediagram av disse tallene",
+            "Lag en lånekalkulator med skyveknapp for rente",
+        ]);
+        for prompt in prompts {
+            assert_eq!(message_for_turn(prompt), message_for_turn_with(prompt, false), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn the_switch_is_the_literal_true() {
+        assert!(!widget_guidance_enabled_from(None));
+        assert!(!widget_guidance_enabled_from(Some("")));
+        assert!(!widget_guidance_enabled_from(Some("1")));
+        assert!(!widget_guidance_enabled_from(Some("TRUE")));
+        assert!(widget_guidance_enabled_from(Some("true")));
+        assert!(widget_guidance_enabled_from(Some(" true ")));
+    }
+
+    #[test]
+    fn the_widget_notice_states_the_frame_limits() {
+        for needle in [
+            "`widget`",
+            "(not `html`)",
+            "one fenced code block",
+            "no network",
+            "no external scripts",
+            "data: URLs",
+            "--vv-text",
+            "--vv-accent",
+            "100,000 characters",
+            "`chart` or `mermaid` block",
+        ] {
+            assert!(WIDGET_NOTICE.contains(needle), "missing {needle:?}");
+        }
+        assert!(!WIDGET_NOTICE.contains('\r'));
+        assert!(WIDGET_NOTICE.len() < 1600, "{} bytes", WIDGET_NOTICE.len());
     }
 }

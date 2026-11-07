@@ -8,6 +8,16 @@ import type { RunEventHandlers } from '@/shared/api/run-console-client'
 const hoisted = vi.hoisted(() => ({
   subscriptions: [] as Array<{ handlers: Record<string, unknown>; runId: string }>,
   runDetail: null as { status: string } | null,
+  /** Per-run detail for the children a reloaded panel reads (EP-2 S9); falls back to `runDetail`. */
+  runDetails: {} as Record<string, { status: string }>,
+  lineageEdges: [] as Array<{
+    parentRunId: string
+    childRunId: string
+    goalSummary: string
+    batchId: string
+    status: string
+  }>,
+  lineageThreads: [] as string[],
 }))
 
 vi.mock('@/shared/api/run-console-client', () => ({
@@ -19,7 +29,14 @@ vi.mock('@/shared/api/run-console-client', () => ({
 }))
 
 vi.mock('@/shared/api/runs-client', () => ({
-  getRun: async () => hoisted.runDetail,
+  getRun: async (runId: string) => hoisted.runDetails[runId] ?? hoisted.runDetail,
+}))
+
+vi.mock('@/shared/api/orchestration-client', () => ({
+  getLineageEdges: async (threadId: string) => {
+    hoisted.lineageThreads.push(threadId)
+    return hoisted.lineageEdges
+  },
 }))
 
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
@@ -38,6 +55,9 @@ async function tick(times = 1): Promise<void> {
 beforeEach(() => {
   hoisted.subscriptions.length = 0
   hoisted.runDetail = null
+  hoisted.runDetails = {}
+  hoisted.lineageEdges = []
+  hoisted.lineageThreads.length = 0
 })
 
 describe('ChatWideResearchPanel', () => {
@@ -236,5 +256,106 @@ describe('ChatWideResearchPanel', () => {
     expect(done?.getAttribute('data-status')).toBe('done')
     expect(unresolved?.getAttribute('data-status')).toBe('unknown')
     expect(unresolved?.textContent).toContain('Fullførte ikke')
+  })
+
+  it('does not read the lineage without a threadId, so a live-only host starts empty as before', async () => {
+    hoisted.lineageEdges = [
+      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
+      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+    ]
+    const { container } = render(() => <ChatWideResearchPanel runId="run_1" />)
+    await tick(3)
+
+    expect(hoisted.lineageThreads).toHaveLength(0)
+    expect(container.querySelector('.verevon-wide-research')).toBeNull()
+  })
+
+  it('restores the grid after a reload from the lineage, with each card status read from its child run', async () => {
+    hoisted.runDetail = { status: 'completed' }
+    hoisted.runDetails = {
+      c0: { status: 'completed' },
+      c1: { status: 'failed' },
+      c2: { status: 'running' },
+    }
+    hoisted.lineageEdges = [
+      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'detached' },
+      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+      // A retry of item B started from a later run: it joins the batch it retried.
+      { parentRunId: 'run_2', childRunId: 'c2', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+      // Another run's fan-out and a standalone delegation are not this run's grid.
+      { parentRunId: 'run_9', childRunId: 'x0', goalSummary: 'other', batchId: 'b9', status: 'attached' },
+      { parentRunId: 'run_1', childRunId: 'x1', goalSummary: 'lone task', batchId: '', status: 'attached' },
+    ]
+    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
+    await tick(4)
+
+    expect(hoisted.lineageThreads).toEqual(['thread_1'])
+    const cards = [...container.querySelectorAll('.verevon-wide-research__card')]
+    expect(cards).toHaveLength(3)
+    expect(container.textContent).not.toContain('other')
+    expect(container.textContent).not.toContain('lone task')
+    const status = (index: number) => cards[index]?.getAttribute('data-status')
+    expect(status(0)).toBe('done')
+    expect(status(1)).toBe('failed')
+    // The parent run ended, so a child still shown running did not finish.
+    expect(status(2)).toBe('unknown')
+  })
+
+  it('joins live stop events onto the cards it seeded from the lineage', async () => {
+    hoisted.runDetails = { c0: { status: 'running' }, c1: { status: 'running' } }
+    hoisted.lineageEdges = [
+      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
+      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+    ]
+    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
+    await tick(4)
+
+    handlers().onSubagentStopped?.({ childRunId: 'c0', status: 'completed' })
+    flush()
+    await tick()
+
+    const cards = [...container.querySelectorAll('.verevon-wide-research__card')]
+    expect(cards).toHaveLength(2)
+    expect(cards.find((card) => card.textContent?.includes('item A'))?.getAttribute('data-status')).toBe('done')
+    expect(cards.find((card) => card.textContent?.includes('item B'))?.getAttribute('data-status')).toBe('running')
+  })
+
+  it('offers "Prøv igjen" only on an item without an answer, and only when the host can retry', async () => {
+    hoisted.runDetails = { c0: { status: 'completed' }, c1: { status: 'failed' } }
+    hoisted.lineageEdges = [
+      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
+      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+    ]
+    const onRetryItem = vi.fn(async () => {})
+    const { container } = render(() => (
+      <ChatWideResearchPanel runId="run_1" threadId="thread_1" onRetryItem={onRetryItem} />
+    ))
+    await tick(4)
+
+    const cardFor = (text: string) => [...container.querySelectorAll('.verevon-wide-research__card')]
+      .find((card) => card.textContent?.includes(text))
+    expect(cardFor('item A')?.querySelector('.verevon-wide-research__retry')).toBeNull()
+    const button = cardFor('item B')?.querySelector<HTMLButtonElement>('.verevon-wide-research__retry')
+    expect(button?.textContent).toContain('Prøv igjen')
+
+    button?.click()
+    flush()
+    await tick()
+
+    expect(onRetryItem).toHaveBeenCalledTimes(1)
+    expect(onRetryItem).toHaveBeenCalledWith({ childRunId: 'c1', batchId: 'b1', goalSummary: 'item B' })
+  })
+
+  it('offers no retry when the host does not wire one', async () => {
+    hoisted.runDetails = { c0: { status: 'failed' }, c1: { status: 'failed' } }
+    hoisted.lineageEdges = [
+      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
+      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
+    ]
+    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
+    await tick(4)
+
+    expect(container.querySelectorAll('.verevon-wide-research__card')).toHaveLength(2)
+    expect(container.querySelector('.verevon-wide-research__retry')).toBeNull()
   })
 })

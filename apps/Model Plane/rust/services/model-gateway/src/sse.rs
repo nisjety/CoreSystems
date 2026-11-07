@@ -210,6 +210,24 @@ struct AgentRoleInput {
     autonomy_cap: String,
 }
 
+/// The passage of each knowledge citation of `grounding`, in citation order (EP-2-S4): one entry
+/// per citation, all `None` with the cited-passage switch off so every frame is unchanged. A ZDR
+/// turn streams these too; what may be stored is decided at persistence, not here.
+fn knowledge_passages(
+    grounding: &crate::retrieval::Grounding,
+    enabled: bool,
+) -> Vec<Option<crate::sse_events::CitationPassage>> {
+    grounding
+        .citations
+        .iter()
+        .map(|citation| {
+            enabled
+                .then(|| crate::sse_events::CitationPassage::knowledge(&grounding.facts, &citation.id))
+                .flatten()
+        })
+        .collect()
+}
+
 /// The bounded role catalogue a Do run carries in `RunContext.agent_roles` (EP-6 S10).
 ///
 /// Empty with the switch off, for a ZDR or waived turn (Do and delegation are refused there, so the
@@ -269,6 +287,196 @@ fn within_bytes(text: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// The switch that lets a mentioned agent's pinned version narrow its turn (EP-6 S9): its tool
+/// allowlist and its autonomy cap. Opt-in: only the literal `true` enables it. Off, the five
+/// `agent_*` pin fields of `InvokeRequest` are never read, so a turn is exactly what it was. The BFF
+/// gateway sends them only under its own switch, `AGENT_VERSION_PINNING`.
+const AGENT_TOOL_ALLOWLIST_VAR: &str = "MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST";
+
+fn agent_tool_allowlist_enabled() -> bool {
+    agent_tool_allowlist_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn agent_tool_allowlist_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(AGENT_TOOL_ALLOWLIST_VAR).is_some_and(|value| value == "true")
+}
+
+/// The typed refusal for agent pin fields that are not the shape the BFF gateway sends. A pin that
+/// cannot be read is refused rather than dropped, because dropping it would drop its allowlist and cap.
+const AGENT_PIN_INVALID_CODE: &str = "agent_pin_invalid";
+
+/// The typed refusal for a Do or execute turn whose agent states a tool allowlist. execution-core
+/// owns the binding from a tool to its governed capability (`trusted_capability_id`) and does not
+/// receive the allowlist yet, so such a run could reach tools outside it.
+const AGENT_ALLOWLIST_DO_CODE: &str = "agent_tool_allowlist_do_unsupported";
+
+/// The bound Convex puts on a version's allowlist (`MAX_TOOL_CAPABILITY_IDS`).
+const MAX_AGENT_TOOL_CAPABILITY_IDS: usize = 64;
+
+/// The pinned agent version a mention turn runs (EP-6 S9), as the BFF gateway resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentPin {
+    agent_ref: String,
+    version: u32,
+    digest: String,
+    /// `None` when the version states no allowlist; `Some(empty)` allows no tool at all.
+    tool_capability_ids: Option<Vec<String>>,
+    autonomy_cap: Option<mp_contracts::agent_mode::AgentMode>,
+}
+
+/// Reads the agent pin of a turn. `Ok(None)` with the switch off and for a turn that carries no
+/// pin (every turn not addressed to a versioned agent). Every present field must be well formed, and
+/// an allowlist or cap without the agent it belongs to is malformed: the refusal never falls back to
+/// an unpinned turn, which would be the widest one.
+fn agent_pin(
+    enabled: bool,
+    agent_ref: Option<&Value>,
+    version: Option<&Value>,
+    digest: Option<&Value>,
+    tool_capability_ids: Option<&Value>,
+    autonomy_cap: Option<&Value>,
+) -> Result<Option<AgentPin>, &'static str> {
+    if !enabled {
+        return Ok(None);
+    }
+    // A function, not a closure: a closure cannot tie its returned borrow to its argument's lifetime.
+    fn present(value: Option<&Value>) -> Option<&Value> {
+        value.filter(|value| !value.is_null())
+    }
+    let (agent_ref, version, digest, tool_capability_ids, autonomy_cap) = (
+        present(agent_ref),
+        present(version),
+        present(digest),
+        present(tool_capability_ids),
+        present(autonomy_cap),
+    );
+    let Some(agent_ref) = agent_ref else {
+        return if version.is_none()
+            && digest.is_none()
+            && tool_capability_ids.is_none()
+            && autonomy_cap.is_none()
+        {
+            Ok(None)
+        } else {
+            Err(AGENT_PIN_INVALID_CODE)
+        };
+    };
+    let agent_ref = agent_ref
+        .as_str()
+        .filter(|agent_ref| {
+            !agent_ref.is_empty()
+                && agent_ref.len() <= MAX_AGENT_REF_BYTES
+                && agent_ref
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        })
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let version = version
+        .and_then(Value::as_u64)
+        .filter(|version| *version >= 1)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let digest = digest
+        .and_then(Value::as_str)
+        .filter(|digest| {
+            digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        })
+        .ok_or(AGENT_PIN_INVALID_CODE)?;
+    let tool_capability_ids = match tool_capability_ids {
+        None => None,
+        Some(ids) => {
+            let ids = ids.as_array().ok_or(AGENT_PIN_INVALID_CODE)?;
+            if ids.len() > MAX_AGENT_TOOL_CAPABILITY_IDS {
+                return Err(AGENT_PIN_INVALID_CODE);
+            }
+            // The capability id shape Convex validates on publish.
+            let ids = ids
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .filter(|id| {
+                            id.len() <= 128
+                                && id.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                                && id.bytes().all(|b| {
+                                    b.is_ascii_lowercase()
+                                        || b.is_ascii_digit()
+                                        || matches!(b, b'_' | b'.' | b'-')
+                                })
+                        })
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<String>>>()
+                .ok_or(AGENT_PIN_INVALID_CODE)?;
+            Some(ids)
+        }
+    };
+    let autonomy_cap = match autonomy_cap {
+        None => None,
+        Some(cap) => Some(
+            cap.as_str()
+                .and_then(|cap| mp_contracts::agent_mode::AgentMode::parse(cap).ok())
+                .ok_or(AGENT_PIN_INVALID_CODE)?,
+        ),
+    };
+    Ok(Some(AgentPin {
+        agent_ref: agent_ref.to_owned(),
+        version,
+        digest: digest.to_owned(),
+        tool_capability_ids,
+        autonomy_cap,
+    }))
+}
+
+/// Narrows a turn to its agent's tool allowlist: one more intersection beside the binding policy
+/// (BFF), the org policy and the WS05 bindings, so it only ever removes. The gateway holds no binding
+/// from a client-declared or built-in tool name to its governed capability (execution-core does), so
+/// no tool of an Ask turn can be shown to be on the list: the tool loop, the client tools and the web
+/// toggle are all withdrawn. A Do or execute turn is refused (see [`AGENT_ALLOWLIST_DO_CODE`]). A
+/// version without an allowlist changes nothing.
+fn narrow_to_agent_allowlist(
+    pin: Option<&AgentPin>,
+    execute_granted: bool,
+    features: &mut Vec<String>,
+    tools: &mut Vec<crate::http_routes::ToolSpec>,
+    browse_web: &mut bool,
+) -> Result<(), &'static str> {
+    if pin.and_then(|pin| pin.tool_capability_ids.as_ref()).is_none() {
+        return Ok(());
+    }
+    if execute_granted || features.iter().any(|feature| feature == "agentic") {
+        return Err(AGENT_ALLOWLIST_DO_CODE);
+    }
+    features.retain(|feature| feature != "tools");
+    tools.clear();
+    *browse_web = false;
+    Ok(())
+}
+
+/// The mode a turn runs under with its agent's autonomy cap as one more WS25-S6 input: a ceiling,
+/// so it can only make the result stricter. An `auto` cap or none leaves the resolve exactly as it
+/// was, including `None` for a turn that asked for no mode.
+fn resolve_turn_with_agent_cap(
+    posture: crate::profile::ApprovalPosture,
+    chosen: Option<mp_contracts::agent_mode::AgentMode>,
+    org_cap: Option<mp_contracts::agent_mode::AgentMode>,
+    agent_cap: Option<mp_contracts::agent_mode::AgentMode>,
+) -> Option<mp_contracts::agent_mode::Resolved> {
+    match agent_cap.filter(|cap| *cap != mp_contracts::agent_mode::AgentMode::Auto) {
+        None => crate::org_agent_policy::resolve_turn(posture, chosen, org_cap),
+        Some(cap) => Some(mp_contracts::agent_mode::resolve(
+            crate::profile::mode_floor_from(posture),
+            org_cap,
+            chosen,
+            &[mp_contracts::agent_mode::Ceiling {
+                source: "agent",
+                mode: cap,
+            }],
+        )),
+    }
 }
 
 /// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
@@ -706,6 +914,10 @@ fn tool_phase_explanation(reason: &str, subscription: bool) -> (&'static str, &'
         crate::result_validation::VALIDATION_UNAVAILABLE => (
             crate::result_validation::VALIDATION_UNAVAILABLE,
             "Modelltjenesten svarte ikke mens utkastet ble kontrollert mot kildene. Dette utkastet er ikke publisert. Prøv igjen om litt.",
+        ),
+        crate::selection_guard::REJECTED_REASON => (
+            crate::selection_guard::REJECTED_REASON,
+            "Endringen ble ikke lagret: den skrev om tekst utenfor det valgte avsnittet to ganger. Dette utkastet er ikke publisert. Prøv igjen og be bare om endring i det valgte.",
         ),
         _ => ("audit_persistence_failed", "Tool action could not be durably audited"),
     }
@@ -1812,6 +2024,44 @@ pub async fn invoke_stream_sse(
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
     let browser_bearer = browser_bearer.map(|Extension(bearer)| bearer);
+    // EP-6 S9: the mentioned agent's pinned version, read only with the switch on. Its allowlist
+    // narrows the turn before anything reads the features or tools; its cap joins the mode resolve.
+    let agent_pin = match agent_pin(
+        agent_tool_allowlist_enabled(),
+        req.agent_ref.as_ref(),
+        req.agent_version.as_ref(),
+        req.agent_digest.as_ref(),
+        req.agent_tool_capability_ids.as_ref(),
+        req.agent_autonomy_cap.as_ref(),
+    ) {
+        Ok(pin) => pin,
+        Err(code) => {
+            return error_stream(&request_id, code, "The agent version for this turn could not be read.", false);
+        }
+    };
+    if let Some(pin) = agent_pin.as_ref() {
+        // Ids and a digest only, never the agent's instructions.
+        info!(
+            agent_ref = %pin.agent_ref,
+            agent_version = pin.version,
+            agent_digest = %pin.digest,
+            "agent version pinned for the turn"
+        );
+    }
+    if let Err(code) = narrow_to_agent_allowlist(
+        agent_pin.as_ref(),
+        req.execute_granted,
+        &mut req.features,
+        &mut req.tools,
+        &mut req.browse_web,
+    ) {
+        return error_stream(
+            &request_id,
+            code,
+            "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+            false,
+        );
+    }
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -1844,7 +2094,14 @@ pub async fn invoke_stream_sse(
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only and web-only turns don't support Plan mode yet. Turn off Plan mode, or switch the source filter back to Kunnskap + nett, to continue.", false);
     }
-    if retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly && req.deep_research {
+    // EP-2-S7 (D3): with knowledge sources switched on, a knowledge-only research run reads the org's
+    // knowledge per sub-query and never the web, so the scope no longer conflicts. Read once for the
+    // turn, so the admission here and the run below agree.
+    let research_knowledge_sources = crate::deep_research::knowledge_sources_enabled();
+    if retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly
+        && req.deep_research
+        && !research_knowledge_sources
+    {
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only turns can't run web research. Switch to Kunnskap + nett or Kun nett to use Dyp research.", false);
     }
@@ -1924,6 +2181,34 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    // Typed context references (Wave 3 EP-3 S5), checked before any run or model call. With the switch off the
+    // field is never read, so the turn is the one it was before.
+    let context_refs = match crate::context_refs::resolve(
+        crate::context_refs::enabled(),
+        req.context_refs.as_ref(),
+        &crate::context_refs::TurnFacts {
+            zdr: turn_posture.zdr(),
+            waived: turn_posture.is_waived(),
+            thread_references: crate::thread_reference_tools::enabled(),
+            agentic: features.iter().any(|feature| feature == "agentic"),
+            knowledge: !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly,
+            selection_edit: crate::selection_guard::enabled_for(state.artifact_revisions_mode),
+            space_id: req
+                .space_context
+                .as_ref()
+                .or(req.space_append_context.as_ref())
+                .map(|context| context.space_id.as_str())
+                .filter(|id| !id.is_empty()),
+        },
+    ) {
+        Ok(resolved) => resolved,
+        Err(crate::context_refs::ContextRefRefusal::Zdr) => {
+            return zdr_refusal_stream(&request_id, crate::context_refs::ContextRefRefusal::zdr_refusal());
+        }
+        Err(crate::context_refs::ContextRefRefusal::Typed { code, message, .. }) => {
+            return error_stream(&request_id, code, message, false);
+        }
+    };
     let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
     // call the platform chain, which a waived turn must never reach, so they are refused before any run.
@@ -1981,6 +2266,27 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    // The org's web switches (Wave 3 EP-9 W2), read from the policy the admission above left warm. `None` when the
+    // policy does not bind this turn, so its web access stays what the person chose.
+    let org_web_off = crate::org_agent_policy::held_web_caps(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &org_id,
+    )
+    .is_some_and(|caps| !caps.live);
+    // Deep research is a web turn by definition: it searches outside the tool loop, so an organisation that turned web
+    // access off refuses it here, before any plan or search runs. A knowledge-only run with knowledge sources on
+    // (EP-2-S7) searches no web, so the org's web switch does not bind it.
+    let knowledge_only_research = research_knowledge_sources
+        && retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly;
+    if req.deep_research && org_web_off && !knowledge_only_research {
+        return error_stream(
+            &request_id,
+            "org_web_off",
+            "The organisation has turned web access off, so deep research cannot run.",
+            false,
+        );
+    }
     let chosen_mode = match crate::profile::chosen_agent_mode(
         crate::profile::agent_modes_enabled(),
         req.agent_mode.as_deref(),
@@ -1995,7 +2301,12 @@ pub async fn invoke_stream_sse(
             );
         }
     };
-    let turn_mode = crate::org_agent_policy::resolve_turn(requested_posture, chosen_mode, org_mode_cap);
+    let turn_mode = resolve_turn_with_agent_cap(
+        requested_posture,
+        chosen_mode,
+        org_mode_cap,
+        agent_pin.as_ref().and_then(|pin| pin.autonomy_cap),
+    );
     if let Some(turn) = turn_mode {
         req.plan_mode |= turn.preset.plan_gate;
         tracing::info!(
@@ -2463,6 +2774,93 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
         }
     }
+    // A turn the goal pump sent (Wave 3 EP-7 S4) is refused here, before any run exists, unless
+    // auto-continue is available and the turn is a Do turn naming its goal. A turn without the mark
+    // is never refused here: with MODEL_GATEWAY_GOAL_AUTO_CONTINUE off every other turn is as it was.
+    if let Some((code, message)) = crate::goal_auto::refusal(
+        req.goal_auto,
+        crate::goal_auto::available(),
+        agentic_requested,
+        req.goal_id.as_deref(),
+    ) {
+        return error_stream(&request_id, code, message, false);
+    }
+    // The thread goal (Wave 3 EP-7 S1), decided before any run exists: a Do turn recites the
+    // thread's active goal as data, and a Continue turn whose `goal_id` is not that goal is refused.
+    // With MODEL_GATEWAY_THREAD_GOALS_ENABLED off nothing is read and the run is what it was.
+    let goal_recitation = match crate::thread_goal_routes::turn_goal_recitation(
+        &state,
+        &crate::thread_goal_routes::GoalTurn {
+            enabled: crate::thread_goal_routes::enabled(),
+            agentic: agentic_requested,
+            zdr_or_waived: effective_zdr || turn_posture.is_waived(),
+            space_scoped: req
+                .space_context
+                .as_ref()
+                .or(req.space_append_context.as_ref())
+                .is_some_and(|context| !context.space_id.is_empty()),
+            thread_id: req.thread_id.as_deref(),
+            goal_id: req.goal_id.as_deref(),
+        },
+        &org_id,
+        &model_bearer,
+    )
+    .await
+    {
+        Ok(recitation) => recitation,
+        Err(crate::thread_goal_routes::TurnGoalRefusal::Zdr) => {
+            return zdr_refusal_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::thread_goal_routes::ZDR_FEATURE,
+                ),
+            );
+        }
+        Err(crate::thread_goal_routes::TurnGoalRefusal::Typed { code, message }) => {
+            return error_stream(&request_id, code, message, false);
+        }
+    };
+    // The goal turn ledger (EP-7 S2): a Continue turn that names its goal, and passed the check
+    // above, is admitted by session-core before any run exists. A refusal (a spent budget, the turn
+    // cap, a turn still in flight) is a typed stream error and no run is prepared. The claim settles
+    // itself on every exit of this turn ([`crate::thread_goal::GoalTurnLedger`]). Off with the goal
+    // switch, for an Ask turn and for a turn that names no goal, so those turns are unchanged.
+    let goal_turn_id = req
+        .goal_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && agentic_requested && crate::thread_goal_routes::enabled());
+    let mut goal_turn = match goal_turn_id {
+        Some(goal_id) => match crate::thread_goal::GoalTurnLedger::claim(
+            state.thread_goal_client.clone(),
+            &model_bearer,
+            &org_id,
+            goal_id,
+        )
+        .await
+        {
+            Ok(ledger) => {
+                // D10: what the goal has left, clamped to the org's per-run ceiling and never above
+                // it. A Do run carries no token cap of its own yet (register D2-705), so the cap is
+                // stated here and the goal stops at its next claim.
+                let cap = crate::thread_goal::goal_turn_cap(
+                    ledger.allowance(),
+                    crate::sse_events::run_ceiling::RunCeiling::resolve(
+                        None,
+                        None,
+                        org_limits.max_cost_usd,
+                        org_limits.max_tokens,
+                    ),
+                );
+                tracing::info!(request_id = %request_id, cap_tokens = ?cap.tokens, cap_usd = ?cap.usd, "goal turn claimed");
+                Some(ledger)
+            }
+            Err(refusal) => {
+                return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+            }
+        },
+        None => None,
+    };
     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
     // image is refused here rather than silently losing its tools to that diversion.
@@ -2592,7 +2990,9 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::prepare_managed_run_authenticated_with_receipt(
+    let session_run = match crate::session_flow::with_user_context_refs(
+        context_refs.as_ref(),
+        crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
@@ -2625,7 +3025,7 @@ pub async fn invoke_stream_sse(
             req.idempotency_key.as_deref(),
         ),
         req.wake_context.as_ref(),
-    )
+    ))
     .await
     {
         Ok(run) => run,
@@ -2673,6 +3073,11 @@ pub async fn invoke_stream_sse(
                 true,
             );
         }
+    }
+    // The claimed goal turn names its run as soon as the run exists (EP-7 S2), so every later exit
+    // settles it against that run and counts it.
+    if let Some(ledger) = goal_turn.as_mut() {
+        ledger.bind(&session_run.run_id, req.goal_auto).await;
     }
     let thread_scope = session_run.thread_id.clone();
     let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
@@ -2808,6 +3213,34 @@ pub async fn invoke_stream_sse(
                     Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
                 ),
         );
+        // A wide-research run from the composer's entry (EP-2 S8): absent with
+        // WIDE_RESEARCH_ENTRY_ENABLED off, for a turn that does not ask for one and for a ZDR or
+        // waived turn. Its item cap is clamped to the org's `research.max_fan_out_items`; the
+        // admission above already refused a Do turn whose enforced policy cannot be read, so a
+        // read that fails here holds the run to 0, which execution-core refuses.
+        let wide_research_enabled =
+            crate::http_routes::wide_research_entry_enabled() && req.wide_research.is_some();
+        let wide_research = if wide_research_enabled {
+            let org_cap = crate::http_routes::wide_research_org_cap(
+                &state,
+                &org_id,
+                capability_bearer.as_ref(),
+            )
+            .await
+            .unwrap_or(Some(0));
+            crate::http_routes::wide_research_request(
+                true,
+                req.wide_research.as_ref(),
+                effective_zdr
+                    || matches!(
+                        retention_class,
+                        Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                    ),
+                crate::http_routes::WideResearchCap::of(org_cap),
+            )
+        } else {
+            None
+        };
         timing.hand_off("agentic");
         return agentic_run_stream(
             state.clone(),
@@ -2883,6 +3316,9 @@ pub async fn invoke_stream_sse(
                 crate::thinking::ladder_enabled(),
             ),
             agent_roles,
+            wide_research,
+            goal_recitation,
+            goal_turn,
         );
     }
 
@@ -2945,6 +3381,18 @@ pub async fn invoke_stream_sse(
         room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
         participants: &wake.participants,
     });
+    // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
+    // revision another replica committed is what this turn revises. Runs before the metadata
+    // rehydration below; seeding never lowers a version, so the order only saves a write.
+    crate::artifact_revisions::seed_from_table_heads(
+        &state,
+        &model_bearer,
+        &org_id,
+        &session_run.thread_id,
+        effective_zdr,
+        retention_class.is_some(),
+    )
+    .await;
     let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
@@ -2966,6 +3414,28 @@ pub async fn invoke_stream_sse(
         wake_history.as_ref(),
     )
     .await;
+    // EP-3 S6: a selection edit names the version it revises. It is admitted against the heads this turn has just seeded, refused before any model call when the head moved, and held for this run's tool rounds (see the spawn below).
+    let selection_hold = match crate::selection_guard::admit(
+        &session_run.run_id,
+        context_refs.as_ref(),
+        &state.artifact_versions,
+        &session_run.thread_id,
+    ) {
+        Ok(hold) => hold,
+        Err(refusal) => {
+            timing.fail();
+            return prepared_direct_failure_stream(
+                &state,
+                &session_run,
+                &model_bearer,
+                &request_id,
+                refusal.code,
+                refusal.message,
+                refusal.retryable,
+            )
+            .await;
+        }
+    };
     // A summary written this turn, persisted with the answer so later turns
     // send the same bytes instead of summarising the same head again.
     let head_summary = recent_thread.head_summary;
@@ -3301,14 +3771,16 @@ pub async fn invoke_stream_sse(
         skills_truncated,
         skills_dropped,
         skill_file_offered,
+        pins: skill_pins,
     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
         capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
         &org_id,
         &user_id,
+        &session_run.thread_id,
         &req.content,
-        &req.skill_ids,
+        &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
     )
     .await };
     // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
@@ -3326,7 +3798,21 @@ pub async fn invoke_stream_sse(
         &req.content,
         &requested_skill_ids,
         MAX_INJECTED_SKILLS,
+        &skill_pins,
     );
+    // EP-11 S3: stamp the versions this turn injected on its run record, spawned so
+    // the turn never waits on it. Never for a ZDR or waived turn: session-core
+    // refuses both, and their run record keeps nothing durable about the turn.
+    if !skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived() {
+        let pin_state = state.clone();
+        let pin_bearer = model_bearer.clone();
+        let (pin_org, pin_run) = (org_id.clone(), session_run.run_id.clone());
+        let pins = skill_pins.clone();
+        tokio::spawn(async move {
+            crate::run_context::record_skill_pins(&pin_state, &pin_org, &pin_run, &pin_bearer, pins)
+                .await;
+        });
+    }
     // Shared turn record (off by default): lets a rating on another replica
     // resolve this turn. A waived turn stays in this process, as it does for
     // every other shared store.
@@ -3389,10 +3875,15 @@ pub async fn invoke_stream_sse(
     if crate::tool_loop::asks_about_conversation_state(&req.content) {
         prompt.generated_image_state = generated_image_state_message(&prompt.history);
     }
-    // Formatting guidance for what this turn asks for (today: the chart fence
-    // the web app draws natively). `None` on every ordinary turn, so the prompt
-    // is then exactly what it was without the slot. See `format_guidance`.
-    prompt.format_guidance = crate::format_guidance::message_for_turn(&req.content);
+    // Formatting guidance for what this turn asks for: the chart fence the web app
+    // draws natively, and the widget fence when the client can draw one (the
+    // `inline_widgets` feature, with the gateway switch on). `None` on every
+    // ordinary turn, so the prompt is then exactly what it was without the slot.
+    // See `format_guidance`.
+    let widgets_offered = crate::format_guidance::widget_guidance_enabled()
+        && features.iter().any(|feature| feature == "inline_widgets");
+    prompt.format_guidance =
+        crate::format_guidance::message_for_turn_with(&req.content, widgets_offered);
 
     // chat-parity §2 — function-calling tool loop. When the client supplies
     // tools AND opts into the `tools` family, resolve tool calls first (unary
@@ -3422,6 +3913,16 @@ pub async fn invoke_stream_sse(
     // searches, and the loop afterwards must be able to close a named gap the
     // report could not fill.
     let deep_research_requested = req.deep_research;
+    // Which turn of a two-turn deep research this is (EP-2 S5). With `DEEP_RESEARCH_PLAN_TURN` off
+    // both fields are ignored and the turn is the one-shot it always was.
+    let research_phase = crate::deep_research::research_phase(
+        crate::deep_research::plan_turn_enabled(),
+        deep_research_requested,
+        req.research_phase.as_ref(),
+        req.research_plan.as_ref(),
+        crate::deep_research::max_sub_queries(),
+        pii_redaction_required,
+    );
     let web_search_available = !conversation_only
         && retrieval_scope != crate::normalize::RetrievalScope::KnowledgeOnly
         && (retrieval_scope == crate::normalize::RetrievalScope::WebOnly
@@ -3502,6 +4003,20 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
+    // The organisation's web switch (Wave 3 EP-9 W2) withholds the public web tools whatever the turn asked for, so
+    // the model is not shown them and a call to one is refused as not offered. Taken out before the scope filter
+    // below, so each withheld tool is named once, here. The notice further down says what was withheld and why.
+    let excluded_by_org_web: Vec<String> = if org_web_off {
+        let withheld: Vec<String> = tool_defs
+            .iter()
+            .filter(|tool| crate::tool_loop::is_public_web_tool(&tool.name))
+            .map(|tool| tool.name.clone())
+            .collect();
+        tool_defs.retain(|tool| !crate::tool_loop::is_public_web_tool(&tool.name));
+        withheld
+    } else {
+        Vec::new()
+    };
     if conversation_only {
         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
         prompt.conversation_scope = Some(ChatMessage {
@@ -3656,11 +4171,20 @@ pub async fn invoke_stream_sse(
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
+    // Whether the turn runs in a Space room: a deep-research run there never reads connected accounts
+    // (EP-2-S7), as the selection check above already refuses a selection there.
+    let research_space_scoped = req
+        .space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .is_some_and(|context| !context.space_id.is_empty());
     // Provider-bound copy for the title inference: `user_content` already has
     // the opt-in PII redaction applied, and the title call reaches the same
     // external provider the answer did.
     let title_user_content = user_content.clone();
 
+    let context_ref_documents = crate::context_refs::register_turn_documents(&session_run.run_id, context_refs.as_ref());
+    let context_ref_threads = crate::thread_reference_tools::register_turn_threads(&session_run.run_id, context_refs.as_ref());
     // The tool phase and the first inference call run INSIDE this task, after
     // `connected` is already on the wire. Axum begins the HTTP response only
     // once this handler returns, so doing that work here held the whole response
@@ -3671,6 +4195,9 @@ pub async fn invoke_stream_sse(
         // Owns the gauge unit: it drops when this task ends on any path, so a stop, a cancel, a
         // client disconnect or a panic cannot leave the stream counted.
         let _active_stream = active_stream;
+        let _context_ref_documents = context_ref_documents;
+        let _context_ref_threads = context_ref_threads;
+        let _selection_hold = selection_hold;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
@@ -3787,10 +4314,20 @@ pub async fn invoke_stream_sse(
         // chat-parity §8: emit retrieved sources up front (gated on the
         // `citations` family) so the UI can render the Sources panel before
         // the answer streams in.
-        for c in grounding
+        //
+        // Behind the cited-passage switch (EP-2-S4) each one also carries the fact it was numbered
+        // from and that fact's locator, so the viewer can show the passage and ask Data Plane for
+        // more under the viewer's own grants. The same passages are seeded into the sink below.
+        let kb_passages: Vec<Option<crate::sse_events::CitationPassage>> = grounding
+            .as_ref()
+            .map(|payload| knowledge_passages(payload, crate::sse_events::citation_passages_enabled()))
+            .unwrap_or_default();
+        for (c, passage) in grounding
             .as_ref()
             .map(|payload| payload.citations.clone())
             .unwrap_or_default()
+            .into_iter()
+            .zip(kb_passages.iter().cloned())
         {
             let cite = crate::sse_events::ChatEvent::Citation {
                 id: c.id,
@@ -3804,6 +4341,7 @@ pub async fn invoke_stream_sse(
                 start: None,
                 end: None,
                 origin: c.origin,
+                passage,
             };
             emit_and_buffer(
                 &tx,
@@ -3840,6 +4378,14 @@ pub async fn invoke_stream_sse(
         ))
         .with_usage_progress(usage_progress_switch())
         .with_run_ceiling(run_ceiling)
+        // The turn's web-search provenance (EP-9 W1): every answered search records here, and the one frame after
+        // the tool phase names them all. Attached only while the line is switched on.
+        .with_search_provenance(crate::search_provenance::enabled().then(|| {
+            crate::search_provenance::SearchProvenanceTurn::new(crate::search_provenance::Route::for_turn(
+                effective_zdr,
+                crate::tool_loop::paid_providers_allowed(&model_clone, effective_zdr),
+            ))
+        }))
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-
@@ -3851,7 +4397,7 @@ pub async fn invoke_stream_sse(
         // citations instead of only whatever web_search/deep-research/
         // verification-retry adds later via `sink.emit()`.
         if let Some(payload) = grounding.as_ref() {
-            sink.seed_recorded_citations(payload.citations.iter().map(|c| {
+            sink.seed_recorded_citations(payload.citations.iter().zip(kb_passages).map(|(c, passage)| {
                 crate::sse_events::RecordedCitation {
                     id: c.id.clone(),
                     title: c.title.clone(),
@@ -3861,6 +4407,7 @@ pub async fn invoke_stream_sse(
                     source_group_label: Some(c.source_group_label.clone()),
                     number: Some(c.number),
                     origin: c.origin.clone(),
+                    passage,
                 }
             }));
         }
@@ -3872,16 +4419,26 @@ pub async fn invoke_stream_sse(
         // receipt has no frame. `conversation_only` forces the filter to
         // `Auto`, so a Space-scoped conversation-only turn reaches this frame
         // only through its knowledge receipt (WS18-S3).
-        if retrieval_scope != crate::normalize::RetrievalScope::Auto || knowledge.is_some() {
+        // An organisation withholding web tools is a reason to say so too, with the same frame (Wave 3 EP-9 W2).
+        if retrieval_scope != crate::normalize::RetrievalScope::Auto
+            || knowledge.is_some()
+            || !excluded_by_org_web.is_empty()
+        {
             sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
                 scope: match retrieval_scope {
                     crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
                     crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
-                    // Reached only with a knowledge receipt, since the guard above admits Auto for nothing else.
+                    // Reached with a knowledge receipt or an organisation withholding, since the guard above admits
+                    // Auto for nothing else.
                     crate::normalize::RetrievalScope::Auto => "auto".to_owned(),
                 },
-                excluded_tools: excluded_by_retrieval_scope.clone(),
+                excluded_tools: excluded_by_org_web
+                    .iter()
+                    .chain(excluded_by_retrieval_scope.iter())
+                    .cloned()
+                    .collect(),
                 knowledge,
+                reason: (!excluded_by_org_web.is_empty()).then(|| "org_web_off".to_owned()),
             })
             .await;
         }
@@ -3904,8 +4461,69 @@ pub async fn invoke_stream_sse(
         // failure inside it degrades into a stated fact in the context rather
         // than failing the turn.
         let mut deep_research_ran = false;
-        if deep_research_requested {
+        // The plan a plan turn stores with its answer (EP-2 S5); `None` on every other turn.
+        let mut research_plan_record: Option<serde_json::Value> = None;
+        if deep_research_requested
+            && matches!(research_phase, crate::deep_research::ResearchPhase::Plan)
+        {
+            // The plan turn: one plan inference, the editable plan, and a short answer pointing at
+            // it. It searches nothing, so the forced search below is skipped and the tool rounds
+            // get no tools; the run turn sends the edited plan back.
             seq = sink.sync_cursor(seq).await;
+            let max_sub_queries = crate::deep_research::max_sub_queries();
+            let plan = crate::deep_research::plan_only(
+                &session_state,
+                &req_id,
+                &org_clone,
+                inference_bearer.as_str(),
+                effective_zdr,
+                min_privacy_tier_wire,
+                &model_clone,
+                &tool_phase_query,
+                &sink,
+            )
+            .await;
+            sink.emit(plan.event(max_sub_queries)).await;
+            seq = sink.sync_cursor(seq).await;
+            research_plan_record = Some(plan.record(max_sub_queries));
+            messages.push(plan.context_message());
+            tool_defs.clear();
+            deep_research_ran = true;
+        } else if deep_research_requested {
+            seq = sink.sync_cursor(seq).await;
+            // The sources the run reads (EP-2-S7). With both switches off the plan is the web alone, as
+            // before. Knowledge is read with the viewer's own Data Plane bearer and the turn's Space scope;
+            // connected accounts only as the person selected them, through the Ask loop's read path.
+            let research_connector_turn = crate::tool_loop::connector_reads::ConnectorTurn::new(
+                connector_ids.clone(),
+                retrieval_scope.is_auto() && !conversation_only,
+            );
+            let research_sources = crate::deep_research::ResearchSources {
+                plan: crate::deep_research::SourcePlan::for_turn(
+                    research_knowledge_sources,
+                    crate::deep_research::connector_sources_enabled(),
+                    retrieval_scope,
+                    effective_zdr,
+                    research_space_scoped,
+                    !connector_ids.is_empty(),
+                ),
+                knowledge: verify_bearer
+                    .as_ref()
+                    .map(|bearer| crate::deep_research::KnowledgeAccess {
+                        bearer,
+                        zdr_mode: data_plane_mode.clone(),
+                        sovereign_required: verify_sovereign,
+                        space_decision: verify_space_decision.as_deref(),
+                    }),
+                connectors: Some(crate::deep_research::ConnectorAccess {
+                    turn: &research_connector_turn,
+                    ingestion_bearer: ingestion_bearer.as_ref(),
+                    capability_bearer: capability_bearer
+                        .as_ref()
+                        .map(VerifiedCapabilityBearer::as_str),
+                    space_scoped: research_space_scoped,
+                }),
+            };
             let research = crate::deep_research::run_deep_research(
                 &session_state,
                 &req_id,
@@ -3920,6 +4538,8 @@ pub async fn invoke_stream_sse(
                 &model_clone,
                 messages,
                 &tool_phase_query,
+                research_phase.client_plan(),
+                &research_sources,
                 cancel_flag.as_ref(),
                 Some(&sink),
             )
@@ -4099,6 +4719,17 @@ pub async fn invoke_stream_sse(
             // so the plan goes to the tool rounds only while it still describes that head.
             let rounds_tiers =
                 crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
+            // The turn's brand deck template (EP-5 S6): resolved once from the request's own pick and held while the tool rounds run; the model never names one. Holds nothing while a switch is off or under ZDR.
+            let _deck_template = crate::deck_tool::hold_turn_template(
+                &session_state,
+                &session_run_for_terminal.run_id,
+                &org_clone,
+                &user_clone,
+                capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
+                effective_zdr,
+                req.deck_template.as_ref(),
+            )
+            .await;
             let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(
                 &session_state,
                 &req_id,
@@ -4230,6 +4861,15 @@ pub async fn invoke_stream_sse(
                     answer_model = tool_phase_model;
                 }
             }
+        }
+
+        // The turn's web-search provenance, sent once the tool phase is over: every search it ran, forced or
+        // looped, is on the record. Only a turn with the line switched on has a record, so with the switch off
+        // the cursor is not touched at all.
+        if sink.search_provenance().is_some() {
+            seq = sink.sync_cursor(seq).await;
+            sink.emit_search_provenance().await;
+            seq = sink.sync_cursor(seq).await;
         }
 
         // Reasoning request, derived server-side from the client's effort
@@ -5164,7 +5804,11 @@ pub async fn invoke_stream_sse(
                                     // reader needs to see. Only the score
                                     // treats the two differently.
                                     if verdict != crate::verification::SourceVerdict::Unrelated {
-                                        for citation in &found.citations {
+                                        let passages = knowledge_passages(
+                                            &found,
+                                            crate::sse_events::citation_passages_enabled(),
+                                        );
+                                        for (citation, passage) in found.citations.iter().zip(passages) {
                                             sink.emit(crate::sse_events::ChatEvent::Citation {
                                                 id: citation.id.clone(),
                                                 title: citation.title.clone(),
@@ -5179,6 +5823,7 @@ pub async fn invoke_stream_sse(
                                                 start: None,
                                                 end: None,
                                                 origin: citation.origin.clone(),
+                                                passage,
                                             })
                                             .await;
                                         }
@@ -5390,8 +6035,25 @@ pub async fn invoke_stream_sse(
                     let lock_started = timing.now_ms();
                     let _artifact_commit_guard = committed_artifacts.lock_commit(&session_thread_id).await;
                     timing.close(crate::turn_timing::Phase::CommitLock, lock_started);
+                    // EP-3 S3: with the revision switch `on`, the table's compare-and-set
+                    // also decides, so a head another replica moved fails the same way.
                     if sink.recorded_artifacts().iter().any(|artifact|
-                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id)) {
+                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id))
+                        || crate::artifact_revisions::commit_turn_revisions(
+                            &session_state,
+                            &session_bearer,
+                            &crate::artifact_revisions::RevisionTarget {
+                                org_id: org_clone.clone(),
+                                thread_id: session_thread_id.clone(),
+                                run_id: session_run_for_terminal.run_id.clone(),
+                            },
+                            &committed_artifacts,
+                            &sink.recorded_artifacts(),
+                            effective_zdr,
+                            retention_class.is_some(),
+                        )
+                        .await
+                        .is_err() {
                         failure_code = "artifact_revision_conflict";
                         emit_turn_timing(
                             &tx,
@@ -5514,11 +6176,22 @@ pub async fn invoke_stream_sse(
                                                     // Why Control declined retrieval for this turn (D1-242) is
                                                     // stored as its typed code beside the evidence, so a thread
                                                     // reopened later says what the live stream said.
+                                                    // A plan turn's plan rides beside it, except on a ZDR
+                                                    // or waived turn (EP-2 S5, D12).
+                                                    crate::session_flow::with_research_plan(
                                                     crate::session_flow::with_retrieval_decline(
+                                                    // A ZDR or waived turn streamed its passages and
+                                                    // stamps but stores neither (D12).
                                                     crate::session_flow::turn_evidence_metadata(
                                                         session_grounding.as_ref(),
-                                                        &sink.recorded_citations(),
-                                                        &sink.recorded_artifacts(),
+                                                        &crate::session_flow::persistable_citations(
+                                                            sink.recorded_citations(),
+                                                            effective_zdr || retention_class.is_some(),
+                                                        ),
+                                                        &crate::session_flow::persistable_artifacts(
+                                                            sink.recorded_artifacts(),
+                                                            effective_zdr || retention_class.is_some(),
+                                                        ),
                                                         // Scored, and where applicable verified, just
                                                         // above — so the durable turn carries the same
                                                         // number the stream reported, and a reader who
@@ -5539,6 +6212,9 @@ pub async fn invoke_stream_sse(
                                                         },
                                                     ),
                                                     retrieval_decline,
+                                                    ),
+                                                    research_plan_record.as_ref(),
+                                                    effective_zdr || retention_class.is_some(),
                                                     ),
                                                     result_receipt
                                                         .lock()
@@ -5701,6 +6377,34 @@ pub async fn invoke_stream_sse(
                     timing.mark(crate::turn_timing::Mark::Durable);
                     let publish_started = timing.now_ms();
 
+                    // EP-3 S2: with the revision switch on, the same revisions also go to
+                    // session-core's store, best effort on their own task. It reads the heads
+                    // committed before this turn, so it runs before the seeding below. In `on`
+                    // the same revisions were appended at the commit lock instead (S3).
+                    if session_state.artifact_revisions_mode.writes_after_save() {
+                        crate::artifact_revisions::record_turn_revisions(
+                            &session_state,
+                            &session_bearer,
+                            crate::artifact_revisions::RevisionTarget {
+                                org_id: org_clone.clone(),
+                                thread_id: session_thread_id.clone(),
+                                run_id: session_run_for_terminal.run_id.clone(),
+                            },
+                            &committed_artifacts,
+                            &sink.recorded_artifacts(),
+                            effective_zdr,
+                            // Only a ZDR or waived (DEC-32) turn states a retention class; OD-11 keeps waived out.
+                            retention_class.is_some(),
+                        );
+                    }
+
+                    // EP-3 S3: in `on` a stored revision's frame names its editor; in every other
+                    // mode the frame carries no `editor` key, as before.
+                    let artifact_editor = crate::artifact_revisions::frame_editor(
+                        session_state.artifact_revisions_mode,
+                        effective_zdr,
+                        retention_class.is_some(),
+                    );
                     // The exact text and its receipt are now in the durable
                     // assistant message. Publish only the last selected version
                     // of each artifact, through the normal resumable stream.
@@ -5708,16 +6412,16 @@ pub async fn invoke_stream_sse(
                         if !effective_zdr {
                         committed_artifacts.seed_persisted(&session_thread_id, &artifact.id,
                             &artifact.title, &artifact.content, artifact.version);
-                        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&artifact.kind) {
+                        if let Some(kind) = crate::deck_tool::stored_kind(&artifact.kind) {
                             committed_artifacts.remember_kind(&session_thread_id, &artifact.id, kind);
                         }
                         // The accepted review travels with its text, for a
                         // later revision turn's receipt-bound reuse.
                         committed_artifacts.adopt_review(&session_state.artifact_versions, &session_thread_id, &artifact.id);
                         }
+                        // The live frame keeps a report's provenance stamp even when the turn may not store it.
                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
-                            crate::sse_events::ChatEvent::Artifact { id: artifact.id, kind: artifact.kind,
-                                title: artifact.title, content: artifact.content, version: artifact.version }).await;
+                            artifact.into_event().with_editor(artifact_editor)).await;
                     }
                     if hold_artifact_answer {
                         let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
@@ -6324,6 +7028,9 @@ struct SkillContext {
     skills_dropped: usize,
     /// A skill this turn injected has a bundle, so `skill_file` is worth offering (WS19-S7).
     skill_file_offered: bool,
+    /// The versions this turn injected, one per skill (EP-11 S3). Empty while
+    /// `MODEL_GATEWAY_SKILL_PINS` is off.
+    pins: Vec<mp_contracts::model_plane::v1::SkillPin>,
 }
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
@@ -7175,8 +7882,16 @@ fn rehydrate_persisted_artifacts(
             &text("content"),
             version,
         );
-        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&text("kind")) {
+        // The gateway wrote this record, so a kept deck (EP-5 S3) is restored as a deck and a
+        // later turn's `deck` ops continue it at the next version.
+        if let Some(kind) = crate::deck_tool::stored_kind(&text("kind")) {
             state.artifact_versions.remember_kind(thread_id, &id, kind);
+        }
+        // Research-to-deck reads a report's stamp back from the store (EP-5 S8).
+        if crate::deck_tool::from_artifact_enabled() {
+            if let Some(Kind::StructValue(stamp)) = fields.fields.get("provenance").and_then(|value| value.kind.as_ref()) {
+                state.artifact_versions.remember_provenance(thread_id, &id, version, crate::deck_tool::stamp_json(stamp));
+            }
         }
     }
 }
@@ -7566,6 +8281,7 @@ async fn fetch_skill_context(
     capability_bearer: Option<&str>,
     org_id: &str,
     user_id: &str,
+    thread_id: &str,
     query: &str,
     requested: &[String],
 ) -> SkillContext {
@@ -7574,15 +8290,28 @@ async fn fetch_skill_context(
     if org_id.trim().is_empty() {
         return SkillContext::default();
     }
+    // EP-11 S9: with Space skills on, the pull names the turn's thread and session-core adds
+    // the skills of that thread's own Space. Off, the thread is not sent and no shelf is read.
+    let space_thread = if crate::skills::space_scope_enabled() {
+        thread_id.trim()
+    } else {
+        ""
+    };
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
     // operator's edit or deletion lands without a gateway restart.
-    if !state.skills.is_loaded(org_id, user_id) {
+    if !state.skills.is_loaded(org_id, user_id)
+        || (!space_thread.is_empty()
+            && !state.skills.is_thread_space_loaded(org_id, user_id, space_thread))
+    {
         if let Ok(request) = authenticated_session_request(
             ListAgentSkillsRequest {
                 org_id: org_id.to_owned(),
                 enabled_only: true,
                 for_user_id: String::new(),
+                // EP-11 S6: no kinds = skills only; a template or preset is never matched or injected.
+                kinds: Vec::new(),
+                thread_id: space_thread.to_owned(),
             },
             bearer,
         ) {
@@ -7596,13 +8325,23 @@ async fn fetch_skill_context(
                 // cache must also FORGET skills the operator deleted, or a
                 // removed skill keeps steering answers indefinitely. The pull is
                 // this caller's, so it replaces only this caller's share, and
-                // ownership (SKILL-1) is recorded from the same pull.
-                Ok(resp) => state.skills.refresh_learned(
-                    &state.ownership,
-                    org_id,
-                    user_id,
-                    resp.into_inner().skills,
-                ),
+                // ownership (SKILL-1) is recorded from the same pull. Space rows
+                // go to their Space's shelf alone, never into either bucket.
+                Ok(resp) => {
+                    let listed = resp.into_inner();
+                    if !space_thread.is_empty() {
+                        state.skills.refresh_space(
+                            org_id,
+                            user_id,
+                            space_thread,
+                            &listed.space_id,
+                            &listed.skills,
+                        );
+                    }
+                    state
+                        .skills
+                        .refresh_learned(&state.ownership, org_id, user_id, listed.skills);
+                }
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
                 }
@@ -7621,9 +8360,60 @@ async fn fetch_skill_context(
         requested,
         MAX_REQUESTED_SKILLS,
     );
+    // The Space's shelf (EP-11 S9), empty outside a Space thread and while the switch is off.
+    // A picked id the org catalogue did not hold may name one of its skills.
+    let space_skills = if space_thread.is_empty() {
+        Vec::new()
+    } else {
+        crate::skills::usable_space_skills(
+            org_id,
+            state.skills.space_skills_for(org_id, user_id, space_thread),
+        )
+    };
+    let mut requested_skills = requested_skills;
+    for raw in requested {
+        if requested_skills.len() >= MAX_REQUESTED_SKILLS {
+            break;
+        }
+        let id = raw.trim();
+        if requested_skills.iter().any(|s| s.id == id) {
+            continue;
+        }
+        if let Some(skill) = space_skills.iter().find(|s| s.id == id) {
+            requested_skills.push(skill.clone());
+        }
+    }
     let requested_ids: Vec<String> = requested_skills.iter().map(|s| s.id.clone()).collect();
     let mut chosen: Vec<Skill> = requested_skills;
-    if let Ok(matched) = crate::skills::handle_match_skills(
+    if !space_skills.is_empty() {
+        // Org and Space matches compete on one score, so a Space thread gets the same number of
+        // keyword matches as any other, not more.
+        let mut matches = crate::skills::match_space_skills(&space_skills, query);
+        if let Ok(matched) = crate::skills::handle_match_skills(
+            &state.skills,
+            MatchSkillsRequest {
+                request_id: String::new(),
+                org_id: org_id.to_owned(),
+                query: query.to_owned(),
+                limit: MAX_INJECTED_SKILLS,
+                min_score: 0.0,
+            },
+            &state.ownership,
+            user_id,
+        ) {
+            matches.extend(matched.matches);
+        }
+        matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        for skill in matches
+            .into_iter()
+            .filter_map(|m| m.skill)
+            .take(usize::try_from(MAX_INJECTED_SKILLS).unwrap_or(0))
+        {
+            if !chosen.iter().any(|c| c.id == skill.id) {
+                chosen.push(skill);
+            }
+        }
+    } else if let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
         MatchSkillsRequest {
             request_id: String::new(),
@@ -7643,6 +8433,17 @@ async fn fetch_skill_context(
     }
     // A skill with a bundle says so in its block; the bundle's files are read on demand (WS19-S7).
     let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
+    // EP-11 S3: pin every skill the turn set out to inject, a block the budget cut
+    // or dropped included: `reattach_skill` recovers exactly those, at this version.
+    let pins = if crate::skills::skill_pins_enabled() {
+        chosen
+            .iter()
+            .filter(|s| !s.body.trim().is_empty())
+            .map(|s| crate::skills::skill_pin(s, requested_ids.contains(&s.id)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
     let fitted = crate::skills::fit_skill_blocks_with_footers(
@@ -7676,6 +8477,7 @@ async fn fetch_skill_context(
         skills_truncated: fitted.truncated,
         skills_dropped: fitted.dropped,
         skill_file_offered: !bundles.is_empty(),
+        pins,
     }
 }
 
@@ -7967,6 +8769,8 @@ fn image_gen_stream(
                     title,
                     content: content.clone(),
                     version: 1,
+                    provenance: None,
+                    editor: None,
                 };
                 if artifact.should_emit(&features) {
                     let _ = tx.send(Ok(artifact.to_sse(&request_id))).await;
@@ -9693,6 +10497,16 @@ pub async fn run_events_sse(
         while let Some(result) = grpc_stream.next().await {
             match result {
                 Ok(event) => {
+                    // Never emit a compatibility marker on a stream for a different run,
+                    // even if an upstream event was routed incorrectly.
+                    let compat_observation = match event.event.as_ref() {
+                        Some(orchestration_event::Event::BrowserObservationReceived(p))
+                            if p.action_id == crate::browser_attach_compat::ACTION_ID => Some(p),
+                        _ => None,
+                    };
+                    if compat_observation.is_some_and(|p| p.run_id != run_id) {
+                        continue;
+                    }
                     // Carry the server-assigned event_id onto the SSE `id:` line
                     // so the next reconnect resumes from exactly here.
                     let event_id = event.event_id.clone();
@@ -9707,8 +10521,10 @@ pub async fn run_events_sse(
                     // chat-parity §2/Phase 3: also surface the agentic step in the
                     // unified `step_update` taxonomy (no SSE id — the raw event
                     // above carries the resume cursor).
-                    if let Some(step) = orchestration_event_to_step_update(&event) {
+                    if compat_observation.is_none() {
+                      if let Some(step) = orchestration_event_to_step_update(&event) {
                         let _ = tx.send(Ok(step.to_sse(&run_id))).await;
+                      }
                     }
                 }
                 Err(error) => {
@@ -10926,7 +11742,11 @@ fn zdr_answer_stream(
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
-            for citation in payload.citations {
+            // A ZDR turn streams its knowledge passages live and writes no thread, so nothing of
+            // them is stored (EP-2-S4).
+            let passages =
+                knowledge_passages(&payload, crate::sse_events::citation_passages_enabled());
+            for (citation, passage) in payload.citations.into_iter().zip(passages) {
                 let event = crate::sse_events::ChatEvent::Citation {
                     id: citation.id,
                     title: citation.title,
@@ -10939,6 +11759,7 @@ fn zdr_answer_stream(
                     start: None,
                     end: None,
                     origin: citation.origin,
+                    passage,
                 };
                 if event.should_emit(&features) {
                     let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -11003,7 +11824,7 @@ fn zdr_answer_stream(
 ///     identity (default `agent:autonomous,agent:deployed,deployed_agent`).
 ///   - `HARNESS_POSTURE_FLOOR` — base floor for non-autonomous principals:
 ///     `ask` to fail safe fleet-wide, anything else → `auto` (default).
-fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
+pub(crate) fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
     use crate::profile::ApprovalPosture;
     let base_floor = match std::env::var("HARNESS_POSTURE_FLOOR")
         .ok()
@@ -11975,6 +12796,8 @@ fn spawn_run_dispatch(
     // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4); zero offers
     // none. Decided by the caller, which knows the turn's posture and whether it is a continuation.
     max_questions: u32,
+    // The wide-research request (EP-2 S8), item cap clamped to the org's; `None` for every other run.
+    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -12093,8 +12916,23 @@ fn spawn_run_dispatch(
             org_id,
         ),
     );
+    // The org's web switches travel with the run (Wave 3 EP-9 W2), so execution-core withholds the public web tools by
+    // the policy the run was admitted under. An enforced org the cache does not hold is held to the fail-closed switches.
+    crate::org_agent_policy::stamp_web_policy(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        org_id,
+        &mut run_agent_req.org_policy,
+    );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;
+    // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
+    // of that cap and the server's own subagent budget, never wider than either.
+    if let Some(wide) = wide_research {
+        run_agent_req.max_subagents =
+            wide_research_max_subagents(run_agent_req.max_subagents, wide.item_cap);
+        run_agent_req.wide_research = Some(wide);
+    }
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -12352,7 +13190,29 @@ fn build_run_agent_request(
         org_policy: None,
         // The question tool's cap is decided by the caller (`spawn_run_dispatch`), as the org policy is; none here.
         max_questions: 0,
+        // A wide-research request is set by the caller (`spawn_run_dispatch`) once the org's cap is
+        // read (EP-2 S8); none here, so every other run is the bytes it was.
+        wide_research: None,
     }
+}
+
+/// The delegation budget of a wide-research run (EP-2 S8): its org-clamped item cap, or the server's
+/// own subagent budget when that is set and narrower. `0` in the budget means unspecified
+/// (execution-core's default), so it never widens the cap; a cap of 0 stays 0 and execution-core
+/// refuses the run.
+fn wide_research_max_subagents(budget: u32, item_cap: u32) -> u32 {
+    if budget == 0 {
+        item_cap
+    } else {
+        budget.min(item_cap)
+    }
+}
+
+/// The wall clock a fresh Do run gets, in seconds: the deadline [`resolve_agentic_run_deadline`]
+/// gives it from this process's environment. The wide-research estimate (EP-2 S8) states its minutes
+/// within it.
+pub(crate) fn agentic_run_deadline_secs(pinned_to_subscription: bool) -> u64 {
+    resolve_agentic_run_deadline(pinned_to_subscription, &|key| std::env::var(key).ok()).as_secs()
 }
 
 /// `HOOKS_DO_RUNS` (WS25-S3), read once per process so the mode cannot change under a run.
@@ -12366,8 +13226,10 @@ fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
     })
 }
 
+/// How a Do run ended, as the gateway reads its status. Crate-visible so the goal ledger
+/// (`thread_goal::settle_outcome`, EP-7 S2) names a settled turn by the same reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgenticRunOutcome {
+pub(crate) enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
@@ -12865,10 +13727,22 @@ fn agentic_run_stream(
     // The run's agent role catalogue (EP-6 S10, `compose_agent_roles`), carried in the run
     // context. Empty with `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` off and for a continuation.
     agent_roles: Vec<mp_contracts::model_plane::v1::AgentRoleSpec>,
+    // The wide-research request of a turn from the composer's entry (EP-2 S8), item cap already
+    // clamped to the org's. `None` with WIDE_RESEARCH_ENTRY_ENABLED off and for a continuation.
+    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+    // The thread goal recited to the run as data (EP-7 S1, `thread_goal_routes::turn_goal_recitation`),
+    // carried in the run context. Empty with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, for a thread
+    // without an active goal and for a continuation.
+    goal_recitation: String,
+    // The claimed goal turn of a Continue turn (EP-7 S2), settled from this run's answer and
+    // answered with a `goal_progress` frame. `None` for every other turn and every continuation.
+    goal_turn: Option<crate::thread_goal::GoalTurnLedger>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
+        // Held for the whole task: an exit before the run's answer settles the turn on drop.
+        let mut goal_turn = goal_turn;
         let start = std::time::Instant::now();
         let run_id = run.run_id.clone();
         let thread_id = run.thread_id.clone();
@@ -12940,6 +13814,8 @@ fn agentic_run_stream(
         // of the run record. A run whose context is not composed carries none.
         let run_context = run_context.map(|mut context| {
             context.agent_roles = agent_roles;
+            // The thread goal rides the same way (EP-7 S1): in flight only, Volatile tier.
+            context.goal_recitation = goal_recitation;
             context
         });
 
@@ -13063,6 +13939,7 @@ fn agentic_run_stream(
             durable_grant.as_ref(),
             run_effort,
             max_questions,
+            wide_research,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -13281,6 +14158,11 @@ fn agentic_run_stream(
                     run_id = %run.run_id,
                     "the client stopped an agentic run; its dispatch was aborted"
                 );
+                // A stopped goal turn is settled as cancelled when this task ends (EP-7 S2); its
+                // run started, so it still counts as a turn.
+                if let Some(ledger) = goal_turn.as_mut() {
+                    ledger.end_as("cancelled");
+                }
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
@@ -13531,6 +14413,41 @@ fn agentic_run_stream(
             &response.round_timing,
         );
 
+        // The goal turn is settled from the run's answer, whatever the run's status (EP-7 S2): the
+        // run's metered usage, else the round tally a run that ended without usage left (register
+        // D2-005), else none; the turn counts either way. The `goal_progress` frame goes out before
+        // the run's own end frame, so the bar and the answer agree.
+        if let Some(ledger) = goal_turn.take() {
+            let progress = agent_usage.as_ref().and_then(AgentRunUsage::reported_metered);
+            let cost_usd = match (response.usage.as_ref(), agent_usage.as_ref()) {
+                (Some(usage), Some(meter)) => frame_cost_usd(&meter.total(usage).0),
+                // Without a meter the run is priced once here, so a cost budget can be enforced
+                // whether or not the progress frames are on. A goal turn is never ZDR or waived.
+                (Some(usage), None) => frame_cost_usd(
+                    &AgentRunUsage::start(&state.pricing, &model, &route)
+                        .await
+                        .total(usage)
+                        .0,
+                ),
+                (None, _) => None,
+            };
+            let settlement = crate::thread_goal::TurnSettlement::of_run(
+                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status)),
+                response.usage.as_ref(),
+                progress,
+                cost_usd,
+                crate::pricing::CostBasis::of_route(
+                    &route.provider_hint,
+                    &route.subscription_connection_id,
+                ),
+                &route.provider_hint,
+                &route.subscription_connection_id,
+            );
+            if let Some(frame) = ledger.settle(&settlement).await {
+                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+            }
+        }
+
         // Compaction is LOSSY and otherwise invisible: an answer built on a
         // prompt whose earlier tool results were cleared can be worse for a
         // reason nothing else in the stream explains. execution-core reports it;
@@ -13736,6 +14653,8 @@ fn agentic_run_stream(
                     delivery: question.delivery,
                     expires_at: fields["expires_at"].as_str().map(str::to_owned),
                     items: fields["items"].clone(),
+                    origin: fields["origin"].as_str().map(str::to_owned),
+                    origin_label: fields["origin_label"].as_str().map(str::to_owned),
                 };
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
@@ -14385,6 +15304,27 @@ impl AgentRunUsage {
         }
     }
 
+    /// The metered tokens the run's progress reports add up to, for a goal turn whose run ended
+    /// without its usage (EP-7 S2, register D2-005); `None` when no round was reported. A report
+    /// names no leg, so the route decides: a run pinned to the subscription spends no metered token.
+    fn reported_metered(&self) -> Option<crate::thread_goal::MeteredTokens> {
+        if self.reported == RunTokens::default() {
+            return None;
+        }
+        let metered = crate::pricing::CostBasis::of_route(
+            &self.route.provider_hint,
+            &self.route.subscription_connection_id,
+        ) == crate::pricing::CostBasis::Metered;
+        Some(if metered {
+            crate::thread_goal::MeteredTokens {
+                input: self.reported.input,
+                output: self.reported.output,
+            }
+        } else {
+            crate::thread_goal::MeteredTokens::default()
+        })
+    }
+
     /// The run's total as its final frame states it, and the rounds whose price is unknown. The
     /// total is the sum of the legs the executor reported, which is what the ledger rows are too.
     fn total(
@@ -14408,6 +15348,18 @@ impl AgentRunUsage {
 }
 
 fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
+    // This owner-writable event is an audit record, not authenticated proof.
+    if matches!(event.event.as_ref(), Some(orchestration_event::Event::BrowserAttachSharedJar(_))) {
+        return None;
+    }
+    if let Some(orchestration_event::Event::BrowserObservationReceived(p)) = event.event.as_ref() {
+        if p.action_id == crate::browser_attach_compat::ACTION_ID {
+            let receipt = crate::browser_attach_compat::verify_configured(&p.status, &p.run_id, &p.plan_id)?;
+            let payload = json!({ "run_id": receipt.run_id, "plan_id": receipt.plan_id,
+                "session_run_id": receipt.session_run_id, "attach_id": receipt.attach_id, "tab_id": receipt.tab_id });
+            return Some(Event::default().event("browser_attach_shared_jar").data(payload.to_string()));
+        }
+    }
     let payload = event_payload_value(event)?;
     let event_name = match event.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(_) => "plan_transitioned",
@@ -15437,6 +16389,43 @@ mod tests {
         super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
         assert_eq!(state.artifact_versions.content_of("thread", "campaign").as_deref(), Some("Newer plain prose"));
         assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
+    }
+
+    /// EP-5 S3: a deck kept in a turn's metadata is restored as a deck, with its manifest, so the
+    /// next `deck` op of a later turn continues it at the next version.
+    #[tokio::test]
+    async fn rehydrated_deck_continues_at_next_version() {
+        use mp_contracts::deck_manifest::{DeckManifest, DeckOp, SlideInput, SlideLayout};
+        use prost_types::{value::Kind, ListValue, Struct, Value};
+        let mut deck = DeckManifest::empty("deck-01test");
+        deck.apply(DeckOp::Create {
+            title: "Kvartalstall".to_owned(),
+            locale: "nb-NO".to_owned(),
+            slides: vec![SlideInput {
+                layout: SlideLayout::TitleOnly,
+                title: "Risiko".to_owned(),
+                bullets: Vec::new(),
+                left: Vec::new(),
+                right: Vec::new(),
+                image: None,
+                notes: None,
+            }],
+        })
+        .expect("a valid create");
+        let manifest = deck.canonical_json();
+        let text = |value: &str| Value { kind: Some(Kind::StringValue(value.into())) };
+        let metadata = Struct { fields: [("artifacts".into(), Value { kind: Some(Kind::ListValue(ListValue { values: vec![Value { kind: Some(Kind::StructValue(Struct { fields: [
+            ("id".into(), text("deck-01test")), ("kind".into(), text("deck")),
+            ("title".into(), text("Kvartalstall")), ("content".into(), text(&manifest)),
+            ("version".into(), Value { kind: Some(Kind::NumberValue(2.0)) }),
+        ].into_iter().collect() })) }] })) })].into_iter().collect() };
+        let state = AppState::new();
+        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        assert_eq!(state.artifact_versions.kind_of("thread", "deck-01test"), Some(crate::artifacts::ArtifactKind::Deck));
+        assert_eq!(state.artifact_versions.current_version("thread", "deck-01test"), Some(2));
+        let stored = state.artifact_versions.content_of("thread", "deck-01test").expect("the manifest is kept");
+        assert_eq!(DeckManifest::from_untrusted_json(&stored).expect("it reads back"), deck);
+        assert_eq!(state.artifact_versions.next_version("thread", "deck-01test"), 3);
     }
 
     // ── F-01: a failed provider stream must be reported, never silently
@@ -20255,6 +21244,12 @@ pub(crate) async fn continue_run(
             0,
             // Nor a role catalogue: it carries no run context (EP-6 S10).
             Vec::new(),
+            // Nor a wide-research request: the run it continues already carried its items (EP-2 S8).
+            None,
+            // Nor a goal recitation: it carries no run context (EP-7 S1).
+            String::new(),
+            // Nor a goal turn: a continuation resumes a run, it claims no new turn (EP-7 S2).
+            None,
         )
     };
     if !resume_enabled {
@@ -22149,6 +23144,9 @@ mod continue_run_tests {
             Vec::new(),
             0,
             Vec::new(),
+            None,
+            String::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -22450,6 +23448,7 @@ mod continue_run_tests {
                     },
                     step_id: if with_call { "s1.tool_1".to_owned() } else { String::new() },
                     authority: None,
+                    ..Default::default()
                 }
             }
         }
@@ -22592,6 +23591,7 @@ mod continue_run_tests {
                 tool_input_json: "{\"command\":\"echo\"}".to_owned(),
                 step_id: "s1.tool_1".to_owned(),
                 authority: Some(mp_contracts::model_plane::v1::ApprovedAuthority::default()),
+                ..Default::default()
             }),
             Err(tonic::Status::not_found("approval not found")),
         ])
@@ -23318,6 +24318,7 @@ mod continue_run_tests {
                     run_id: "run-42".to_owned(),
                     plan_id: "plan-1".to_owned(),
                     reason: reason.to_owned(),
+                    control_epoch: 0,
                 },
             )),
             ..Default::default()
@@ -23335,6 +24336,7 @@ mod continue_run_tests {
                     run_id: "run-42".to_owned(),
                     plan_id: "plan-1".to_owned(),
                     reason: "control_returned".to_owned(),
+                    control_epoch: 0,
                 },
             )),
             ..Default::default()
@@ -23351,6 +24353,28 @@ mod continue_run_tests {
     }
 
     #[tokio::test]
+    async fn compat_attach_live_requires_matching_key_and_signed_ids() {
+        let key = "test-only-compat-key-32-characters-long";
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let receipt = crate::browser_attach_compat::Receipt { run_id: "run-42".into(), plan_id: "plan-1".into(), session_run_id: "qrun-9".into(), attach_id: "att-1".into(), tab_id: "tab-3".into(), issued_at: now };
+        let envelope = crate::browser_attach_compat::sign(key.as_bytes(), &receipt).unwrap();
+        let mut event = OrchestrationEvent { event: Some(orchestration_event::Event::BrowserObservationReceived(orchestration_event::BrowserObservationReceived { run_id: receipt.run_id.clone(), plan_id: receipt.plan_id.clone(), action_id: crate::browser_attach_compat::ACTION_ID.into(), status: envelope, ..Default::default() })), ..Default::default() };
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert!(orchestration_event_to_sse(&event).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "0".repeat(37));
+        assert!(orchestration_event_to_sse(&event).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).unwrap()).await;
+        assert_eq!(name, "browser_attach_shared_jar");
+        assert_eq!(frame, json!({"run_id":"run-42","plan_id":"plan-1","session_run_id":"qrun-9","attach_id":"att-1","tab_id":"tab-3"}));
+        if let Some(orchestration_event::Event::BrowserObservationReceived(ref mut p)) = event.event { p.plan_id = "different-plan".into(); }
+        assert!(orchestration_event_to_sse(&event).is_none());
+        let forged = OrchestrationEvent { event: Some(orchestration_event::Event::BrowserAttachSharedJar(orchestration_event::BrowserAttachSharedJar { run_id: "run-42".into(), plan_id: "plan-1".into(), attach_id: "att-1".into(), session_run_id: "qrun-9".into(), tab_id: "tab-3".into() })), ..Default::default() };
+        assert!(orchestration_event_to_sse(&forged).is_none(), "unsigned typed event must not become proof");
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+    }
+
+    #[tokio::test]
     async fn orchestration_browser_attach_shared_jar_frame_is_ids_only() {
         let event = OrchestrationEvent {
             event: Some(orchestration_event::Event::BrowserAttachSharedJar(
@@ -23364,14 +24388,7 @@ mod continue_run_tests {
             )),
             ..Default::default()
         };
-        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
-        assert_eq!(name, "browser_attach_shared_jar");
-        let mut keys: Vec<&str> = frame.as_object().unwrap().keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["attach_id", "plan_id", "run_id", "session_run_id", "tab_id"]
-        );
+        assert!(orchestration_event_to_sse(&event).is_none(), "unsigned owner-writable receipt is not proof");
         assert!(
             orchestration_event_to_step_update(&event).is_none(),
             "an audit event is not a chat step"
@@ -23637,6 +24654,9 @@ mod continue_run_tests {
             Vec::new(),
             0,
             Vec::new(),
+            None,
+            String::new(),
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24417,8 +25437,9 @@ mod execute_turn_tests {
         let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
         assert_eq!(
             invoke.matches("req.execute_granted").count(),
-            // the waiver refusal, the approve-then-execute shape check (WS14 S2), and the one stream call
-            3,
+            // the agent allowlist narrowing (EP-6 S9), the waiver refusal, the approve-then-execute
+            // shape check (WS14 S2), and the one stream call
+            4,
             "{invoke}"
         );
         let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];
@@ -25148,6 +26169,43 @@ mod agent_role_catalogue_tests {
         }
     }
 
+    /// EP-2 S8: a wide-research run delegates no wider than its org-clamped item cap, and the
+    /// server's own subagent budget can only narrow it further.
+    #[test]
+    fn a_wide_research_run_delegates_no_wider_than_its_item_cap() {
+        assert_eq!(wide_research_max_subagents(0, 10), 10, "an unset budget takes the cap");
+        assert_eq!(wide_research_max_subagents(4, 10), 4, "a narrower budget wins");
+        assert_eq!(wide_research_max_subagents(20, 10), 10, "a wider budget never widens");
+        assert_eq!(wide_research_max_subagents(8, 0), 0, "an org with wide research off stays off");
+    }
+
+    /// EP-2 S8: the wide-research request is built only behind its switch, so with the switch off
+    /// the run request carries no such field and its bytes are what they were before it existed.
+    #[test]
+    fn the_wide_research_request_is_built_only_behind_its_switch() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source
+            .find("fn agentic_run_stream(")
+            .expect("the stream launch");
+        let launch = &source[start..];
+        let launch = &launch[..launch.find("\n}\n").expect("the end of the launch")];
+        assert!(
+            launch.contains("wide_research,"),
+            "the launch forwards what the invoke handler decided"
+        );
+        let handler = &source[source
+            .find("pub async fn invoke_stream_sse(")
+            .expect("the invoke handler")..];
+        let handler = &handler[..handler.find("\n}\n").expect("the end of the handler")];
+        let gate = handler
+            .find("crate::http_routes::wide_research_entry_enabled()")
+            .expect("the switch gates the request");
+        let read = handler
+            .find("crate::http_routes::wide_research_request(")
+            .expect("the request is built");
+        assert!(gate < read, "the switch is read before the request is built");
+    }
+
     #[test]
     fn no_catalogue_with_the_switch_off_or_on_a_zdr_or_waived_turn() {
         let body = json!([role("analyst")]);
@@ -25188,5 +26246,312 @@ mod agent_role_catalogue_tests {
         );
         let refs: Vec<&str> = roles.iter().map(|r| r.agent_ref.as_str()).collect();
         assert_eq!(refs, ["ok"], "invalid entries and duplicates are left out");
+    }
+}
+
+/// EP-6 S9: a mentioned agent's pinned version narrows its turn and never widens it.
+#[cfg(test)]
+mod agent_pin_tests {
+    use super::*;
+    use mp_contracts::agent_mode::{AgentMode, Source};
+
+    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn pin_from(body: &Value) -> Result<Option<AgentPin>, &'static str> {
+        agent_pin(
+            true,
+            body.get("agent_ref"),
+            body.get("agent_version"),
+            body.get("agent_digest"),
+            body.get("agent_tool_capability_ids"),
+            body.get("agent_autonomy_cap"),
+        )
+    }
+
+    fn pinned(extra: Value) -> Value {
+        let mut body = json!({
+            "agent_ref": "agent_1",
+            "agent_version": 2,
+            "agent_digest": DIGEST,
+        });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        body
+    }
+
+    fn tool(name: &str) -> crate::http_routes::ToolSpec {
+        crate::http_routes::ToolSpec {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_switch_reads_only_the_literal_true() {
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("on")] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert!(!agent_tool_allowlist_enabled_with(&get), "{value:?} must leave it off");
+        }
+        assert!(agent_tool_allowlist_enabled_with(&|_| Some("true".to_owned())));
+    }
+
+    #[test]
+    fn switch_off_never_reads_the_pin() {
+        let body = pinned(json!({"agent_autonomy_cap": "nonsense"}));
+        assert_eq!(
+            agent_pin(
+                false,
+                body.get("agent_ref"),
+                body.get("agent_version"),
+                body.get("agent_digest"),
+                body.get("agent_tool_capability_ids"),
+                body.get("agent_autonomy_cap"),
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_pin_is_unchanged() {
+        assert_eq!(pin_from(&json!({})), Ok(None));
+        assert_eq!(pin_from(&json!({"agent_ref": null})), Ok(None));
+    }
+
+    #[test]
+    fn a_well_formed_pin_is_read() {
+        let pin = pin_from(&pinned(json!({
+            "agent_tool_capability_ids": ["cap.retrieval.query"],
+            "agent_autonomy_cap": "read_only",
+        })))
+        .expect("well formed")
+        .expect("pinned");
+        assert_eq!(pin.agent_ref, "agent_1");
+        assert_eq!(pin.version, 2);
+        assert_eq!(pin.digest, DIGEST);
+        assert_eq!(
+            pin.tool_capability_ids,
+            Some(vec!["cap.retrieval.query".to_owned()])
+        );
+        assert_eq!(pin.autonomy_cap, Some(AgentMode::ReadOnly));
+
+        let bare = pin_from(&pinned(json!({})))
+            .expect("well formed")
+            .expect("pinned");
+        assert_eq!(bare.tool_capability_ids, None, "no allowlist stated");
+        assert_eq!(bare.autonomy_cap, None);
+    }
+
+    #[test]
+    fn a_malformed_pin_is_refused_never_dropped() {
+        for body in [
+            json!({"agent_tool_capability_ids": []}),
+            json!({"agent_autonomy_cap": "read_only"}),
+            pinned(json!({"agent_ref": "bad ref"})),
+            pinned(json!({"agent_version": 0})),
+            pinned(json!({"agent_version": "2"})),
+            pinned(json!({"agent_digest": "sha256:abc"})),
+            pinned(json!({"agent_digest": null})),
+            pinned(json!({"agent_tool_capability_ids": "cap.retrieval.query"})),
+            pinned(json!({"agent_tool_capability_ids": ["Cap.Upper"]})),
+            pinned(json!({"agent_autonomy_cap": "unrestricted"})),
+            pinned(json!({"agent_autonomy_cap": "Auto"})),
+        ] {
+            assert_eq!(pin_from(&body), Err(AGENT_PIN_INVALID_CODE), "{body}");
+        }
+        let many: Vec<String> = (0..=MAX_AGENT_TOOL_CAPABILITY_IDS)
+            .map(|n| format!("cap.n{n}"))
+            .collect();
+        assert_eq!(
+            pin_from(&pinned(json!({"agent_tool_capability_ids": many}))),
+            Err(AGENT_PIN_INVALID_CODE)
+        );
+    }
+
+    /// The allowlist intersects, it never grants: a list naming a tool the org policy blocks, or any
+    /// other tool, leaves the Ask turn with no tool at all, because the gateway cannot bind a tool
+    /// name to its capability.
+    #[test]
+    fn an_allowlist_never_offers_a_tool() {
+        let pin = pin_from(&pinned(json!({"agent_tool_capability_ids": ["cap.command.shell"]})))
+            .expect("well formed");
+        let mut features = vec!["tools".to_owned(), "rag".to_owned()];
+        let mut tools = vec![tool("shell"), tool("web_search")];
+        let mut browse_web = true;
+        narrow_to_agent_allowlist(pin.as_ref(), false, &mut features, &mut tools, &mut browse_web)
+            .expect("an Ask turn is narrowed");
+        assert_eq!(features, ["rag"]);
+        assert!(tools.is_empty());
+        assert!(!browse_web);
+    }
+
+    #[test]
+    fn a_pin_without_an_allowlist_leaves_the_tools() {
+        let pin = pin_from(&pinned(json!({}))).expect("well formed");
+        let mut features = vec!["tools".to_owned(), "agentic".to_owned()];
+        let mut tools = vec![tool("shell")];
+        let mut browse_web = true;
+        narrow_to_agent_allowlist(pin.as_ref(), true, &mut features, &mut tools, &mut browse_web)
+            .expect("nothing to narrow");
+        assert_eq!(features, ["tools", "agentic"]);
+        assert_eq!(tools.len(), 1);
+        assert!(browse_web);
+        narrow_to_agent_allowlist(None, true, &mut features, &mut tools, &mut browse_web)
+            .expect("no pin");
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn a_do_or_execute_turn_with_an_allowlist_is_refused() {
+        let pin = pin_from(&pinned(json!({"agent_tool_capability_ids": []}))).expect("well formed");
+        let mut browse_web = false;
+        let mut agentic = vec!["agentic".to_owned()];
+        assert_eq!(
+            narrow_to_agent_allowlist(
+                pin.as_ref(),
+                false,
+                &mut agentic,
+                &mut Vec::new(),
+                &mut browse_web
+            ),
+            Err(AGENT_ALLOWLIST_DO_CODE)
+        );
+        assert_eq!(
+            narrow_to_agent_allowlist(
+                pin.as_ref(),
+                true,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut browse_web
+            ),
+            Err(AGENT_ALLOWLIST_DO_CODE)
+        );
+    }
+
+    #[test]
+    fn a_read_only_cap_wins_over_a_user_auto_choice() {
+        let turn = resolve_turn_with_agent_cap(
+            crate::profile::ApprovalPosture::Auto,
+            Some(AgentMode::Auto),
+            None,
+            Some(AgentMode::ReadOnly),
+        )
+        .expect("a cap resolves a mode");
+        assert_eq!(turn.mode, AgentMode::ReadOnly);
+        assert_eq!(turn.source, Source::Ceiling("agent"));
+        assert!(turn.preset.plan_gate);
+    }
+
+    #[test]
+    fn a_cap_never_loosens_a_stricter_input() {
+        let turn = resolve_turn_with_agent_cap(
+            crate::profile::ApprovalPosture::Ask,
+            Some(AgentMode::ReadOnly),
+            Some(AgentMode::Lockdown),
+            Some(AgentMode::AskFirst),
+        )
+        .expect("resolved");
+        assert_eq!(turn.mode, AgentMode::Lockdown);
+        assert_eq!(turn.source, Source::Org);
+    }
+
+    #[test]
+    fn an_auto_cap_or_none_resolves_as_before() {
+        let posture = crate::profile::ApprovalPosture::Auto;
+        for chosen in [None, Some(AgentMode::AskFirst)] {
+            for org_cap in [None, Some(AgentMode::ReadOnly)] {
+                let before = crate::org_agent_policy::resolve_turn(posture, chosen, org_cap);
+                assert_eq!(resolve_turn_with_agent_cap(posture, chosen, org_cap, None), before);
+                assert_eq!(
+                    resolve_turn_with_agent_cap(posture, chosen, org_cap, Some(AgentMode::Auto)),
+                    before
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod citation_passage_tests {
+    use super::knowledge_passages;
+
+    fn grounding() -> crate::retrieval::Grounding {
+        let citation = |id: &str, number: u32| crate::retrieval::GroundingCitation {
+            id: id.to_owned(),
+            title: format!("Title {id}"),
+            url: "notion".to_owned(),
+            snippet: "snippet".to_owned(),
+            source_group_id: "kb:notion".to_owned(),
+            source_group_label: "Notion".to_owned(),
+            number,
+            origin: crate::retrieval::KNOWLEDGE_ORIGIN.to_owned(),
+        };
+        let fact = |document_id: &str, chunk_index: i32, text: &str| crate::retrieval::GroundingFact {
+            knowledge_id: "kid-1".to_owned(),
+            document_id: document_id.to_owned(),
+            text: text.to_owned(),
+            score: 0.9,
+            source_title: "Title".to_owned(),
+            source_type: "policy".to_owned(),
+            provider: "Notion".to_owned(),
+            chunk_index,
+        };
+        crate::retrieval::Grounding {
+            facts: vec![fact("doc-1", 2, "Refunds within 30 days.")],
+            citations: vec![citation("doc-1", 1), citation("doc-9", 2)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn citation_passages_off_give_one_empty_entry_per_citation() {
+        assert_eq!(knowledge_passages(&grounding(), false), vec![None, None]);
+    }
+
+    #[test]
+    fn citation_passages_on_carry_the_fact_and_its_locator_in_citation_order() {
+        let passages = knowledge_passages(&grounding(), true);
+        assert_eq!(passages.len(), 2, "one entry per citation, so the zip never drops a source");
+        let first = passages[0].as_ref().expect("doc-1 has a fact");
+        assert_eq!(first.quote.as_deref(), Some("Refunds within 30 days."));
+        assert_eq!(
+            first.locator,
+            Some(crate::sse_events::CitationLocator { document_id: "doc-1".to_owned(), chunk_index: 2 })
+        );
+        assert_eq!(passages[1], None, "a citation with no fact gets no invented passage");
+    }
+}
+
+#[cfg(test)]
+mod authored_kinds_tests {
+    /// EP-11 S6: the match cache lists skills only. A template or preset is text the person inserts
+    /// or defaults they see; injecting one into a turn would act on the person's behalf unseen.
+    #[test]
+    fn templates_never_injected_as_skills() {
+        let source = include_str!("sse.rs");
+        let start = source.find("async fn fetch_skill_context(").expect("fetch_skill_context is in sse.rs");
+        let body = &source[start..];
+        let literal_start = body.find("ListAgentSkillsRequest {").expect("the match cache lists agent skills");
+        let literal = &body[literal_start..];
+        let literal = &literal[..literal.find("bearer,").expect("the request literal ends before its bearer")];
+        assert!(literal.contains("kinds: Vec::new()"), "the match cache must ask for skills only: {literal}");
+        assert!(!literal.contains("\"template\""), "the match cache must never name templates: {literal}");
+        assert!(!literal.contains("\"preset\""), "the match cache must never name presets: {literal}");
+    }
+
+    /// EP-11 S9: the pull names the turn's thread only while Space skills are on, never a Space
+    /// id, and Space rows are cached on their own shelf before the org refresh sees the list.
+    #[test]
+    fn space_skills_follow_the_thread_behind_the_switch() {
+        let source = include_str!("sse.rs");
+        let start = source.find("async fn fetch_skill_context(").expect("fetch_skill_context is in sse.rs");
+        let body = &source[start..];
+        let body = &body[..body.find("async fn skill_bundle_summaries(").expect("the next fn")];
+        assert!(body.contains("if crate::skills::space_scope_enabled() {"));
+        assert!(body.contains("thread_id: space_thread.to_owned(),"));
+        assert!(!body.contains("space_id: "), "the pull never names a Space");
+        assert!(body.contains("state.skills.refresh_space("));
+        assert!(body.contains("crate::skills::usable_space_skills("));
     }
 }

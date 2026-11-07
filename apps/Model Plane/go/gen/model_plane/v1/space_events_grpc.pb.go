@@ -44,9 +44,14 @@ const (
 // Separate file and service so that SessionCore and every mock of it stay
 // source-compatible. The SSE form of these frames is pinned by the golden
 // apps/Model Plane/api/contracts/space-events.json.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 type SpaceEventsClient interface {
 	// Opens the tail. The first frame is `connected` (or `cursor_too_old`); the stream ends
 	// after a `closing` frame, after `cursor_too_old`, or when the caller goes away.
+	// Frame type name kept; renaming it would break generated code.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	StreamSpaceEvents(ctx context.Context, in *StreamSpaceEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SpaceEventFrame], error)
 }
 
@@ -99,9 +104,14 @@ type SpaceEvents_StreamSpaceEventsClient = grpc.ServerStreamingClient[SpaceEvent
 // Separate file and service so that SessionCore and every mock of it stay
 // source-compatible. The SSE form of these frames is pinned by the golden
 // apps/Model Plane/api/contracts/space-events.json.
+//
+// Service name kept; generated code and deployed services depend on it.
+// buf:lint:ignore SERVICE_SUFFIX
 type SpaceEventsServer interface {
 	// Opens the tail. The first frame is `connected` (or `cursor_too_old`); the stream ends
 	// after a `closing` frame, after `cursor_too_old`, or when the caller goes away.
+	// Frame type name kept; renaming it would break generated code.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	StreamSpaceEvents(*StreamSpaceEventsRequest, grpc.ServerStreamingServer[SpaceEventFrame]) error
 	mustEmbedUnimplementedSpaceEventsServer()
 }

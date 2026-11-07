@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use mp_contracts::agent_mode::{self, AgentMode, Resolved};
 use mp_contracts::autonomy;
-use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext};
+use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext, WebPolicyContext};
 use mp_contracts::org_agent_policy::{Kind, SettingDef, SETTINGS};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -84,6 +84,25 @@ pub fn policy_mode() -> PolicyMode {
     })
 }
 
+/// The org's web switches as the gateway enforces them (Wave 3 EP-9 W2). Each is read from its key of the document
+/// with the schema's fail-closed value for any token this build cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebCaps {
+    /// Whether `web.mode` is `live`. `off` withholds public web access from every agent path; so does any token this
+    /// build does not enforce (`cached_only` is reserved and never stored).
+    pub live: bool,
+    /// Whether `web.paid_providers` is `on`: a paid search provider may serve the org's agents.
+    pub paid: bool,
+}
+
+impl WebCaps {
+    /// The switches an enforced org the gateway cannot see is held to: the schema's fail-closed values.
+    pub const FAIL_CLOSED: Self = Self {
+        live: false,
+        paid: false,
+    };
+}
+
 /// An org's policy as the gateway enforces it, built from the document capability-core answers with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrgPolicy {
@@ -97,6 +116,14 @@ pub struct OrgPolicy {
     pub rung_cap: Option<AutonomyRung>,
     /// Whether the document narrows anything from the defaults. This decides how long a stale answer may still be served.
     pub restrictive: bool,
+    /// The most items one wide-research run may fan out (`research.max_fan_out_items`, EP-2 S8). A value this build
+    /// cannot read is 0: wide research off for the org.
+    pub max_fan_out_items: u32,
+    /// The org's web switches (`web.mode`, `web.paid_providers`, Wave 3 EP-9 W2).
+    pub web: WebCaps,
+    /// The org's `ext.skills` token (EP-11 S9): `none`, `approved_only` or `any`, or the schema's fail-closed `none` for a
+    /// value this build cannot read. Read by `skills::held_ext_skills` only while SKILL_EXT_POLICY_ENFORCED is on.
+    pub ext_skills: String,
 }
 
 impl OrgPolicy {
@@ -123,6 +150,14 @@ impl OrgPolicy {
             restrictive: SETTINGS
                 .iter()
                 .any(|def| token_of(def, settings) != def.default),
+            max_fan_out_items: token(mp_contracts::org_agent_policy::RESEARCH_MAX_FAN_OUT_ITEMS)
+                .parse()
+                .unwrap_or(0),
+            web: WebCaps {
+                live: token("web.mode") == "live",
+                paid: token("web.paid_providers") == "on",
+            },
+            ext_skills: token("ext.skills"),
         }
     }
 }
@@ -133,12 +168,18 @@ fn token_of(def: &SettingDef, settings: &Map<String, Value>) -> String {
     let Some(value) = settings.get(def.key) else {
         return def.default.to_owned();
     };
+    // An integer key's token is its decimal form, held here so the match can lend it out.
+    let count;
     let read = match def.kind {
         Kind::Enum => value.as_str(),
         Kind::Bool => value
             .as_bool()
             .map(|flag| if flag { "true" } else { "false" }),
         Kind::AllowList => value.get("mode").and_then(Value::as_str),
+        Kind::Integer => {
+            count = value.as_u64().map(|n| n.to_string());
+            count.as_deref()
+        }
     };
     read.filter(|token| def.strictness_order.iter().any(|allowed| allowed == token))
         .unwrap_or(def.fail_closed_value)
@@ -362,12 +403,21 @@ pub async fn admit_turn(
         PolicyMode::Off => Ok(None),
         PolicyMode::Shadow => {
             match ensure(cache, client, base_url, org_id, bearer).await {
-                Ok(policy) if policy.mode_cap != AgentMode::Auto => tracing::info!(
-                    %org_id,
-                    would_mode_cap = policy.mode_cap.as_str(),
-                    "org agent policy (shadow): the mode cap would bind this turn"
-                ),
-                Ok(_) => {}
+                Ok(policy) => {
+                    if policy.mode_cap != AgentMode::Auto {
+                        tracing::info!(
+                            %org_id,
+                            would_mode_cap = policy.mode_cap.as_str(),
+                            "org agent policy (shadow): the mode cap would bind this turn"
+                        );
+                    }
+                    if !policy.web.live {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): web access would be withheld for this turn"
+                        );
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read")
                 }
@@ -484,6 +534,50 @@ pub fn stamp_policy_revision(
     context.policy_digest = digest;
 }
 
+/// The org's web switches for an inline turn, when the switch enforces them and the policy is held. `None` leaves the
+/// turn's web access as the person chose it: a turn is never refused web access because its policy cannot be read,
+/// since an outage must not silently break an answer.
+#[must_use]
+pub fn held_web_caps(mode: PolicyMode, cache: &OrgPolicyCache, org_id: &str) -> Option<WebCaps> {
+    match mode {
+        PolicyMode::Enforce => cache.policy(org_id).map(|policy| policy.web),
+        PolicyMode::Off | PolicyMode::Shadow => None,
+    }
+}
+
+/// Whether the org's switch lets a paid search provider serve this turn. It reads the cache the turn's admission left
+/// warm, as [`held_rung_cap`] does, so the search path needs no extra parameter.
+#[must_use]
+pub fn org_allows_paid_providers(org_id: &str) -> bool {
+    held_web_caps(policy_mode(), shared_cache(), org_id).is_none_or(|caps| caps.paid)
+}
+
+/// Carries the org's web switches on a Do run's policy context, so execution-core withholds the web tools by the policy
+/// the run was admitted under. Enforced and held: the held switches and their revision. Enforced but not held: the
+/// fail-closed switches at revision zero, as the rung is held to the narrowest rung ([`dispatch_rung_cap`]). Off and
+/// shadow stamp nothing, so the request is exactly as it was.
+pub fn stamp_web_policy(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    org_id: &str,
+    org_policy: &mut Option<OrgPolicyContext>,
+) {
+    let (caps, revision) = match mode {
+        PolicyMode::Enforce => match cache.policy(org_id) {
+            Some(policy) => (policy.web, policy.revision),
+            None => (WebCaps::FAIL_CLOSED, 0),
+        },
+        PolicyMode::Off | PolicyMode::Shadow => return,
+    };
+    let context = org_policy.get_or_insert_with(OrgPolicyContext::default);
+    context.web = Some(WebPolicyContext {
+        mode: if caps.live { "live" } else { "off" }.to_owned(),
+        paid_providers: caps.paid,
+        revision,
+        site_policy_revision: 0,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +596,22 @@ mod tests {
             "digest": format!("sha256:{revision}"),
             "settings": body,
         })
+    }
+
+    #[test]
+    fn org_agent_policy_reads_the_wide_research_item_cap() {
+        assert_eq!(OrgPolicy::from_settings(0, "", &settings(json!({}))).max_fan_out_items, 8);
+        assert_eq!(
+            OrgPolicy::from_settings(1, "d", &settings(json!({"research.max_fan_out_items": 3})))
+                .max_fan_out_items,
+            3
+        );
+        // A value this build cannot read turns wide research off for the org, never on.
+        assert_eq!(
+            OrgPolicy::from_settings(1, "d", &settings(json!({"research.max_fan_out_items": "x"})))
+                .max_fan_out_items,
+            0
+        );
     }
 
     #[test]
@@ -653,6 +763,99 @@ mod tests {
     }
 
     #[test]
+    fn org_agent_policy_web_switches_are_read_from_the_document_and_fail_closed() {
+        let default = OrgPolicy::from_settings(0, "", &settings(json!({})));
+        assert_eq!(default.web, WebCaps { live: true, paid: true });
+        let off = OrgPolicy::from_settings(
+            1,
+            "d",
+            &settings(json!({"web.mode": "off", "web.paid_providers": "off"})),
+        );
+        assert_eq!(off.web, WebCaps { live: false, paid: false });
+        // cached_only is reserved and never stored, and a value this build cannot read takes the fail-closed off.
+        let reserved = OrgPolicy::from_settings(1, "d", &settings(json!({"web.mode": "cached_only"})));
+        assert!(!reserved.web.live);
+        let unreadable = OrgPolicy::from_settings(
+            1,
+            "d",
+            &settings(json!({"web.mode": 3, "web.paid_providers": "maybe"})),
+        );
+        assert_eq!(unreadable.web, WebCaps::FAIL_CLOSED);
+    }
+
+    #[test]
+    fn org_agent_policy_an_off_web_switch_makes_the_policy_restrictive() {
+        let off = OrgPolicy::from_settings(2, "sha256:2", &settings(json!({"web.mode": "off"})));
+        assert!(off.restrictive, "a stale answer that withholds web access keeps the long bound");
+        assert!(!OrgPolicy::from_settings(0, "", &Map::new()).restrictive);
+    }
+
+    #[test]
+    fn org_agent_policy_web_switches_bind_inline_turns_only_under_enforcement_and_when_held() {
+        let cache = OrgPolicyCache::new();
+        cache.store(
+            "org-web-off",
+            OrgPolicy::from_settings(3, "sha256:3", &settings(json!({"web.mode": "off"}))),
+            Instant::now(),
+        );
+        assert_eq!(
+            held_web_caps(PolicyMode::Enforce, &cache, "org-web-off"),
+            Some(WebCaps { live: false, paid: true })
+        );
+        assert_eq!(held_web_caps(PolicyMode::Shadow, &cache, "org-web-off"), None);
+        assert_eq!(held_web_caps(PolicyMode::Off, &cache, "org-web-off"), None);
+        assert_eq!(
+            held_web_caps(PolicyMode::Enforce, &cache, "org-web-unknown"),
+            None,
+            "an unread policy never turns web access off for an inline turn"
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_a_do_run_carries_the_web_switches_it_was_admitted_under() {
+        let cache = OrgPolicyCache::new();
+        cache.store(
+            "org-web-run",
+            OrgPolicy::from_settings(4, "sha256:4", &settings(json!({"web.mode": "off"}))),
+            Instant::now(),
+        );
+        let mut context = None;
+        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-run", &mut context);
+        let web = context
+            .as_ref()
+            .and_then(|context| context.web.as_ref())
+            .expect("the run carries its web switches");
+        assert_eq!((web.mode.as_str(), web.paid_providers, web.revision), ("off", true, 4));
+
+        cache.store(
+            "org-web-live",
+            OrgPolicy::from_settings(5, "sha256:5", &Map::new()),
+            Instant::now(),
+        );
+        let mut live = None;
+        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-live", &mut live);
+        let web = live
+            .as_ref()
+            .and_then(|context| context.web.as_ref())
+            .expect("the run carries its web switches");
+        assert_eq!(web.mode, "live");
+
+        // An enforced org the cache does not hold is held to the fail-closed switches at revision zero.
+        let mut unknown = None;
+        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-unknown", &mut unknown);
+        let web = unknown
+            .as_ref()
+            .and_then(|context| context.web.as_ref())
+            .expect("the run is held to the fail-closed switches");
+        assert_eq!((web.mode.as_str(), web.paid_providers, web.revision), ("off", false, 0));
+
+        // Off and shadow stamp nothing, so the request is exactly as it was.
+        let mut shadow = None;
+        stamp_web_policy(PolicyMode::Shadow, &cache, "org-web-run", &mut shadow);
+        assert!(shadow.is_none());
+    }
+
+    #[test]
     fn org_agent_policy_attribution_carries_the_revision_without_hook_rules() {
         let mut context = None;
         stamp_policy_revision(&mut context, Some((7, "sha256:7".to_owned())));
@@ -716,6 +919,46 @@ mod tests {
             cache.policy("org-a").is_none(),
             "the expired entry is dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_a_web_off_answer_is_held_for_the_restrictive_bound() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(
+                "org-web-stale",
+                6,
+                json!({"web.mode": "off"}),
+            )))
+            .mount(&server)
+            .await;
+        let cache = OrgPolicyCache::new();
+        let client = reqwest::Client::new();
+        let t0 = Instant::now();
+        ensure_at(&cache, &client, &server.uri(), "org-web-stale", "token", t0)
+            .await
+            .expect("the registry answers");
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        // Past the 30 s TTL, a refresh that fails keeps web access off for the restrictive bound: a registry
+        // outage cannot quietly turn an org's web access back on.
+        let held = ensure_at(
+            &cache,
+            &client,
+            &server.uri(),
+            "org-web-stale",
+            "token",
+            t0 + Duration::from_secs(600),
+        )
+        .await
+        .expect("the restrictive answer is inside its 900 s bound");
+        assert!(!held.web.live);
     }
 
     #[tokio::test]

@@ -264,6 +264,7 @@ export function ScrapeCapturesSection(props: { captures?: ScrapeCaptureView; tit
 }
 
 function BrowserSessionSurface(props: {
+  browsing?: boolean
   browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
@@ -284,6 +285,7 @@ function BrowserSessionSurface(props: {
   onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onBrowserTryOtherSource?: () => void
@@ -317,6 +319,8 @@ function BrowserSessionSurface(props: {
       }]}
     >
       <BrowserChrome
+        personalBrowsing={props.browsing}
+        allowAssistantContinuation={props.browsing}
         browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
@@ -358,6 +362,7 @@ function BrowserSessionSurface(props: {
         onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
+        onBrowserCloseTab={props.onBrowserCloseTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
         onBrowserTryOtherSource={props.onBrowserTryOtherSource}
@@ -420,7 +425,7 @@ function BrowserSessionSurface(props: {
         </div>
       </BrowserChrome>
 
-      <div class="knowledge-browser-frame__footer">
+      <Show when={!props.browsing}><div class="knowledge-browser-frame__footer">
         <div class="knowledge-browser-frame__selection">
           <span><Code2 class="size-3.5" /> {props.selectedCount}/{props.total} seksjoner valgt</span>
           <span>{props.selectedChars.toLocaleString('nb-NO')} tegn</span>
@@ -468,13 +473,14 @@ function BrowserSessionSurface(props: {
             }}
           </For>
         </div>
-      </details>
+      </details></Show>
     </div>
   )
 }
 
 export function ScrapePreviewPanel(props: {
   adding: boolean
+  browsing?: boolean
   browserApprovals?: BrowserApprovalEntry[]
   browserBusy?: boolean
   browserLoop?: BrowserLoopState
@@ -494,6 +500,7 @@ export function ScrapePreviewPanel(props: {
   onAskVerevon?: (text: string) => void
   onBrowserNewTab?: () => Promise<void> | void
   onBrowserSelectTab?: (tabId: string) => Promise<void> | void
+  onBrowserCloseTab?: (tabId: string) => Promise<void> | void
   onBrowserSuggestAction?: (goal: string) => Promise<BrowserActionSuggestionResponse | null>
   onBrowserSocketObservation?: (observation: BrowserObservation) => void
   onBrowserTryOtherSource?: () => void
@@ -536,6 +543,7 @@ export function ScrapePreviewPanel(props: {
       aria-label="Nettleser"
     >
       <BrowserSessionSurface
+        browsing={props.browsing}
         browserApprovals={props.browserApprovals}
         browserBusy={props.browserBusy}
         browserLoop={props.browserLoop}
@@ -557,6 +565,7 @@ export function ScrapePreviewPanel(props: {
         onAskVerevon={props.onAskVerevon}
         onBrowserNewTab={props.onBrowserNewTab}
         onBrowserSelectTab={props.onBrowserSelectTab}
+        onBrowserCloseTab={props.onBrowserCloseTab}
         onBrowserSuggestAction={props.onBrowserSuggestAction}
         onBrowserSocketObservation={props.onBrowserSocketObservation}
         onBrowserTryOtherSource={props.onBrowserTryOtherSource}

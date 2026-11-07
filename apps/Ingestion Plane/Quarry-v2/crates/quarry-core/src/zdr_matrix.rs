@@ -260,6 +260,17 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "browser_redirect_probe",
+        routes: &["/v1/browser/redirect-hop"],
+        treatment: Treatment::Inert {
+            reason: "checks one public HTTP response header for a redirect and stores nothing",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "browser_redirect::probe uses credentialless pinned transport and touches no cache, artifact store, index or event sink",
+        log: Log::Unverified,
+    },
+    Row {
         id: "audio",
         routes: &["/v1/audio"],
         treatment: Treatment::Honored,

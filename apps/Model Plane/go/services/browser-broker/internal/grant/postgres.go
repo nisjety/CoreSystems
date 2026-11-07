@@ -410,7 +410,7 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 			return err
 		}
 		for _, host := range domains {
-			if !hostWithin(host, parent.AllowedDomains) {
+			if !hostWithinGrant(host, parent) {
 				return ErrDeriveWidensParent
 			}
 		}

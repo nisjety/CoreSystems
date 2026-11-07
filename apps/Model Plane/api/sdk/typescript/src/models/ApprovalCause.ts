@@ -77,6 +77,7 @@ export const ApprovalCauseCodeEnum = {
     HookAsk: 'hook_ask',
     BrowserActionRisk: 'browser_action_risk',
     AutoPostureProviderWrite: 'auto_posture_provider_write',
+    BrowserHumanAssist: 'browser_human_assist',
     UnclassifiedGate: 'unclassified_gate'
 } as const;
 export type ApprovalCauseCodeEnum = typeof ApprovalCauseCodeEnum[keyof typeof ApprovalCauseCodeEnum];

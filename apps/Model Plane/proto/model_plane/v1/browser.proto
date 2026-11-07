@@ -270,7 +270,9 @@ message ValidateGrantResponse {
 
   // Same values as AcquireGrantResponse (WS8.C).
   string policy_mode = 50;
+  // Hosts this grant may never reach; same meaning as AcquireGrantResponse.denied_domains.
   repeated string denied_domains = 51;
+  // Hard backstop a renewal can never pass; see AcquireGrantResponse.absolute_expires_at.
   google.protobuf.Timestamp absolute_expires_at = 52;
   // The run an "attach" grant is bound to; empty for every other kind.
   string resource_id = 53;
@@ -300,6 +302,7 @@ message ValidateGrantResponse {
   string key_id = 60;
 }
 
+// Request to derive a run grant from an active session grant.
 message DeriveRunGrantRequest {
   // The session grant the run derives from. It must be active, of kind
   // "session", owned by the caller (users) inside the caller's organization.
@@ -348,9 +351,13 @@ message DeriveRunGrantRequest {
   string resource_id = 50;
 }
 
+// The run grant derived by DeriveRunGrant.
 message DeriveRunGrantResponse {
+  // Identifier of the derived run grant.
   string grant_id = 1;
+  // Browser endpoint of the run grant (CDP URL or local ws).
   string endpoint = 2;
+  // Expiry of the run grant; never later than the parent grant's expiry.
   google.protobuf.Timestamp expires_at = 3;
   // Canonical hosts of the run grant.
   repeated string allowed_domains = 4;
@@ -382,6 +389,7 @@ message DeriveRunGrantResponse {
   string resource_id = 50;
 }
 
+// Request to extend a renewable grant by one TTL.
 message RenewGrantRequest {
   // The grant to extend: kind "session" or "human_browse", owned by the caller.
   string grant_id = 1;
@@ -390,6 +398,7 @@ message RenewGrantRequest {
   string org_id = 2;
 }
 
+// Result of RenewGrant: the new expiry and the hard backstop.
 message RenewGrantResponse {
   // The new expiry: min(now + the broker TTL, absolute_expires_at).
   google.protobuf.Timestamp expires_at = 1;

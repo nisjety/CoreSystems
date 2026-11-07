@@ -79,16 +79,27 @@ fn canonical_denied_domains_rejects_noncanonical_input() {
         BrowserEgressPolicy::canonical_denied_domains(&denied(&["a.example", "b.example"])).unwrap(),
         denied(&["a.example", "b.example"])
     );
-    // Unsorted, upper case, wildcard, IP literal, single label, empty: all refused.
+    // Unsorted, upper case, wildcard, IP literal, malformed suffix and empty: all refused.
     assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["b.example", "a.example"])).is_err());
     assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["Bank.example"])).is_err());
     assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["*.example"])).is_err());
     assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["10.0.0.1"])).is_err());
-    assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["localhost"])).is_err());
+    assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&["..localhost"])).is_err());
     assert!(BrowserEgressPolicy::canonical_denied_domains(&denied(&[""])).is_err());
     // Bounded at 64 entries.
     let too_many: Vec<String> = (0..65).map(|i| format!("d{i:02}.example")).collect();
     assert!(BrowserEgressPolicy::canonical_denied_domains(&too_many).is_err());
+}
+
+#[test]
+fn broker_suffixes_validate_and_block_matching_public_names() {
+    let deny = denied(&[".blocked.example", ".home.arpa", ".internal", ".lan", ".local", ".localdomain", ".localhost", ".svc", "metadata.goog", "metadata.google.internal"]);
+    let policy = BrokerNavPolicy::from_validation("open_web", &[], &deny).unwrap().egress_policy();
+    assert!(policy.denies_url("https://sub.blocked.example/"));
+    assert!(!policy.allows_url("https://sub.blocked.example/"));
+    assert!(!policy.allows_url("https://service.svc/"));
+    assert!(policy.allows_url("https://blocked.example/"));
+    assert!(policy.allows_url("https://example.com/"));
 }
 
 #[test]

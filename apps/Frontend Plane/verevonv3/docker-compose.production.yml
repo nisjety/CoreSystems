@@ -28,6 +28,7 @@ services:
             SPACE_ROOM_PINS_API: "false"
             SPACE_ROOM_FILES_API: "false"
             SPACE_ROOM_FILES_UI: "false"
+            AGENT_VERSION_PINNING: "false"
             SPACE_TURN_ATTACHMENTS_UI: "false"
             SPACE_MESSAGE_SEARCH_API: "false"
             SPACE_MESSAGE_SEARCH_UI: "false"

@@ -139,6 +139,7 @@ pub fn anchor_citations(answer: &str, turn_id: &str, recorded: &[RecordedCitatio
                 start: u32::try_from(marker_start).ok(),
                 end: u32::try_from(marker_end).ok(),
                 origin: citation.origin.clone(),
+                passage: citation.passage.clone(),
             });
         }
     }
@@ -160,6 +161,7 @@ mod tests {
             source_group_label: None,
             number: Some(number),
             origin: "web".to_owned(),
+            passage: None,
         }
     }
 
@@ -251,6 +253,7 @@ mod tests {
             source_group_label: Some("Microsoft 365".to_owned()),
             number: None,
             origin: "connector".to_owned(),
+            passage: None,
         };
         let events = anchor_citations("The invoice came on Tuesday [1].", "turn-1", &[connector]);
         assert!(events.is_empty());

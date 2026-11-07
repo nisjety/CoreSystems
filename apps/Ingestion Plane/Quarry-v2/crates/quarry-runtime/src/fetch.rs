@@ -21,6 +21,66 @@ use crate::proxy_pool::{ProxyEntry, ProxyPool};
 /// Stable public discovery identity; robots parsing must use this same token.
 pub const DISCOVERY_USER_AGENT: &str = "QuarryBot";
 
+const MAX_REDIRECT_URL_BYTES: usize = 4096;
+
+/// Validate the URL shape before any network request. The transport still
+/// resolves and pins public addresses for each separate probe.
+pub fn validate_redirect_probe_url(url: &Url) -> QuarryResult<()> {
+    if url.as_str().len() > MAX_REDIRECT_URL_BYTES
+        || url.port().is_some()
+        || quarry_security::heur::check(url).decision == quarry_security::Decision::Block
+    {
+        return Err(redirect_probe_blocked());
+    }
+    Ok(())
+}
+
+fn redirect_probe_blocked() -> QuarryError {
+    QuarryError::new(ErrorCode::SecurityBlocked, "redirect probe URL blocked")
+}
+
+pub(crate) fn redirect_probe_target(
+    url: &Url,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> QuarryResult<Option<Url>> {
+    if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+        return Ok(None);
+    }
+
+    let all_locations = headers.get_all(reqwest::header::LOCATION);
+    let mut locations = all_locations.iter();
+    let location = locations
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_REDIRECT_URL_BYTES)
+        .ok_or_else(redirect_probe_blocked)?;
+    if locations.next().is_some() {
+        return Err(redirect_probe_blocked());
+    }
+    let mut target = url.join(location).map_err(|_| redirect_probe_blocked())?;
+    target.set_fragment(None);
+    validate_redirect_probe_url(&target)?;
+    if url.scheme() == "https" && target.scheme() == "http" {
+        return Err(redirect_probe_blocked());
+    }
+    Ok(Some(target))
+}
+
+async fn send_redirect_probe(client: &reqwest::Client, url: &Url) -> QuarryResult<Option<Url>> {
+    // Use GET for sites that implement different routing for HEAD. Drop the
+    // response immediately after inspecting its status and Location header.
+    let response = client.get(url.clone()).send().await.map_err(|error| {
+        let code = if error.is_timeout() {
+            ErrorCode::Timeout
+        } else {
+            ErrorCode::DriverFailed
+        };
+        QuarryError::new(code, "redirect probe request failed")
+    })?;
+    redirect_probe_target(url, response.status(), response.headers())
+}
+
 #[derive(Debug, Clone)]
 pub struct FetchResponse {
     pub status: u16,
@@ -548,7 +608,7 @@ impl StaticDriver {
 
 /// Count decoded chunks, including responses without Content-Length and
 /// compressed responses whose expanded body is larger than the wire length.
-async fn read_bounded_body(mut response: reqwest::Response, limit: usize) -> QuarryResult<Vec<u8>> {
+pub(crate) async fn read_bounded_body(mut response: reqwest::Response, limit: usize) -> QuarryResult<Vec<u8>> {
     let too_large = || {
         QuarryError::new(
             ErrorCode::BadRequest,
@@ -720,6 +780,12 @@ impl Driver for StaticDriver {
             true,
         )
         .await
+    }
+
+    async fn probe_redirect(&self, url: &Url) -> QuarryResult<Option<Url>> {
+        validate_redirect_probe_url(url)?;
+        self.pinned_resolver.pin(resolve_public_url(url).await?)?;
+        send_redirect_probe(&self.bounded_client, url).await
     }
 
     async fn fetch_conditional(
@@ -1042,6 +1108,90 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::SecurityBlocked);
+        let error = driver
+            .probe_redirect(&Url::parse("http://127.0.0.1/").unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[test]
+    fn redirect_probe_resolves_relative_location_and_drops_fragment() {
+        let url = Url::parse("https://example.com/path/page").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            "../new?view=all#anchor".parse().unwrap(),
+        );
+        assert_eq!(
+            redirect_probe_target(&url, reqwest::StatusCode::PERMANENT_REDIRECT, &headers)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "https://example.com/new?view=all"
+        );
+        assert!(redirect_probe_target(&url, reqwest::StatusCode::OK, &headers)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn redirect_probe_rejects_unsafe_or_ambiguous_locations() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for location in [
+            "https://127.0.0.1/",
+            "https://[::ffff:127.0.0.1]/",
+            "https://service.internal/",
+            "https://user:secret@example.net/",
+            "https://example.net:8443/",
+            "http://example.net/",
+            "file:///path",
+        ] {
+            headers.insert(reqwest::header::LOCATION, location.parse().unwrap());
+            assert_eq!(
+                redirect_probe_target(&url, reqwest::StatusCode::FOUND, &headers)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::SecurityBlocked,
+                "{location}"
+            );
+        }
+        headers.clear();
+        assert!(redirect_probe_target(&url, reqwest::StatusCode::FOUND, &headers).is_err());
+        headers.append(reqwest::header::LOCATION, "/a".parse().unwrap());
+        headers.append(reqwest::header::LOCATION, "/b".parse().unwrap());
+        assert!(redirect_probe_target(&url, reqwest::StatusCode::FOUND, &headers).is_err());
+    }
+
+    #[tokio::test]
+    async fn redirect_probe_returns_before_reading_final_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, wait_for_probe) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).await.unwrap();
+            assert!(request.starts_with(b"GET / HTTP/1.1"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n")
+                .await
+                .unwrap();
+            // A consumer waiting for the advertised body will time out.
+            wait_for_probe.await.unwrap();
+        });
+        // Only the transport helper may use the local fixture. The production
+        // driver validates and pins public DNS before it calls this helper.
+        let client = bounded_client_builder(Duration::from_secs(2), DISCOVERY_USER_AGENT)
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("http://{address}/")).unwrap();
+        assert!(send_redirect_probe(&client, &url).await.unwrap().is_none());
+        stop.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[tokio::test]

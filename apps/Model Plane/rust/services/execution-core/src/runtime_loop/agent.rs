@@ -259,6 +259,41 @@ fn offered_among<'a>(offered: &'a BTreeSet<String>, names: &[&'static str]) -> V
         .collect()
 }
 
+/// The public-web tools an org's `web.mode=off` withholds from a Do run (Wave 3 EP-9 W2): web search and fetch with
+/// their aliases, and the crawl tools, which read public sites through Quarry as well.
+const ORG_WEB_TOOLS: &[&str] = &[
+    "web_search",
+    "web_fetch",
+    "web.search",
+    "web.read",
+    crate::web_tools::CRAWL_SITE_TOOL,
+    crate::web_tools::MAP_TOOL,
+    crate::web_tools::BATCH_TOOL,
+];
+
+/// Whether the run's org turned web access off. A run the gateway did not stamp with a web switch keeps its web access,
+/// as it did before the switch existed. A stamped run is withheld unless its mode is `live`, so a mode this build does
+/// not know narrows the run rather than widening it.
+fn org_web_off(req: &pb::RunAgentRequest) -> bool {
+    req.org_policy
+        .as_ref()
+        .and_then(|policy| policy.web.as_ref())
+        .is_some_and(|web| web.mode != "live")
+}
+
+/// Takes the public-web tools out of an offered set, for a run whose org turned web access off.
+fn withhold_org_web_tools(defs: &mut Vec<pb::ToolDefinition>) {
+    defs.retain(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()));
+}
+
+/// The refusal of a call to a public-web tool that the org's web switch takes away, or `None` when the call may run.
+/// It is answered before the purpose lock, so the person is told why rather than that the tool is out of scope.
+fn org_web_refusal(req: &pb::RunAgentRequest, tool_name: &str) -> Option<String> {
+    (org_web_off(req) && ORG_WEB_TOOLS.contains(&tool_name)).then(|| {
+        format!("org_web_off: the organisation has turned web access off, so '{tool_name}' is not run")
+    })
+}
+
 /// Whether this offered set holds both a connected-account tool and a web or browser tool: the
 /// only case in which the routing question exists.
 #[must_use]
@@ -740,13 +775,36 @@ struct UsageTally {
     legs: std::sync::Arc<
         std::sync::Mutex<std::collections::BTreeMap<(String, String), pb::RunUsageLeg>>,
     >,
+    /// The metered tokens of ONE wide-research item's child loop (EP-2 S9), when this tally is
+    /// that child's: its rounds still go into the shared `legs`, and their metered tokens also
+    /// here, so the fan-out can sum what its finished children spent. `None` everywhere else.
+    item_metered: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl UsageTally {
+    /// This tally, also counting each round's metered tokens into `meter` (EP-2 S9): the tally a
+    /// wide-research item's child loop records into.
+    fn metering_into(&self, meter: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            legs: std::sync::Arc::clone(&self.legs),
+            item_metered: Some(meter),
+        }
+    }
+
     /// Count one round that returned a provider response, under the provider and
     /// model that served it. Called only for a round the route guard accepted, and
     /// never for a continuation's seeded round, which no provider answered.
     fn record(&self, response: &pb::InferResponse) {
+        if let Some(meter) = &self.item_metered {
+            meter.fetch_add(
+                crate::subagent::research_fan_out::metered_tokens(
+                    &response.provider_used,
+                    response.input_tokens,
+                    response.output_tokens,
+                ),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         // A negative count is a provider bug; it must not subtract from the run.
         let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
         let mut legs = self
@@ -1182,6 +1240,12 @@ async fn offered_tools(
         governance,
     )
     .await;
+    // The org turned web access off (Wave 3 EP-9 W2): the public web tools are not shown to the model. A set with them
+    // withheld is not one a park resume derives again, so it is kept as the snapshot the pause retains.
+    if org_web_off(req) {
+        withhold_org_web_tools(&mut defs);
+        derivable = false;
+    }
     // `ask_user` (WS14 S4) is named by the deployment and never by a caller: a caller's or an MCP
     // tool of that name is dropped, and the built-in is offered only where `ask::budget` allows it.
     // Appended after the base set, so the run is not derivable, as the browser tools are.
@@ -1856,6 +1920,85 @@ async fn run_agent_with_route(
     .await
 }
 
+/// Admits a wide-research run (Wave 3 EP-2 S8) or refuses it. The gateway never sends one for a
+/// zero-retention turn, so one that arrives is refused rather than run; a run while the fan-out
+/// tool is switched off is refused with that tool's own refusal; and an org cap of 0 is refused,
+/// because the org has wide research off.
+fn admit_wide_research(
+    req: &pb::RunAgentRequest,
+    wide: &pb::WideResearchRequest,
+) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
+    use crate::subagent::research_fan_out;
+
+    if req.zdr {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    if !research_fan_out::enabled() {
+        return Err(tonic::Status::failed_precondition(
+            research_fan_out::disabled_refusal(),
+        ));
+    }
+    research_fan_out::plan_wide_research(&wide.items, wide.item_cap)
+        .map_err(tonic::Status::failed_precondition)
+}
+
+/// The one-item plan of a wide-research retry (Wave 3 EP-2 S9). The item is the goal the retried
+/// child run recorded, read back from session-core under the person's own session credential, so
+/// session-core's run-owner check decides whether this person may read it; the run must also be a
+/// fan-out item of this thread ([`research_fan_out::retry_item_goal`]). Every failure is the same
+/// refusal, returned before the run's first heartbeat, so nothing of the run is written and the
+/// refusal does not say whether the run exists.
+///
+/// [`research_fan_out::retry_item_goal`]: crate::subagent::research_fan_out::retry_item_goal
+async fn retry_wide_research_plan(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    child_run_id: &str,
+    cap: u32,
+) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
+    use crate::subagent::research_fan_out;
+    use mp_contracts::model_plane::v1::run_service_client::RunServiceClient;
+
+    let refused =
+        || tonic::Status::failed_precondition(research_fan_out::retry_unavailable_refusal());
+    let request = authenticated_session_request(
+        pb::GetRunRequest {
+            run_id: child_run_id.to_owned(),
+        },
+        session_bearer,
+    )
+    .map_err(|_| refused())?;
+    let detail = match RunServiceClient::new(session_channel.clone())
+        .get_run(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            warn!(
+                run_id = %req.run_id,
+                code = ?error.code(),
+                reason = %status_reason(&error),
+                "run_agent: the wide-research item to retry could not be read back"
+            );
+            return Err(refused());
+        }
+    };
+    let goal = research_fan_out::retry_item_goal(
+        &req.thread_id,
+        &detail.thread_id,
+        &detail.parent_run_id,
+        &detail.agent_id,
+        &detail.goal,
+    )
+    .map_err(tonic::Status::failed_precondition)?;
+    research_fan_out::plan_wide_research(&[goal], cap.min(1))
+        .map_err(tonic::Status::failed_precondition)
+}
+
 /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
 /// body of the route-level driver. `derivable` is the offer's own claim; an approval
 /// continuation is never derivable whatever it says, because its tools are the snapshot's.
@@ -1893,6 +2036,11 @@ async fn run_agent_with_route_parkable(
     // The attached files, held for the whole run and released when this scope ends on any
     // path, a cancelled request included (WS08-S6).
     let _run_inputs = register_run_inputs(&req, deadline)?;
+    // The entry this run's `code_interpreter` calls take their egress tier from (EP-9 E3), held
+    // and released the same way. None with the switch off, so every call runs with no network.
+    let _run_egress = (crate::egress_proxy::switch_tier()
+        != mp_contracts::sandbox_report::NetworkTier::Off)
+        .then(|| crate::egress_proxy::run_egress().register(&req.org_id, &req.run_id));
 
     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
     // then either restore the paused loop from its fold (the in-place resume) or start the
@@ -1940,6 +2088,9 @@ async fn run_agent_with_route_parkable(
     };
     if result_store.is_some() {
         tools.push(super::result_handles::tool_definition());
+        // The long-page reader's two tools (EP-2-S10) are offered beside `result_query`: only where the run
+        // holds results, and only while the reader is switched on.
+        tools.extend(crate::web_tools::reader_tool_definitions());
     }
 
     // Posture: deployed agents default to `ask` (risky tools gated behind a
@@ -1981,8 +2132,42 @@ async fn run_agent_with_route_parkable(
     // pattern this would mirror). Until that lookup lands, a request is
     // resolved against the hard ceiling only — never silently unbounded, just
     // not yet org-tightenable.
-    let child_ceiling =
-        crate::subagent::resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None);
+    //
+    // A wide-research run started from the composer (Wave 3 EP-2 S8) is the exception: the
+    // gateway reads the org's `research.max_fan_out_items` and sends the smaller of it and the
+    // person's ask as `wide_research.item_cap`, which is the org ceiling here. Only a fresh run
+    // reads it; a continuation or a scheduled run keeps the shape it started with. A refusal
+    // returns before the run's first heartbeat, so nothing of the run is written.
+    //
+    // A one-item retry (EP-2 S9) is admitted the same way first, so a ZDR turn, the switch off
+    // or an org cap of 0 refuses it before session-core is asked for anything.
+    let wide_research = match req.wide_research.as_ref() {
+        Some(wide) if resumed.is_none() && scheduled.is_none() => {
+            let plan = admit_wide_research(&req, wide)?;
+            Some(if wide.retry_of_child_run_id.is_empty() {
+                plan
+            } else {
+                retry_wide_research_plan(
+                    &session_channel,
+                    session_bearer.as_deref(),
+                    &req,
+                    &wide.retry_of_child_run_id,
+                    plan.cap,
+                )
+                .await?
+            })
+        }
+        _ => None,
+    };
+    let child_ceiling = match wide_research.as_ref() {
+        Some(plan) => {
+            crate::subagent::wide_research_child_ceiling(Some(req.max_subagents), plan.cap)
+        }
+        None => crate::subagent::resolve_child_ceiling(
+            Some(req.max_subagents).filter(|&n| n != 0),
+            None,
+        ),
+    };
 
     // The run's model and provider are `route`'s (see `crate::agent_route`).
     // Autonomous, tool-using runs need a tool-following model, so an UNPINNED
@@ -2089,7 +2274,20 @@ async fn run_agent_with_route_parkable(
     // 2. The governed ReAct loop.
     let (loop_goal, seeded_round) = match resumed {
         Some(resumed) => (resumed.goal, Some(resumed.seed)),
-        None => (req.goal.clone(), None),
+        // A wide-research run's goal carries its items and the items past the cap (EP-2 S8).
+        None => (
+            wide_research.as_ref().map_or_else(
+                || req.goal.clone(),
+                |plan| {
+                    format!(
+                        "{}\n\n{}",
+                        req.goal,
+                        crate::subagent::research_fan_out::wide_research_goal_context(plan)
+                    )
+                },
+            ),
+            None,
+        ),
     };
     let rounds = run_rounds(&context, &loop_goal, max_rounds, seeded_round).await?;
     // Closed here, at the loop's end, so finalizing is not counted as the last round's dispatch.
@@ -2154,6 +2352,15 @@ async fn run_agent_with_route_parkable(
                 crate::subscription_refusal::SUBSCRIPTION_ROUTE_UNAVAILABLE,
             )),
         ),
+    };
+    // A finished wide-research answer names the items past the org's cap itself (EP-2 S8), so the
+    // person learns what was left out whatever the model wrote.
+    let final_answer = match wide_research
+        .as_ref()
+        .and_then(crate::subagent::research_fan_out::dropped_items_note)
+    {
+        Some(note) if success => format!("{final_answer}\n\n{note}"),
+        _ => final_answer,
     };
 
     let finalized = finalize(
@@ -2284,6 +2491,8 @@ async fn fetch_skill_context(
         org_id: org_id.to_owned(),
         enabled_only: true,
         for_user_id: String::new(),
+        kinds: Vec::new(),
+        thread_id: String::new(),
     });
     let Ok(header) = format!("Bearer {bearer}").parse() else {
         return Vec::new();
@@ -2651,8 +2860,9 @@ fn seed_message(role: &str, content: String) -> pb::ChatMessage {
 /// 2. the authored instructions (Context), which a delegated child inherits;
 /// 3. the prior turns of the thread (Conversation), root loop only;
 /// 4. the memory block (Volatile), root loop only;
-/// 5. the matched skills (Volatile);
-/// 6. this loop's goal (Current), which carries the approved plan when there is one.
+/// 5. the thread goal recitation (Volatile), root loop only (EP-7 S1);
+/// 6. the matched skills (Volatile);
+/// 7. this loop's goal (Current), which carries the approved plan when there is one.
 ///
 /// Without a run context the skills stay where they always were, right after the preamble, so
 /// a run that carries none seeds byte-identically to before. Pure: the skills are fetched by
@@ -2695,6 +2905,12 @@ fn seed_order(
         );
         if !run_context.memory_block.is_empty() {
             messages.push(seed_message("system", run_context.memory_block.clone()));
+        }
+        // The thread goal (EP-7 S1): the owner's standing aim, recited as data under its own
+        // header. Volatile, never cached: it changes whenever the owner edits the goal. A child
+        // has its own sub-goal and never sees the thread's.
+        if !run_context.goal_recitation.is_empty() {
+            messages.push(seed_message("system", run_context.goal_recitation.clone()));
         }
     }
     messages.extend(skills);
@@ -2870,6 +3086,7 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
             history_messages = if root { run_context.history.len() } else { 0 },
             memory_bytes = if root { run_context.memory_block.len() } else { 0 },
             profile_bytes = if root { run_context.user_profile.len() } else { 0 },
+            goal_recitation_bytes = if root { run_context.goal_recitation.len() } else { 0 },
             skills = skills.is_some(),
             "run_agent: seeded run context"
         );
@@ -3738,6 +3955,16 @@ async fn run_rounds(
                 }));
                 continue;
             }
+            // The org turned web access off (Wave 3 EP-9 W2): a web call gets its own typed refusal, ahead of the
+            // purpose lock, so the person is told why and no request leaves the run.
+            if let Some(refusal) = org_web_refusal(req, &call.name) {
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(refusal),
+                }));
+                continue;
+            }
             // Purpose-lock: reject any tool not in the offered allowlist.
             if !ctx.allowlist.contains(&call.name) {
                 warn!(
@@ -4405,6 +4632,23 @@ async fn run_rounds(
                             screening_taint: false,
                         });
                     }
+                    // The run's egress ceiling for this call (EP-9 E3, D-E3), from what the run is
+                    // now: a taint or plan mode that arrived since the last call holds this one at
+                    // off. The calls of one round see the same facts, so they agree.
+                    if call.name == "code_interpreter" {
+                        crate::egress_proxy::run_egress().set_ceiling(
+                            &req.org_id,
+                            &req.run_id,
+                            crate::egress_proxy::run_ceiling(crate::egress_proxy::RunEgressFacts {
+                                zdr,
+                                waived: ctx.route.is_waived(),
+                                plan_mode: req.plan_mode,
+                                tainted: read_in_round || ctx.taint.is_marked(),
+                                read_only_rung: req.autonomy_rung
+                                    == pb::AutonomyRung::ReadOnly as i32,
+                            }),
+                        );
+                    }
                     let ledger_entry = if ctx.effect_ledger {
                         let entry = runtime_loop::effect::entry_for_run_call(
                             &run_gate,
@@ -4538,7 +4782,66 @@ async fn run_rounds(
                             org_id: &req.org_id,
                             run_id: &req.run_id,
                         });
-                    let outcome = Some(
+                    // EP-1 S1: the browser call a takeover paused runs only once the person has given
+                    // the browser back. While Quarry still says the person holds it, the call is not
+                    // dispatched and the model reads that the person is using the browser. EP-1 S5:
+                    // after the give-back it also needs a grant that outlived the takeover, read back
+                    // under the person's click-time bearer; a run whose wait ran out is told so.
+                    let handback_refusal = if is_release
+                        && crate::browser_session::is_do_tool(&call.name)
+                        && crate::browser_session::takeover_pause_enabled()
+                    {
+                        match browser.as_ref() {
+                            Some(browser) => released_browser_call_refusal(ctx, browser).await,
+                            None if !zdr && ctx.depth == 0 && req.space_id.is_empty() => {
+                                crate::browser_session::handback_without_bearer(
+                                    ctx.state,
+                                    &req.run_id,
+                                )
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    // EP-1 S3: once the person has given the browser back, the run looks at the
+                    // page once, fresh, before the paused call runs again, and the model reads the
+                    // person's note with that look. A paused observe is answered by the look.
+                    let hand_back = match browser.as_ref() {
+                        Some(browser)
+                            if is_release
+                                && handback_refusal.is_none()
+                                && crate::browser_session::is_do_tool(&call.name)
+                                && crate::browser_session::takeover_pause_enabled() =>
+                        {
+                            match released_hand_back_note(ctx).await {
+                                Some(note) => {
+                                    let quarry =
+                                        crate::quarry_agent::QuarryAgentClient::from_env()
+                                            .ok()
+                                            .flatten();
+                                    let look = crate::browser_session::hand_back(
+                                        browser,
+                                        quarry.as_ref(),
+                                        &note,
+                                    )
+                                    .await;
+                                    Some((look, note))
+                                }
+                                None => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let outcome = if let Some(refusal) = handback_refusal {
+                        Some(StepOutcome::failed(&refusal.text()))
+                    } else if let Some((look, _)) = hand_back
+                        .as_ref()
+                        .filter(|_| crate::browser_session::hand_back_answers(&call.name))
+                    {
+                        Some(hand_back_observed(look))
+                    } else {
+                        Some(
                         runtime_loop::retry::run_attempts(
                             || {
                                 runtime_loop::execute_step_with_result_handles(
@@ -4617,7 +4920,12 @@ async fn run_rounds(
                             },
                         )
                         .await,
-                    );
+                    )
+                    .map(|dispatched| match hand_back.as_ref() {
+                        Some((look, note)) => after_hand_back(dispatched, look, note),
+                        None => dispatched,
+                    })
+                    };
                     if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
                         let closing = runtime_loop::effect::final_outcome_for(&result.status);
                         if let Err(reason) = runtime_loop::effect::finalize(
@@ -4677,6 +4985,111 @@ async fn run_rounds(
                 (CallSlot::ToDispatch { .. }, None) => {
                     unreachable!("every ToDispatch slot produced an outcome in phase 2")
                 }
+            };
+
+            // EP-1 S1: a Do browser call refused because the person holds the browser pauses the run
+            // on that call (switch on). The approval is the give-back: once it is consumed, the call
+            // runs again. A released call that meets the takeover again is not paused a second time,
+            // since its approval is spent and the pause would collapse onto it; the model reads the
+            // refusal and may ask again. A run that keeps no state holds no approval: it is refused.
+            let human_assist = if crate::browser_session::takeover_pause_enabled()
+                && ctx.depth == 0
+                && !ctx.release.as_ref().is_some_and(|release| {
+                    release.covers(&step_id, &call.name, &call.arguments_json)
+                }) {
+                crate::browser_session::takeover_step(
+                    &call.name,
+                    &outcome.error,
+                    !zdr && !ctx.route.is_waived(),
+                )
+            } else {
+                None
+            };
+            let outcome = match human_assist {
+                Some(crate::browser_session::TakeoverStep::Pause) if pending_pause.is_none() => {
+                    paused_index = Some(index);
+                    pending_pause = Some(PendingPause {
+                        step_id,
+                        name: call.name.clone(),
+                        arguments_json: call.arguments_json.clone(),
+                        cause: CauseCode::BrowserHumanAssist,
+                    });
+                    continue;
+                }
+                Some(crate::browser_session::TakeoverStep::Refuse(refusal)) => {
+                    warn!(
+                        run_id = %req.run_id,
+                        code = refusal.code(),
+                        feature = refusal.feature().unwrap_or_default(),
+                        "run_agent: a takeover pause is refused for a run that keeps no state"
+                    );
+                    runtime_loop::StepOutcome {
+                        error: crate::browser_session::UNAVAILABLE.text(),
+                        ..outcome
+                    }
+                }
+                _ => outcome,
+            };
+
+            // EP-1 S2: a page that shows a sign-in, CAPTCHA, consent or WAF wall pauses the run for the
+            // person (switch on; only the switch makes the page refusal a help request), at most twice a
+            // run. The approval is the help, and the call runs again after it. A call that cannot pause
+            // tells the model the site blocked it, as before the switch: a released call (its approval
+            // is spent), a round another pause already holds, a delegated child, a run that keeps no
+            // state, or a run at its cap. A person who declined help with this call is not asked again:
+            // the session closes and the model reads that.
+            let outcome = match crate::browser_session::help_kind(&outcome.error) {
+                Some(kind) => {
+                    let can_pause = crate::browser_session::human_assist_enabled()
+                        && ctx.depth == 0
+                        && !zdr
+                        && !ctx.route.is_waived()
+                        && pending_pause.is_none()
+                        && !ctx.release.as_ref().is_some_and(|release| {
+                            release.covers(&step_id, &call.name, &call.arguments_json)
+                        });
+                    if can_pause
+                        && declined_earlier_in_run(ctx, &call.name, &call.arguments_json).await
+                    {
+                        let declined = match ctx.browser_bearer {
+                            Some(bearer) => {
+                                let quarry =
+                                    crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
+                                crate::browser_session::decline_help(
+                                    &crate::browser_session::BrowserDispatch {
+                                        state: ctx.state,
+                                        broker: crate::browser_session::production_broker(),
+                                        bearer,
+                                        org_id: &req.org_id,
+                                        run_id: &req.run_id,
+                                    },
+                                    quarry.as_ref(),
+                                )
+                                .await
+                            }
+                            None => crate::browser_session::HELP_DECLINED,
+                        };
+                        runtime_loop::StepOutcome {
+                            error: declined.text(),
+                            ..outcome
+                        }
+                    } else if can_pause && crate::browser_session::raise_help(&req.run_id, kind) {
+                        paused_index = Some(index);
+                        pending_pause = Some(PendingPause {
+                            step_id,
+                            name: call.name.clone(),
+                            arguments_json: call.arguments_json.clone(),
+                            cause: CauseCode::BrowserHumanAssist,
+                        });
+                        continue;
+                    } else {
+                        runtime_loop::StepOutcome {
+                            error: crate::browser_session::BLOCKED.text(),
+                            ..outcome
+                        }
+                    }
+                }
+                None => outcome,
             };
 
             // A scheduled run is unattended: a gated call is withheld and recorded, and the model
@@ -4919,6 +5332,29 @@ async fn run_rounds(
                 pause_fold,
             )
             .await?;
+            // EP-1 S1: the page the person holds outlives this request, so the give-back resumes the
+            // run on it; and the run's events say the browser is with the person.
+            if pending.cause == CauseCode::BrowserHumanAssist {
+                let hold = crate::browser_session::hold_for_person(&req.run_id);
+                // EP-1 S5: a page the person never gives back is closed once the approval's wait
+                // runs out, so the takeover cannot hold a Quarry run and a grant without end.
+                if let Some(bearer) = ctx.browser_bearer {
+                    crate::browser_session::expire_hold_after(
+                        ctx.state,
+                        bearer,
+                        &req.org_id,
+                        &req.run_id,
+                        hold,
+                        approval_ttl_seconds(pending.cause),
+                    );
+                }
+                // A help request (EP-1 S2) waits for the person to take the browser: Quarry's control
+                // has not moved yet, so no takeover is published for it.
+                if crate::browser_session::pending_help_kind(&req.run_id).is_none() {
+                    let epoch = taken_over_epoch(ctx).await;
+                    publish_browser_takeover(ctx, true, epoch).await;
+                }
+            }
             // Built outside the loop, which alone holds the tally: a pause is an
             // invocation that spent rounds, and the continuation starts its own tally.
             paused.usage = Some(ctx.usage.snapshot());
@@ -5250,23 +5686,75 @@ impl LoopSubagentDispatch<'_, '_> {
         // the model-supplied item id: that is free text, and a lineage row is
         // not the place to store it.
         let label = crate::subagent::label(research_fan_out::RESEARCH_TOOL_NAME);
-        let batch_id = self.parent_step_id.to_owned();
+        // A one-item retry joins the batch it retries (EP-2 S9), so the person's grid groups the
+        // new attempt with its siblings; every other call is its own batch.
+        let batch_id = self
+            .parent
+            .req
+            .wide_research
+            .as_ref()
+            .and_then(|wide| {
+                research_fan_out::retry_batch_id(&wide.retry_of_child_run_id, &wide.batch_id)
+            })
+            .unwrap_or(self.parent_step_id)
+            .to_owned();
         let semaphore =
             std::sync::Arc::new(tokio::sync::Semaphore::new(research_fan_out::concurrency()));
         let consumed = std::sync::atomic::AtomicU32::new(0);
         let max_rounds_per_item = request.max_rounds_per_item;
         let result_schema_hint = request.result_schema_hint.as_deref();
+        // The children's token budget (EP-2 S9, decision D4): what the call's FINISHED children
+        // spent, checked before each item starts. Off (`WIDE_RESEARCH_CHILD_BUDGET_ENFORCED`), a
+        // spent budget is logged once and every item still starts.
+        let child_budget = research_fan_out::ChildBudget::from_env();
+        let finished_spent = std::sync::atomic::AtomicU64::new(0);
+        let spent_logged = std::sync::atomic::AtomicBool::new(false);
 
         let results: Vec<FanOutItemResult> = futures::future::join_all(
             request.items.iter().enumerate().map(|(index, item)| {
                 let semaphore = std::sync::Arc::clone(&semaphore);
                 let batch_id = batch_id.as_str();
                 let consumed = &consumed;
+                let finished_spent = &finished_spent;
+                let spent_logged = &spent_logged;
                 async move {
                     let _permit = semaphore
                         .acquire()
                         .await
                         .expect("fan-out semaphore is never closed");
+                    // Checked once this item holds its permit, so a sibling that finished while
+                    // it waited is counted; before the ceiling claim, so an item the budget stops
+                    // spends no child slot.
+                    let spent = finished_spent.load(std::sync::atomic::Ordering::Relaxed);
+                    match child_budget.check(spent) {
+                        research_fan_out::BudgetCheck::Within => {}
+                        research_fan_out::BudgetCheck::SpentNotEnforced => {
+                            if !spent_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                warn!(
+                                    run_id = %self.parent.req.run_id,
+                                    spent,
+                                    budget = child_budget.tokens,
+                                    "run_agent: research_fan_out children spent their token \
+                                     budget; not enforced, so the remaining items still start"
+                                );
+                            }
+                        }
+                        research_fan_out::BudgetCheck::Reached => {
+                            info!(
+                                run_id = %self.parent.req.run_id,
+                                spent,
+                                budget = child_budget.tokens,
+                                item_index = index,
+                                "run_agent: research_fan_out item not started; the children's \
+                                 token budget is spent"
+                            );
+                            return FanOutItemResult::budget_reached(
+                                item,
+                                spent,
+                                child_budget.tokens,
+                            );
+                        }
+                    }
                     // Resolve this item's share of the pool BEFORE claiming a
                     // child-ceiling slot. It depends only on the item's index, so
                     // no item's outcome depends on another's — but it matters
@@ -5306,6 +5794,7 @@ impl LoopSubagentDispatch<'_, '_> {
                     }
                     let item_step_id = format!("{}.{index}", self.parent_step_id);
                     let prompt = research_fan_out::compose_item_prompt(item, result_schema_hint);
+                    let item_meter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let (result, rounds) = run_delegated_child(
                         self.parent,
                         &item_step_id,
@@ -5316,9 +5805,16 @@ impl LoopSubagentDispatch<'_, '_> {
                         pb::SubagentRole::Researcher,
                         Some(batch_id),
                         None,
+                        Some(&item_meter),
                     )
                     .await;
                     consumed.fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
+                    // Added while this item still holds its permit, so the next item to start
+                    // sees what this one spent.
+                    finished_spent.fetch_add(
+                        item_meter.load(std::sync::atomic::Ordering::Relaxed),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     match result {
                         Ok(answer) => FanOutItemResult::ok(item, answer),
                         Err(error) => FanOutItemResult::failed(item, error),
@@ -6216,6 +6712,7 @@ async fn run_subagent(
         SUBAGENT_LINEAGE_ROLE,
         None,
         role,
+        None,
     )
     .await
 }
@@ -6239,6 +6736,9 @@ async fn run_subagent(
 /// the child then holds only the parent's tools that role allows and its run is
 /// recorded as `agent_ref@version`. `None` for every other delegation.
 ///
+/// `item_meter` is where a wide-research item's child counts its metered tokens (EP-2 S9), so
+/// its fan-out can hold its children to their token budget. `None` for every other delegation.
+///
 /// Returns the rounds consumed alongside the result — including on failure —
 /// because the caller must charge them either way.
 #[allow(clippy::too_many_arguments)] // a cohesive description of one delegation
@@ -6252,6 +6752,7 @@ async fn run_delegated_child(
     role: pb::SubagentRole,
     batch_id: Option<&str>,
     agent_role: Option<&pb::AgentRoleSpec>,
+    item_meter: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
 ) -> (Result<String, String>, u32) {
     // A run-wide refusal (a spent usage limit, an expired sign-in) that another
     // loop of the run already met ends the run: this delegation is not started,
@@ -6371,8 +6872,12 @@ async fn run_delegated_child(
         subagent_roles: None,
         // The parent's deadline, copied: one limit for the whole run.
         deadline: parent.deadline,
-        // The parent's tally, shared: the delegate's rounds are the run's.
-        usage: parent.usage.clone(),
+        // The parent's tally, shared: the delegate's rounds are the run's. A wide-research
+        // item's also counts its metered tokens for its fan-out's child budget (EP-2 S9).
+        usage: item_meter.map_or_else(
+            || parent.usage.clone(),
+            |meter| parent.usage.metering_into(std::sync::Arc::clone(meter)),
+        ),
         // A delegated loop's rounds are not listed: they fall inside the parent round's dispatch.
         round_timing: None,
         result_store: parent.result_store.clone(),
@@ -8058,7 +8563,10 @@ fn connector_step_note(tool_input: &str, outcome: &StepOutcome) -> String {
         );
     }
     let operation = connector_operation(tool_input).unwrap_or_else(|| "invalid".to_owned());
-    let note = format!("[connector_write op={operation} content_redacted=true]");
+    let note = format!(
+        "[connector_write op={operation}{} content_redacted=true]",
+        super::edit_step_note(&outcome.output)
+    );
     match outcome.output.lines().last() {
         Some(line) if is_postcondition_verdict(line) => format!("{note} {line}"),
         _ => note,
@@ -8348,13 +8856,39 @@ async fn declined_earlier_in_run(
 }
 
 /// The cause a pause is stored with (WS21-S5b). A browser act is stored under the risk category its
-/// own input reads as, so the approval shows that category for the call it is for.
-fn approval_cause_for_pause(
+/// own input reads as, so the approval shows that category for the call it is for. A takeover pause
+/// (EP-1 S1) names the host of the session the run holds, never one the page states. A help request
+/// the agent raised (EP-1 S2) states the wall the page showed; any other browser pause is the person's
+/// takeover.
+pub(crate) fn approval_cause_for_pause(
+    state: &crate::state::StateStore,
     cause: CauseCode,
     run_id: &str,
     tool_name: &str,
     tool_input: &str,
 ) -> mp_contracts::model_plane::v1::ApprovalCause {
+    if cause == CauseCode::BrowserHumanAssist {
+        let host = state
+            .browser_session(run_id)
+            .map(|session| session.host)
+            .unwrap_or_default();
+        let (assist_kind, assist_origin) = crate::browser_session::pending_help_kind(run_id)
+            .map_or(
+                (
+                    approval_cause::ASSIST_KIND_USER_TAKEOVER,
+                    approval_cause::ASSIST_ORIGIN_PERSON,
+                ),
+                |kind| (kind, approval_cause::ASSIST_ORIGIN_AGENT),
+            );
+        return approval_cause::for_browser_assist(
+            run_id,
+            tool_name,
+            tool_input,
+            assist_kind,
+            assist_origin,
+            &host,
+        );
+    }
     let mut stored = approval_cause::for_call(cause, run_id, tool_name, tool_input);
     if tool_name == crate::browser_session::ACT_TOOL {
         stored.risk_category = crate::tool_bridge::browser_act_risk_category(tool_input)
@@ -8362,6 +8896,138 @@ fn approval_cause_for_pause(
             .to_owned();
     }
     stored
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the shell-rule proposal switch (see [`ShellRuleSwitch`]).
+    static TEST_SHELL_RULES: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the shell-rule proposal switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct ShellRuleSwitch;
+
+#[cfg(test)]
+impl ShellRuleSwitch {
+    fn set(on: bool) -> Self {
+        TEST_SHELL_RULES.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ShellRuleSwitch {
+    fn drop(&mut self) {
+        TEST_SHELL_RULES.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether shell-rule proposals are on in this process (EP-9 E4). Default off: the one strict
+/// parser is `mp_contracts::shell_rule::shell_rule_proposals_enabled`, which also reads it as off
+/// without WS13-S7's rule switch.
+fn shell_rule_proposals_on() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_SHELL_RULES.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::shell_rule::shell_rule_proposals_enabled()
+}
+
+/// The WS13-S7 proposal producer's shell hook (EP-9 E4): a shell pause's `action_key` names the
+/// narrow rule an "Always" would propose, for example `shell:git status`, instead of `shell`. The
+/// rule is a program and subcommand from mp-contracts' closed tables, never a word of the command's
+/// arguments; a command with no rule (compound, redirected, substituted, unknown) keeps `shell` and
+/// is offered once, as before. A zero-retention run keeps `shell` too: its approval row states
+/// nothing read from the command.
+fn propose_shell_rule(
+    stored: &mut mp_contracts::model_plane::v1::ApprovalCause,
+    zdr: bool,
+    tool_name: &str,
+    tool_input: &str,
+) {
+    if zdr || tool_name != mp_contracts::shell_rule::SHELL_TOOL || !shell_rule_proposals_on() {
+        return;
+    }
+    if let Some(rule) = mp_contracts::shell_rule::rule_for_shell_input(tool_input) {
+        stored.action_key = rule.action_key();
+    }
+}
+
+#[cfg(test)]
+mod shell_rule_proposals {
+    use super::*;
+
+    fn shell_cause(command: &str, zdr: bool) -> mp_contracts::model_plane::v1::ApprovalCause {
+        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
+        let mut cause =
+            approval_cause::for_call(CauseCode::RiskyEffectUnderAsk, "run_test", "shell", &input);
+        propose_shell_rule(&mut cause, zdr, "shell", &input);
+        cause
+    }
+
+    #[test]
+    fn shell_rule_switch_off_keeps_the_tool_key() {
+        let _switch = ShellRuleSwitch::set(false);
+        let cause = shell_cause("git status", false);
+        assert_eq!(cause.action_key, "shell");
+        assert_eq!(cause.scope_options, ["once"]);
+    }
+
+    #[test]
+    fn shell_rule_names_program_and_subcommand_only() {
+        let _switch = ShellRuleSwitch::set(true);
+        let command = "git commit -m 'Rettet særs viktig feil'";
+        let cause = shell_cause(command, false);
+        assert_eq!(cause.action_key, "shell:git commit");
+        assert!(!cause.action_key.contains("Rettet"));
+        // The rule changes what an "Always" would name, never which scopes the pause offers or
+        // which call the digest identifies.
+        assert_eq!(cause.scope_options, ["once"]);
+        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
+        assert_eq!(cause.call_digest, approval_cause::call_digest("run_test", "shell", &input));
+    }
+
+    #[test]
+    fn shell_rule_no_rule_for_compound_or_unknown_commands() {
+        let _switch = ShellRuleSwitch::set(true);
+        for command in ["git status && git push", "git log | head", "rm -rf build", "FOO=1 ls"] {
+            assert_eq!(shell_cause(command, false).action_key, "shell", "{command}");
+        }
+    }
+
+    #[test]
+    fn shell_rule_not_proposed_for_a_zero_retention_run() {
+        let _switch = ShellRuleSwitch::set(true);
+        assert_eq!(shell_cause("git status", true).action_key, "shell");
+    }
+
+    #[test]
+    fn shell_rule_leaves_other_tools_alone() {
+        let _switch = ShellRuleSwitch::set(true);
+        let input = r#"{"command":"git status"}"#;
+        let mut cause = approval_cause::for_call(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_test",
+            "code_interpreter",
+            input,
+        );
+        propose_shell_rule(&mut cause, false, "code_interpreter", input);
+        assert_eq!(cause.action_key, "code_interpreter");
+    }
+}
+
+/// How long an ordinary pause's approval waits for a decision.
+const APPROVAL_TTL_SECONDS: u32 = 3600;
+
+/// The TTL of a pause's approval. A takeover waits the configured assist wait (EP-1 S5), since the
+/// person holds a live page and its grant meanwhile; every other pause waits the hour.
+fn approval_ttl_seconds(cause: CauseCode) -> u32 {
+    if cause == CauseCode::BrowserHumanAssist {
+        crate::browser_session::assist_ttl_seconds()
+    } else {
+        APPROVAL_TTL_SECONDS
+    }
 }
 
 /// HITL pause: mint a durable approval for the gated tool (same shape as the
@@ -8464,7 +9130,7 @@ async fn pause_for_approval(
             org_id: req.org_id.clone(),
             user_id: req.user_id.clone(),
             reason: approval_reason_for_call(gate, tool_name, tool_input),
-            expires_in_seconds: 3600,
+            expires_in_seconds: approval_ttl_seconds(cause),
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
             // Stable per-(run, step) idempotency key (D-1): a re-paused step
@@ -8488,6 +9154,7 @@ async fn pause_for_approval(
             ),
             continuation_descriptor_json,
             cause: Some(approval_cause_for_pause(
+                state,
                 cause,
                 &req.run_id,
                 tool_name,
@@ -8497,7 +9164,10 @@ async fn pause_for_approval(
         },
         bearer,
     );
-    let request = request?;
+    let mut request = request?;
+    if let Some(stored) = request.get_mut().cause.as_mut() {
+        propose_shell_rule(stored, req.zdr, tool_name, tool_input);
+    }
     // The fold of this pause is durable BEFORE the approval is visible, so a fast
     // approve-and-continue can always claim it. It is named by the approval's own
     // idempotency key (`{run_id}:{step_id}`, set below), which exists before
@@ -9079,6 +9749,8 @@ async fn consume_for_resume(
         snapshot_digest: snapshot.digest.clone(),
         effective,
         segment,
+        revision: consumed.revision,
+        original_action_fingerprint: consumed.original_action_fingerprint,
     })
 }
 
@@ -9102,7 +9774,8 @@ fn released_call(
     let step_id = tool_step_id(&format!("s{}.", consumed.segment), 1, &call);
     let release =
         super::resume::ApprovedRelease::new(gate, &step_id, &call.name, &call.arguments_json)
-            .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
+            .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?
+            .with_edit(consumed.edit_note());
     Ok((call, step_id, release))
 }
 
@@ -9193,7 +9866,7 @@ async fn restore_continuation(
     .await
     {
         Ok(restored) => Ok(Ok(Continuation {
-            release: Some(release),
+            release: Some(release.with_edit(restored.edit.clone())),
             step_prefix: format!("s{}.", consumed.segment),
             goal: req.goal.clone(),
             seed: RoundSeed::InPlace(Box::new(restored)),
@@ -9362,6 +10035,248 @@ async fn publish_plan_transition(
             error = %error,
             "run_agent: failed to publish PlanTransitioned (best-effort)"
         );
+    }
+}
+
+/// Publish a takeover's `BrowserRunPaused` or the give-back's `BrowserRunResumed` on session-core's
+/// broadcast (EP-1 S1), the same path as [`publish_plan_transition`]. Best-effort. A run that keeps
+/// no state never pauses for a takeover, and publishes nothing here either.
+async fn publish_browser_takeover(ctx: &LoopContext<'_>, paused: bool, control_epoch: u64) {
+    if ctx.req.zdr || ctx.route.is_waived() {
+        return;
+    }
+    let request = pb::RecordOrchestrationEventRequest {
+        event: Some(pb::OrchestrationEvent {
+            // session-core assigns event_id + at.
+            event_id: String::new(),
+            at: None,
+            event: Some(crate::browser_session::takeover_event(
+                &ctx.req.run_id,
+                paused,
+                control_epoch,
+            )),
+        }),
+    };
+    let result = match authenticated_session_request(request, ctx.session_bearer) {
+        Ok(request) => OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+            .record_orchestration_event(request)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        warn!(
+            run_id = %ctx.req.run_id,
+            code = ?error.code(),
+            paused,
+            "run_agent: browser takeover event not published (best-effort)"
+        );
+    }
+}
+
+/// The control epoch of the run's browser at a takeover pause (EP-1 S1). Zero when Quarry is not
+/// configured or did not answer: the epoch only labels the event.
+async fn taken_over_epoch(ctx: &LoopContext<'_>) -> u64 {
+    let Some(quarry) = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten() else {
+        return 0;
+    };
+    crate::browser_session::session_control(ctx.state, &quarry, &ctx.req.org_id, &ctx.req.run_id)
+        .await
+        .map_or(0, |control| control.control_epoch)
+}
+
+/// What stops a released Do browser call after a takeover, `None` to dispatch it: a wait that ran out
+/// (EP-1 S5), the person still holding the browser (S1), or a grant the give-back finds lapsed (S5).
+/// The timeout is read first, because ending the hold forgets it.
+async fn released_browser_call_refusal(
+    ctx: &LoopContext<'_>,
+    browser: &crate::browser_session::BrowserDispatch<'_>,
+) -> Option<crate::browser_session::Refusal> {
+    if let Some(timed_out) = crate::browser_session::take_help_timed_out(browser.run_id) {
+        return Some(timed_out);
+    }
+    if released_browser_call_still_held(ctx, browser).await {
+        return Some(crate::browser_session::TAKEN_OVER);
+    }
+    let quarry = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
+    crate::browser_session::revalidate_after_handback(browser, quarry.as_ref()).await
+}
+
+/// Whether the browser call a takeover paused must stay held: Quarry says the person still holds the
+/// browser (EP-1 S1). Once it is given back the hold ends and the give-back is published. A control
+/// that cannot be read releases the call: Quarry's own gate still refuses an agent step while the
+/// person holds the browser.
+async fn released_browser_call_still_held(
+    ctx: &LoopContext<'_>,
+    browser: &crate::browser_session::BrowserDispatch<'_>,
+) -> bool {
+    let control = match crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten() {
+        Some(quarry) => {
+            crate::browser_session::session_control(
+                browser.state,
+                &quarry,
+                browser.org_id,
+                browser.run_id,
+            )
+            .await
+        }
+        None => None,
+    };
+    if control
+        .as_ref()
+        .is_some_and(crate::quarry_agent::RunControl::person_holds)
+    {
+        return true;
+    }
+    crate::browser_session::end_hold(browser.run_id);
+    if let Some(control) = control {
+        publish_browser_takeover(ctx, false, control.control_epoch).await;
+    }
+    false
+}
+
+/// The person's hand-back note when this continuation released a browser call a takeover paused
+/// (EP-1 S3): the granted `browser_human_assist` approval's decision reason, empty when the person
+/// wrote none. `None` for any other approval, or when the approval cannot be read: the call then
+/// runs again as it did before S3, with no look and no note. The note is never logged.
+async fn released_hand_back_note(ctx: &LoopContext<'_>) -> Option<String> {
+    let resume = ctx.req.resume.as_ref()?;
+    if resume.approval_id.is_empty() {
+        return None;
+    }
+    let request = authenticated_session_request(
+        pb::GetApprovalRequest {
+            approval_id: resume.approval_id.clone(),
+            // The approval must belong to the run's own org; another org's reads as not found.
+            org_id: ctx.req.org_id.clone(),
+            ..Default::default()
+        },
+        ctx.session_bearer,
+    )
+    .ok()?;
+    let approval = match OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+        .get_approval(request)
+        .await
+    {
+        Ok(response) => response.into_inner().approval?,
+        Err(error) => {
+            warn!(
+                run_id = %ctx.req.run_id,
+                code = ?error.code(),
+                "run_agent: the hand-back approval could not be read; the call runs without a look"
+            );
+            return None;
+        }
+    };
+    hand_back_note_of(&approval, &ctx.req.run_id)
+}
+
+/// The note of a granted `browser_human_assist` approval of `run_id`, `None` for any other.
+fn hand_back_note_of(approval: &pb::Approval, run_id: &str) -> Option<String> {
+    let is_hand_back = approval.run_id == run_id
+        && approval.state == pb::ApprovalState::Granted as i32
+        && approval
+            .cause
+            .as_ref()
+            .is_some_and(|cause| cause.code == CauseCode::BrowserHumanAssist.as_str());
+    is_hand_back.then(|| approval.decision_reason.clone())
+}
+
+/// A paused observe answered by the hand-back's one look (EP-1 S3).
+fn hand_back_observed(
+    look: &Result<String, crate::browser_session::Refusal>,
+) -> runtime_loop::StepOutcome {
+    match look {
+        Ok(view) => StepOutcome::completed(view.clone()),
+        Err(refusal) => StepOutcome::failed(&refusal.text()),
+    }
+}
+
+/// The paused call's outcome after a hand-back (EP-1 S3): a call that completed is read after the
+/// fresh look and the note; a failed one keeps its refusal alone, so the closed refusal text the
+/// loop and the retry classifier read is unchanged. A look that failed still carries the note.
+fn after_hand_back(
+    dispatched: runtime_loop::StepOutcome,
+    look: &Result<String, crate::browser_session::Refusal>,
+    note: &str,
+) -> runtime_loop::StepOutcome {
+    if dispatched.status != "completed" {
+        return dispatched;
+    }
+    let output = match look {
+        Ok(view) => format!("{view}\n{}", dispatched.output),
+        Err(_) => crate::browser_session::with_person_note(dispatched.output.clone(), note),
+    };
+    runtime_loop::StepOutcome {
+        output,
+        ..dispatched
+    }
+}
+
+#[cfg(test)]
+mod browser_hand_back {
+    use super::*;
+
+    fn approval(code: &str, state: pb::ApprovalState, reason: &str) -> pb::Approval {
+        pb::Approval {
+            run_id: "run-1".to_owned(),
+            state: state as i32,
+            decision_reason: reason.to_owned(),
+            cause: Some(pb::ApprovalCause {
+                code: code.to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_a_granted_human_assist_approval_of_the_run_carries_a_note() {
+        let granted = approval("browser_human_assist", pb::ApprovalState::Granted, "Go on.");
+        assert_eq!(hand_back_note_of(&granted, "run-1").as_deref(), Some("Go on."));
+        let silent = approval("browser_human_assist", pb::ApprovalState::Granted, "");
+        assert_eq!(hand_back_note_of(&silent, "run-1").as_deref(), Some(""));
+
+        assert_eq!(hand_back_note_of(&granted, "run-2"), None, "another run's approval");
+        let denied = approval("browser_human_assist", pb::ApprovalState::Denied, "no");
+        assert_eq!(hand_back_note_of(&denied, "run-1"), None);
+        let other = approval("owner_effect_reserved", pb::ApprovalState::Granted, "fine");
+        assert_eq!(hand_back_note_of(&other, "run-1"), None, "not a hand-back");
+    }
+
+    #[test]
+    fn a_paused_observe_is_answered_by_the_look() {
+        let answered = hand_back_observed(&Ok("view\n<person_note>n</person_note>".to_owned()));
+        assert_eq!(answered.status, "completed");
+        assert_eq!(answered.output, "view\n<person_note>n</person_note>");
+
+        let lost = hand_back_observed(&Err(crate::browser_session::SESSION_LOST));
+        assert_eq!(lost.status, "failed");
+        assert_eq!(lost.error, crate::browser_session::SESSION_LOST.text());
+    }
+
+    #[test]
+    fn a_redispatched_call_is_read_after_the_look_and_the_note() {
+        let look = Ok("view\n<person_note>n</person_note>".to_owned());
+        let closed = after_hand_back(
+            StepOutcome::completed(r#"{"ok":true,"closed":true}"#.to_owned()),
+            &look,
+            "n",
+        );
+        assert_eq!(
+            closed.output,
+            "view\n<person_note>n</person_note>\n{\"ok\":true,\"closed\":true}"
+        );
+
+        let without_look = after_hand_back(
+            StepOutcome::completed("out".to_owned()),
+            &Err(crate::browser_session::SESSION_LOST),
+            "n",
+        );
+        assert_eq!(without_look.output, "out\n<person_note>n</person_note>");
+
+        let failed = StepOutcome::failed(&crate::browser_session::SESSION_FAILED.text());
+        assert_eq!(after_hand_back(failed.clone(), &look, "n"), failed);
     }
 }
 
@@ -10903,6 +11818,9 @@ mod tests {
         /// Status `MockRunService` reports for a child run. `completed` unless a
         /// replay test needs to prove the still-in-flight refusal.
         replayed_run_status: Option<String>,
+        /// Agent id `MockRunService` reports for a run. `task` unless a wide-research
+        /// retry test needs a fan-out item (EP-2 S9).
+        run_agent_id: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
         /// The `continuation_mode` of every `CreateApproval` the mock accepted, in
@@ -12012,6 +12930,7 @@ mod tests {
         ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
             Ok(Response::new(pb::ListAgentSkillsResponse {
                 skills: self.rec.lock().unwrap().agent_skills.clone(),
+                space_id: String::new(),
             }))
         }
 
@@ -12092,7 +13011,10 @@ mod tests {
                 run_id: run_id.to_owned(),
                 thread_id: sample_request().thread_id,
                 parent_run_id: sample_request().run_id,
-                agent_id: "task".to_owned(),
+                agent_id: rec
+                    .run_agent_id
+                    .clone()
+                    .unwrap_or_else(|| "task".to_owned()),
                 status: rec
                     .replayed_run_status
                     .clone()
@@ -12459,6 +13381,13 @@ mod tests {
             Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
         }
 
+        async fn get_approval_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+        }
+
         type StreamRunEventsStream = RunEventStream;
 
         async fn get_run_proof_bundle(
@@ -12690,6 +13619,7 @@ mod tests {
                 tool_input_json: "{}".to_owned(),
                 step_id: "tool_1_del-1".to_owned(),
                 authority: Some(mock_snapshot()),
+                ..Default::default()
             }))
         }
 
@@ -13041,7 +13971,124 @@ mod tests {
             // No question tool, which is what every run that predates the field sends; the
             // `ask_user` tests set it explicitly.
             max_questions: 0,
+            // An ordinary Do run, which is what every run before wide research (EP-2 S8) sent.
+            wide_research: None,
         }
+    }
+
+    fn wide_research(item_cap: u32, items: &[&str]) -> pb::WideResearchRequest {
+        pb::WideResearchRequest {
+            item_cap,
+            items: items.iter().map(|item| (*item).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_wide_research_run_is_admitted_with_its_items_split_at_the_cap() {
+        let _enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
+        let plan = admit_wide_research(&sample_request(), &wide_research(2, &["a", "b", "c"]))
+            .expect("a persistent run with fan-out on and a cap above zero");
+        assert_eq!(plan.kept, ["a", "b"]);
+        assert_eq!(plan.dropped, ["c"]);
+        assert_eq!(
+            crate::subagent::wide_research_child_ceiling(Some(0), plan.cap),
+            2,
+            "the org-clamped cap is the run's child ceiling"
+        );
+    }
+
+    #[test]
+    fn a_wide_research_run_is_refused_under_zdr_with_fan_out_off_and_at_cap_zero() {
+        let enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
+        let zdr = pb::RunAgentRequest {
+            zdr: true,
+            ..sample_request()
+        };
+        let refused = admit_wide_research(&zdr, &wide_research(4, &["a"])).expect_err("ZDR");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused
+                .metadata()
+                .get(mp_contracts::zdr_refusal::FEATURE_TRAILER)
+                .and_then(|value| value.to_str().ok()),
+            Some("agentic"),
+            "the typed refusal names the feature the run rides on"
+        );
+
+        let off = admit_wide_research(&sample_request(), &wide_research(0, &["a"]))
+            .expect_err("the org has wide research off");
+        assert_eq!(
+            off.message(),
+            crate::subagent::research_fan_out::wide_research_off_refusal()
+        );
+
+        drop(enabled);
+        let _disabled = crate::subagent::research_fan_out::EnabledOverride::set(false);
+        let switched_off = admit_wide_research(&sample_request(), &wide_research(4, &["a"]))
+            .expect_err("the fan-out tool is switched off");
+        assert_eq!(
+            switched_off.message(),
+            crate::subagent::research_fan_out::disabled_refusal()
+        );
+    }
+
+    /// A one-item retry (EP-2 S9) reads its item back from the child run under the person's own
+    /// session credential (session-core's run-owner check), and only from a fan-out item of the
+    /// same thread; every other case is the one refusal.
+    #[tokio::test]
+    async fn a_research_fan_out_retry_reads_its_item_back_only_from_a_fan_out_child_of_the_thread()
+    {
+        use crate::subagent::research_fan_out::{retry_unavailable_refusal, RESEARCH_TOOL_NAME};
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder {
+            run_agent_id: Some(crate::subagent::label(RESEARCH_TOOL_NAME).to_owned()),
+            ..Recorder::default()
+        }));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let req = sample_request();
+
+        let plan =
+            retry_wide_research_plan(&session_channel, Some("session-token"), &req, "run-child", 4)
+                .await
+                .expect("a fan-out item of this thread");
+        assert_eq!(plan.kept, ["the delegated goal"]);
+        assert_eq!(plan.cap, 1, "a retry is one item, whatever the org allows");
+        assert!(plan.dropped.is_empty());
+
+        // An org with wide research off still refuses the retry.
+        let off = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 0)
+            .await
+            .expect_err("cap 0");
+        assert_eq!(
+            off.message(),
+            crate::subagent::research_fan_out::wide_research_off_refusal()
+        );
+
+        // No forwardable credential: session-core is never asked.
+        let anonymous = retry_wide_research_plan(&session_channel, None, &req, "run-child", 4)
+            .await
+            .expect_err("no credential");
+        assert_eq!(anonymous.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(anonymous.message(), retry_unavailable_refusal());
+
+        // A run of another conversation.
+        let elsewhere = pb::RunAgentRequest {
+            thread_id: "thread-other".to_owned(),
+            ..sample_request()
+        };
+        let refused =
+            retry_wide_research_plan(&session_channel, Some("session-token"), &elsewhere, "c", 4)
+                .await
+                .expect_err("another thread");
+        assert_eq!(refused.message(), retry_unavailable_refusal());
+
+        // A child that is not a fan-out item.
+        rec.lock().unwrap().run_agent_id = None;
+        let task = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 4)
+            .await
+            .expect_err("a subagent.task child");
+        assert_eq!(task.message(), retry_unavailable_refusal());
     }
 
     fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
@@ -16397,6 +17444,77 @@ mod tests {
         );
     }
 
+    /// EP-1 S1: a takeover pause is stored under `browser_human_assist`, says the person took the
+    /// browser, and names the host of the session the run holds: never an id of the session.
+    #[tokio::test]
+    async fn a_browser_takeover_pause_is_stored_under_browser_human_assist() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+        state.replace_browser_session(
+            "run_test",
+            crate::browser_session::BrowserSession {
+                grant_id: "grant-1".to_owned(),
+                quarry_run_id: "run-q1".to_owned(),
+                lease_id: "lease-q1".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+
+        let resp = pause_for_approval(
+            &state,
+            &session_channel,
+            &sample_request(),
+            "step-1",
+            crate::browser_session::OBSERVE_TOOL,
+            "{}",
+            CauseCode::BrowserHumanAssist,
+            "ask",
+            0,
+            Some("session-token"),
+            None,
+            None,
+        )
+        .await
+        .expect("a takeover pauses the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+        let rec = rec.lock().unwrap();
+        let cause = rec.approval_requests[0]
+            .cause
+            .clone()
+            .expect("the pause carries its cause");
+        assert_eq!(cause.code, "browser_human_assist");
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("user_takeover", "person", "example.com")
+        );
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+        for id in ["grant-1", "run-q1", "lease-q1"] {
+            assert!(!format!("{cause:?}").contains(id), "{id} is in the cause: {cause:?}");
+        }
+        assert_eq!(
+            rec.approval_requests[0].expires_in_seconds,
+            crate::browser_session::assist_ttl_seconds(),
+            "a takeover waits the assist wait, not the hour (EP-1 S5)"
+        );
+    }
+
+    /// EP-1 S5: only a takeover pause waits the configured assist wait; every other cause keeps the
+    /// hour, so the setting changes nothing while no takeover pauses.
+    #[test]
+    fn only_a_takeover_pause_waits_the_assist_ttl() {
+        let assist = crate::browser_session::assist_ttl_seconds();
+        assert!((300..=3600).contains(&assist), "{assist}");
+        assert_eq!(approval_ttl_seconds(CauseCode::BrowserHumanAssist), assist);
+        for cause in CauseCode::ALL {
+            if cause != CauseCode::BrowserHumanAssist {
+                assert_eq!(approval_ttl_seconds(cause), 3600, "{cause:?}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_snapshot_under_the_cap_is_not_refused_for_size() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
@@ -16886,6 +18004,7 @@ mod tests {
             tool_input_json: "{}".to_owned(),
             step_id: step_id.to_owned(),
             authority: Some(authority),
+            ..Default::default()
         }
     }
 
@@ -17191,6 +18310,7 @@ mod tests {
             attempted_retrievals: BTreeSet::new(),
             claimed_seq: 0,
             segment: 2,
+            edit: None,
         };
         let in_place = RoundSeed::InPlace(Box::new(restored));
         assert!(matches!(&in_place, RoundSeed::InPlace(restored) if restored.segment == 2));
@@ -19884,6 +21004,7 @@ mod tests {
             user_profile: String::new(),
             status: None,
             agent_roles: Vec::new(),
+            goal_recitation: String::new(),
         }
     }
 
@@ -20008,6 +21129,47 @@ mod tests {
                 ("user", "SUB-GOAL"),
             ]
         );
+    }
+
+    #[test]
+    fn goal_recitation_sits_in_volatile_tier() {
+        let context = pb::RunContext {
+            goal_recitation: "GOAL-RECITATION".to_owned(),
+            ..full_run_context()
+        };
+        let root = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            true,
+            Some("SKILLS".to_owned()),
+            "GOAL",
+        );
+        // After the memory block and before the skills and the turn: Volatile, behind every byte
+        // a provider may cache.
+        assert_eq!(
+            roles_and_contents(&root),
+            vec![
+                ("system", "PREAMBLE"),
+                ("system", CONTEXT_INSTRUCTIONS),
+                ("user", CONTEXT_FIRST_TURN),
+                ("assistant", CONTEXT_FIRST_REPLY),
+                ("system", CONTEXT_MEMORY),
+                ("system", "GOAL-RECITATION"),
+                ("system", "SKILLS"),
+                ("user", "GOAL"),
+            ]
+        );
+        // The cache plan still names only the preamble and the instructions.
+        assert_eq!(
+            prompt_tier_plan(Some(&context), &root)
+                .map(|plan| (plan.stable_messages, plan.context_messages)),
+            Some((1, 1))
+        );
+        // A delegated child never sees the thread's goal.
+        let child = seed_order("PREAMBLE".to_owned(), Some(&context), false, None, "SUB-GOAL");
+        assert!(child
+            .iter()
+            .all(|message| message.content != "GOAL-RECITATION"));
     }
 
     #[test]
@@ -20231,6 +21393,7 @@ mod tests {
             user_profile: String::new(),
             status: None,
             agent_roles: Vec::new(),
+            goal_recitation: String::new(),
         };
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -23210,6 +24373,68 @@ mod tests {
         );
     }
 
+    /// Six items, four in flight at once, and every mock round spends two metered tokens: the
+    /// first four start before any child finished, and the last two wait for a permit until one
+    /// has. With the child budget enforced at one token they end `budget_reached` and never
+    /// start; with it only logged (the default) all six run (EP-2 S9).
+    async fn research_fan_out_with_child_budget(enforced: bool) -> (usize, ObservedMessages) {
+        let _budget = crate::subagent::research_fan_out::BudgetOverride::set(enforced, 1);
+        let items: Vec<String> = (0..6)
+            .map(|i| format!(r#"{{"id":"q{i}","goal":"look up {i}"}}"#))
+            .collect();
+        let input = format!(r#"{{"items":[{}]}}"#, items.join(","));
+        let mut script = vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![research_fan_out_call("fan-1", &input)],
+        }];
+        let started = if enforced { 4 } else { 6 };
+        for i in 0..started {
+            script.push(Scripted::Answer(format!("finding {i}")));
+        }
+        script.push(Scripted::Answer("Collected the findings.".to_owned()));
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_messages(script, observed.clone()).await;
+
+        let mut req = sample_request();
+        req.max_rounds = 10;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Collected the findings.");
+        let edges = rec.lock().unwrap().lineage_edges.len();
+        (edges, observed)
+    }
+
+    #[tokio::test]
+    async fn research_fan_out_stops_starting_items_once_the_enforced_child_budget_is_spent() {
+        if crate::subagent::research_fan_out::concurrency() != 4 {
+            return; // the arithmetic below assumes the default of four in flight
+        }
+        let (edges, observed) = research_fan_out_with_child_budget(true).await;
+        assert_eq!(
+            edges, 4,
+            "an item the budget stops registers no child run, and a started one is never stopped"
+        );
+        assert!(
+            observed_text_contains(&observed, "budget: 2 of 6 item(s) were not started"),
+            "the parent reads how many items the budget stopped"
+        );
+        assert!(observed_text_contains(&observed, "Reason: budget_reached"));
+    }
+
+    #[tokio::test]
+    async fn research_fan_out_only_logs_a_spent_child_budget_when_not_enforced() {
+        if crate::subagent::research_fan_out::concurrency() != 4 {
+            return;
+        }
+        let (edges, observed) = research_fan_out_with_child_budget(false).await;
+        assert_eq!(edges, 6, "with the switch off every item starts, as before the budget");
+        assert!(!observed_text_contains(&observed, "budget_reached"));
+    }
+
     /// A per-run ceiling hit PARTWAY through a fan-out degrades to "some ran,
     /// the rest were refused" — and the parent is told, per item, with the real
     /// reason. The ceiling is shared with `subagent.task`: one delegation
@@ -25623,6 +26848,8 @@ mod tests {
             snapshot_digest: snapshot.digest(),
             snapshot_authority: snapshot.clone(),
             effective: snapshot,
+            revision: 0,
+            original_action_fingerprint: String::new(),
         };
         let (_, release_step_id, _) = released_call(
             crate::permission::RunGate::for_run("org-release", "run-release"),
@@ -25809,6 +27036,7 @@ mod tests {
                     .collect(),
                 digest: authority.digest(),
             }),
+            ..Default::default()
         }
     }
 
@@ -31369,6 +32597,74 @@ mod tests {
         let seed = vec![seed_message("system", "p".to_owned()), seed_message("user", "g".to_owned())];
         assert_eq!(with_attachment_note(seed.clone(), &req, 1), seed);
         assert_eq!(with_attachment_note(seed, &req, 0).len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod org_web_switch_tests {
+    use super::*;
+
+    /// A request under the org web mode `mode`, or with no org web switch at all when `mode` is `None`.
+    fn request_under_web_mode(mode: Option<&str>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            org_policy: mode.map(|mode| pb::OrgPolicyContext {
+                web: Some(pb::WebPolicyContext {
+                    mode: mode.to_owned(),
+                    paid_providers: true,
+                    revision: 3,
+                    site_policy_revision: 0,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn org_web_off_offers_no_web_tools() {
+        // The base set offers the public web tools, so withholding them is a change this test can see.
+        let mut defs = offered_tool_defs();
+        assert!(defs.iter().any(|tool| tool.name == "web_search"));
+        assert!(defs.iter().any(|tool| tool.name == "web.read"));
+        assert!(org_web_off(&request_under_web_mode(Some("off"))));
+        withhold_org_web_tools(&mut defs);
+        for name in ORG_WEB_TOOLS {
+            assert!(defs.iter().all(|tool| tool.name != *name), "{name} is still offered");
+        }
+        // Only the web tools go: every other offered tool stays.
+        assert_eq!(
+            defs.len(),
+            offered_tool_defs()
+                .iter()
+                .filter(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()))
+                .count()
+        );
+        // A live run, and a run the gateway did not stamp, keep the web tools as they were. A mode this build does
+        // not know narrows the run.
+        assert!(!org_web_off(&request_under_web_mode(Some("live"))));
+        assert!(!org_web_off(&request_under_web_mode(None)));
+        assert!(org_web_off(&request_under_web_mode(Some("cached_only"))));
+    }
+
+    #[test]
+    fn org_web_off_refuses_a_forged_call() {
+        let off = request_under_web_mode(Some("off"));
+        for name in [
+            "web_search",
+            "web.search",
+            "web_fetch",
+            "web.read",
+            "knowledge.crawl_site",
+            "knowledge.map",
+            "knowledge.batch",
+        ] {
+            let refusal = org_web_refusal(&off, name).expect("a web call under web off is refused");
+            assert!(refusal.starts_with("org_web_off: "), "{refusal}");
+        }
+        // Calls the switch does not touch reach the purpose lock and the gates as before.
+        assert_eq!(org_web_refusal(&off, "knowledge_search"), None);
+        assert_eq!(org_web_refusal(&request_under_web_mode(Some("live")), "web_search"), None);
+        assert_eq!(org_web_refusal(&request_under_web_mode(None), "web_search"), None);
     }
 }
 

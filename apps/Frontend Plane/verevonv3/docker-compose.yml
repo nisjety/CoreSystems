@@ -144,6 +144,7 @@ services:
       # is the environment's default, never a looser mode. Keep the default empty here:
       # a value in this base file would be inherited by the production overlay.
       BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
+      BROWSER_HUMAN_BROWSE: ${BROWSER_HUMAN_BROWSE:-false}
       QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
       # Result caching/rate limiting degrades safely to in-process storage when
       # no frontend-owned cache contract is configured.
@@ -155,11 +156,18 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      BROWSER_SITES_ENABLED: ${BROWSER_SITES_ENABLED:-false}
       # WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true.
       SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
       # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
       BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
+      # Allow a verified agent run to attach to the owner-scoped browser session.
+      BROWSER_AI_RUN_ATTACH_SESSION: ${BROWSER_AI_RUN_ATTACH_SESSION:-false}
+      # Use task-scoped, public-site grants. Enable after deploying the matching browser broker.
+      BROWSER_ASSISTANT_TASK_GRANTS: ${BROWSER_ASSISTANT_TASK_GRANTS:-false}
+      # Kill switch for the assistant navigation model call. Off by default; only the literal true.
+      ASSISTANT_NAVIGATION_ENABLED: ${ASSISTANT_NAVIGATION_ENABLED:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
@@ -225,6 +233,8 @@ services:
       # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
       # enables them; do not enable before the matcher and the model-gateway admission are deployed.
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
+      # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
+      CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
       # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
       # A rollout control only; it never decides who may do anything.
       SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}
@@ -278,6 +288,7 @@ services:
       SPACE_HUMAN_MARKDOWN_UI: ${SPACE_HUMAN_MARKDOWN_UI:-true}
       SPACE_ROOM_FILES_API: ${SPACE_ROOM_FILES_API:-false}
       SPACE_ROOM_FILES_UI: ${SPACE_ROOM_FILES_UI:-false}
+      AGENT_VERSION_PINNING: ${AGENT_VERSION_PINNING:-false}
       SPACE_TURN_ATTACHMENTS_UI: ${SPACE_TURN_ATTACHMENTS_UI:-false}
       # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
       # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.
@@ -287,6 +298,8 @@ services:
       SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
       SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
       SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}
+      # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.
+      SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}
       # WS11-S7: the attention inbox (/attention) and the thread follow control. Rollout controls only; the
       # caller's own Application rows, Control's index and its read decisions decide what is shown.
       SPACE_ATTENTION_API: ${SPACE_ATTENTION_API:-true}
@@ -462,6 +475,7 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
       VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
+      VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}
       VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}

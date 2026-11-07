@@ -1,4 +1,4 @@
-import type { CronSchedule, CronScheduleFire } from '@/shared/api/cron-client'
+import type { CronSchedule } from '@/shared/api/cron-client'
 
 /**
  * The automations hub's view of a schedule (EP-6-S1, OD-3). The hub filters on
@@ -54,17 +54,14 @@ export function goalOf(schedule: CronSchedule): string {
 
 /**
  * Where a schedule stands. A lapsed approval is Expired whatever its enabled flag
- * says: renewal is the way back, not a switch (WS20-S8). A pause's reason is read
- * from the last fire, which records `paused_failures` when the guards stopped it.
+ * says: renewal is the way back, not a switch (WS20-S8). A pause's reason is the
+ * `last_outcome` the list carries from the newest fire, which records
+ * `paused_failures` when the guards stopped it (EP-6-S3).
  */
-export function automationStateOf(
-  schedule: CronSchedule,
-  lastFire: CronScheduleFire | null | undefined,
-  now: number,
-): AutomationState {
+export function automationStateOf(schedule: CronSchedule, now: number): AutomationState {
   if (approvalLapsed(schedule, now)) return 'expired'
   if (schedule.enabled) return 'active'
-  return lastFire?.outcome === 'paused_failures' ? 'paused_failures' : 'paused_by_owner'
+  return schedule.last_outcome === 'paused_failures' ? 'paused_failures' : 'paused_by_owner'
 }
 
 /** The filter a state is listed under. Both pauses share one filter; the row says which pause it is. */

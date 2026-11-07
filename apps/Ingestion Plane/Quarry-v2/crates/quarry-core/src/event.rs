@@ -136,6 +136,11 @@ pub struct ActionStartedPayload {
     /// back as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rect: Option<ElementRect>,
+    /// Correlation for an admitted attached-agent step, omitted for other lanes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 impl ActionStartedPayload {
@@ -157,6 +162,8 @@ mod action_started_payload_tests {
             step: 3,
             action: Some(json!({ "kind": "click_ref" })),
             rect,
+            attach_id: None,
+            tab_id: None,
         }
     }
 
@@ -192,6 +199,8 @@ mod action_started_payload_tests {
             step: 1,
             action: None,
             rect: None,
+            attach_id: None,
+            tab_id: None,
         }
         .to_value();
         assert_eq!(value, json!({ "step": 1, "action": null }));
@@ -203,6 +212,8 @@ mod action_started_payload_tests {
         let read: ActionStartedPayload = serde_json::from_value(legacy).unwrap();
         assert_eq!(read.step, 2);
         assert_eq!(read.rect, None);
+        assert_eq!(read.attach_id, None);
+        assert_eq!(read.tab_id, None);
     }
 
     #[test]
@@ -215,5 +226,32 @@ mod action_started_payload_tests {
         }));
         let read: ActionStartedPayload = serde_json::from_value(original.to_value()).unwrap();
         assert_eq!(read, original);
+    }
+
+    #[test]
+    fn attached_agent_identity_round_trips_with_target() {
+        let mut original = payload(Some(ElementRect { x: 1.0, y: 2.0, width: 4.0, height: 6.0 }));
+        original.attach_id = Some("attach-1".into());
+        original.tab_id = Some("tab-1".into());
+        let value = original.to_value();
+        assert_eq!(value["attach_id"], "attach-1");
+        assert_eq!(value["tab_id"], "tab-1");
+        assert_eq!(serde_json::from_value::<ActionStartedPayload>(value).unwrap(), original);
+    }
+
+    #[test]
+    fn attached_event_envelope_exposes_session_run_and_time_for_live_correlation() {
+        let session_run = crate::ids::Id::new();
+        let mut started = payload(Some(ElementRect { x: 1.0, y: 2.0, width: 4.0, height: 6.0 }));
+        started.attach_id = Some("attach-1".into());
+        started.tab_id = Some("tab-1".into());
+        let event = Event { event_id: crate::ids::Id::new(), run_id: Some(session_run.clone()), job_id: None,
+            event_type: EventType::ActionStarted, ts: chrono::Utc::now(), seq: 1,
+            payload: started.to_value(), idempotency_key: "event-1".into() };
+        let wire = serde_json::to_value(event).unwrap();
+        assert_eq!(wire["run_id"], session_run.to_string());
+        assert!(wire["ts"].as_str().is_some());
+        assert_eq!(wire["payload"]["attach_id"], "attach-1");
+        assert_eq!(wire["payload"]["tab_id"], "tab-1");
     }
 }

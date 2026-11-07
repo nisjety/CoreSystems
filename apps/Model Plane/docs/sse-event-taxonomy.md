@@ -22,22 +22,26 @@ asserted, not just reported.
 | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
 | `compaction` | — (control) | `ChatEvent::Compaction` | ✅ |
+| `connector_suggestion` | — (control) | `ChatEvent::ConnectorSuggestion` | ✅ |
 | `context_change` | — (control) | `ChatEvent::ContextChange` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
 | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
 | `error` | — (control) | `ChatEvent::ZdrError` | ✅ |
 | `follow_ups` | — (control) | `ChatEvent::FollowUps` | ✅ |
+| `goal_progress` | — (control) | `ChatEvent::GoalProgress` | ✅ |
 | `grounding` | `citations` | `ChatEvent::Grounding` | ✅ |
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
 | `plan_proposed` | — (control) | `ChatEvent::PlanProposed` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInputReceipted` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
+| `research_plan` | — (control) | `ChatEvent::ResearchPlan` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
 | `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |
 | `sandbox_state` | `steps` | `ChatEvent::SandboxState` | ✅ |
+| `search_provenance` | `citations` | `ChatEvent::SearchProvenance` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |

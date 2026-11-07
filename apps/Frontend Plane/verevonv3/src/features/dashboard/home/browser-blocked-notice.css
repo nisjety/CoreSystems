@@ -44,6 +44,7 @@
   font: inherit;
   font-size: 11.5px;
   font-weight: 700;
+  text-decoration: none;
   cursor: pointer;
   transition: background 140ms ease, opacity 140ms ease;
 }

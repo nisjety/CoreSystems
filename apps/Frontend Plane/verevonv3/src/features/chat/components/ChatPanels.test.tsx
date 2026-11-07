@@ -1392,6 +1392,117 @@ describe('SourcesPanel read/unread grouping', () => {
   })
 })
 
+describe('SourcesPanel cited passages (EP-2-S4)', () => {
+  /** A knowledge citation as the gateway streams it with the cited-passage switch on. */
+  const withPassage = () => read({
+    id: 'doc-1',
+    url: 'notion',
+    origin: 'knowledge',
+    quote: 'Refusjon gis innen 30 dager etter levering.',
+    locator: { document_id: 'doc-1', chunk_index: 2 },
+  } as Partial<Citation>)
+
+  it('shows the passage on the row and opens the viewer beside the card, never inside its link', () => {
+    const { container, getByText, unmount } = render(() => <SourcesPanel sources={[withPassage()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')?.textContent).toBe(
+      'Refusjon gis innen 30 dager etter levering.',
+    )
+    const button = getByText('Vis passasjen')
+    expect(button.closest('a')).toBeNull()
+    fireEvent.click(button)
+    flush()
+    expect(container.querySelector('.verevon-chat-cited-passage')).not.toBeNull()
+    expect(container.textContent).toContain('Vis mer')
+    unmount()
+  })
+
+  it('renders the row exactly as before when the server sent no passage', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={[read()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card__passage')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card-passage')).toBeNull()
+    unmount()
+  })
+})
+
+describe('SourcesPanel knowledge and connector research sources (EP-2-S7)', () => {
+  it('labels a knowledge row by its provider, not by a host', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-1', number: 1, url: 'sharepoint', origin: 'knowledge', sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'SharePoint' }),
+          read({ id: 'dr-2', number: 2, url: 'https://example.com/a' }),
+        ]}
+      />
+    ))
+    const labels = Array.from(container.querySelectorAll('.verevon-chat-source-card__meta em')).map((node) => node.textContent)
+    expect(labels).toContain('SharePoint')
+    expect(labels).toContain('example.com')
+    unmount()
+  })
+
+  it('shows the number a research report cites a connected-app item by', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-3', number: 3, url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365', snippet: 'Kari · 2026-11-01' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).toContain('[3]')
+    unmount()
+  })
+
+  it('shows no number on an Ask-loop connected-app item, which has none', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'conn-1', url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).not.toMatch(/\[\d+\]/)
+    unmount()
+  })
+})
+
+describe('SourcesPanel research passes (EP-2-S6)', () => {
+  const numbered = () => [
+    read({ id: 'dr-1', number: 1, url: 'https://one.no/a' }),
+    read({ id: 'dr-2', number: 2, url: 'https://two.no/a' }),
+    read({ id: 'dr-3', number: 3, url: 'https://three.no/a' }),
+    unread(),
+  ]
+
+  it('groups the read sources by the pass that read them, keeping the leads apart', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={numbered()} secondPassNumbers={[3]} />)
+    const passes = Array.from(container.querySelectorAll('.verevon-chat-source-pass'))
+    expect(passes.map((section) => section.getAttribute('data-pass'))).toEqual(['1', '2'])
+    expect(passes[0]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
+    expect(passes[1]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(1)
+    expect(passes[1]?.textContent).toContain('Andre runde')
+    expect(passes[1]?.textContent).toContain('three.no')
+    // The running index carries on across the passes, and the unread lead stays in its own group.
+    expect(passes[1]?.querySelector('.verevon-chat-source-card__meta span')?.textContent).toBe('3')
+    expect(container.querySelectorAll('.verevon-chat-source-group--unread .verevon-chat-source-card')).toHaveLength(1)
+    unmount()
+  })
+
+  it('renders the flat list as before without a second pass', () => {
+    for (const secondPassNumbers of [undefined, [], [9]]) {
+      const { container, unmount } = render(() => (
+        <SourcesPanel sources={numbered()} secondPassNumbers={secondPassNumbers} />
+      ))
+      expect(container.querySelector('.verevon-chat-source-pass')).toBeNull()
+      expect(container.textContent).not.toContain('Første runde')
+      expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(4)
+      unmount()
+    }
+  })
+})
+
 describe('ChatTabs Kilder badge', () => {
   it('counts the sources that were read, not the leads that were only found', () => {
     const { container, unmount } = render(() => (

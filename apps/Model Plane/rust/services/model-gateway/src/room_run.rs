@@ -207,6 +207,7 @@ pub const ROOM_EVENT_POLICY: &[(&str, Disposition)] = &[
     ("result_receipt", Disposition::Drop),
     ("title", Disposition::Drop),
     ("follow_ups", Disposition::Drop),
+    ("connector_suggestion", Disposition::Drop),
     // Lifecycle and transport frames the room does not need.
     ("retry_scheduled", Disposition::Drop),
     ("compaction", Disposition::Drop),
@@ -348,6 +349,7 @@ pub const BUILTIN_TOOL_CLASSES: &[(&str, Option<StepClass>)] = &[
     ("create_artifact", Some(StepClass::Artifact)),
     ("read_artifact", Some(StepClass::Artifact)),
     ("update_artifact", Some(StepClass::Artifact)),
+    ("deck", Some(StepClass::Artifact)),
     ("inbox_search", Some(StepClass::Lookup)),
     ("inbox_get_conversation", Some(StepClass::Lookup)),
     ("result_query", Some(StepClass::Lookup)),

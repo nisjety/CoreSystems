@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// Skill versions (Wave 3 EP-11 S2).
+//
+// Every accepted change to an agent skill is cut as a numbered, immutable
+// version with a digest, by a trigger on session-core's `agent_skills` table,
+// whichever service wrote the row. This service reads those versions; nothing
+// writes them through it. Visibility is the ListAgentSkills rule: org skills,
+// the caller's own, and accepted skills shared with the caller. A separate file
+// and service so that SessionCore and every implementation or test double of
+// it stay source-compatible (integration round B, C-B6).
+
+// EP-11 S2. One immutable version of one skill.
+message AgentSkillVersion {
+  // The skill the version belongs to.
+  string skill_id = 1;
+  // The version number, 1 for the first accepted text.
+  int32 version = 2;
+  // Lowercase hex sha256 of the versioned fields below (plus the skill kind
+  // and settings), as the database computed it.
+  string digest = 3;
+  // The skill's name at this version.
+  string name = 4;
+  // The description at this version.
+  string description = 5;
+  // The skill text at this version. Empty in a listing that asked for no content.
+  string content = 6;
+  // The trigger keywords at this version.
+  repeated string trigger_keywords = 7;
+  // The trigger file patterns at this version.
+  repeated string trigger_file_patterns = 8;
+  // The tool restrictions at this version.
+  repeated string tool_restrictions = 9;
+  // The manifest digest of the skill's bundle at this version; empty when it had none.
+  string bundle_sha256 = 10;
+  // Who cut the version: `user`, `service`, `system` or `unattributed`.
+  string actor_kind = 11;
+  // The verified principal that cut it; empty for the system and unattributed.
+  string actor_id = 12;
+  // When the version was cut, RFC 3339 UTC.
+  string created_at = 13;
+}
+
+// EP-11 S2. List one skill's versions, newest first.
+message ListAgentSkillVersionsRequest {
+  // The org the skill belongs to; must match the caller's org.
+  string org_id = 1;
+  // The skill to list.
+  string skill_id = 2;
+  // The most versions to return; 0 means 20, and more than 100 is read as 100.
+  int32 limit = 3;
+  // Return only versions below this one (paging); 0 starts at the newest.
+  int32 before_version = 4;
+  // A service caller reading on behalf of a user names that user here, as
+  // ListAgentSkillsRequest.for_user_id does. Ignored for a user caller, who
+  // always reads as itself.
+  string for_user_id = 5;
+  // Whether each version carries its text.
+  bool include_content = 6;
+}
+
+// EP-11 S2. One page of versions.
+message ListAgentSkillVersionsResponse {
+  // The versions, newest first.
+  repeated AgentSkillVersion versions = 1;
+  // Whether older versions exist past this page.
+  bool has_more = 2;
+}
+
+// EP-11 S2. Read one version of one skill.
+message GetAgentSkillVersionRequest {
+  // The org the skill belongs to; must match the caller's org.
+  string org_id = 1;
+  // The skill to read.
+  string skill_id = 2;
+  // The version to read; 0 reads the newest.
+  int32 version = 3;
+  // A service caller reading on behalf of a user names that user here, as
+  // ListAgentSkillVersionsRequest.for_user_id does.
+  string for_user_id = 4;
+}
+
+// EP-11 S2. The version, or `gone`.
+message GetAgentSkillVersionResponse {
+  // The version, content included; unset when `gone`.
+  AgentSkillVersion version = 1;
+  // True when the skill or the version no longer exists or is not visible to
+  // the caller (a run that pinned it reads it as gone).
+  bool gone = 2;
+}
+
+// EP-11 S2. Read-only access to immutable skill versions, hosted by
+// session-core. Off unless SKILL_VERSIONS_API is the literal `true`; while off
+// every RPC answers `unavailable` `skill_versions_disabled`.
+service SkillVersionService {
+  // List one skill's versions, newest first. A skill the caller cannot see is
+  // `not_found`.
+  rpc ListAgentSkillVersions(ListAgentSkillVersionsRequest) returns (ListAgentSkillVersionsResponse);
+  // Read one version, or the newest.
+  rpc GetAgentSkillVersion(GetAgentSkillVersionRequest) returns (GetAgentSkillVersionResponse);
+}

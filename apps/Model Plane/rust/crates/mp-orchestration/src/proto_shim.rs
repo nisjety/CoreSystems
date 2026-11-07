@@ -410,6 +410,7 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     run_id,
                     plan_id,
                     reason,
+                    control_epoch: 0,
                 }),
             ),
             OrchestrationEvent::BrowserRunResumed {
@@ -423,6 +424,7 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     run_id,
                     plan_id,
                     reason,
+                    control_epoch: 0,
                 }),
             ),
             OrchestrationEvent::BrowserAttachSharedJar {

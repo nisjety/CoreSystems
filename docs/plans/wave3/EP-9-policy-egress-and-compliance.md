@@ -322,7 +322,7 @@ Test commands used below. Rust: `cd "apps/Model Plane/rust" && cargo test -q -p 
 **Goal.** session-core finds personal threads past their org's window and reports what it would delete, per org, without deleting.
 **Files.**
 - `SC/src/retention_sweeper.rs` NEW: enumerate orgs with a policy (org-core `/internal/orgs` plus the check route), select candidate personal threads by last activity older than the window (Space threads and threads with Space ids are excluded in W3), drop held ones from the check answer, write one `retention_sweep_runs` row per org and pass (counts only: candidates, held, skipped_zdr, would_delete), and publish an audit event with the same counts.
-- `SC/migrations/0095_retention_sweep_runs.sql` (+ `revert/0095_retention_sweep_runs.down.sql`; head `0071_run_question_consume`): `retention_sweep_runs(id, org_id, mode, policy_revision, started_at, finished_at, candidates, held, would_delete, deleted, error_code)`.
+- `SC/migrations/0107_retention_sweep_runs.sql` (renumbered from 0095; + `revert/0107_retention_sweep_runs.down.sql`; head `0071_run_question_consume`): `retention_sweep_runs(id, org_id, mode, policy_revision, started_at, finished_at, candidates, held, would_delete, deleted, error_code)`.
 - `SC/src/main.rs` - spawn behind the switch; interval default 6 h.
 **Flag.** `SESSION_RETENTION_SWEEP` (`off|dry_run|enforce`; default off; an unknown value is treated as `dry_run`, never as enforce, because this switch deletes data. This deviates from K3-26 on purpose and is stated in the ledger entry).
 **ZDR.** New store with counts only. ZDR threads have no content rows to find.

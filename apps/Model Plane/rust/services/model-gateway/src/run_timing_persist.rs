@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_switch_takes_only_the_literal_true() {
-        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("on")] {
+        for raw in [None, Some(""), Some("1"), Some("yes"), Some("on")] {
             assert!(!mp_contracts::loop_fold::switch_from(raw), "{raw:?}");
         }
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));

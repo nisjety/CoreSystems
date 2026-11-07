@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use mp_contracts::model_plane::v1 as pb;
 
 use crate::quarry_auth::TokenSource;
+use crate::site_policy_client::SitePolicy;
 
 const MAX_SEARCH_RESULTS: usize = 8;
 // Second-stage snippet cap. The SERP providers already hand back ~150-char
@@ -38,8 +39,17 @@ const MAX_SEARCH_RESULTS: usize = 8;
 // window, not to summarize. Keep it well clear of real snippet lengths.
 const MAX_SNIPPET_CHARS: usize = 900;
 const MAX_FETCH_CHARS: usize = 8000;
+/// The deployment switch for the long-page reader (EP-2-S10): a fetched page is held for reading rather
+/// than cut to its head, and `read_page` and `find_in_page` are offered. Default OFF. Only the literal
+/// `true` enables it, and it takes effect only in a run that holds results (`EXECUTION_RESULT_HANDLES`).
+pub const WEB_READER_ENV: &str = "EXECUTION_WEB_READER";
+/// The reader's two model-facing tools, answered from the pages the run holds.
+pub const READ_PAGE_TOOL: &str = "read_page";
+pub const FIND_IN_PAGE_TOOL: &str = "find_in_page";
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
+/// The tool name a page fetch is refused under: the org's domain rules name it in the refusal (EP-9 W3).
+const WEB_FETCH_TOOL: &str = "web_fetch";
 /// E3.7.10: the scopes of Quarry's site map and its durable crawl/batch jobs. The
 /// service principal's grant of these is a Control Plane registry row (MP-ASKS).
 const MAP_SCOPES: &[&str] = &["map:read"];
@@ -54,6 +64,8 @@ pub struct WebToolsClient {
     base_url: String,
     auth: TokenSource,
     http: reqwest::Client,
+    /// The org's domain rules, checked before a host is reached (EP-9 W3). Off reads nothing and changes nothing.
+    site: SitePolicy,
 }
 
 impl WebToolsClient {
@@ -78,6 +90,7 @@ impl WebToolsClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth,
             http,
+            site: SitePolicy::from_env(),
         }))
     }
 
@@ -143,21 +156,30 @@ impl WebToolsClient {
         // so this IS the edge's contract. The `data: {...}` envelope some
         // callers expect is added by the BFF in front of the chat path, not by
         // the edge — do not "harmonise" this reader toward `data.results`.
-        let results = value
+        let mut results = value
             .get("results")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // The org's domain rules drop a hit on a host the org does not allow, before any hit is shown (EP-9 W3).
+        self.site.drop_denied_results(org_id, &mut results).await;
         Ok(format_search_results(query, &value, &results))
     }
 
     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
     pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
+        // The org's domain rules come before the call: a host the org does not allow is refused by name, and nothing is read.
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], WEB_FETCH_TOOL).await {
+            return Err(refusal);
+        }
         let body = extract_body(url, zdr);
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
             .await?;
-        extract_markdown(url, &value)
+        let markdown = extract_markdown(url, &value)?;
+        // With the reader on, the complete page comes back so the loop can hold it for reading. The loop
+        // cuts it to the head itself when it holds nothing (`result_handles::inline_text`).
+        Ok(if reader_enabled() { markdown } else { fetch_head(&markdown) })
     }
 
     /// `knowledge.map` -> POST `/v1/map`: the URLs of a site (sitemaps and robots), optionally
@@ -170,6 +192,9 @@ impl WebToolsClient {
         include_subdomains: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], MAP_TOOL).await {
+            return Err(refusal);
+        }
         let body = map_body(url, search, limit, include_subdomains);
         let value = self.post("/v1/map", &body, org_id, MAP_SCOPES).await?;
         Ok(format_map_result(url, &value))
@@ -185,6 +210,9 @@ impl WebToolsClient {
         ingest: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_SITE_TOOL).await {
+            return Err(refusal);
+        }
         let body = crawl_body(url, max_pages, max_depth, ingest);
         let value = self.post("/v1/crawl", &body, org_id, CRAWL_SCOPES).await?;
         Ok(format_handoff("crawl", &value))
@@ -197,6 +225,10 @@ impl WebToolsClient {
         ingest: bool,
         org_id: &str,
     ) -> Result<String, String> {
+        let every_url: Vec<&str> = urls.iter().map(String::as_str).collect();
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &every_url, BATCH_TOOL).await {
+            return Err(refusal);
+        }
         let body = batch_body(urls, ingest);
         let value = self.post("/v1/batch", &body, org_id, CRAWL_SCOPES).await?;
         Ok(format_handoff("batch", &value))
@@ -282,6 +314,7 @@ impl WebToolsClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("test HTTP client"),
+            site: SitePolicy::disabled(),
         }
     }
 }
@@ -580,7 +613,59 @@ fn extract_markdown(url: &str, value: &Value) -> Result<String, String> {
             "fetched {url} (status={status}) but no extractable content"
         ));
     }
-    Ok(truncate_chars(markdown, MAX_FETCH_CHARS))
+    Ok(markdown.to_owned())
+}
+
+/// Whether the long-page reader is switched on in this process.
+#[must_use]
+pub fn reader_enabled() -> bool {
+    reader_enabled_from(std::env::var(WEB_READER_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn reader_enabled_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// Whether a tool is a page fetch: the one result kind the reader holds for reading.
+#[must_use]
+pub fn is_page_fetch(tool_name: &str) -> bool {
+    matches!(tool_name, "web_fetch" | "web.read")
+}
+
+/// The head of a fetched page the loop shows when it does not hold the page: the cut every fetch has
+/// always made, so a page the reader cannot hold reads exactly as it did before the reader existed.
+#[must_use]
+pub fn fetch_head(markdown: &str) -> String {
+    truncate_chars(markdown, MAX_FETCH_CHARS)
+}
+
+/// The model-facing definitions of `read_page` and `find_in_page`, offered only while the reader is on.
+#[must_use]
+pub fn reader_tool_definitions() -> Vec<pb::ToolDefinition> {
+    if reader_enabled() {
+        reader_definitions()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The two definitions as the chat reader offers them (model-gateway's `web_reader_tool_definitions`),
+/// so the model meets the same names and arguments in either loop.
+fn reader_definitions() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: READ_PAGE_TOOL.to_owned(),
+            description: "Read one section of a long web page that web_fetch held for reading. The section ids come from the page's outline. Each read returns up to 4000 characters, and the result says whether the section continues and the offset to continue from. Read a section you have not read yet rather than fetching the page again. Only pages fetched in this run can be read, and only while their ref is live.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"section":{"type":"string","description":"A section id from the outline, such as s3. Omit to read the outline and the start of the page."},"offset":{"type":"integer","minimum":0,"description":"Characters into the section to start from: the next_offset of the previous read. Defaults to 0."}},"required":["ref"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: FIND_IN_PAGE_TOOL.to_owned(),
+            description: "Search a long web page that web_fetch held for reading. Returns the passages that best match the query, each with the section it is in, most relevant first (at most two). Use it when the outline does not show where the answer is, or to check one specific fact on the page. Read the surrounding section with read_page when a passage is not enough.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"query":{"type":"string","description":"The words to look for on the page"}},"required":["ref","query"]}"#.to_owned(),
+        },
+    ]
 }
 
 /// Char-boundary-safe truncation (never panics on multibyte input).
@@ -1099,5 +1184,195 @@ mod crawl_tool_tests {
         assert!(text.contains("max_pages"), "{text}");
         assert!(text.contains("1 URL(s) were refused"), "{text}");
         assert!(format_handoff("batch", &serde_json::json!({"data": {}})).contains("not accepted"));
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    #[test]
+    fn the_reader_switch_is_read_only_from_the_literal_true() {
+        assert!(reader_enabled_from(Some("true")));
+        assert!(reader_enabled_from(Some(" true ")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("on"), Some("yes")] {
+            assert!(!reader_enabled_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_definitions_name_the_ref_they_read_by_and_match_the_chat_reader() {
+        let defs = reader_definitions();
+        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, ["read_page", "find_in_page"]);
+        let read: Value = serde_json::from_str(&defs[0].parameters_json).expect("json schema");
+        assert_eq!(read["required"], json!(["ref"]));
+        assert!(read["properties"]["section"].is_object());
+        let find: Value = serde_json::from_str(&defs[1].parameters_json).expect("json schema");
+        assert_eq!(find["required"], json!(["ref", "query"]));
+    }
+
+    #[test]
+    fn the_head_of_a_page_is_the_cut_every_fetch_has_always_made() {
+        let long = "x".repeat(MAX_FETCH_CHARS + 25);
+        assert_eq!(fetch_head(&long), truncate_chars(&long, MAX_FETCH_CHARS));
+        assert!(fetch_head(&long).ends_with("[truncated 25 chars]"));
+        assert_eq!(fetch_head("short page"), "short page");
+    }
+
+    #[test]
+    fn only_a_page_fetch_is_held_for_reading() {
+        assert!(is_page_fetch("web_fetch"));
+        assert!(is_page_fetch("web.read"));
+        assert!(!is_page_fetch("web_search"));
+        assert!(!is_page_fetch(READ_PAGE_TOOL));
+    }
+
+    #[test]
+    fn an_extracted_page_comes_back_whole_for_the_loop_to_cut_or_hold() {
+        let markdown = "y".repeat(MAX_FETCH_CHARS + 10);
+        let value = json!({
+            "results": [{"url": "https://x", "status": "fetched", "markdown": markdown}]
+        });
+        let whole = extract_markdown("https://x", &value).expect("markdown");
+        assert_eq!(whole.chars().count(), MAX_FETCH_CHARS + 10);
+    }
+}
+
+// ---- EP-9 W3: the org's domain rules before a web call (see `site_policy_client`) ---------------------------
+
+#[cfg(test)]
+mod site_policy_tests {
+    use std::sync::Arc;
+
+    use mp_contracts::site_policy::WebDomainPolicyMode;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::{mint_mock, minted, quarry_client};
+    use crate::site_policy_client::{SiteChecker, SiteOwner, SitePolicy};
+
+    const ORG: &str = "org-a";
+
+    /// org-core's resolve route for `ORG`, answering with `decisions`.
+    async fn org_core(decisions: Value) -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org-a/browser-sites/resolve"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-token", "org-core-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": ORG,
+                "revision": 3,
+                "decisions": decisions,
+            })))
+            .mount(&org)
+            .await;
+        org
+    }
+
+    /// The policy in enforcement against `org`, with a fresh cache.
+    fn enforcing(org: &MockServer) -> SitePolicy {
+        SitePolicy::new(
+            WebDomainPolicyMode::Enforce,
+            SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
+            Arc::new(SiteChecker::default()),
+        )
+    }
+
+    fn blocked_and_open() -> Value {
+        json!([
+            {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
+            {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_fetch_of_a_blocked_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        // The extract route must never be reached: the refusal comes before any call to the edge.
+        Mock::given(method("POST"))
+            .and(path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&edge)
+            .await;
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        let refusal = client
+            .fetch("https://example.org/page", ORG, false)
+            .await
+            .expect_err("a blocked host is refused");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert!(refusal.contains("'example.org'"), "{refusal}");
+        assert!(refusal.contains("'web_fetch'"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_search_shows_no_hit_on_a_host_the_org_does_not_allow() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "norge",
+                "provider": "brave",
+                "results": [
+                    {"url": "https://example.org/a", "title": "Blocked hit", "snippet": "s", "rank": 1},
+                    {"url": "https://example.com/b", "title": "Open hit", "snippet": "t", "rank": 2}
+                ],
+                "count": 2
+            })))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "search:read", minted("search-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = enforcing(&org);
+
+        let shown = client
+            .search("norge", 5, ORG, false)
+            .await
+            .expect("the search answers");
+        assert!(shown.contains("https://example.com/b"), "{shown}");
+        assert!(!shown.contains("example.org"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_map_or_a_crawl_of_a_blocked_start_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        for route in ["/v1/map", "/v1/crawl", "/v1/batch"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&edge)
+                .await;
+        }
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        assert!(client
+            .map_site("https://example.org/", None, 10, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_crawl("https://example.org/", 10, None, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_batch(
+                &["https://example.com/a".to_owned(), "https://example.org/b".to_owned()],
+                false,
+                ORG,
+            )
+            .await
+            .is_err_and(|refusal| refusal.contains("'example.org'")));
     }
 }

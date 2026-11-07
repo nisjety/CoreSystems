@@ -101,6 +101,11 @@
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
+      "id": "prompt/format_guidance.rs/ENABLED",
+      "sha256": "afe2205480c760d840f3015af254811a4b38c0cfcc3d34b1500dd7dec50e8862",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
       "id": "prompt/format_guidance.rs/MAX_SCAN_CHARS",
       "sha256": "973c6209bef67888a00bd0fae6977e7358dd694de264675555c808afdd64a635",
       "source": "services/model-gateway/src/format_guidance.rs"
@@ -131,8 +136,28 @@
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
+      "id": "prompt/format_guidance.rs/WIDGET_NOTICE",
+      "sha256": "3314b5417d55266990c3e3642faec6fcf3e271ee04e973fe17f56a802d03dbf1",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/WIDGET_NOUN_STEMS",
+      "sha256": "a25e26c2202a64edb46f3ad49858bc818a19185c1820cab385ed815502b1f015",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/asks_for",
+      "sha256": "3112d84e51d74d2645e71eec26091501793e28945599f652b26b0674630f0a7d",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
       "id": "prompt/format_guidance.rs/asks_for_chart",
-      "sha256": "918af9a2a20b3060a8886d4ed28affd85dc33e6da1b554c5fa63954b5f299bf8",
+      "sha256": "a70573114960962dd145cef83ea7a25d498ad93318212ddcc2ff786d8c8e47ac",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/asks_for_widget",
+      "sha256": "a0d7e55a737e61fc74ca4652e23ef9338a2d5da34ade8cebd9f893b55e709c2d",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
@@ -142,7 +167,7 @@
     },
     {
       "id": "prompt/format_guidance.rs/for_turn",
-      "sha256": "39d9a37e0a87f5d81a2510d9fbad6da602b86c7fc5ec600f5944ec5576aae70a",
+      "sha256": "c30157f651859d0126e41537e4e1eff3d72f2a29759d78bd77206186209ccbde",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
@@ -151,8 +176,33 @@
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
+      "id": "prompt/format_guidance.rs/is_widget_noun",
+      "sha256": "734f465e2ef7542cbeff48d8279bf07d08ffbe6e37d92a73aba4e035eeba9fd3",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
       "id": "prompt/format_guidance.rs/message_for_turn",
-      "sha256": "f6b56785ed2167337a449b7b41d2e9bbf4ea7f1bb2ce7bcd4580d008897854b4",
+      "sha256": "58d925d72bfe65a73ea5ecbda03c438e53cb7b70ada6996379bae2ee7cd027f1",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/message_for_turn_with",
+      "sha256": "878c99597777bd067d6870e5f3933108ff4f6885322bdf2ead30d08dea0ab59d",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/widget_guidance_enabled",
+      "sha256": "b8474c37f5f98201c63890510e81fdc525e179b95951a504b772f082d0605433",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/widget_guidance_enabled_from",
+      "sha256": "86009b4d7549cde01d1e4e16ee78b54ef46822c55266b05874c360692bf87afc",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/widget_notice",
+      "sha256": "78d96ec671866b65e37588f87daffff61acbef13e9d61c4589c296a1a33f4875",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
@@ -162,7 +212,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/CONDITIONAL_TOOLS",
-      "sha256": "31b93c6d366d11dbb8b676d6bd9927e1f4da8047cb9fe2ec016610b95295ada9",
+      "sha256": "8865e5d1d46be7b9431ad08baeeff65cd701f7db4ac530e5fb97b1441fa21a80",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -257,7 +307,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/render_legacy",
-      "sha256": "28764cf5367cf4ef6006c1218756fde605db57e4b32a912d68eddf8781694ded",
+      "sha256": "6811efcc813482990a98e14bccb839420e3d81589f94f6f150c3fb31d211f47a",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -267,7 +317,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/render_stable_prefix",
-      "sha256": "5f8160896fd6174b2885ac4fb0a67d5067a7ba820d773976d178778c40b4dc85",
+      "sha256": "114743367df7283af8f4f4574dac19a5d82b94f7639f794c012186a4104abfa0",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -291,9 +341,24 @@
       "source": "services/execution-core/src/runtime_loop/agent.rs"
     },
     {
+      "id": "tool-builder/deck_tool.rs/tool_definition",
+      "sha256": "e2362d3c227ac83bcb4d9099092d546f3d1088b442d4e62e147084c7c83739cd",
+      "source": "services/model-gateway/src/deck_tool.rs"
+    },
+    {
       "id": "tool-builder/recall_conversations.rs/tool_definition",
       "sha256": "ca4242e642967e8a7f7f92059de70cd5fdf239378b0f7c02ab0de24781e344c2",
       "source": "services/model-gateway/src/recall_conversations.rs"
+    },
+    {
+      "id": "tool-builder/thread_reference_tools.rs/tool_definitions",
+      "sha256": "ec4e0de97dd6ada5adae9ae74b34b9787208f3da69f0eaa81a30fd5780c8dcbd",
+      "source": "services/model-gateway/src/thread_reference_tools.rs"
+    },
+    {
+      "id": "tool-builder/tool_loop.rs/advertise_batched_search",
+      "sha256": "39a2fe9c3848457605d5bcf252005a5f526cdb551b90c6558ed7228f6656a9aa",
+      "source": "services/model-gateway/src/tool_loop.rs"
     },
     {
       "id": "tool/agent.rs/book_shipment",
@@ -303,6 +368,11 @@
     {
       "id": "tool/agent.rs/browser.close",
       "sha256": "da2ac890d4bf6a4ecf843a557491ff0f20c25c44ebb859a8545288222a5563bb",
+      "source": "services/execution-core/src/runtime_loop/agent.rs"
+    },
+    {
+      "id": "tool/agent.rs/browser.console",
+      "sha256": "79787fc049c8e80eaba1742181780573547c9456c7d4b9c5f63a9d1f994eb084",
       "source": "services/execution-core/src/runtime_loop/agent.rs"
     },
     {
@@ -478,6 +548,11 @@
     {
       "id": "tool/tool_loop.rs/create_artifact",
       "sha256": "79d955200e9a12d901b012a188008a5485c34612636ccadc5e5838ad44c73437",
+      "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
+      "id": "tool/tool_loop.rs/extract_structured",
+      "sha256": "0c1ef6101919d548c2f00c9293271db4dc1fd5c4c79db03a81fb637fc654d435",
       "source": "services/model-gateway/src/tool_loop.rs"
     },
     {

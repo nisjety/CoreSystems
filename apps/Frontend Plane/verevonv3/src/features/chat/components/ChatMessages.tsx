@@ -1,9 +1,21 @@
+import { ConnectorSuggestionCard } from './ConnectorSuggestionCard'
+import type { ConnectIntent } from '@/shared/integrations/connect-intent'
 import { ForkAction, threadForkEnabled } from './ForkAction'
+import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
+  WritePreviewDisclosure,
+  approvalWritePreviewEnabled,
+  isMailSendApproval,
+  mailEditProblemText,
+  type MailEditDraft,
+} from './WritePreview'
+import {
+  approvalEditRefusalOf,
   type Approval,
   type ApprovalDecision,
+  type ApprovalEdit,
   type ApprovalScope,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
@@ -62,9 +74,19 @@ import {
   type ToolIntent,
 } from '@/shared/chat-nodes'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
+import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
-import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import type {
+  AutonomyRung,
+  ChatKnowledgeReceipt,
+  ChatPlanStep,
+  ChatSearchProviderId,
+  ChatSearchProvenanceEvent,
+  ChatSearchRoute,
+  MemoryOrigin,
+  RecalledMemory,
+} from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { isWidgetFence } from '../lib/inline-widget'
 import type { SettledFold } from '../lib/settled-fold'
@@ -75,6 +97,11 @@ import { listNotifications, type Notification } from '@/shared/api/notifications
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
+import { memberSkillAuthoring } from '@/shared/api/skills-client'
+import { SaveAsSkillDialog } from '@/features/skills/components/SaveAsSkillDialog'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { getSession } from '@/shared/session/session-store'
 import { ApiError } from '@/shared/api/http'
 import {
   For,
@@ -99,7 +126,8 @@ import {
   highlightCode,
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
-import { InlineWidget, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
 import { StepStrip, stepStripEnabled } from './StepStrip'
@@ -149,7 +177,14 @@ import { streamActivityLabel, type StreamActivity, type Translator } from '@/fea
 import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
-import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import {
+  approvalHeadline,
+  approvalReason,
+  browserAssistActionLabel,
+  browserAssistKindOf,
+  browserAssistNoTakeOverLine,
+} from '@/shared/approvals/approval-copy'
+import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
 import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
 import {
   APPROVAL_REDIRECT_ENABLED,
@@ -161,6 +196,20 @@ import {
 import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
+
+/**
+ * What an assistant turn's connected-app suggestion card needs from the page (EP-10 S8, S9). Absent where the
+ * surface offers no card.
+ */
+export type ConnectorSuggestionWiring = {
+  orgId?: string
+  /** "Use it for this question": select the account for the turn and send the question again. */
+  onUse: (suggestion: { suggestionId: string; provider: string }, connectionId: string) => void
+  connectTurn?: () => { threadId: string; prompt: string } | null
+  pendingConnectIntent?: () => ConnectIntent | null
+  resumeConnectIntent?: (intent: ConnectIntent, connectionId: string, providerLabel: string) => boolean
+  dismissConnectIntent?: () => void
+}
 
 export function MessageBlock(props: {
   copied: boolean
@@ -195,6 +244,8 @@ export function MessageBlock(props: {
    */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -219,10 +270,17 @@ export function MessageBlock(props: {
    * attest zero data retention.
    */
   temporaryChat?: boolean
+  /**
+   * The thread is scoped to a Space. Its history has its own surface and authority, so the conversation export
+   * is not offered there (EP-12 D8).
+   */
+  spaceScoped?: boolean
   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
   docked?: DockedNodes
   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
   settledFold?: SettledFold
+  /** The connected-app suggestion card's wiring (EP-10 S8); see `ConnectorSuggestionWiring`. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -296,6 +354,10 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
       <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} knowledge={node.knowledge} />
     ),
   },
+  'search-provenance': {
+    kind: 'search-provenance',
+    render: (node) => <SearchProvenanceNotice provenance={node.provenance} />,
+  },
   'lifecycle-notices': {
     kind: 'lifecycle-notices',
     render: (node) => <LifecycleNotices notices={node.notices} />,
@@ -329,6 +391,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
           <ApprovalRequests
             approvals={node.approvals}
             onDecide={ctx.onApprovalDecision}
+            onDecideEdited={ctx.onApprovalEditedDecision}
           />
         }
       >
@@ -508,6 +571,8 @@ export function AssistantMessage(props: {
   /** See `MessageBlock`'s doc — same "Planlegg dette" affordance, forwarded through. */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -532,10 +597,14 @@ export function AssistantMessage(props: {
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
   temporaryChat?: boolean
+  /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
+  spaceScoped?: boolean
   /** See `MessageBlock`'s doc. */
   docked?: DockedNodes
   /** See `MessageBlock`'s doc. */
   settledFold?: SettledFold
+  /** See `MessageBlock`'s doc. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -582,6 +651,22 @@ export function AssistantMessage(props: {
       setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
     }
   }
+  // "Lagre som ferdighet" (EP-11 S1): an admin may save a private skill from an answer, a member only while
+  // the member switch is on. A temporary chat and a conversation not yet saved never offer it. The member
+  // answer is asked only for a signed-in member on an answer that could show the action, so an anonymous
+  // or temporary render never calls the gateway.
+  const [savingSkill, setSavingSkill] = createSignal(false)
+  const skillActionShape = () =>
+    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
+  const askMemberSkillAuthoring = () =>
+    skillActionShape() && getSession().status === 'authenticated' && !hasWorkspaceAdminAccess(getSession())
+  const [memberSkills] = createResource(
+    () => (askMemberSkillAuthoring() ? true : undefined),
+    () => memberSkillAuthoring(),
+  )
+  const canSaveAsSkill = () =>
+    skillActionShape() && (hasWorkspaceAdminAccess(getSession()) || memberSkills() === true)
+
   const toggleReadAloud = () => {
     if (player.playingId() === props.message.id) {
       player.stop()
@@ -669,6 +754,7 @@ export function AssistantMessage(props: {
       onViewSteps: props.onViewSteps,
       onViewAttachments: props.onViewAttachments,
       onApprovalDecision: props.onApprovalDecision,
+      onApprovalEditedDecision: props.onApprovalEditedDecision,
       onApprovePlan: props.onApprovePlan,
       onRejectPlan: props.onRejectPlan,
       onSelectFollowUp: props.onSelectFollowUp,
@@ -808,7 +894,19 @@ export function AssistantMessage(props: {
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
           {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
-            <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+              <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+            </InlineWidgetAnswer>
+            {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
+            <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
+              <McpAppsForAnswer
+                calls={props.message.toolCalls ?? []}
+                streaming={props.message.streaming}
+                temporaryChat={props.temporaryChat}
+                onSelectFollowUp={props.onSelectFollowUp}
+                runId={props.message.runId}
+              />
+            </Show>
           </InlineWidgetSurface>
           <Show when={stepStripEnabled && props.message.streaming}>
             <StepStrip
@@ -818,6 +916,22 @@ export function AssistantMessage(props: {
             />
           </Show>
         </div>
+        {/* EP-10 S8: at most one connected-app suggestion per turn; the card hides itself in a Space or temporary chat. */}
+        <Show when={props.connectorSuggestion ? props.message.connectorSuggestion : undefined}>
+          {(suggestion) => (
+            <ConnectorSuggestionCard
+              suggestion={suggestion()}
+              orgId={props.connectorSuggestion?.orgId ?? ''}
+              spaceScoped={props.spaceScoped}
+              temporary={props.temporaryChat}
+              onUse={(connectionId) => props.connectorSuggestion?.onUse(suggestion(), connectionId)}
+              connectTurn={props.connectorSuggestion?.connectTurn}
+              pendingConnectIntent={props.connectorSuggestion?.pendingConnectIntent}
+              resumeConnectIntent={props.connectorSuggestion?.resumeConnectIntent}
+              dismissConnectIntent={props.connectorSuggestion?.dismissConnectIntent}
+            />
+          )}
+        </Show>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
             <Show when={props.pinned}>
@@ -847,12 +961,28 @@ export function AssistantMessage(props: {
             <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
               <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
             </Show>
+            {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
+            <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
+              <ExportConversationAction
+                threadId={props.threadId ?? ''}
+                temporaryChat={props.temporaryChat}
+                spaceScoped={props.spaceScoped}
+              />
+            </Show>
             <Show when={canRemember()}>
               <MessageAction
                 label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}
                 onClick={() => void rememberThis()}
               >
                 {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+              </MessageAction>
+            </Show>
+            <Show when={canSaveAsSkill()}>
+              <MessageAction
+                label={i18n.tr('Lagre som ferdighet', 'Save as skill')}
+                onClick={() => setSavingSkill(true)}
+              >
+                <Sparkles size={14} />
               </MessageAction>
             </Show>
             {/*
@@ -1129,6 +1259,15 @@ export function AssistantMessage(props: {
             )}
           </Show>
         </Show>
+        <Show when={savingSkill()}>
+          <SaveAsSkillDialog
+            threadId={props.threadId ?? ''}
+            messageId={props.message.id}
+            content={props.message.content}
+            temporary={props.temporaryChat}
+            onClose={() => setSavingSkill(false)}
+          />
+        </Show>
       </div>
     </article>
   )
@@ -1212,6 +1351,7 @@ export function UserMessage(props: {
             <UserMessageContent content={props.message.content} />
             <ToolChips tools={props.message.tools} />
             <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
+            <ContextRefChips refs={props.message.contextRefs ?? []} />
           </div>
           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
             <Show
@@ -2260,11 +2400,122 @@ export function BrowserSiteConsentCard(props: {
   )
 }
 
+/**
+ * EP-1 S2: the agent asks the person to clear a wall on the page (a sign-in, a human check, a
+ * consent choice, a firewall). The words and the host come from the approval's cause, the record
+ * the server keeps, never from text on the page. Take over flips the browser to the person through
+ * the same control call the live panel uses, compare-and-set on the epoch the projection shows; it is
+ * offered only when the turn's browser is bound and the owner may take it (`onTakeOver` present).
+ * Skip this site declines the request: the run closes the page and looks elsewhere.
+ */
+export function BrowserHumanAssistCard(props: {
+  approval: Approval
+  control?: ChatRunBrowserControl
+  onTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  onSkip: () => void
+}) {
+  const i18n = useI18n()
+  const control = () => (props.onTakeOver ? props.control : undefined)
+  return (
+    <div class="verevon-chat-approval" role="group" aria-label={approvalHeadline(props.approval, i18n)}>
+      <div class="verevon-chat-approval__head">
+        <span class="verevon-chat-approval__badge">{i18n.tr('Hjelp', 'Help')}</span>
+        <span class="verevon-chat-approval__kind">{approvalHeadline(props.approval, i18n)}</span>
+      </div>
+      <Show when={approvalReason(props.approval, i18n)}>
+        {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+      </Show>
+      <Show when={!control()}>
+        <p class="verevon-chat-approval__detail">{browserAssistNoTakeOverLine(i18n)}</p>
+      </Show>
+      <div class="verevon-chat-approval__actions">
+        <Show when={control()}>
+          {(bound) => (
+            <button
+              type="button"
+              class="verevon-chat-approval__approve"
+              onClick={() => props.onTakeOver?.(bound().sessionId, bound().controlEpoch)}
+            >
+              {browserAssistActionLabel('take_over', i18n)}
+            </button>
+          )}
+        </Show>
+        <button type="button" class="verevon-chat-approval__reject" onClick={() => props.onSkip()}>
+          {browserAssistActionLabel('skip', i18n)}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function ApprovalRequests(props: {
   approvals: Approval[]
   onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
+  /** The turn's browser, as the person may address it (EP-1 S1); a help card offers Take over with it. */
+  browserControl?: ChatRunBrowserControl
+  /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
+  onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  /**
+   * Sends an approval with the person's edits to a drafted mail send (EP-10-S6), for this one call.
+   * It rejects with the typed `ApiError`, so a 409 `approval_changed` keeps the card and the
+   * person's text. Absent: the card offers no edit mode.
+   */
+  onDecideEdited?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
 }) {
   const i18n = useI18n()
+  // The person's pending edits by approval id (EP-10-S6). Present only while the form differs from
+  // the draft; an edited approval is ONCE only (decision D1), so a standing scope hides meanwhile.
+  const [drafts, setDrafts] = createSignal<Record<string, MailEditDraft>>({})
+  // Bumped on a 409 approval_changed: the disclosure refetches the draft and keeps the person's text.
+  const [conflicts, setConflicts] = createSignal<Record<string, number>>({})
+  const [editErrors, setEditErrors] = createSignal<Record<string, string>>({})
+  const [editBusy, setEditBusy] = createSignal<string | null>(null)
+
+  const noteDraft = (approvalId: string, draft: MailEditDraft | null) => {
+    setDrafts((current) => {
+      const next = { ...current }
+      if (draft) next[approvalId] = draft
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const noteEditError = (approvalId: string, message: string | null) => {
+    setEditErrors((current) => {
+      const next = { ...current }
+      if (message) next[approvalId] = message
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const sendEdited = async (approvalId: string, edit: ApprovalEdit) => {
+    const send = props.onDecideEdited
+    if (!send || editBusy() !== null) return
+    setEditBusy(approvalId)
+    noteEditError(approvalId, null)
+    try {
+      await send(approvalId, edit)
+      noteDraft(approvalId, null)
+    } catch (error) {
+      const refusal = approvalEditRefusalOf(error)
+      if (refusal === 'approval_changed') {
+        setConflicts((current) => ({ ...current, [approvalId]: (current[approvalId] ?? 0) + 1 }))
+      }
+      noteEditError(
+        approvalId,
+        refusal
+          ? mailEditProblemText(refusal, i18n.tr)
+          : translateApiError(error, i18n.tr, {
+              no: 'Godkjenningen med endringene gikk ikke gjennom.',
+              en: 'The approval with your edits did not go through.',
+            }),
+      )
+    } finally {
+      setEditBusy(null)
+    }
+  }
+
   // An approval whose cause asks for a fresh password confirmation before it is granted (build
   // plan WS13 S5). Only the grant asks; a denial never does.
   const [confirming, setConfirming] = createSignal<string | null>(null)
@@ -2291,10 +2542,16 @@ export function ApprovalRequests(props: {
   }
 
   const approve = (approval: Approval, scope?: ApprovalScope) => {
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft?.problem) return
     if (approval.cause?.stepUpRequired) {
       setConfirmError(null)
       setConfirmingScope(scope)
       setConfirming(approval.id)
+      return
+    }
+    if (draft) {
+      void sendEdited(approval.id, draft.edit)
       return
     }
     decide(approval.id, 'approve', scope)
@@ -2330,6 +2587,12 @@ export function ApprovalRequests(props: {
     }
     const scope = confirmingScope()
     cancelConfirmation()
+    // The step-up runs first for an edited grant exactly as for a plain one (WS13-S5).
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft && !draft.problem) {
+      void sendEdited(approval.id, draft.edit)
+      return
+    }
     decide(approval.id, 'approve', scope)
   }
 
@@ -2353,6 +2616,17 @@ export function ApprovalRequests(props: {
       <For each={props.approvals}>
         {(approval) => (
           <Show
+            when={!browserAssistKindOf(approval.cause)}
+            fallback={
+              <BrowserHumanAssistCard
+                approval={approval}
+                control={props.browserControl}
+                onTakeOver={props.onBrowserTakeOver}
+                onSkip={() => props.onDecide(approval.id, 'reject')}
+              />
+            }
+          >
+          <Show
             when={cardModel(approval)}
             fallback={
           <div class="verevon-chat-approval">
@@ -2363,6 +2637,21 @@ export function ApprovalRequests(props: {
             <Show when={approvalReason(approval, i18n)}>
               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
+            <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
+              <WritePreviewDisclosure
+                approvalId={approval.id}
+                editable={props.onDecideEdited !== undefined}
+                onDraftChange={(draft) => noteDraft(approval.id, draft)}
+                conflict={conflicts()[approval.id] ?? 0}
+              />
+            </Show>
+            <Show when={editErrors()[approval.id]}>
+              {(message) => (
+                <p class="verevon-chat-approval__error" role="alert">
+                  {message()}
+                </p>
+              )}
+            </Show>
             <Show
               when={confirming() === approval.id}
               fallback={
@@ -2370,11 +2659,14 @@ export function ApprovalRequests(props: {
                   <button
                     type="button"
                     class="verevon-chat-approval__approve"
+                    disabled={Boolean(drafts()[approval.id]?.problem) || editBusy() === approval.id}
                     onClick={() => approve(approval)}
                   >
-                    {i18n.tr('Godkjenn', 'Approve')}
+                    {drafts()[approval.id]
+                      ? i18n.tr('Send med mine endringer', 'Send with my edits')
+                      : i18n.tr('Godkjenn', 'Approve')}
                   </button>
-                  <Show when={offersStandingScope(approval, 'thread')}>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'thread')}>
                     <button
                       type="button"
                       class="verevon-chat-approval__approve"
@@ -2383,7 +2675,7 @@ export function ApprovalRequests(props: {
                       {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
                     </button>
                   </Show>
-                  <Show when={offersStandingScope(approval, 'run')}>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'run')}>
                     <button
                       type="button"
                       class="verevon-chat-approval__approve"
@@ -2435,7 +2727,9 @@ export function ApprovalRequests(props: {
                   >
                     {confirmBusy()
                       ? i18n.tr('Bekrefter…', 'Confirming…')
-                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                      : drafts()[approval.id] && confirmingScope() === undefined
+                        ? i18n.tr('Bekreft og send med mine endringer', 'Confirm and send with my edits')
+                        : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
                   </button>
                   <button
                     type="button"
@@ -2461,6 +2755,7 @@ export function ApprovalRequests(props: {
                 }}
               />
             )}
+          </Show>
           </Show>
         )}
       </For>
@@ -3257,6 +3552,27 @@ export function AttachmentChips(props: {
       <div class="verevon-chat-attachments">
         <For each={props.attachments}>
           {(attachment) => <AttachmentItem attachment={attachment} tone={props.tone} onOpen={props.onOpen} />}
+        </For>
+      </div>
+    </Show>
+  )
+}
+
+/**
+ * The context chips a user turn was sent with (EP-3 S5), read back from `metadata.context_refs`. Labels
+ * only: a chip is a reference the gateway resolved, never content, so nothing here opens or fetches it.
+ */
+function ContextRefChips(props: { refs: readonly ChatContextRef[] }) {
+  const i18n = useI18n()
+  return (
+    <Show when={props.refs.length > 0}>
+      <div class="verevon-chat-context-refs" role="list" aria-label={i18n.tr('Kontekst', 'Context')}>
+        <For each={props.refs}>
+          {(ref) => (
+            <span role="listitem" class="verevon-chat-context-ref" data-kind={ref.kind}>
+              {ref.label || ref.id}
+            </span>
+          )}
         </For>
       </div>
     </Show>
@@ -4181,6 +4497,45 @@ export function SourceScopeNotice(props: {
         )}
       </Show>
     </>
+  )
+}
+
+/**
+ * "Searched via X" (EP-9 W1): which search providers served this turn's web searches, and the route that allowed
+ * them. The wording is keyed by the closed provider id, so a provider the server does not name shows as "other
+ * provider" and never as its raw id. Names and a reason only: no query and no URL reach this line.
+ */
+export function SearchProvenanceNotice(props: { provenance: ChatSearchProvenanceEvent }) {
+  const i18n = useI18n()
+  const providerName = (id: ChatSearchProviderId) => {
+    if (id === 'tantivy_local') return i18n.tr('Verevon-indeks', 'Verevon index')
+    if (id === 'verevon') return i18n.tr('Verevon-søk', 'Verevon search')
+    if (id === 'brave') return 'Brave Search'
+    if (id === 'serper') return i18n.tr('Serper (Google-resultater)', 'Serper (Google results)')
+    if (id === 'searxng') return 'SearXNG'
+    if (id === 'stract') return 'Stract'
+    return i18n.tr('annen leverandør', 'other provider')
+  }
+  const routeText = (route: ChatSearchRoute) => {
+    if (route === 'zdr_free_only') {
+      return i18n.tr(
+        'Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
+        'Zero data retention is on, so only free search providers were used.',
+      )
+    }
+    if (route === 'paid_allowed') {
+      return i18n.tr('Betalte søketjenester er tillatt for dette svaret.', 'Paid search providers are allowed for this answer.')
+    }
+    return i18n.tr('Bare gratis søketjenester er tillatt for dette svaret.', 'Only free search providers are allowed for this answer.')
+  }
+  return (
+    <p class="verevon-chat-source-scope-notice" role="note">
+      <Info size={12} />
+      {i18n.tr('Søkt via ', 'Searched via ')}
+      {props.provenance.providers.map((provider) => providerName(provider.id)).join(', ')}
+      {'. '}
+      {routeText(props.provenance.route)}
+    </p>
   )
 }
 

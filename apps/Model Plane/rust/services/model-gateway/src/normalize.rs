@@ -587,6 +587,8 @@ mod tests {
             browse_web: false,
             skill_ids: Vec::new(),
             deep_research: false,
+            research_phase: None,
+            research_plan: None,
             retrieval_scope: None,
             connector_scope: None,
             max_cost_usd: None,
@@ -615,6 +617,16 @@ mod tests {
             client_utc_offset_minutes: None,
             ui_locale: None,
             agent_roles: None,
+            agent_ref: None,
+            agent_version: None,
+            agent_digest: None,
+            agent_tool_capability_ids: None,
+            agent_autonomy_cap: None,
+            wide_research: None,
+            context_refs: None,
+            deck_template: None,
+            goal_id: None,
+            goal_auto: false,
         }
     }
 

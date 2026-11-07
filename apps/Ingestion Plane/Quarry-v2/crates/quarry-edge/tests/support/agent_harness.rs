@@ -588,6 +588,7 @@ impl BrowserDriver for RecordingDriver {
         Ok(LiveFrame {
             mime_type: "image/png".into(),
             data_base64: "cmVjb3JkZWQ=".into(),
+            agent_cursor: None,
         })
     }
 

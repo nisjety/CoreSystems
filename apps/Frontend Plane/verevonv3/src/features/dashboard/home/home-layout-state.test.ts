@@ -58,7 +58,7 @@ describe('reading the remembered layout', () => {
   })
 
   it('returns the defaults when nothing is stored', () => {
-    expect(readHomeLayout(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, feed: 'news', category: 'all', pinnedOnly: false })
+    expect(readHomeLayout(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, dockPosition: 'bottom', feed: 'news', category: 'all', pinnedOnly: false })
   })
 
   it('does not hand out the shared defaults object', () => {
@@ -68,7 +68,7 @@ describe('reading the remembered layout', () => {
   })
 
   it('restores every stored field', () => {
-    const saved = { dockMinimized: true, dockExpanded: true, feed: 'workspace', category: 'Business', pinnedOnly: true }
+    const saved = { dockMinimized: true, dockExpanded: true, dockPosition: 'right' as const, feed: 'workspace', category: 'Business', pinnedOnly: true }
     localStorage.setItem(keyA, JSON.stringify(saved))
     expect(readHomeLayout(keyA)).toEqual(saved)
   })
@@ -109,7 +109,7 @@ describe('writing a partial update', () => {
   it('merges the patch into what is stored and returns the saved state', () => {
     expect(writeHomeLayout(keyA, { pinnedOnly: true })).toEqual({ ...HOME_LAYOUT_DEFAULTS, pinnedOnly: true })
     expect(writeHomeLayout(keyA, { feed: 'workspace', category: 'Technology' })).toEqual({ ...HOME_LAYOUT_DEFAULTS, pinnedOnly: true, feed: 'workspace', category: 'Technology' })
-    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, feed: 'workspace', category: 'Technology', pinnedOnly: true })
+    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: false, dockPosition: 'bottom', feed: 'workspace', category: 'Technology', pinnedOnly: true })
   })
 
   it('writes nothing while the identity is unknown', () => {
@@ -145,7 +145,7 @@ describe('useHomeLayout', () => {
   it('has the restored state on creation, before any effect runs', () => {
     writeHomeLayout(keyA, { dockMinimized: true, feed: 'traffic', category: 'Business', pinnedOnly: true })
     const layout = mount()
-    expect(layout.state()).toEqual({ dockMinimized: true, dockExpanded: false, feed: 'traffic', category: 'Business', pinnedOnly: true })
+    expect(layout.state()).toEqual({ dockMinimized: true, dockExpanded: false, dockPosition: 'bottom', feed: 'traffic', category: 'Business', pinnedOnly: true })
   })
 
   it('starts from the defaults when nothing is stored', () => {
@@ -170,7 +170,7 @@ describe('useHomeLayout', () => {
     recent.update({ pinnedOnly: true })
     updates.update({ feed: 'traffic', category: 'General' })
     flush()
-    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: true, feed: 'traffic', category: 'General', pinnedOnly: true })
+    expect(stored(keyA)).toEqual({ dockMinimized: false, dockExpanded: true, dockPosition: 'bottom', feed: 'traffic', category: 'General', pinnedOnly: true })
     expect(home.state().feed).toBe('news')
   })
 

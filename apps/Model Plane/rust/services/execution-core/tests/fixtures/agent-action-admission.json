@@ -65,7 +65,20 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:b7bb7f171a61f950b32fb159a8c4c1b635bede9a90c7d78edc95ccdf8e76b299",
+      "schemaHash": "sha256:11ef0bda1b1d9616e1f9220f57e88ccc33dc9ed01147e0631b322a473df2058f",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "approvals.preview",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "approval_authority",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:15e5362dec9f54340e05ddc200ed725b0a16cf60e0d1b642196640ee0cc0f43b",
       "zdr_allowed": false
     },
     {
@@ -351,7 +364,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:b680505df8834cd85800af8855cadee866289b09ab923af4835ace3b17a2caed",
+      "schemaHash": "sha256:a24a488b1322dce77b3f4bb8020d959e56b2abbcdc306e8f3f2c8aca808fc6bf",
       "zdr_allowed": false
     },
     {
@@ -462,6 +475,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.accept_connector_suggestion",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d556951132468f319f8ae60384754e9e6cd6e64cc2633d5ed03829764ec14110",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.answer_question",
       "registry": true,
       "access": "none",
@@ -472,6 +498,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:107d80c7b5aefd77e2eece9385313bd613f6a780cfd014def30b1fbcd532ba95",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.apply_deck_template",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:c1712b81dcef725a2bd2faea056a8a64ee6418f01cd6028b94f68be6a3c08320",
       "zdr_allowed": false
     },
     {
@@ -501,6 +540,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.clear_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:17225ee012eb3afbf65422a13268ee033aa03367c48ce3371eddefcada45e871",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.clear_threads",
       "registry": true,
       "access": "none",
@@ -514,6 +566,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.continue_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3d4679c3021fe84d15e4f7b09442ef003085cf771a1268e9157eb26679b5f869",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.delete_thread",
       "registry": true,
       "access": "none",
@@ -524,6 +589,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:9ff097bc5d12d3fb612c288a9698b5274b57a7cc6618321a7fba9ef91657423b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.edit_artifact_selection",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ec366fc3b5838258a70e5ffff0346d2e6f3ff3aac21818448eead1d9419e7417",
       "zdr_allowed": false
     },
     {
@@ -553,6 +631,58 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.goal_auto_toggle",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:be4bb4d91fa6653c595646f18d04a4fd450f291e654ab3bca0536505244cf39e",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.inspect_run_request",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4ea9b8c45309a940fb99a2fc4fd36ca77579008d8aec5f6146fa5f17be39b544",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.list_artifact_revisions",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4ad9d1e2e9984d7150585d2cee2038c8cfce54dbac196e8290a1d4ca4b91eb50",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.list_deck_templates",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:af90eb1c3aa3ed8f583d7ddd8fe79894d6c0276db8485868dd3751808a20cb9a",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.mark_thread_seen",
       "registry": true,
       "access": "none",
@@ -563,6 +693,97 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4860c8e55b7bb12054ce389533cd465ee8b04e7374c30962f956690fcbe5f882",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.mcp_app_tool_call",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:b1e80438cb2d4a2f7bdfc395516071197bc7c5bd02bfb3448762d834d9f05509",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.open_cited_passage",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:07f6e47cc2208433c3e8b7b4c83b08a589d18463d25c22a2bd7b557c04dda700",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.open_deck_slide",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:10696af22d7f40b6998b1cc74c67e30bc446a6837d683f824a12b7d3b16b7cb1",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.open_mcp_app",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:adeb1eeee849ee5841ff79b27ce1731c4260ad13ee9d647db7345d0179a18f88",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.open_widget_link",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:616373a34fc31f29a7d24ab369e3ef21f7fa9c249e0bf6d06dfcb9aea6402984",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.pick_context_ref",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:29a6d182bebd304797ac70b17c9030e30ce7c511f99dbfb878dff5ca634f7820",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.present_deck",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:fb75c0bbe104eeac13ecace65795f24d4908bac9dea598aedbaedf9fdde8388c",
       "zdr_allowed": false
     },
     {
@@ -579,6 +800,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.research_plan_cancel",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3ce293bcf51652e7a101b9d2e59d5b76cc8127a08e1a8ac620b924b71835708d",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.research_plan_start",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ba249ff1ef13a511613a1355d28ce525754375b3cc7350e7999f8537db3906f4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.restore_artifact_revision",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:a711faa6a3795312f7b8f97043c1cbac991b3ca86cbbd906b7416f06a589bfa9",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.run.continue",
       "registry": true,
       "access": "none",
@@ -589,6 +849,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:596d28219f66054cca2b168abfc1516ce35baf7c1390eaf9548a48d068b4aead",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.save_artifact_revision",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:6dfe0821c34c1204cfa49aeb67a2901b9de67b5a31a85d5734a4772b302774a3",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.save_artifact_to_knowledge",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:d88438b9c6a27d85b7c93574ccc244b9a74139d722b4af6bfe8f4044a00cde68",
       "zdr_allowed": false
     },
     {
@@ -631,6 +917,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_context_refs",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:03941b748341dfc4393f686333884629766e1997961a4a633c1b94214a0244e7",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.set_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:60390a0a15649a5de4822156ea6fdaa7314bafd19dc57e5963d5df6d3894e579",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.set_transcript_density",
       "registry": true,
       "access": "none",
@@ -641,6 +953,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:99e70a79698568f447a3b61916fbad61d12e7c8a360cff76befa052c4ce4832d",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.stage_mcp_app_message",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8ffe6d51d37f38d72ceb577e8f3bb1ee6f30239d59e5eb47075a9cbd1accbfc0",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.stage_widget_followup",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:160ff6e4afc5641c553e9d0107a2bee5409759d1931372caf9a174b77cf2b5b6",
       "zdr_allowed": false
     },
     {
@@ -657,6 +995,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.update_goal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3a54df51c8a7979ccc69660e2c9a507e0bdcf1747bafb685eb9883ce84c2d74c",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.upload_document",
       "registry": true,
       "access": "none",
@@ -667,6 +1018,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:70eb9abb3c1db046fe35386232efca65e1d9fbf128b3336347e52facede094a4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.wide_research_retry_item",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ab9026b844b0c068bf88860d711467edae170514f21fb0cfae4a1a3278ef951b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "chat.wide_research_start",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f7f0730fd20240bb9ffca92f8020fce3551be2319dc394f3c2852e42fedeaa41",
       "zdr_allowed": false
     },
     {
@@ -1235,6 +1612,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "integrations.list_connector_policies",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f270ce3314882116a3658b46b74f066d25d1cb319174556274afa0dcb806d4d6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "integrations.set_connector_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ebf28a0c7cc53fdd70627c845697f0fc60e4760ebe2bbff5ee7bb61996bf954a",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "integrations.start_chatgpt_subscription",
       "registry": true,
       "access": "none",
@@ -1514,6 +1917,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4b029850c97f81dad6bc202a9572072d4b94a31997a678027c520a613dc771c0",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "learning.learn_from_thread",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:7c51ab86c8c325489874edf4cc38366353fc7d017493330fc3c2306c2afb3c50",
       "zdr_allowed": false
     },
     {
@@ -1929,7 +2345,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:cf43226ed06d77aa16934b19d2686531bdf503d7c44181b6143239a53d4cc508",
+      "schemaHash": "sha256:54175225740f4ef6549d22aab6857cf85f3f6ae4ebdb6b41345285d39bbfafe1",
       "zdr_allowed": false
     },
     {
@@ -2037,6 +2453,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "org.place_legal_hold",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:79b2dc3423c929a9240537a7b81bc4de51c70cc79c000b983d60cf431d2cb2ae",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "org.preview_effective_policy",
       "registry": true,
       "access": "none",
@@ -2047,6 +2476,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:ac479b7ad9ac94f9eb8210b9f0c8d0cf80b8571afc37665f133ef18355f72bc4",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.release_legal_hold",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4f4d89b37b2d68d98a4eed695288d340eb8f078ef342a3a0dc862ee73fc2a020",
       "zdr_allowed": false
     },
     {
@@ -2138,6 +2580,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:ee7d6f6faaad454f36afc8724cf2fdd63f38638a80c1543ff07b78b9cfdf832f",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.set_retention",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:bbdc65f8629f245397679f13372026499ce515e1f0e4afd28294cfbbf7f24ecb",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.set_web_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:96ca91153e544c9759c485a64febbd813a2135a3c93d946b336e223aa011c4c4",
       "zdr_allowed": false
     },
     {
@@ -2284,6 +2752,45 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "policy.read_effective",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:949b46e82df3ccbc6d06048c00ac11dddb1f1747407a6ccaecc8b2c1841b6869",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "presets.create",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ee1378f4950f5e5f2ee1dba72ea39db38fe9af07aabc320f43d3ae594ea6f154",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "presets.update",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:efe514f287d70c21ca4c0e89a0eb9381cf1fc39cd24a37d65d58d892b16020c5",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "privacy.erase_my_account",
       "registry": true,
       "access": "none",
@@ -2372,6 +2879,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:4787ea52c0873062138d0f9cd77cc4b7873b879fd9f3b91ba44c8fe469d5cc9b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "schedule.run_now",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1a588268dad9c87cb4ca9caff81a5fb67f9f14da8bf1881dce2f2f94b8812b43",
       "zdr_allowed": false
     },
     {
@@ -2505,6 +3025,97 @@
       },
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:0f9caeeda9e32abae806807fb1348e954c6916e825926443b95ed6a4fa3f7714",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.draft.discard",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8b4bed72934170f91cfda2221e3095593b86e41b9cfa840e0771f5852bd10773",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.draft.save",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9ed1ec72eaecb4de23ae97fbacee1906c76c8c2aaf6cb006cf36756524c5c363",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.import",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:05c23f584445e8fde24fb5c40adce8f8d63165e5b4617d3ef3f78a83c7d9fa3b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.publish",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1e74480604c4011b80d1c2b8eb63fb214432d704c0addef2b6d0cd44adf421dd",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.save_from_message",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f7671a1c385b07ff3ffbf9933f3dae8bb5d8762e4cf82c7e953f071fbc8c122c",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.version.restore",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:291aad53bcaa8bbedf77f4a594b8e6de232c6da69fa84776b655a8ee3feea139",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "skills.versions.list",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:13d07132851184e7213d021e8e4e9905aa59566f1ececd959ea5e794309c170e",
       "zdr_allowed": false
     },
     {
@@ -3265,6 +3876,45 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:8e566fc16b74fb66876d710f296b52c592dbaace4cd57119247931ffb066ae1b",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "templates.create",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:7fe0eea79955f66eed574cdae72e76d6b447eb6d59f551515f5fd2e0b62c6161",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "templates.update",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9572d77d466596a3b6641b17d69097483084cf8b50349857e046900022937ef6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "thread.export",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:cbf29008acba5e792fc12df267d4157b3444d1927633b97390f782492b8531fa",
       "zdr_allowed": false
     },
     {

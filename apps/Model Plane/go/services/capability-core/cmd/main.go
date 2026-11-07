@@ -176,14 +176,15 @@ func main() {
 	// TOOL_POLICY_ENFORCED is the literal "true"; off, they are stored and ignored.
 	// The handler is built here because the engine takes it; its routes are mounted
 	// with the other policy APIs below.
-	toolPolicies := api.NewToolPoliciesHandler(pool)
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
-	slog.Info("tool policies", "enforced", toolPolicyEnforced)
+	toolPolicies := api.NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced)
+	browserAgentPolicyEnforced := policy.BrowserAgentPolicyEnforcedFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced)
 	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
 	// ORG_EXTENSION_ALLOWLIST is the literal true.
 	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
 	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced).
-		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
+		WithBrowserAgentPolicyEnforced(browserAgentPolicyEnforced).WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server
@@ -299,6 +300,7 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
+	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
@@ -340,16 +342,35 @@ func main() {
 	api.NewSafetyHandler(pool).WithPublisher(recPub).
 		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
+	// EP-11 S7 /learn: off unless LEARN_COMMAND_ENABLED is exactly true and the learning review is on.
+	// Without a learner (a backend not dialled) the switched-on route answers 503.
+	learnOn := api.LearnCommandAPIFromLookup(os.Getenv) && learningReviewEnabled()
+	var learner *sessionreview.Learner
+	if learnOn && sessionClient != nil && inferenceClient != nil && memoryClient != nil {
+		learnOpts := []sessionreview.Option{sessionreview.WithMemoryControls(memoryClient)}
+		if cost, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv); costErr == nil && costOn {
+			learnOpts = append(learnOpts, sessionreview.WithCostControls(cost))
+		}
+		learner = sessionreview.NewLearner(sessionClient, inferenceClient, os.Getenv("LEARNING_REVIEW_MODEL"), learnOpts...)
+	}
+	api.NewLearnCommandHandler(learnOn, runClient, learner).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
 	// consumer that actually fires the notification is wired below,
 	// independently, once NATS is available (see startRunWatchConsumer).
 	api.NewRunWatchersHandler(pool).Register(protectedMux)
+	// Built before the handler: Run now and the sweeper below share one Control fire authorizer.
+	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	cronHandler := api.NewCronHandler(pool)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
 	cronHandler.WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
+	// EP-6-S2: Run now, a manual fire through the same fresh Control fire authorization.
+	// Strict literal true; off by default. Without the authorizer the route never exists.
+	if cronAuthErr == nil {
+		cronHandler.WithRunNow(pool, cronAuthorizer, os.Getenv("CRON_RUN_NOW_ENABLED") == "true")
+	}
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {
@@ -361,7 +382,6 @@ func main() {
 	// Cron sweeper: fires due cron_schedules — creates a task per fire, records
 	// cron_fires, and advances next_fire_at, single-flight across replicas via
 	// FOR UPDATE SKIP LOCKED. Opt out with CRON_SWEEPER_ENABLED=false.
-	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
 		if cronAuthErr != nil {
 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
@@ -476,11 +496,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPC)))
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPCWith(authz.BundleReadRuleFromLookup(os.Getenv)))))
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
-		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv))
+		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
+		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
+		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}

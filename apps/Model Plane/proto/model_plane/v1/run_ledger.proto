@@ -37,6 +37,15 @@ service RunLedgerService {
   // times (EP-14 S5). Owner only: a run of another user or org reads as not
   // found. Answers UNIMPLEMENTED unless SESSION_CORE_RUN_LEDGER_READ is on.
   rpc GetRunTiming(GetRunTimingRequest) returns (GetRunTimingResponse);
+
+  // Read one model call's snapshot for the request inspector (EP-14 S7).
+  // Only the user who owns the run reads it: another user, an org admin, a
+  // service caller and a system-owned run all read as not found. The prompt
+  // comes back as sections; a platform-authored section, or one whose text
+  // cannot be matched to its digest, carries no text (decision D3). A ZDR
+  // caller is refused with `zdr_feature_not_supported` (`run_inspection`).
+  // Answers UNIMPLEMENTED unless SESSION_CORE_REQUEST_INSPECTOR_READ is on.
+  rpc GetRequestSnapshot(GetRequestSnapshotRequest) returns (GetRequestSnapshotResponse);
 }
 
 // RecordRequestSnapshotRequest: one model call's snapshot (EP-14 S6).
@@ -148,4 +157,52 @@ message GetRunTimingResponse {
   repeated RunActionTiming actions = 2;
   // More tool calls exist than `actions` holds.
   bool truncated = 3;
+}
+
+// GetRequestSnapshotRequest: read one model call's snapshot (EP-14 S7).
+message GetRequestSnapshotRequest {
+  // The run the call belongs to. Must be the caller's own run.
+  string run_id = 1;
+  // The call's order within the run, from 1.
+  uint32 call_seq = 2;
+}
+
+// PromptSection: one system message of a call's prompt, in prompt order
+// (EP-14 S7). Decision D3: a platform section carries its label, digest and
+// length but never its text; org, user and memory sections carry their text.
+message PromptSection {
+  // What the section is: the label table's name for the message's source tag,
+  // or the prompt tier it was placed in when the caller gave it no tag.
+  string label = 1;
+  // Who authored the text: "platform", "org", "user" or "memory". A section
+  // the label table does not know is "platform", so unknown text stays hidden.
+  string source = 2;
+  // The sha256 of the section's text: its version, comparable across calls.
+  string digest = 3;
+  // The section's length in characters.
+  uint32 chars = 4;
+  // The section's text. Empty for a platform section, and for any section
+  // whose stored text did not match its digest (a cut or reordered prompt).
+  string text = 5;
+}
+
+// GetRequestSnapshotResponse: one model call as the inspector shows it (EP-14 S7).
+message GetRequestSnapshotResponse {
+  // The `request-snapshot-v1` JSON: parameters, routed model, digests and the
+  // message manifest, never a message body.
+  string snapshot_json = 1;
+  // The system prompt as sections, in prompt order, filtered by decision D3.
+  repeated PromptSection system_sections = 2;
+  // The tool catalogue JSON offered on the call; empty when none was offered.
+  string tools_json = 3;
+  // Snapshots of this run that were never stored (inference-core's full
+  // queue), so the record is incomplete when this is above 0.
+  uint64 dropped = 4;
+  // Whether `tools_json` was cut at its cap and may not parse.
+  bool tools_truncated = 5;
+  // Whether the stored system prompt was cut at its cap; sections past the
+  // cut carry no text.
+  bool system_truncated = 6;
+  // What the call was for (EP-13's closed vocabulary), as stored.
+  string call_purpose = 7;
 }

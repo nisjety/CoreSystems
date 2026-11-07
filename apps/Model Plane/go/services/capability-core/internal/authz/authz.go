@@ -204,6 +204,51 @@ func AuthorizeGRPC(principal authctx.Principal, method string, request any) erro
 	return errDenied
 }
 
+// BundleReadRuleEnv is the switch for the explicit skill bundle read rule (EP-5 decision D8,
+// register D2-383). Only the literal "true" turns it on; off, the three bundle RPCs fall through
+// to AuthorizeGRPC's generic read rule exactly as before.
+const BundleReadRuleEnv = "SKILL_BUNDLE_READ_RULE_ENABLED"
+
+// BundleReadRuleFromLookup reads SKILL_BUNDLE_READ_RULE_ENABLED strictly.
+func BundleReadRuleFromLookup(lookup func(string) string) bool {
+	return lookup(BundleReadRuleEnv) == "true"
+}
+
+// AuthorizeGRPCWith is AuthorizeGRPC with the skill bundle read rule applied when bundleReadRule
+// is true, and AuthorizeGRPC itself when it is false.
+//
+// Under the rule a bundle body (GetSkillBlob) is read only by a service principal holding the
+// capability read scope: bundle bytes include scripts the sandbox runs, so a person's own token is
+// never enough to fetch them, and a write scope alone is no read grant. The listing and the
+// manifest carry metadata only (paths, digests, sizes), so a person may still read them for their
+// own org, as may a service with the read scope. The org is the signed one in every case; the
+// handlers take no org from the request.
+func AuthorizeGRPCWith(bundleReadRule bool) authctx.GRPCAuthorizer {
+	if !bundleReadRule {
+		return AuthorizeGRPC
+	}
+	return func(principal authctx.Principal, method string, request any) error {
+		if principal.OrganizationID == "" || principal.ActorID == "" {
+			return errDenied
+		}
+		serviceReader := principal.PrincipalType == "service" && principal.HasScope(ReadScope)
+		switch method {
+		case mpv1.CapabilityCore_GetSkillBlob_FullMethodName:
+			if serviceReader {
+				return nil
+			}
+			return errDenied
+		case mpv1.CapabilityCore_ListSkillBundles_FullMethodName,
+			mpv1.CapabilityCore_GetSkillBundleManifest_FullMethodName:
+			if serviceReader || principal.PrincipalType == "user" {
+				return nil
+			}
+			return errDenied
+		}
+		return AuthorizeGRPC(principal, method, request)
+	}
+}
+
 func isReadMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
 }

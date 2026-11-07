@@ -2019,4 +2019,153 @@ mod tests {
         assert_eq!(legacy.reason, explicit.reason);
         assert_eq!(legacy.effect_id, explicit.effect_id);
     }
+
+    // ---- an approval the person edited (EP-10-S5) ----
+    //
+    // A cold approval's edit replaces the retained descriptor's input in session-core, so the
+    // worker needs no change: it parses and runs whatever input the descriptor holds. These pin
+    // that the edited input is what runs and what the write attestation is bound to.
+
+    /// A mail send's descriptor as session-core leaves it after the person's edit: the edited
+    /// input, and the fingerprint of the edited call.
+    const EDITED_MAIL_DESCRIPTOR: &str = r#"{
+        "version": 1,
+        "run_id": "run-1",
+        "org_id": "org-1",
+        "user_id": "user-1",
+        "step_id": "step-1",
+        "action_kind": "tool_call",
+        "tool_name": "execute_provider_action",
+        "input": {
+            "connection_id": "conn-1",
+            "operation": "gmail.send",
+            "params": {},
+            "body": {"to": ["alice@example.com"], "subject": "New subject", "bodyText": "the edited body", "threadId": "thread-1"}
+        },
+        "permission_mode": "ask",
+        "action_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }"#;
+
+    /// The body the model drafted, before the edit.
+    fn drafted_mail_body() -> Value {
+        serde_json::json!({
+            "to": ["alice@example.com"],
+            "subject": "Old subject",
+            "bodyText": "the drafted body",
+            "bodyHtml": "<p>the drafted body</p>",
+            "threadId": "thread-1",
+        })
+    }
+
+    fn edited_mail_input() -> ProviderActionInput {
+        let descriptor = parse_descriptor(EDITED_MAIL_DESCRIPTOR).expect("descriptor");
+        match parse_resumable_action(&descriptor).expect("a provider action") {
+            ResumableAction::ProviderAction(input) => input,
+            other => panic!("expected ProviderAction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cold_delivery_runs_the_edited_input() {
+        let input = edited_mail_input();
+        assert_eq!(input.connection_id, "conn-1");
+        assert_eq!(input.operation, "gmail.send");
+        assert_eq!(input.body["subject"], "New subject");
+        assert_eq!(input.body["bodyText"], "the edited body");
+        assert!(input.body.get("bodyHtml").is_none(), "the dropped formatted body stays dropped");
+        assert_eq!(input.body["threadId"], "thread-1", "the threading the draft had is kept");
+        assert_ne!(input.body, drafted_mail_body());
+    }
+
+    #[tokio::test]
+    async fn cold_delivery_attests_the_edited_payload() {
+        use base64::Engine as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        for token_path in ["/api/ingestion/internal-token", "/api/ingestion/token-exchange"] {
+            Mock::given(method("POST"))
+                .and(path(token_path))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "test-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let integration = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections/conn-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data": {"connection": {"providerKey": "google"}}}),
+            ))
+            .mount(&integration)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn-1/actions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"success": true, "data": {"action": {"result": {"id": "msg-1"}}}}),
+            ))
+            .mount(&integration)
+            .await;
+        let signer = crate::attestation::Signer::new([7u8; 32], "test-key-1").expect("test signer");
+        let client = IntegrationActionsClient::new_for_test(
+            &auth.uri(),
+            &integration.uri(),
+            Some(std::sync::Arc::new(signer)),
+        );
+
+        // Exactly what process_delivery hands the client for a provider action.
+        let input = edited_mail_input();
+        let approval_id = "appr_edited";
+        let _ = client
+            .execute_action(
+                "org-1",
+                &input.connection_id,
+                &input.operation,
+                input.params.clone(),
+                input.body.clone(),
+                "user-1",
+                Some(approval_id),
+                None,
+            )
+            .await;
+
+        let requests = integration.received_requests().await.expect("request recording is on");
+        let sent: Value = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/connections/conn-1/actions")
+            .and_then(|request| serde_json::from_slice(&request.body).ok())
+            .expect("the write was sent");
+        assert_eq!(sent["body"]["subject"], "New subject", "the edited mail is what is sent");
+        assert_eq!(sent["body"]["bodyText"], "the edited body");
+        let token = sent["writeAttestation"].as_str().expect("a write is attested");
+        let claims_segment = token.split('.').nth(1).expect("a three-segment JWS");
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(claims_segment)
+                .expect("base64url claims"),
+        )
+        .expect("JSON claims");
+        assert_eq!(claims["approval_id"], approval_id);
+
+        // The digest of the body actually sent (with the approval reference the client adds)
+        // is the attested one, and it is not the digest of the draft.
+        let digest_of = |body: &Value| {
+            let mut body = body.clone();
+            body["approvalId"] = Value::String(approval_id.to_owned());
+            crate::attestation::payload_sha256(
+                "org-1",
+                "conn-1",
+                "google",
+                "gmail.send",
+                &input.params,
+                &body,
+            )
+            .expect("digest")
+        };
+        assert_eq!(claims["payload_sha256"], digest_of(&input.body));
+        assert_eq!(claims["payload_sha256"], digest_of(&sent["body"]));
+        assert_ne!(claims["payload_sha256"], digest_of(&drafted_mail_body()));
+    }
 }

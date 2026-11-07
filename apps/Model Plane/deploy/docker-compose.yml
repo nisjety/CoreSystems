@@ -209,6 +209,8 @@ services:
       - "127.0.0.1:8080:8080"   # HTTP
       - "127.0.0.1:9090:9090"   # gRPC compatibility probe; production overlay removes host ports
     environment:
+      # Optional server-only receipt key; omitted when not present in runtime config.
+      BROWSER_ATTACH_COMPAT_HMAC_KEY:
       RUST_LOG: info
       # This service also joins inter-plane-bus, where the generic `nats`
       # hostname can resolve another plane's broker. Use the plane-unique alias.
@@ -243,9 +245,15 @@ services:
       MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}
       MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}
       MODEL_GATEWAY_WEB_SEARCH_BATCH: ${MODEL_GATEWAY_WEB_SEARCH_BATCH:-false}
+      # EP-2-S4: cited passages on citations and the research report's provenance stamp. Only the literal true.
+      MODEL_GATEWAY_CITATION_PASSAGES: ${MODEL_GATEWAY_CITATION_PASSAGES:-false}
       # Side-task models from the platform role table (EP-13 S4). Roll out inference-core first:
       # an older inference-core refuses the verevon-role model id.
       MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}
+      # EP-4 S2: widget prompt notice, literal true only. VITE_CHAT_INLINE_WIDGETS must also be on in the frontend.
+      MODEL_GATEWAY_WIDGET_GUIDANCE: ${MODEL_GATEWAY_WIDGET_GUIDANCE:-false}
+      # EP-9 T2: the thread's effective-policy read (GET only). Off by default (404); only the literal `true`.
+      MODEL_GATEWAY_POLICY_EFFECTIVE: ${MODEL_GATEWAY_POLICY_EFFECTIVE:-false}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a
@@ -347,9 +355,23 @@ services:
       # WS19-S9: first-party Office skills (docx, xlsx, pptx, pdf) listed for every org. Off by default; only the literal
       # `true` turns it on.
       BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}
+      # EP-11 S3: a run records the skill versions it injected and recovery inside the run reads the pinned version. Off
+      # by default; only the literal `true` turns it on. Needs SKILL_VERSIONS_API on in session-core for recovery reads.
+      MODEL_GATEWAY_SKILL_PINS: ${MODEL_GATEWAY_SKILL_PINS:-false}
+      # EP-11 S9: only the literal `true` turns it on; SKILL_EXT_POLICY_ENFORCED needs ORG_AGENT_POLICY_MODE=enforce or every authored skill is withheld (fail closed).
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
+      SKILL_EXT_POLICY_ENFORCED: ${SKILL_EXT_POLICY_ENFORCED:-false}
       # WS19-S8: name a turn's skill bundles to execution-core so code_interpreter sees them read-only at /skills. Off by
       # default; only the literal `true`.
       SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}
+      # EP-5 S2: the typed deck tool in the Ask loop (manifest owned by the gateway, server-authored build). Off by
+      # default; only the literal `true`.
+      MODEL_GATEWAY_DECK_TOOL: ${MODEL_GATEWAY_DECK_TOOL:-false}
+      # EP-5 S8: research-to-deck (op create_from_artifact). Needs MODEL_GATEWAY_DECK_TOOL. Only the literal true.
+      MODEL_GATEWAY_DECK_FROM_ARTIFACT: ${MODEL_GATEWAY_DECK_FROM_ARTIFACT:-false}
+      # EP-5 S6: a turn's brand deck template, mounted read-only for the build. Needs SKILL_BUNDLE_MOUNT_ENABLED. Only the
+      # literal true.
+      SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}
       # WS04-S6: durable send receipts (client_message_id on a send, dedupe in session-core, ids on the queued_input
       # delivery event). On by default since the WS04-S9 proof; only the literal `true` turns it on. Deploy order:
       # session-core (migration 0052) first, then model-gateway, then the BFF and frontend. Roll back with false plus a
@@ -358,6 +380,10 @@ services:
       # WS17-S8: message versions (branch and rewind). Off by default; set it together with
       # SESSION_CORE_MESSAGE_VERSIONS_ENABLED on session-core.
       MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}
+      # EP-12 S1: the top-level origin on run projections. Only the literal true turns it on.
+      MODEL_GATEWAY_RUN_ORIGIN_FIELD: ${MODEL_GATEWAY_RUN_ORIGIN_FIELD:-false}
+      # EP-4 S8: MCP App resources (read-through, never stored). Only the literal true; EP-4 S12 flips it.
+      MCP_APPS_ENABLED: ${MCP_APPS_ENABLED:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -413,6 +439,9 @@ services:
       # an unknown value reads as enforce. Off by default: resumed runs and the browser and code-interpreter entry points
       # do not read the policy yet, and every Do caller must carry a capability bearer before enforce.
       ORG_AGENT_POLICY_MODE: ${ORG_AGENT_POLICY_MODE:-off}
+      # EP-9 W3: org browser-site allow/block lists on web tools. off, shadow (logs only) or enforce; an unknown value
+      # reads as enforce.
+      WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -427,6 +456,33 @@ services:
       MODEL_GATEWAY_USER_PROFILE_PREFIX: ${MODEL_GATEWAY_USER_PROFILE_PREFIX:-false}
       # EP-6 S10: the Space's agent role catalogue on a Do launch. Only the literal true.
       MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE: ${MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE:-false}
+      # EP-2 S8: the composer's wide-research entry (estimate route + wide_research on a Do run). Only the literal true.
+      WIDE_RESEARCH_ENTRY_ENABLED: ${WIDE_RESEARCH_ENTRY_ENABLED:-false}
+      # EP-2 S5: deep research shows an editable plan first (research_phase plan|run). Only the literal true.
+      DEEP_RESEARCH_PLAN_TURN: ${DEEP_RESEARCH_PLAN_TURN:-false}
+      # EP-3 S5: typed context references on the send (document, skill, own Space). Only the literal true.
+      MODEL_GATEWAY_CONTEXT_REFS_ENABLED: ${MODEL_GATEWAY_CONTEXT_REFS_ENABLED:-false}
+      # EP-3 S6: ask for a change to a selected range of an artifact (needs CONTEXT_REFS and artifact revisions on).
+      # Only the literal true.
+      MODEL_GATEWAY_SELECTION_EDIT_ENABLED: ${MODEL_GATEWAY_SELECTION_EDIT_ENABLED:-false}
+      # EP-3 S7: read-only thread_outline/thread_search/thread_read over attached threads (needs CONTEXT_REFS too). Only the literal true.
+      MODEL_GATEWAY_THREAD_REFERENCES_ENABLED: ${MODEL_GATEWAY_THREAD_REFERENCES_ENABLED:-false}
+      # EP-7 S1: thread goals (goal routes and the goal recited on a Continue turn). Needs SESSION_CORE_THREAD_GOALS_ENABLED.
+      # Only the literal true.
+      MODEL_GATEWAY_THREAD_GOALS_ENABLED: ${MODEL_GATEWAY_THREAD_GOALS_ENABLED:-false}
+      # EP-12 S10: the owner's conversation export route (JSON and Markdown). Only the literal true.
+      MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}
+      # EP-12 S14: the owner's share snapshot routes (/v1/threads/:id/snapshots, /v1/snapshots/:id). Needs SESSION_THREAD_SHARES_ENABLED. Only the literal true.
+      MODEL_GATEWAY_THREAD_SHARES: ${MODEL_GATEWAY_THREAD_SHARES:-false}
+      # EP-12 S5: the Agent API read and control routes (/v1/agent/*) for API keys with agent:runs. Only the literal true.
+      MODEL_GATEWAY_AGENT_API: ${MODEL_GATEWAY_AGENT_API:-false}
+      # Assistant navigation durable runs (POST /v1/ai/assistant-navigation). Only the literal true.
+      MODEL_GATEWAY_ASSISTANT_NAVIGATION: ${MODEL_GATEWAY_ASSISTANT_NAVIGATION:-false}
+      # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the
+      # literal true.
+      MODEL_GATEWAY_GOAL_AUTO_CONTINUE: ${MODEL_GATEWAY_GOAL_AUTO_CONTINUE:-false}
+      # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
+      MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}
@@ -584,6 +640,8 @@ services:
       # browser_attach_unavailable. All layers must be on: broker BROWSER_BROKER_HUMAN_BROWSE_ENABLED,
       # Quarry QUARRY_EDGE__ATTACH and the gateway BROWSER_ATTACH too. Only `on` enables it.
       MODEL_GATEWAY_BROWSER_ATTACH: ${MODEL_GATEWAY_BROWSER_ATTACH:-off}
+      # Enable only after the matching execution and Quarry policy protocol is deployed.
+      MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED: ${MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED:-off}
       # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
       # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
       MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
@@ -650,6 +708,12 @@ services:
       MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS: ${MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS:-}
       # EP-14 S5: write per-round run timing through session-core's RunLedgerService. Only the literal true.
       MODEL_GATEWAY_RUN_TIMING_PERSIST: ${MODEL_GATEWAY_RUN_TIMING_PERSIST:-false}
+      # EP-14 S7: the request inspector route GET /v1/runs/:run_id/requests/:call_seq. Only the literal true.
+      MODEL_GATEWAY_REQUEST_INSPECTOR: ${MODEL_GATEWAY_REQUEST_INSPECTOR:-false}
+      # EP-3 S2: shadow dual-write of artifact revisions into session-core (off|shadow|on; any other value fails startup).
+      MODEL_GATEWAY_ARTIFACT_REVISIONS: ${MODEL_GATEWAY_ARTIFACT_REVISIONS:-off}
+      # EP-3 S4: the person's own edit and restore of a thread artifact (needs MODEL_GATEWAY_ARTIFACT_REVISIONS=on). Only the literal true.
+      MODEL_GATEWAY_ARTIFACT_EDITING: ${MODEL_GATEWAY_ARTIFACT_EDITING:-false}
       # Source-check deadlines in seconds. The code default is 90 per artifact
       # and 150 for the shared tool phase, and the code treats an empty value as
       # unset. Here `:-120` fills in an empty value too, so the per-artifact
@@ -849,6 +913,12 @@ services:
       #   the intent layer's cheapest mode; the REPORT is written by the turn's
       #   own model, never this one.
       DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
+      # EP-2 S6: the claim ledger and the gap-driven second pass of deep research. Only the literal true.
+      DEEP_RESEARCH_SECOND_PASS: ${DEEP_RESEARCH_SECOND_PASS:-false}
+      # EP-2 S7: org knowledge per sub-query in deep research; knowledge_only research allowed. Only the literal true.
+      DEEP_RESEARCH_KNOWLEDGE_SOURCES: ${DEEP_RESEARCH_KNOWLEDGE_SOURCES:-false}
+      # EP-2 S7: selected connected accounts in deep research (also needs CONNECTOR_ASK_READS_ENABLED). Only the literal true.
+      DEEP_RESEARCH_CONNECTOR_SOURCES: ${DEEP_RESEARCH_CONNECTOR_SOURCES:-false}
       # SEMANTIC_CACHE_URL/SEMANTIC_CACHE_TTL_SECS/SEMANTIC_CACHE_DATAPLANE_ENABLED
       # were removed 2026-09-17 — the code that read them (model-gateway's
       # langcache module) was already reduced to a documentation tombstone on
@@ -872,6 +942,8 @@ services:
       # WS23-S5: Ask-mode connector reads (read_provider_action) for the connections the person selected, with citations
       # and no body text in history. Off by default; only the literal `true`. Reads go to integration-corev2.
       CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
+      # EP-10 S8: the suggest_connector tool and its connector_suggestion card in Ask. Only the literal true.
+      CONNECTOR_SUGGESTIONS_ENABLED: ${CONNECTOR_SUGGESTIONS_ENABLED:-false}
       INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
       # information-core (Application Plane weather/traffic/news aggregator,
       # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
@@ -957,6 +1029,11 @@ services:
       # token, minted after auth-core's POST /api/v2/auth/step-up). Only the literal `shadow` (log, let through) or
       # `enforce` (refuse) turns it on; anything else is off. A denial never needs it.
       APPROVAL_STEP_UP_ENFORCED: ${APPROVAL_STEP_UP_ENFORCED:-off}
+      # EP-10-S1: the owner-only decrypted preview of a pending write approval, never stored. Only the literal true;
+      # the SPA's VITE_APPROVAL_WRITE_PREVIEW must be on too for the disclosure to show.
+      APPROVAL_WRITE_PREVIEW_ENABLED: ${APPROVAL_WRITE_PREVIEW_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1127,6 +1204,8 @@ services:
       SESSION_CORE_MESSAGE_VERSIONS_ENABLED: ${SESSION_CORE_MESSAGE_VERSIONS_ENABLED:-false}
       # WS13-S3: the approval decision audit event and its provenance record. Off by default.
       APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
       # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
       SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
@@ -1143,6 +1222,27 @@ services:
       SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS: ${SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS:-7}
       # EP-14 S5: the GetRunTiming read. Only the literal true.
       SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}
+      # EP-12 S1: a child run inherits its parent's origin token. Only the literal true turns it on.
+      SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}
+      # EP-12 S4: admit the api_key principal on its closed method list. Only the literal true.
+      SESSION_CORE_API_KEY_PRINCIPAL: ${SESSION_CORE_API_KEY_PRINCIPAL:-false}
+      # EP-14 S7: the request inspector read (GetRequestSnapshot). Only the literal true.
+      SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
+      # EP-3 S2: the ArtifactRevisionService store. Only the literal true.
+      SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}
+      # EP-7 S1: the ThreadGoalService store. Only the literal true.
+      SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
+      # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.
+      SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
+      # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.
+      SESSION_THREAD_SHARES_ENABLED: ${SESSION_THREAD_SHARES_ENABLED:-false}
+      # EP-12 S15: the owner's ImportThread (ThreadExportService). Only the literal true.
+      SESSION_THREAD_IMPORT_ENABLED: ${SESSION_THREAD_IMPORT_ENABLED:-false}
+      # EP-11 S2: the SkillVersionService read of immutable skill versions. Only the literal true;
+      # set it together with SKILL_VERSIONS_API on capability-core.
+      SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
+      # EP-11 S9: only the literal `true` turns it on.
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -1168,6 +1268,12 @@ services:
       ORG_POLICY_MAX_STALE: ${ORG_POLICY_MAX_STALE:-900}
       ORG_POLICY_FAIL_CLOSED: ${ORG_POLICY_FAIL_CLOSED:-false}
       ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}
+      # EP-9 C2 retention sweeper: off|dry_run|enforce, default off; any other value is dry_run, never enforce.
+      # This build only counts (enforce runs dry). Needs SESSION_ORG_CORE_SERVICE_TOKEN with org:retention-policy:read:any.
+      SESSION_RETENTION_SWEEP: ${SESSION_RETENTION_SWEEP:-off}
+      SESSION_RETENTION_SWEEP_INTERVAL_SECS: ${SESSION_RETENTION_SWEEP_INTERVAL_SECS:-21600}
+      # EP-11 S4 skill lint: off | report | enforce.
+      SKILL_LINT_MODE: ${SKILL_LINT_MODE:-off}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as
@@ -1469,6 +1575,8 @@ services:
       - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
+      # Must match model-gateway; never place this value in source control.
+      BROWSER_ATTACH_COMPAT_HMAC_KEY:
       RUST_LOG: info
       # Sandbox spawn bounds (WS06-S7). Per-stream output cap in bytes (the child is killed
       # past it), process-wide concurrent sandbox spawns, and how long a spawn waits for a
@@ -1486,6 +1594,11 @@ services:
       EXECUTION_SANDBOX_MAX_FILE_MB: ${EXECUTION_SANDBOX_MAX_FILE_MB:-64}
       EXECUTION_SANDBOX_MAX_OPEN_FILES: ${EXECUTION_SANDBOX_MAX_OPEN_FILES:-1024}
       CODE_INTERPRETER_ENFORCEMENT_REPORT: ${CODE_INTERPRETER_ENFORCEMENT_REPORT:-false}
+      OFFICE_PREVIEW_PAGES: ${OFFICE_PREVIEW_PAGES:-3}
+      # EP-9 E4: shell-rule proposals narrow WS13-S7's rule proposals, so execution-core reads
+      # both switches and refuses to start with the child on and the parent off.
+      APPROVAL_SHELL_RULE_PROPOSALS_ENABLED: ${APPROVAL_SHELL_RULE_PROPOSALS_ENABLED:-false}
+      APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}
       # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
       # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
       EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}
@@ -1532,6 +1645,8 @@ services:
       EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}
       # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
       EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
+      # EP-2-S10: the Do loop's long-page reader (read_page, find_in_page) over held pages. Off by default; only the literal true enables it, and it needs EXECUTION_RESULT_HANDLES on.
+      EXECUTION_WEB_READER: ${EXECUTION_WEB_READER:-false}
       # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and
       # open tool round to session-core at the end of a round, before an effectful call
       # and before a pause for approval. OFF by default; with it off the loop makes no
@@ -1584,6 +1699,8 @@ services:
       # WS13-S4: within one run, a call the user already declined (same tool, same arguments) is refused from the
       # run's approvals instead of being asked again. Off by default; only the literal `true` turns it on.
       APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}
+      # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
+      APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →
@@ -1633,6 +1750,9 @@ services:
       # a first proof on the subscription sets this to 2.
       WIDE_RESEARCH_FAN_OUT_ENABLED: ${WIDE_RESEARCH_FAN_OUT_ENABLED:-true}
       WIDE_RESEARCH_FAN_OUT_CONCURRENCY: ${WIDE_RESEARCH_FAN_OUT_CONCURRENCY:-4}
+      # Wave 3 EP-2 S9: the token budget all children of one fan-out call may spend (metered tokens; subscription rounds count 0). Only the literal true enforces it; off, a spent budget is logged and every item still starts.
+      WIDE_RESEARCH_CHILD_BUDGET_ENFORCED: ${WIDE_RESEARCH_CHILD_BUDGET_ENFORCED:-false}
+      WIDE_RESEARCH_CHILD_TOKEN_BUDGET: ${WIDE_RESEARCH_CHILD_TOKEN_BUDGET:-400000}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
@@ -1691,6 +1811,8 @@ services:
       # Do run only with MCP_DO_TOOLS=read (read-class tools; `all` is blocked) AND TOOL_CLASS_GATE=enforce; MCP_DO_TOOL_CAP bounds the offer.
       # Roll execution-core first, then capability-core, then shadow, then enforce.
       TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}
+      # Narrow browser-only signed class and stored-policy enforcement.
+      BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       MCP_DO_TOOLS: ${MCP_DO_TOOLS:-off}
       MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}
       # Per-call capability decisions are signed by capability-core and
@@ -1769,6 +1891,11 @@ services:
       # ZDR. Off by default; only the value `1` turns it on (unlike the `true` switches). The Verevon gateway's
       # BROWSER_DO_ENABLED decides whether a bearer is minted at all.
       EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
+      # EP-1 S2: a wall the person may clear (sign-in, challenge) pauses the run for them. Only the literal true.
+      EXECUTION_BROWSER_HUMAN_ASSIST: ${EXECUTION_BROWSER_HUMAN_ASSIST:-false}
+      # EP-1 S5: how long a takeover pause waits for the browser back, whole seconds clamped to 300-3600. A setting,
+      # not a switch: only a takeover pause reads it.
+      EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
@@ -1872,6 +1999,11 @@ services:
       # reconciled to the same value manually until the credential-rollout
       # ritual (verevon-roadmap.md) runs — not a gap unique to this token.
       EXECUTION_ORG_CORE_SERVICE_TOKEN: ${EXECUTION_ORG_CORE_SERVICE_TOKEN:-}
+      # EP-9 W3: org browser-site allow/block lists on web fetches. off, shadow (logs only) or enforce; an unknown
+      # value reads as enforce.
+      WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}
+      # EP-9 E3: the code_interpreter egress ceiling (off, registries, allowlist). Unknown reads as off.
+      EXECUTION_SANDBOX_EGRESS: ${EXECUTION_SANDBOX_EGRESS:-off}
       EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS:-}
       EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS:-15}
     depends_on:
@@ -2027,6 +2159,8 @@ services:
       SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
       # WS20-S8: approval guards (auto-pause on expiry and failures, renewal refusal). Only the literal `true` enables them.
       CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}
+      # EP-6-S2: Run now, a manual schedule fire through the same Control fire authorization. Only the literal `true` enables it.
+      CRON_RUN_NOW_ENABLED: ${CRON_RUN_NOW_ENABLED:-false}
       # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.
       CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}
       ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}
@@ -2034,6 +2168,7 @@ services:
       CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED: ${CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED:-false}
       # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
       TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
+      BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
       # inference-core (review it). The two JWKS/ISSUER vars above verify
@@ -2069,6 +2204,12 @@ services:
       # WS19-S6: the skill bundle HTTP routes (PUT, GET and DELETE /api/v1/skills/{id}/bundle). Off by default (404);
       # only the literal `true` turns them on.
       SKILL_BUNDLES_ENABLED: ${SKILL_BUNDLES_ENABLED:-false}
+      # EP-5 S6: deck templates (skill bundles carrying templates/deck-theme.json, checked on upload and listed as such)
+      # and the bundle read rule. Off by default; only the literal `true`.
+      SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}
+      SKILL_BUNDLE_READ_RULE_ENABLED: ${SKILL_BUNDLE_READ_RULE_ENABLED:-false}
+      # EP-11 S4 skill lint: off | report | enforce.
+      SKILL_LINT_MODE: ${SKILL_LINT_MODE:-off}
       # Cost controls for the learning review (WS07-S10). Off unless the switch is
       # exactly true; the bounds apply only then. With no counter store wired the
       # day caps skip every review (budget_unavailable), so keep the switch false.
@@ -2077,6 +2218,23 @@ services:
       LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS: ${LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS:-60000}
       LEARNING_REVIEW_MAX_PER_USER_PER_DAY: ${LEARNING_REVIEW_MAX_PER_USER_PER_DAY:-5}
       LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}
+      # EP-11 S7 /learn: a person's request to distil one thread into a skill proposal. Off unless
+      # exactly true; it also needs LEARNING_REVIEW_ENABLED and a review counter (else budget_unavailable).
+      LEARN_COMMAND_ENABLED: ${LEARN_COMMAND_ENABLED:-false}
+      # EP-11 S2: GET /api/v1/skills/{id}/versions (404 while off). Only the literal true; set it
+      # together with SKILL_VERSIONS_API on session-core.
+      SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
+      # EP-11 S6: skill routes read and write templates and presets (authored-behaviour kinds). Only the literal true.
+      AUTHORED_KINDS_ENABLED: ${AUTHORED_KINDS_ENABLED:-false}
+      # EP-11 S5: edits of accepted skills go through a draft (publish/discard/restore routes). Needs session-core 0110. Only the literal true enables.
+      SKILL_DRAFT_PUBLISH: ${SKILL_DRAFT_PUBLISH:-false}
+      # EP-11 S5: keep replaced skill bundles per version. Keep off until D2-379/D2-383 (bundle read authz) are fixed. Needs session-core 0108+0110 and capability-core 0037.
+      SKILL_BUNDLE_RETENTION: ${SKILL_BUNDLE_RETENTION:-false}
+      # EP-11 S8: import a skill from a SKILL.md or a zip (needs SKILL_BUNDLES_ENABLED and SKILL_DRAFT_PUBLISH). Keep off until
+      # D2-379/D2-383 are fixed. Only the literal true.
+      SKILL_IMPORT_ENABLED: ${SKILL_IMPORT_ENABLED:-false}
+      # EP-11 S9: only the literal `true` turns it on.
+      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with
@@ -2258,6 +2416,8 @@ services:
       SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}
       # WS06-S6: refuse a token with no retention claim at all. Exact match, only "on" enables; a token that says zdr:true is refused regardless.
       SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM: ${SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM:-off}
+      # EP-9 E3 (D-E2): grant an egress-capable lease at off and record its tier instead of refusing it. Only the literal true.
+      SANDBOX_MANAGER_EGRESS_TIERS: ${SANDBOX_MANAGER_EGRESS_TIERS:-false}
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
@@ -2327,6 +2487,11 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
       BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
+      # Browser access consults Control-owned site decisions when explicitly enabled.
+      BROWSER_BROKER_SITE_POLICY: ${BROWSER_BROKER_SITE_POLICY:-off}
+      BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED: ${BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED:-0}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      BROWSER_BROKER_ORG_CORE_TOKEN: ${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:-}
       # API-key grants (INNH-10 MP-2, internal/server/key_grants.go). OFF unless
       # exactly 1, true or on. A key grant lives KEY_GRANT_TTL_SECONDS (clamped
       # 30-900 s, never renewed); one key holds at most MAX_ACTIVE_GRANTS_PER_KEY

@@ -1018,6 +1018,46 @@ func TestSkillBundleReadRPCsAreFlagGatedAndMapTheStore(t *testing.T) {
 	}
 }
 
+func TestListReportsDeckTemplate(t *testing.T) {
+	t.Parallel()
+
+	store := &skillBundleReaderStub{
+		summaries: []skillbundle.Summary{
+			{SkillID: "skill-brand", ManifestSHA256: "m1", DeckTemplate: true},
+			{SkillID: "skill-xlsx", ManifestSHA256: "m2"},
+		},
+	}
+	ctx := verifiedGRPCContext(t, "triodelab")
+
+	// SKILL_DECK_TEMPLATES_ENABLED off: no summary claims a template, whatever the store derived.
+	off := newTestServer().WithSkillBundles(store, true)
+	list, err := off.ListSkillBundles(ctx, &mpv1.ListSkillBundlesRequest{})
+	if err != nil {
+		t.Fatalf("ListSkillBundles: %v", err)
+	}
+	for _, bundle := range list.Bundles {
+		if bundle.DeckTemplate {
+			t.Fatalf("switch off reported %s as a deck template", bundle.SkillId)
+		}
+	}
+
+	on := newTestServer().WithSkillBundles(store, true).WithDeckTemplates(true)
+	list, err = on.ListSkillBundles(ctx, &mpv1.ListSkillBundlesRequest{})
+	if err != nil {
+		t.Fatalf("ListSkillBundles: %v", err)
+	}
+	if len(list.Bundles) != 2 || !list.Bundles[0].DeckTemplate || list.Bundles[1].DeckTemplate {
+		t.Fatalf("bundles = %+v, want only skill-brand flagged", list.Bundles)
+	}
+
+	// The template switch never opens the bundle reads on its own.
+	dark := newTestServer().WithSkillBundles(store, false).WithDeckTemplates(true)
+	list, err = dark.ListSkillBundles(ctx, &mpv1.ListSkillBundlesRequest{})
+	if err != nil || len(list.Bundles) != 0 {
+		t.Fatalf("bundles off, templates on = %+v, %v; want an empty list", list, err)
+	}
+}
+
 func TestSkillPromotionRPCs(t *testing.T) {
 	s := newTestServer()
 	ctx := verifiedGRPCContext(t, "triodelab")

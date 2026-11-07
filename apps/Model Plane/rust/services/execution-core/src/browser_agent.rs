@@ -258,6 +258,9 @@ pub struct BrowserObservation {
     /// opaque evidence handles, never CDP backend node ids or selectors.
     pub snapshot_generation: Option<u32>,
     pub snapshot_targets: Vec<BrowserSnapshotTarget>,
+    /// Bounded names from Quarry's rendered top-level accessibility tree.
+    /// Used for completion checks, including controls outside the action index.
+    pub rendered_controls: Vec<String>,
     pub error_message: String,
     /// Quarry's access-state signal for this page. `None` when Quarry sent
     /// none (an older Quarry, or a page that is an ordinary page).
@@ -341,6 +344,12 @@ impl BrowserChallenge {
     #[must_use]
     pub fn is_strong(&self) -> bool {
         self.strength == ChallengeStrength::Strong
+    }
+
+    /// A site challenge for which Quarry offers no remaining recovery action.
+    #[must_use]
+    pub(crate) fn requires_user(&self) -> bool {
+        self.is_strong() && self.recovery != ChallengeRecovery::Available
     }
 }
 
@@ -530,6 +539,9 @@ pub trait BrowserEventSink: Send + Sync {
     async fn action_dispatched(&self, config: &PlanConfig, action: &BrowserAction);
     /// Emit that `observation` was received for the run/plan in `config`.
     async fn observation_received(&self, config: &PlanConfig, observation: &BrowserObservation);
+    /// Best-effort owner-scoped storage of a planner's actual final answer.
+    /// Never called for zero-retention runs or a completion without an answer.
+    async fn record_final_answer(&self, _config: &PlanConfig, _answer: &str) {}
     /// Emit that a user paused the run/plan in `config` (Phase 2 B5).
     async fn run_paused(&self, config: &PlanConfig);
     /// Emit that a user resumed the run/plan in `config` (Phase 2 B5).
@@ -806,12 +818,14 @@ fn redaction_stamp_failure(
 pub struct AttachConfig {
     /// The person's Quarry run id (the attach grant's `resource_id`).
     pub session_run_id: String,
+    pub target_tab: Option<crate::quarry_agent::AttachTabTarget>,
 }
 
 /// D5: a person who took the agent tab has ten minutes to give it back.
 pub const DEFAULT_TAKEOVER_WAIT_S: u32 = 600;
 /// How often a paused attached run checks whether the tab came back.
 pub const TAKEOVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const RECENT_SUCCESS_LIMIT: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct AgentPlan {
@@ -825,6 +839,8 @@ pub struct AgentPlan {
     last_planner_tokens: u64,
     /// Recoverable step failures (only fed when a planner is selected).
     failures: FailureBudget,
+    /// Confirmed steps, carrying no page content or action arguments.
+    recent_successes: Vec<(i32, ActionType)>,
     no_progress: NoProgressDetector,
     /// Page URLs observed so far (bounded); `back` may only return to the
     /// page before the current one.
@@ -847,6 +863,8 @@ pub struct AgentPlan {
     /// E3.2-c: set by `decide_next_action` for the step in hand: a redirect
     /// only makes sense when a planner will read it.
     planner_active: bool,
+    /// A bounded planner answer, separate from lifecycle and verification text.
+    final_answer: Option<String>,
     /// E3.3-f: texts taken from the run's steer queue, waiting for the next
     /// planner call (shown once). At most `MAX_QUEUED_MESSAGES`.
     steer_pending: Vec<String>,
@@ -859,6 +877,7 @@ impl AgentPlan {
         Self {
             config,
             failures,
+            recent_successes: Vec::new(),
             no_progress: NoProgressDetector::default(),
             history: admission::UrlHistory::default(),
             focus_hint: None,
@@ -873,8 +892,20 @@ impl AgentPlan {
             redirect: None,
             redirects_used: 0,
             planner_active: false,
+            final_answer: None,
             steer_pending: Vec::new(),
         }
+    }
+
+    fn note_success(&mut self, action: &ActionType, status: &ObservationStatus) {
+        if *status != ObservationStatus::Success {
+            return;
+        }
+        if self.recent_successes.len() == RECENT_SUCCESS_LIMIT {
+            self.recent_successes.remove(0);
+        }
+        self.recent_successes
+            .push((self.current_step, action.clone()));
     }
 
     /// E3.2-c: take a person's redirect for `action` when the run may use one
@@ -1127,6 +1158,16 @@ pub struct BrowserAgentLoopResult {
     pub failure_kind: Option<BrowserFailureKind>,
 }
 
+/// Persist only a planner-supplied answer and never cross a durable boundary for ZDR.
+async fn record_completed_answer(plan: &AgentPlan, sink: Option<&dyn BrowserEventSink>) {
+    if plan.config.zdr || plan.status != PlanStatus::Completed {
+        return;
+    }
+    if let (Some(sink), Some(answer)) = (sink, plan.final_answer.as_deref()) {
+        sink.record_final_answer(&plan.config, answer).await;
+    }
+}
+
 /// Extract the host portion of a URL without bringing in a full URL parser.
 /// Handles `scheme://[user:pass@]host[:port][/path...]` and lowercases the
 /// result. Returns `None` for inputs that lack a `://` separator or where
@@ -1209,6 +1250,14 @@ pub fn plan_next_action(
         plan.observations.push(obs.clone());
         if plan.history.observe(&obs.page_url) {
             plan.focus_hint = None;
+        }
+
+        if let Some(challenge) = obs.challenge.as_ref().filter(|challenge| challenge.requires_user()) {
+            plan.status = PlanStatus::Failed;
+            return PlanStepResult::Stopped {
+                reason: bot_wall_reason(challenge),
+                kind: BrowserFailureKind::Blocked,
+            };
         }
 
         if obs.status == ObservationStatus::Failed {
@@ -1373,11 +1422,13 @@ pub async fn run_browser_agent_loop(
                 org_id: &plan.config.org_id,
                 run_id: &attach.session_run_id,
                 grant_id: &plan.config.grant_id,
-                // The tab opens blank; the loop's first step navigates to the
+                attach_tab: attach.target_tab.clone(),
+                // A new agent tab opens blank; the loop's first step navigates to the
                 // start URL as an admitted agent step (one navigation, not two).
                 start_url: None,
                 max_steps: Some(max_steps),
                 max_runtime_s: Some(runtime_s),
+                policy: plan.config.policy.clone(),
                 request_id: plan.config.request_id.as_deref(),
             })
             .await
@@ -1453,6 +1504,7 @@ pub async fn run_browser_agent_loop(
     let mut abort_reason = None;
     let mut resource_limit = None;
     let mut failure_kind = None;
+    let mut needs_manual_handoff = false;
     // WS12.S4: the missing-stamp warning is logged once per run.
     let mut stamp_warned = false;
     let summary = loop {
@@ -1503,6 +1555,7 @@ pub async fn run_browser_agent_loop(
                             plan.status = PlanStatus::Failed;
                             break reason.to_owned();
                         }
+                        plan.note_success(&action.action_type, &obs.status);
                         // Best-effort: surface the observation we just received.
                         if let Some(sink) = sink {
                             sink.observation_received(&plan.config, &obs).await;
@@ -1722,7 +1775,10 @@ pub async fn run_browser_agent_loop(
                     }
                 }
             }
-            PlanStepResult::Completed(reason) => break reason,
+            PlanStepResult::Completed(reason) => {
+                record_completed_answer(&plan, sink).await;
+                break reason;
+            },
             PlanStepResult::ResourceExhausted { reason, limit } => {
                 resource_limit = Some(limit);
                 break reason;
@@ -1740,6 +1796,11 @@ pub async fn run_browser_agent_loop(
                 pending = last;
             }
             PlanStepResult::Stopped { reason, kind } => {
+                needs_manual_handoff = kind == BrowserFailureKind::Blocked
+                    && last
+                        .as_ref()
+                        .and_then(|observation| observation.challenge.as_ref())
+                        .is_some_and(BrowserChallenge::requires_user);
                 failure_kind = Some(kind);
                 break reason;
             }
@@ -1768,33 +1829,48 @@ pub async fn run_browser_agent_loop(
             attach,
             ..
         } => {
-            // WS8.J: a run that completed marks its tab (`deliverable` by
-            // default) so the release keeps it open for the person. Every other
-            // exit marks nothing. A failed mark is logged and never blocks the
-            // release.
-            if plan.status == PlanStatus::Completed
-                && plan.config.tab_mark_on_complete != crate::quarry_agent::TabMark::None
+            use crate::quarry_agent::{AttachDisposition, TabMark};
+
+            // A confirmed terminal challenge can hand the exact agent-created
+            // tab to its owner without completing the Model run. A borrowed
+            // tab is returned by Quarry on either disposition.
+            let handoff = needs_manual_handoff
+                && plan.status == PlanStatus::Failed
+                && !plan.config.zdr;
+            let mark = if attach.attached_existing_tab
+                || plan.config.tab_mark_on_complete == TabMark::None
             {
-                if let Err(e) = client
+                TabMark::None
+            } else if handoff {
+                TabMark::Handoff
+            } else if plan.status == PlanStatus::Completed {
+                plan.config.tab_mark_on_complete
+            } else {
+                TabMark::None
+            };
+            let mut disposition = attach_disposition(&plan.status);
+            if mark != TabMark::None {
+                match client
                     .mark_tab(crate::quarry_agent::MarkTabParams {
                         org_id: &plan.config.org_id,
                         run_id: session_run_id,
                         tab_id: &attach.tab_id,
                         grant_id: &plan.config.grant_id,
-                        mark: plan.config.tab_mark_on_complete,
+                        mark,
                         request_id: plan.config.request_id.as_deref(),
                     })
                     .await
                 {
-                    warn!(
+                    Ok(()) if handoff => disposition = AttachDisposition::Release,
+                    Ok(()) => {}
+                    Err(e) => warn!(
                         plan_id = %plan.config.plan_id,
                         error = %e,
-                        mark = plan.config.tab_mark_on_complete.as_str(),
-                        "browser-agent mark_tab failed; releasing anyway"
-                    );
+                        mark = mark.as_str(),
+                        "browser-agent mark_tab failed; ending attachment without handoff"
+                    ),
                 }
             }
-            let disposition = attach_disposition(&plan.status);
             if let Err(e) = client
                 .release_attach(
                     &plan.config.org_id,
@@ -1867,8 +1943,8 @@ impl QuarryRun {
     }
 }
 
-/// D6b: an attachment is released when the run completed and aborted on every
-/// other exit (failure, cancel, a limit, an approval stop, a plan error).
+/// Default attachment disposition. A successful manual handoff explicitly
+/// overrides the default abort for a failed run.
 #[must_use]
 pub(crate) fn attach_disposition(status: &PlanStatus) -> crate::quarry_agent::AttachDisposition {
     if *status == PlanStatus::Completed {
@@ -2095,12 +2171,14 @@ async fn decide_next_action(
     };
     // The first step of a run with a start URL is a navigation the run was
     // asked for, not a decision: no planner call, no tokens (F11).
-    let deterministic_first_goto = candidate.action_type == ActionType::Goto
-        && plan.current_step == 1
-        && last_observation.is_none();
+    let starts_in_existing_tab = plan.config.attach.as_ref()
+        .is_some_and(|attach| attach.target_tab.is_some());
+    let deterministic_first_step = plan.current_step == 1
+        && last_observation.is_none()
+        && (candidate.action_type == ActionType::Goto || starts_in_existing_tab);
     let action = match planner {
         None => candidate,
-        Some(_) if deterministic_first_goto => candidate,
+        Some(_) if deterministic_first_step => candidate,
         Some(planner) => {
             // The planner reads the hygiene view of the page, never the raw
             // observation; the risk gate and the bot-wall check below keep
@@ -2145,7 +2223,10 @@ async fn decide_next_action(
                     redirect: redirect_line.as_deref(),
                     steer: steer_lines.as_deref(),
                 };
-                match planner.plan_next(&context).await {
+                match planner
+                    .plan_next_with_progress(&context, &plan.recent_successes)
+                    .await
+                {
                     Ok(reply) => break Ok(reply),
                     Err(e) => {
                         attempts += 1;
@@ -2238,6 +2319,35 @@ async fn decide_next_action(
         action
     };
 
+    // A model can omit the leading `@` from an observed ref. Resolve that one
+    // spelling only against the very same snapshot and frame; never guess an
+    // element or weaken Quarry's own stale-target checks.
+    let action = if planner.is_some() {
+        let action_name = action.action_type.as_str();
+        match bind_observed_target(action, last_observation) {
+            Ok(bound) => bound,
+            Err(()) => {
+                const KIND: &str = "unobserved_target";
+                const ADVICE: &str = "choose an exact target and frame from the latest observation";
+                warn!(plan_id = %plan.config.plan_id, kind = KIND, "browser action proposal rejected before Quarry");
+                let verdict = plan.failures.record(ActionFailure {
+                    step: plan.current_step,
+                    action_type: action_name,
+                    kind: KIND,
+                    advice: ADVICE,
+                });
+                if let FailureVerdict::Stop(reason) = verdict {
+                    plan.status = PlanStatus::Failed;
+                    return PlanStepResult::Stopped { reason, kind: BrowserFailureKind::RepeatedFailure };
+                }
+                plan.status = PlanStatus::Executing;
+                return PlanStepResult::Rejected;
+            }
+        }
+    } else {
+        action
+    };
+
     if planner.is_some() && plan.no_progress.observe(&action, last_observation) {
         plan.status = PlanStatus::Failed;
         return PlanStepResult::Stopped {
@@ -2252,6 +2362,43 @@ async fn decide_next_action(
         plan.note_dispatch(dispatched, last_observation);
     }
     result
+}
+
+/// Verify a proposed opaque target against the last Quarry observation.
+/// Bare `e` + decimal digits is repaired only to a unique observed `@e…`.
+fn bind_observed_target(
+    mut action: BrowserAction,
+    last: Option<&BrowserObservation>,
+) -> Result<BrowserAction, ()> {
+    let Some(bound) = action.target.as_mut() else { return Ok(action) };
+    let observed = last.ok_or(())?;
+    if observed.dom_snapshot_ref != bound.snapshot_id
+        || observed.snapshot_generation != Some(bound.generation)
+    {
+        return Err(());
+    }
+    let exact_count = observed.snapshot_targets.iter()
+        .filter(|target| target.ref_id == bound.ref_id && target.frame_id == bound.frame_id)
+        .count();
+    if exact_count == 1 {
+        return Ok(action);
+    }
+    if exact_count != 0 {
+        return Err(());
+    }
+    let Some(digits) = bound.ref_id.strip_prefix('e') else { return Err(()) };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    let repaired = format!("@{}", bound.ref_id);
+    if observed.snapshot_targets.iter()
+        .filter(|target| target.ref_id == repaired && target.frame_id == bound.frame_id)
+        .count() != 1
+    {
+        return Err(());
+    }
+    bound.ref_id = repaired;
+    Ok(action)
 }
 
 /// What a planner `done` means for the run (the honest `done`): `success`
@@ -2280,7 +2427,27 @@ fn finish_from_done(
     }
     match payload.outcome {
         DoneOutcome::Success => {
+            if is_finn_oslo_apartment_search(&plan.config)
+                && !last_observation.is_some_and(finn_oslo_apartment_results_visible)
+            {
+                let failure = ActionFailure {
+                    step: plan.current_step,
+                    action_type: "done",
+                    kind: "filters_unverified",
+                    advice: "Open FINN's property results, apply both Oslo and Leilighet, and verify both active filter chips and the result count before completing.",
+                };
+                if let FailureVerdict::Stop(_) = plan.failures.record(failure) {
+                    return stop(
+                        plan,
+                        BrowserFailureKind::Incomplete,
+                        "FINN did not show the active Oslo and Leilighet filters with a result count",
+                    );
+                }
+                plan.status = PlanStatus::Executing;
+                return PlanStepResult::Rejected;
+            }
             plan.status = PlanStatus::Completed;
+            plan.final_answer = (!payload.answer.is_empty()).then(|| payload.answer.clone());
             PlanStepResult::Completed(if payload.answer.is_empty() {
                 "agent reported task complete".to_owned()
             } else {
@@ -2306,22 +2473,70 @@ fn finish_from_done(
     }
 }
 
+fn is_finn_oslo_apartment_search(config: &PlanConfig) -> bool {
+    let goal = config.system_prompt.to_lowercase();
+    let words: Vec<_> = goal.split(|ch: char| !ch.is_alphanumeric()).collect();
+    config.attach.is_some()
+        && config.allowed_domains.iter().any(|host| is_finn_host(host))
+        && words.contains(&"finn")
+        && words.contains(&"oslo")
+        && words.iter().any(|word| matches!(*word, "leilighet" | "leilighetene" | "leiligheter" | "apartment" | "apartments"))
+        && words.iter().any(|word| matches!(*word, "åpne" | "finn" | "søk" | "vis" | "open" | "search" | "show"))
+}
+
+fn is_finn_host(host: &str) -> bool {
+    matches!(host, "finn.no" | "www.finn.no")
+}
+
+fn finn_oslo_apartment_results_visible(observation: &BrowserObservation) -> bool {
+    if observation.status != ObservationStatus::Success {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&observation.page_url) else {
+        return false;
+    };
+    if !url.host_str().is_some_and(is_finn_host)
+        || !matches!(url.path(), "/realestate/homes/search.html" | "/realestate/lettings/search.html")
+    {
+        return false;
+    }
+    let labels: Vec<_> = observation
+        .rendered_controls
+        .iter()
+        .map(|label| label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())
+        .collect();
+    ["oslo", "leilighet"].into_iter().all(|filter| {
+        labels.iter().any(|label| {
+            label == &format!("vis filter {filter}") || label == &format!("fjern filter {filter}")
+        })
+    }) && labels.iter().any(|label| {
+        label.strip_suffix(" resultater").or_else(|| label.strip_suffix(" resultat")).is_some_and(|count| {
+            count.chars().any(|ch| ch.is_ascii_digit())
+                && count.chars().all(|ch| ch.is_ascii_digit() || ch == ' ')
+        })
+    })
+}
+
 /// Appended to the planner request after an unreadable reply.
 const PARSE_RETRY_NOTE: &str =
-    "Your previous reply could not be read. Reply with ONLY one JSON object that matches the schema.";
+    "Your previous reply was incomplete or could not be read. Reply with ONLY one JSON object that matches the schema. If the task is done, include the actual result in the answer field.";
 
 /// The planner's rule for a strong challenge ends in `done` (the schema has no
 /// separate blocked action). A `done` over a page that still carries a strong
 /// signal is therefore the planner reporting the task blocked, not finished, so
 /// the run fails instead of completing. Typed fields only: no page text.
 fn blocked_by_bot_wall(last_observation: Option<&BrowserObservation>) -> Option<String> {
-    let challenge = last_observation?
+    last_observation?
         .challenge
         .as_ref()
-        .filter(|challenge| challenge.is_strong())?;
-    Some(BrowserFailureKind::Blocked.reason(&format!(
+        .filter(|challenge| challenge.is_strong())
+        .map(bot_wall_reason)
+}
+
+fn bot_wall_reason(challenge: &BrowserChallenge) -> String {
+    BrowserFailureKind::Blocked.reason(&format!(
         "the site refuses automation ({challenge})"
-    )))
+    ))
 }
 
 /// Phase 5 run-level gate: reusing a persistent, cookie-bearing Quarry
@@ -2396,10 +2611,28 @@ async fn gate_risky_action(
         return PlanStepResult::Action(action);
     };
 
+    // Approval details are not yet bound to a revalidated page and target
+    // after the human response. Do not offer an approval that could authorize
+    // a different action in the restricted attached assistant.
+    let restricted_attached = plan.config.attach.is_some()
+        && plan.config.policy.as_ref().is_some_and(|ask| !ask.is_empty());
+    if restricted_attached {
+        plan.status = PlanStatus::Failed;
+        return PlanStepResult::Failed(
+            "browser action requires approval, but verified approval is unavailable for this assistant".to_owned(),
+        );
+    }
+
     let detail = RiskyActionDetail {
         action_id: action.action_id.clone(),
         action_type: action.action_type.as_str().to_owned(),
-        url: action.url.clone(),
+        // Click/type actions often have no URL of their own. The latest
+        // successful Quarry observation is the page they are acting on; use
+        // it as evidence for the approval card instead of an empty location.
+        url: if action.url.trim().is_empty() {
+            last_observation.filter(|observation| observation.status == ObservationStatus::Success)
+                .map(|observation| observation.page_url.clone()).unwrap_or_default()
+        } else { action.url.clone() },
         selector: action.selector.clone(),
         risk_category: category,
         reason: risk_reason(category, &action),
@@ -2643,6 +2876,66 @@ mod tests {
     }
 
     #[test]
+    fn recent_successes_are_bounded_and_exclude_failed_or_blocked_steps() {
+        let mut plan = AgentPlan::new(test_config());
+        let last_step = i32::try_from(RECENT_SUCCESS_LIMIT).unwrap() + 2;
+        for step in 1..=last_step {
+            plan.current_step = step;
+            plan.note_success(&ActionType::Scroll, &ObservationStatus::Success);
+        }
+        plan.current_step += 1;
+        plan.note_success(&ActionType::Click, &ObservationStatus::Blocked);
+        plan.note_success(&ActionType::Type, &ObservationStatus::Failed);
+        assert_eq!(plan.recent_successes.len(), RECENT_SUCCESS_LIMIT);
+        assert_eq!(
+            plan.recent_successes.first(),
+            Some(&(3, ActionType::Scroll))
+        );
+        assert_eq!(
+            plan.recent_successes.last(),
+            Some(&(last_step, ActionType::Scroll))
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_scroll_reaches_the_next_planner_and_can_finish_with_an_answer() {
+        use crate::llm_planner::{
+            ActionPlanner, DoneOutcome, DonePayload, PlannerContext, PlannerError, PlannerReply,
+        };
+
+        struct StopAfterScroll;
+
+        #[tonic::async_trait]
+        impl ActionPlanner for StopAfterScroll {
+            async fn plan_next(
+                &self,
+                _ctx: &PlannerContext<'_>,
+            ) -> Result<PlannerReply, PlannerError> {
+                panic!("expected a progress-aware planner call");
+            }
+
+            async fn plan_next_with_progress(
+                &self,
+                _ctx: &PlannerContext<'_>,
+                successes: &[(i32, ActionType)],
+            ) -> Result<PlannerReply, PlannerError> {
+                assert_eq!(successes, &[(1, ActionType::Scroll)]);
+                Ok(PlannerReply::done_with(DonePayload::new(
+                    "Scrolled once.",
+                    DoneOutcome::Success,
+                )))
+            }
+        }
+
+        let mut plan = AgentPlan::new(test_config());
+        plan.current_step = 1;
+        plan.note_success(&ActionType::Scroll, &ObservationStatus::Success);
+        let next = decide_next_action(&mut plan, None, Some(&StopAfterScroll), None, None).await;
+        assert!(matches!(next, PlanStepResult::Completed(answer) if answer == "Scrolled once."));
+        assert_eq!(plan.status, PlanStatus::Completed);
+    }
+
+    #[test]
     fn first_action_is_observe() {
         let mut plan = AgentPlan::new(test_config());
         let result = plan_next_action(&mut plan, None);
@@ -2737,6 +3030,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![],
             error_message: "element not found".to_owned(),
             challenge: None,
@@ -2795,6 +3089,7 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
@@ -2921,10 +3216,14 @@ mod tests {
     struct RecordingSink {
         paused: std::sync::atomic::AtomicUsize,
         resumed: std::sync::atomic::AtomicUsize,
+        answers: std::sync::Mutex<Vec<String>>,
     }
 
     #[tonic::async_trait]
     impl BrowserEventSink for RecordingSink {
+        async fn record_final_answer(&self, _config: &PlanConfig, answer: &str) {
+            self.answers.lock().unwrap().push(answer.to_owned());
+        }
         async fn action_dispatched(&self, _config: &PlanConfig, _action: &BrowserAction) {}
         async fn observation_received(
             &self,
@@ -2951,6 +3250,28 @@ mod tests {
         ) -> ApprovalOutcome {
             ApprovalOutcome::Granted
         }
+    }
+
+    #[tokio::test]
+    async fn completed_planner_answer_is_recorded_only_for_retained_runs() {
+        use crate::llm_planner::{DoneOutcome, DonePayload};
+        let sink = RecordingSink::default();
+        let mut plan = AgentPlan::new(test_config());
+        let answer = DonePayload::new("The page title is Example Domain.", DoneOutcome::Success);
+        let _ = finish_from_done(&mut plan, None, &answer);
+        record_completed_answer(&plan, Some(&sink)).await;
+        assert_eq!(&*sink.answers.lock().unwrap(), &["The page title is Example Domain."]);
+
+        let mut zdr = AgentPlan::new(test_config());
+        zdr.config.zdr = true;
+        let _ = finish_from_done(&mut zdr, None, &answer);
+        record_completed_answer(&zdr, Some(&sink)).await;
+        assert_eq!(sink.answers.lock().unwrap().len(), 1);
+
+        let mut empty = AgentPlan::new(test_config());
+        let _ = finish_from_done(&mut empty, None, &DonePayload::new("", DoneOutcome::Success));
+        record_completed_answer(&empty, Some(&sink)).await;
+        assert_eq!(sink.answers.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3235,6 +3556,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restricted_risky_action_fails_before_approval() {
+        let mut config = test_config();
+        config.attach = Some(AttachConfig { target_tab: None, session_run_id: "session_1".into() });
+        config.policy = Some(crate::quarry_agent::WireRequestAsk {
+            disable: vec!["browser.act.upload".into(), "browser.act.download".into()],
+            ..Default::default()
+        });
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Granted]);
+        // Neither raw nor snapshot-bound element actions, nor risky navigation,
+        // may turn an unattested approval into permission to act.
+        for (action_type, target) in [
+            (ActionType::Click, None),
+            (ActionType::Click, Some(BrowserTargetRef {
+                snapshot_id: "snapshot".into(), generation: 1, ref_id: "ref".into(), frame_id: None,
+            })),
+            (ActionType::Goto, None),
+        ] {
+            let mut plan = AgentPlan::new(config.clone());
+            let action = BrowserAction {
+                action_id: "act_delete".into(), grant_id: "grant_1".into(),
+                action_type, selector: "button.delete".into(),
+                value: String::new(), url: "https://example.com/checkout".into(),
+                max_wait_ms: 5_000, target, reason: String::new(),
+                risk_category: Some(RiskCategory::Destructive),
+            };
+            assert!(matches!(
+                gate_risky_action(&mut plan, None, action, Some(&sink)).await,
+                PlanStepResult::Failed(_)
+            ));
+            assert_eq!(plan.status, PlanStatus::Failed);
+        }
+        assert_eq!(sink.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn approval_for_a_click_uses_the_last_successfully_observed_page() {
+        let mut plan = AgentPlan::new(test_config());
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Granted]);
+        let action = BrowserAction {
+            action_id: "act_post".into(), grant_id: "grant_1".into(), action_type: ActionType::Click,
+            selector: "button.submit".into(), value: String::new(), url: String::new(),
+            max_wait_ms: 5_000, target: None, reason: String::new(),
+            risk_category: Some(RiskCategory::PostingForm),
+        };
+        let observation = BrowserObservation {
+            observation_id: "obs".into(), action_id: "prior".into(), grant_id: "grant_1".into(),
+            status: ObservationStatus::Success, page_url: "https://example.com/form".into(),
+            page_title: String::new(), extracted_text: String::new(), screenshot_ref: String::new(),
+            rendered_controls: Vec::new(),
+            dom_snapshot_ref: String::new(), snapshot_generation: None, snapshot_targets: vec![],
+            error_message: String::new(), challenge: None, redaction_rule_version: None, quality: Default::default(),
+        };
+        assert!(matches!(gate_risky_action(&mut plan, Some(&observation), action, Some(&sink)).await, PlanStepResult::Action(_)));
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls[0].url, "https://example.com/form");
+        assert_eq!(calls[0].selector, "button.submit");
+    }
+
+    #[tokio::test]
     async fn decide_next_action_aborts_the_run_when_approval_times_out() {
         let mut config = test_config();
         config.start_url = Some("https://example.com/checkout".to_owned());
@@ -3311,12 +3691,102 @@ mod tests {
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
             snapshot_generation: None,
+            rendered_controls: Vec::new(),
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge,
             redaction_rule_version: None,
             quality: Default::default(),
         }
+    }
+
+    #[test]
+    fn finn_apartment_task_needs_rendered_filter_and_result_evidence() {
+        use crate::llm_planner::{DoneOutcome, DonePayload};
+
+        let config = PlanConfig {
+            attach: Some(AttachConfig::default()),
+            allowed_domains: vec!["www.finn.no".to_owned()],
+            system_prompt: "gå på finn og åpne alle leiligheter i oslo".to_owned(),
+            ..test_config()
+        };
+        let done = DonePayload::new("Jeg åpnet resultatene.", DoneOutcome::Success);
+        let mut page = page_with_challenge(None);
+        page.page_url = "https://www.finn.no/realestate/homes/search.html?location=0.20061&property_type=3".into();
+        page.rendered_controls = vec!["Vis filter Oslo".into(), "4 040 resultater".into()];
+
+        let mut plan = AgentPlan::new(config.clone());
+        assert!(matches!(finish_from_done(&mut plan, Some(&page), &done), PlanStepResult::Rejected));
+        assert!(plan.final_answer.is_none());
+
+        page.rendered_controls.push("Vis filter Leilighet".into());
+        assert!(matches!(finish_from_done(&mut AgentPlan::new(config.clone()), Some(&page), &done), PlanStepResult::Completed(_)));
+
+        page.status = ObservationStatus::Blocked;
+        assert!(matches!(finish_from_done(&mut AgentPlan::new(config), Some(&page), &done), PlanStepResult::Rejected));
+    }
+
+    #[test]
+    fn binds_only_a_unique_ref_on_the_latest_snapshot_and_matching_frame() {
+        let mut page = page_with_challenge(None);
+        page.dom_snapshot_ref = "snap-current".into();
+        page.snapshot_generation = Some(7);
+        page.snapshot_targets = vec![
+            BrowserSnapshotTarget { ref_id: "@e12".into(), role: None, name: None, text: None, frame_id: None },
+            BrowserSnapshotTarget { ref_id: "@e14".into(), role: None, name: None, text: None, frame_id: Some("child".into()) },
+        ];
+        let mut action = observe_action();
+        action.action_type = ActionType::Click;
+        action.target = Some(BrowserTargetRef { snapshot_id: "snap-current".into(), generation: 7, ref_id: "e12".into(), frame_id: None });
+        let repaired = bind_observed_target(action.clone(), Some(&page)).unwrap();
+        assert_eq!(repaired.target.unwrap().ref_id, "@e12");
+        action.target.as_mut().unwrap().ref_id = "@e12".into();
+        assert_eq!(bind_observed_target(action.clone(), Some(&page)).unwrap().target.unwrap().ref_id, "@e12");
+
+        for invalid in ["e99", "e", "e1x", "@@e12", "@e99"] {
+            action.target.as_mut().unwrap().ref_id = invalid.into();
+            assert!(bind_observed_target(action.clone(), Some(&page)).is_err(), "{invalid}");
+        }
+        action.target.as_mut().unwrap().ref_id = "e12".into();
+        assert!(bind_observed_target(action.clone(), None).is_err());
+        let mut stale = action.clone(); stale.target.as_mut().unwrap().snapshot_id = "other".into();
+        assert!(bind_observed_target(stale, Some(&page)).is_err());
+        let mut stale = action.clone(); stale.target.as_mut().unwrap().generation = 6;
+        assert!(bind_observed_target(stale, Some(&page)).is_err());
+        let mut frame = action.clone(); frame.target.as_mut().unwrap().frame_id = Some("child".into());
+        assert!(bind_observed_target(frame, Some(&page)).is_err());
+        let mut child = action.clone(); child.target.as_mut().unwrap().ref_id = "e14".into();
+        assert!(bind_observed_target(child.clone(), Some(&page)).is_err());
+        child.target.as_mut().unwrap().frame_id = Some("child".into());
+        assert_eq!(bind_observed_target(child, Some(&page)).unwrap().target.unwrap().ref_id, "@e14");
+        page.snapshot_targets.push(page.snapshot_targets[0].clone());
+        assert!(bind_observed_target(action, Some(&page)).is_err());
+    }
+
+    #[tokio::test]
+    async fn planner_targets_are_repaired_or_rejected_before_dispatch() {
+        let mut page = page_with_challenge(None);
+        page.dom_snapshot_ref = "snap-current".into();
+        page.snapshot_generation = Some(7);
+        page.snapshot_targets = vec![BrowserSnapshotTarget {
+            ref_id: "@e12".into(), role: Some("link".into()), name: Some("About".into()),
+            text: None, frame_id: None,
+        }];
+        let mut proposed = observe_action();
+        proposed.action_type = ActionType::Click;
+        proposed.target = Some(BrowserTargetRef { snapshot_id: "snap-current".into(), generation: 7, ref_id: "e12".into(), frame_id: None });
+        let mut plan = AgentPlan::new(test_config());
+        let planner = SteerProbePlanner::new(vec![proposed.clone()]);
+        match decide_next_action(&mut plan, Some(&page), Some(&planner), None, None).await {
+            PlanStepResult::Action(action) => assert_eq!(action.target.unwrap().ref_id, "@e12"),
+            _ => panic!("expected the observed target to be dispatched"),
+        }
+
+        proposed.target.as_mut().unwrap().ref_id = "e99".into();
+        let mut plan = AgentPlan::new(test_config());
+        let planner = SteerProbePlanner::new(vec![proposed]);
+        assert!(matches!(decide_next_action(&mut plan, Some(&page), Some(&planner), None, None).await, PlanStepResult::Rejected));
+        assert_eq!(plan.failures.total(), 1);
     }
 
     #[test]
@@ -3353,10 +3823,32 @@ mod tests {
         obs.status = ObservationStatus::Blocked;
         obs.error_message = "the site refuses automation".to_owned();
         match plan_next_action(&mut plan, Some(&obs)) {
-            PlanStepResult::Failed(reason) => assert!(reason.contains("action blocked"), "{reason}"),
-            _ => panic!("expected Failed"),
+            PlanStepResult::Stopped { kind: BrowserFailureKind::Blocked, reason } =>
+                assert!(reason.starts_with("blocked: the site refuses automation"), "{reason}"),
+            _ => panic!("expected a typed site block"),
         }
         assert_eq!(plan.status, PlanStatus::Failed);
+    }
+
+    #[test]
+    fn a_rendered_terminal_challenge_stops_before_planning() {
+        for recovery in [ChallengeRecovery::Exhausted, ChallengeRecovery::NotApplicable] {
+            let mut plan = AgentPlan::new(test_config());
+            let mut page = page_with_challenge(Some(strong_wall(recovery)));
+            page.status = ObservationStatus::Success;
+            assert!(matches!(
+                plan_next_action(&mut plan, Some(&page)),
+                PlanStepResult::Stopped { kind: BrowserFailureKind::Blocked, .. }
+            ));
+            assert_eq!(plan.observations.len(), 1);
+        }
+        let mut plan = AgentPlan::new(test_config());
+        let mut recoverable = page_with_challenge(Some(strong_wall(ChallengeRecovery::Available)));
+        recoverable.status = ObservationStatus::Success;
+        assert!(matches!(
+            plan_next_action(&mut plan, Some(&recoverable)),
+            PlanStepResult::Action(_)
+        ));
     }
 
     #[tokio::test]
@@ -3401,7 +3893,8 @@ mod tests {
         let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
 
         assert_eq!(result.status, PlanStatus::Failed);
-        assert!(result.summary.starts_with("action blocked:"), "{}", result.summary);
+        assert!(result.summary.starts_with("blocked: the site refuses automation"), "{}", result.summary);
+        assert_eq!(result.failure_kind, Some(BrowserFailureKind::Blocked));
         assert!(!result.summary.contains("step failed"), "{}", result.summary);
         let last = result.observations.last().expect("the refusal is recorded");
         assert_eq!(last.status, ObservationStatus::Blocked);
@@ -3410,6 +3903,81 @@ mod tests {
             last.challenge.as_ref().map(|c| (c.is_strong(), c.block_reason)),
             Some((true, Some(BlockReason::ChallengeLoop)))
         );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_challenge_releases_an_owned_tab_only_after_handoff_mark() {
+        use crate::quarry_agent::AttachTabTarget;
+        use wiremock::matchers::{body_json, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (borrowed, mark_status, disposition) in [
+            (false, 200, "release"),
+            (false, 403, "abort"),
+            (true, 200, "abort"),
+        ] {
+            let server = MockServer::start().await;
+            let attach_path = if borrowed {
+                "/v1/agent/runs/run_user/attach-current-tab"
+            } else {
+                "/v1/agent/runs/run_user/attach"
+            };
+            Mock::given(method("POST"))
+                .and(path(attach_path))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"attach_id": "att_1", "tab_id": "tab_1", "attached_existing_tab": borrowed}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/agent/runs/run_user/step"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "error": {"code": "CHALLENGE_DETECTED", "details": {"reason": "challenge_loop"}}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/agent/runs/run_user/tabs/tab_1/mark"))
+                .and(body_json(serde_json::json!({"mark": "handoff", "grant_id": "grant_001"})))
+                .respond_with(ResponseTemplate::new(mark_status))
+                .expect(if borrowed { 0 } else { 1 })
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path("/v1/agent/runs/run_user/attach/att_1"))
+                .and(query_param("disposition", disposition))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"attach_id": "att_1"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = PlanConfig {
+                attach: Some(AttachConfig {
+                    session_run_id: "run_user".to_owned(),
+                    target_tab: borrowed.then(|| AttachTabTarget {
+                        tab_id: "tab_1".to_owned(),
+                        expected_epoch: 3,
+                        expected_origin: "https://example.com".to_owned(),
+                    }),
+                }),
+                start_url: (!borrowed).then(|| "https://example.com/".to_owned()),
+                ..test_config()
+            };
+            let client = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok").unwrap();
+            let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+
+            assert_eq!(result.status, PlanStatus::Failed);
+            assert_eq!(result.failure_kind, Some(BrowserFailureKind::Blocked));
+            if !borrowed {
+                let requests = server.received_requests().await.unwrap();
+                assert!(requests[2].url.path().ends_with("/tabs/tab_1/mark"));
+                assert!(requests[3].url.path().ends_with("/attach/att_1"));
+            }
+        }
     }
 
     // ── WS11.S1: planner meter, credential deadline, typed Quarry limits ──
@@ -3792,6 +4360,7 @@ mod tests {
     #[test]
     fn attach_plans_need_a_session_domains_and_no_profile() {
         let attach = Some(AttachConfig {
+            target_tab: None,
             session_run_id: "run_user_1".to_owned(),
         });
         let ok = PlanConfig {
@@ -3799,9 +4368,16 @@ mod tests {
             ..test_config()
         };
         assert_eq!(validate_plan_config(&ok), Ok(()));
+        let restricted = PlanConfig {
+            attach: attach.clone(),
+            policy: Some(crate::quarry_agent::WireRequestAsk::plan_mode()),
+            ..test_config()
+        };
+        assert_eq!(validate_plan_config(&restricted), Ok(()));
 
         let malformed = PlanConfig {
             attach: Some(AttachConfig {
+                target_tab: None,
                 session_run_id: "run/../x".to_owned(),
             }),
             ..test_config()

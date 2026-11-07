@@ -41,6 +41,7 @@ import {
 import {
   ArtifactsPanel,
 } from './ChatArtifactPanel'
+import type { ArtifactSelectionRequest } from './ArtifactSelection'
 import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'
 import { EffectivePolicyPanel } from './EffectivePolicyPanel'
 import {
@@ -55,6 +56,7 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
@@ -120,6 +122,7 @@ export default function ChatPage() {
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    handleEditedApprovalDecision,
     refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
@@ -176,11 +179,28 @@ export default function ChatPage() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    connectTurn,
+    pendingConnectIntent,
+    resumeConnectIntent,
+    dismissConnectIntent,
+    acceptConnectorSuggestion,
     pendingQuestion,
     questionPending,
     questionError,
     answerPendingQuestion,
     skipPendingQuestion,
+    pendingResearchPlan,
+    startResearchPlan,
+    cancelResearchPlan,
+    threadGoal,
+    goalPending,
+    goalError,
+    goalEntryAvailable,
+    saveGoal,
+    setGoalPaused,
+    clearGoal,
+    continueGoal,
+    goalAutoContinue,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -257,6 +277,25 @@ export default function ChatPage() {
     if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
     return handleComposerSubmit(submission)
   }
+  // The Output panel's "Ask for a change" (EP-3 S6) sends one composer turn that names the selected range. The panel has hashed the quote, so the selected text itself is not sent.
+  const askAboutArtifactSelection = (request: ArtifactSelectionRequest) => submitWithWorkPeriod({
+    actions: [],
+    attachments: [],
+    text: request.instruction,
+    tools: [],
+    contextRefs: [{
+      kind: 'artifact_selection',
+      id: request.artifactId,
+      label: i18n.tr(`Utvalg i ${request.title}`, `Selection in ${request.title}`),
+      selection: {
+        artifactId: request.artifactId,
+        version: request.version,
+        start: request.start,
+        end: request.end,
+        quoteSha256: request.quoteSha256,
+      },
+    }],
+  })
   // Temporary chat writes no thread, so it cannot be turned on for a project.
   const setTemporaryFromComposer = (value: boolean) => {
     if (value && projectRef()) {
@@ -552,6 +591,7 @@ export default function ChatPage() {
         pending: planApprovalPending() === turnId,
         error: planApprovalError()[turnId],
       }),
+      goal: threadGoal(),
     }),
   )
 
@@ -730,6 +770,14 @@ export default function ChatPage() {
   // copies of the expression is how those drift apart.
   const sourceBadgeTotal = createMemo(() => evidenceSources().length + (latestGrounding() ? 1 : 0))
   const sourceBadgeRead = createMemo(() => readSourceCount() + (latestGrounding() ? 1 : 0))
+  /** The `[n]` the newest research report read in its second pass (EP-2-S6), for the Sources tab's grouping. */
+  const secondPassNumbers = createMemo(() => {
+    for (const item of [...artifactItems()].reverse()) {
+      const facts = researchPassFacts((item.artifact as { provenance?: unknown }).provenance)
+      if (facts) return facts.secondPassNumbers
+    }
+    return [] as number[]
+  })
   const toolCallCount = createMemo(
     () => state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
   )
@@ -1026,7 +1074,7 @@ export default function ChatPage() {
             )}
           </p>
         </Show>
-        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
+        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} secondPassNumbers={secondPassNumbers()} />
       </Match>
       <Match when={activeTab() === 'artifacts'}>
         <Show
@@ -1037,7 +1085,7 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} />
+            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} onAskAboutSelection={askAboutArtifactSelection} />
           </Show>
         </Show>
       </Match>
@@ -1089,7 +1137,7 @@ export default function ChatPage() {
   // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
-  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} />)
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)
   // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
   // the panel reads one element however often it asks. The position is read inside the component.
   const liveRailDockControls = createMemo(() => (
@@ -1215,6 +1263,7 @@ export default function ChatPage() {
         onApprovalDecision={(approvalId, decision) =>
           void handleApprovalDecision(row().turn.id, approvalId, decision)
         }
+        onApprovalEditedDecision={(approvalId, edit) => handleEditedApprovalDecision(row().turn.id, approvalId, edit)}
         onApprovePlan={(rung, justification, steps) =>
           void approveTurnPlan(row().turn.id, rung, justification, steps)
         }
@@ -1240,6 +1289,15 @@ export default function ChatPage() {
         editLocked={row().editLocked}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
+        spaceScoped={spaceScoped()}
+        connectorSuggestion={{
+          orgId: session.activeOrg?.id,
+          onUse: (suggestion, connectionId) => void acceptConnectorSuggestion(suggestion, connectionId),
+          connectTurn,
+          pendingConnectIntent,
+          resumeConnectIntent,
+          dismissConnectIntent,
+        }}
       />
     </>
   )
@@ -1469,6 +1527,7 @@ export default function ChatPage() {
                 onApprovalDecision={(turnId, approvalId, decision) =>
                   void handleApprovalDecision(turnId, approvalId, decision)
                 }
+                onApprovalEditedDecision={(turnId, approvalId, edit) => handleEditedApprovalDecision(turnId, approvalId, edit)}
                 onApprovePlan={(turnId, rung, justification, steps) =>
                   void approveTurnPlan(turnId, rung, justification, steps)
                 }
@@ -1478,6 +1537,18 @@ export default function ChatPage() {
                 questionError={questionError()}
                 onAnswerQuestion={(answer) => void answerPendingQuestion(answer)}
                 onSkipQuestion={() => void skipPendingQuestion()}
+                researchPlan={pendingResearchPlan()}
+                onStartResearchPlan={(edit) => void startResearchPlan(edit)}
+                onCancelResearchPlan={cancelResearchPlan}
+                goalEntry={goalEntryAvailable()}
+                goalPending={goalPending()}
+                goalError={goalError()}
+                goalBusy={isStreaming()}
+                onSaveGoal={saveGoal}
+                onContinueGoal={() => void continueGoal()}
+                goalAutoContinue={goalAutoContinue}
+                onPauseGoal={(paused) => void setGoalPaused(paused)}
+                onClearGoal={() => void clearGoal()}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">

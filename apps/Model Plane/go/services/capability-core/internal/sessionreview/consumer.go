@@ -310,6 +310,160 @@ func ReviewRunCompleted(
 	return handleRunCompleted(ctx, data, sc, ic, model, opts...)
 }
 
+// LearnRequest is one person's /learn (EP-11 S7): distil this thread into a
+// skill proposal, with an optional note. Org and user come from the verified
+// caller, and the caller has already checked that the user owns the thread.
+type LearnRequest struct {
+	OrgID    string
+	UserID   string
+	ThreadID string
+	// Note is the person's own text, at most learning.MaxLearnNoteChars. It
+	// reaches the reviewer as quoted data only.
+	Note string
+}
+
+// Learner runs /learn through the learning review's own pipeline: the same
+// memory gate, transcript source, caps, reviewer and proposal sink as a review of
+// a completed run. A /learn is split in two so the person hears every refusal:
+// [Learner.Prepare] runs every gate and reads the transcript, and the returned
+// [LearnJob] makes the model call and writes the proposals afterwards.
+type Learner struct {
+	sc      reviewSessionClient
+	ic      reviewInferenceClient
+	model   string
+	options reviewOptions
+}
+
+// NewLearner builds the /learn pipeline over the review's clients and options
+// (normally the same ones the run consumer is given).
+func NewLearner(sc reviewSessionClient, ic reviewInferenceClient, model string, opts ...Option) *Learner {
+	learner := &Learner{sc: sc, ic: ic, model: model}
+	for _, opt := range opts {
+		opt(&learner.options)
+	}
+	return learner
+}
+
+// Skip reasons only a /learn can have.
+const (
+	// The request names no thread.
+	skipThreadUnknown learning.SkipReason = "thread_unknown"
+)
+
+// learnCost is the cost controls a /learn runs under. A person asking is reason
+// enough to read a short thread, so the minimum turn count does not apply, but
+// the transcript bound and the daily caps do, shared with the background review.
+// With the controls switched off a /learn still counts against the default caps
+// and, with no counter store wired, is refused as budget_unavailable: a request a
+// person can repeat at will must never run uncounted.
+func (l *Learner) learnCost() CostControls {
+	cost := CostControls{
+		MaxTranscriptChars: defaultMaxTranscriptChars,
+		MaxPerUserPerDay:   defaultMaxPerUserPerDay,
+		MaxPerOrgPerDay:    defaultMaxPerOrgPerDay,
+	}
+	if l.options.cost != nil {
+		cost = *l.options.cost
+	}
+	cost.MinUserTurns = 0
+	return cost
+}
+
+// Prepare runs a /learn's gates in the background review's order and reads the
+// transcript: the owner's memory state and the organization's review opt-in are
+// asked before anything of the thread is read, then the transcript is read and
+// held to the transcript bound and the daily caps. A skip reason says why the
+// /learn is refused; nothing is read after a gate that refuses. An error means a
+// gate could not be asked, which is never an allow.
+func (l *Learner) Prepare(ctx context.Context, req LearnRequest) (*LearnJob, learning.SkipReason, error) {
+	if req.OrgID == "" || req.UserID == "" {
+		return nil, skipOwnerUnknown, nil
+	}
+	if req.ThreadID == "" {
+		return nil, skipThreadUnknown, nil
+	}
+	ref := SessionRef{OrgID: req.OrgID, UserID: req.UserID, ThreadID: req.ThreadID}
+	// The background review may run without the memory controls, relying on
+	// Session Core not announcing the run. A /learn has no announcement in front
+	// of it, so the question must be asked here or the /learn does not run.
+	if l.options.controls == nil {
+		return nil, "", errors.New("sessionreview: learn needs the memory controls")
+	}
+	skip, err := learningSkip(ctx, l.options.controls, ref)
+	if err != nil {
+		return nil, "", err
+	}
+	if skip != "" {
+		return nil, skip, nil
+	}
+	src := costGatedSource{inner: NewSessionCoreTranscriptSource(l.sc), cost: l.learnCost(), now: time.Now}
+	transcript, err := src.Fetch(ctx, ref)
+	if err != nil {
+		return nil, "", err
+	}
+	if transcript.Skip != "" {
+		return nil, transcript.Skip, nil
+	}
+	return &LearnJob{learner: l, ref: ref, transcript: transcript, note: req.Note}, "", nil
+}
+
+// LearnJob is a /learn that cleared every gate: the transcript is read and the
+// day's caps are counted. Run makes the one model call and writes the proposals.
+type LearnJob struct {
+	learner    *Learner
+	ref        SessionRef
+	transcript Transcript
+	note       string
+}
+
+// Run reviews the transcript with the /learn prompt and writes what survives
+// the retention policy as proposals through UpsertAgentSkill, origin
+// background_review: disabled, owned by the person, awaiting their decision,
+// each reason marked as theirs ([learning.LearnReasonPrefix]). Counts only are
+// logged; the thread's content and the note never are.
+func (j *LearnJob) Run(ctx context.Context) (learning.ReviewOutcome, error) {
+	reviewer := learnReviewer{inner: llmreviewer.NewReviewer(j.learner.ic, j.learner.model, j.ref.OrgID)}
+	sink := learnSink{inner: skillsink.NewSessionCoreSink(j.learner.sc, j.ref.OrgID, j.ref.UserID, "", j.ref.ThreadID)}
+	text := j.transcript.Text + learning.LearnRequestBlock(j.note)
+	outcome, err := learning.RunReviewOutcome(ctx, text, j.transcript.Existing, reviewer, sink)
+	var responseError *llmreviewer.ResponseError
+	if errors.As(err, &responseError) && responseError.Kind == "refused" {
+		slog.Info("learn review skipped", "thread_id", j.ref.ThreadID, "reason", skipProviderRefusal)
+		return learning.ReviewOutcome{Skipped: skipProviderRefusal}, nil
+	}
+	if err == nil {
+		slog.Info("learn review completed", "thread_id", j.ref.ThreadID,
+			"candidates", outcome.Candidates, "selected", outcome.Selected,
+			"skills_persisted", outcome.Persisted)
+	}
+	return outcome, err
+}
+
+// learnReviewer sends the /learn prompt whatever prompt the review loop names,
+// so the loop itself stays the background review's.
+type learnReviewer struct {
+	inner learning.Reviewer
+}
+
+func (r learnReviewer) Review(ctx context.Context, transcript string, existing []learning.ExistingSkill, _ string) ([]learning.SkillCandidate, error) {
+	return r.inner.Review(ctx, transcript, existing, learning.LearnReviewPrompt)
+}
+
+// learnSink marks every proposal's reason as requested by the person, then
+// writes through the review's own sink, so each proposal guard applies unchanged.
+type learnSink struct {
+	inner learning.Sink
+}
+
+func (s learnSink) Persist(ctx context.Context, skills []learning.SkillCandidate) (int, error) {
+	marked := make([]learning.SkillCandidate, len(skills))
+	for i, skill := range skills {
+		skill.Reason = learning.LearnReason(skill.Reason)
+		marked[i] = skill
+	}
+	return s.inner.Persist(ctx, marked)
+}
+
 // costGatedSource reads a run's transcript through the cost controls. A review
 // reaches the model only when the conversation has enough user turns to learn
 // from, fits the transcript bound, and is inside the owner's and the

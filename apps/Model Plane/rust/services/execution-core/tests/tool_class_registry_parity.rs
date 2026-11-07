@@ -88,6 +88,10 @@ fn floor_from_seed(raw: &str) -> ApprovalFloor {
     floor
 }
 
+/// One `capability_tools` seed tuple, as 0016 and every later seeding migration write it.
+const SEED_ROW_PATTERN: &str =
+    r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)";
+
 fn seeded_rows() -> Vec<Seeded> {
     // 0016 seeds the classes; a later migration that registers a tool adds its own seed row.
     let mut sql = read_text(
@@ -108,10 +112,7 @@ fn seeded_rows() -> Vec<Seeded> {
             "../../../go/services/capability-core/migrations/{later}"
         )));
     }
-    let row = Regex::new(
-        r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)",
-    )
-    .expect("seed row pattern");
+    let row = Regex::new(SEED_ROW_PATTERN).expect("seed row pattern");
     // 0025 moves browser.observe and browser.act off cap.browser.open; its DELETE is the record of the
     // move, so the effective seed no longer carries those two rows under cap.browser.open.
     assert!(
@@ -229,6 +230,32 @@ fn every_trusted_capability_arm_has_a_seeded_tool_on_the_same_capability() {
             "`{name}` is seeded under a different capability than the gate binds it to"
         );
     }
+}
+
+/// `deck` (EP-5 S2, migration 0033) is a model-gateway tool. execution-core never resolves it: the
+/// step it runs is `code_interpreter`, gated by that tool's row. So 0033 stays out of
+/// [`seeded_rows`], whose every tool the gate must bind, and its row is held here to the row of the
+/// step it runs instead.
+#[test]
+fn the_gateway_deck_tool_is_seeded_like_the_code_interpreter_step_it_runs() {
+    let sql = read_text("../../../go/services/capability-core/migrations/0033_deck_tool_class.up.sql");
+    let row = Regex::new(SEED_ROW_PATTERN).expect("seed row pattern");
+    let rows: Vec<_> = row.captures_iter(&sql).collect();
+    assert_eq!(rows.len(), 1, "0033 seeds exactly the deck row");
+    let deck = &rows[0];
+    let code = seeded_by_tool()
+        .remove("code_interpreter")
+        .expect("code_interpreter is seeded by 0016");
+    assert_eq!(&deck[2], "deck");
+    assert_eq!(&deck[1], code.capability_id.as_str());
+    assert_eq!(class_from_seed(&deck[3]), code.class);
+    assert_eq!(floor_from_seed(&deck[4]), code.floor);
+    assert_eq!(&deck[5], "NULL");
+    assert_eq!(
+        trusted_capability_id("deck"),
+        None,
+        "execution-core now binds `deck`; add 0033 to `seeded_rows` and drop this test"
+    );
 }
 
 #[test]

@@ -80,6 +80,7 @@ func (MemoryProvenance) EnumDescriptor() ([]byte, []int) {
 type MemoryState int32
 
 const (
+	// Unset state, the zero value. Setting it is refused.
 	MemoryState_MEMORY_STATE_UNSPECIFIED MemoryState = 0
 	// The default. Memory is used and learned from.
 	MemoryState_MEMORY_STATE_ON MemoryState = 1
@@ -1103,6 +1104,7 @@ func (x *DeleteMemoryResponse) GetDegradationReason() string {
 	return ""
 }
 
+// Request to read one user's memory controls.
 type GetMemoryControlsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1157,6 +1159,7 @@ func (x *GetMemoryControlsRequest) GetUserId() string {
 	return ""
 }
 
+// Request to set one user's memory state.
 type SetMemoryControlsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1345,9 +1348,11 @@ func (x *MemoryControls) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// Response carrying one user's memory controls.
 type GetMemoryControlsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Controls      *MemoryControls        `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The user's memory controls.
+	Controls      *MemoryControls `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1389,9 +1394,11 @@ func (x *GetMemoryControlsResponse) GetControls() *MemoryControls {
 	return nil
 }
 
+// Response to a set, carrying the user's memory controls.
 type SetMemoryControlsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Controls      *MemoryControls        `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The user's memory controls.
+	Controls      *MemoryControls `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1433,6 +1440,7 @@ func (x *SetMemoryControlsResponse) GetControls() *MemoryControls {
 	return nil
 }
 
+// Request to erase one user's durable memory; confirm must be true.
 type ResetMemoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1497,6 +1505,7 @@ func (x *ResetMemoryRequest) GetConfirm() bool {
 	return false
 }
 
+// Counts of rows erased by a memory reset, and whether any copy is unconfirmed.
 type ResetMemoryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// How many durable rows were erased (current rows and retired ancestors).
@@ -1666,6 +1675,7 @@ func (x *UserProfile) GetSourcesDeletedSinceEdit() uint32 {
 	return 0
 }
 
+// Request to read one user's profile.
 type GetUserProfileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1720,6 +1730,7 @@ func (x *GetUserProfileRequest) GetUserId() string {
 	return ""
 }
 
+// Request to replace one user's profile text with an edit.
 type SetUserProfileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1792,6 +1803,7 @@ func (x *SetUserProfileRequest) GetExpectedRevision() uint64 {
 	return 0
 }
 
+// Request to rebuild one user's profile from their accepted memories.
 type RebuildUserProfileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Tenant context.
@@ -1855,6 +1867,7 @@ func (x *RebuildUserProfileRequest) GetForce() bool {
 	return false
 }
 
+// The user's profile, and why it is not used in conversations.
 type UserProfileResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The profile, unset when none exists or it is hidden (see skip_reason).

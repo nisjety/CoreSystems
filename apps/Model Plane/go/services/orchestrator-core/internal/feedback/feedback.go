@@ -147,12 +147,33 @@ type QuarantineCandidate struct {
 	Score quality.Score
 }
 
+// SplitSkillRef reads a skill reference as model-gateway records it: `id@version`
+// for a skill the turn pinned at a numbered version (EP-11 S3,
+// MODEL_GATEWAY_SKILL_PINS), the bare id otherwise. Only a numeric suffix is a
+// version, so an id that happens to hold `@` stays whole and reads as version 0.
+// Ratings stay keyed by the bare id, so a pinned rating counts toward, and
+// quarantines, the same skill an unpinned one does.
+func SplitSkillRef(ref string) (id string, version int) {
+	at := strings.LastIndexByte(ref, '@')
+	if at <= 0 || at == len(ref)-1 {
+		return ref, 0
+	}
+	n := 0
+	for _, c := range ref[at+1:] {
+		if c < '0' || c > '9' || n > (1<<31-1)/10 {
+			return ref, 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return ref[:at], n
+}
+
 // Normalize validates and fills in a rating, returning the value to persist.
 func Normalize(r Rating) (Rating, error) {
 	r.OrgID = strings.TrimSpace(r.OrgID)
 	r.UserID = strings.TrimSpace(r.UserID)
 	r.RunID = strings.TrimSpace(r.RunID)
-	r.SkillID = strings.TrimSpace(r.SkillID)
+	r.SkillID, _ = SplitSkillRef(strings.TrimSpace(r.SkillID))
 	r.FromScope = strings.TrimSpace(r.FromScope)
 	r.ToScope = strings.TrimSpace(r.ToScope)
 	r.Rating = strings.ToLower(strings.TrimSpace(r.Rating))

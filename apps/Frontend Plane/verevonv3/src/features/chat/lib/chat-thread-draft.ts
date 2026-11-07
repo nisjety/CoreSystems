@@ -21,6 +21,8 @@ export type ChatThreadDraft = {
   message: Accessor<string>
   /** Writes the composer's text, from the person typing or from a suggestion. */
   setMessage: Setter<string>
+  /** The draft for a chat without a thread, including the current unsaved text if shown. */
+  readNewDraft: () => string
   /**
    * A send is starting from the composer, which it clears. The text stays stored until the send
    * settles: `accepted` discards it, `failed` gives it back to the composer.
@@ -77,6 +79,10 @@ export function useChatThreadDraft(options: {
   // The send in flight, and the key whose draft holds its text.
   let inFlight: Sent | undefined
   const [message, setMessage] = createSignal(saved)
+  const readNewDraft = () => {
+    const newKey = keyFor(null)
+    return bound === newKey ? untrack(message) : restore(newKey)
+  }
 
   const zeroRetention = () => retention || !isLocalRetentionAllowed()
   const writable = () => bound !== null && !zeroRetention() && !tainted
@@ -249,5 +255,5 @@ export function useChatThreadDraft(options: {
     save()
   })
 
-  return { message, setMessage, beginSend, carry, reset }
+  return { message, setMessage, readNewDraft, beginSend, carry, reset }
 }
