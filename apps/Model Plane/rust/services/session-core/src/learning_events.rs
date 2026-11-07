@@ -321,13 +321,20 @@ async fn enqueue_row(
     if let Some(withheld) = withheld_reason(identity.zdr, &identity.retention_class) {
         return Ok(withheld);
     }
-    // The owner's memory state decides whether anything may be learned from
-    // their conversations, and only a person's own chat is a source: a Space,
-    // an agent run, a support or system thread is not theirs to have distilled.
-    // Both go with the memory gate's kill switch, which restores the loop as it
-    // was. The state is read without the row lock: announcing a run writes no
-    // memory, and a pause that races it is caught again where the review's
-    // output would be written.
+    // EP-8 D2/D13: a Space thread and an agent run's thread are never a learning source,
+    // with or without the memory gate's kill switch, so this check sits above the switch.
+    if matches!(
+        identity.thread_origin.as_deref(),
+        Some("space" | "agent_run")
+    ) {
+        return Ok(Enqueued::SkippedOrigin);
+    }
+    // The owner's memory state decides whether anything may be learned from their
+    // conversations, and only a person's own chat is a source: a support, system or
+    // mail-task thread is not theirs to have distilled. Those go with the memory
+    // gate's kill switch, which restores the loop as it was. The state is read
+    // without the row lock: announcing a run writes no memory, and a pause that
+    // races it is caught again where the review's output would be written.
     if crate::memory_control::controls_enabled() {
         if identity.thread_origin.as_deref() != Some("chat") {
             return Ok(Enqueued::SkippedOrigin);
@@ -644,8 +651,8 @@ mod tests {
         );
     }
 
-    /// The owner's memory state and the thread origin are checked before the
-    /// outbox insert, after the retention gate (which keeps its own counters).
+    /// The containment origins, the owner's memory state and the chat origin are checked
+    /// before the outbox insert, after the retention gate (which keeps its own counters).
     #[test]
     fn memory_state_and_origin_gates_precede_the_outbox_insert() {
         let source = include_str!("learning_events.rs");
@@ -655,25 +662,40 @@ mod tests {
                 .unwrap_or_else(|| panic!("expected {needle:?} in learning_events.rs"))
         };
         let retention = position("withheld_reason(identity.zdr, &identity.retention_class)");
+        let containment = position("Some(\"space\" | \"agent_run\")");
+        let gate = position("if crate::memory_control::controls_enabled() {");
         let origin = position("identity.thread_origin.as_deref() != Some(\"chat\")");
         let state = position("if !decision.learning_allowed {");
         let insert = position("INSERT INTO session_audit_outbox");
         assert!(
-            retention < origin && origin < state && state < insert,
-            "retention, then origin, then memory state, then the insert"
+            retention < containment
+                && containment < gate
+                && gate < origin
+                && origin < state
+                && state < insert,
+            "retention, then the containment origins, then the memory gate, then the chat origin, then memory state, then the insert"
         );
     }
 
     /// A paused, off or org-disabled owner and any thread that is not a person's
-    /// own chat are never announced, and both refusals are counted by reason. The
-    /// proposals the review writes belong to the user in the envelope, so the
-    /// announcement is the first place their choice is honoured.
+    /// own chat are never announced, and both refusals are counted by reason. A
+    /// Space or agent-run thread is refused before the kill switch, so it stays
+    /// refused with the switch off. The proposals the review writes belong to the
+    /// user in the envelope, so the announcement is the first place their choice is
+    /// honoured.
     #[test]
     fn memory_paused_and_non_chat_origin_are_never_announced() {
         let source = include_str!("learning_events.rs");
         let gate = source
             .find("if crate::memory_control::controls_enabled() {")
             .expect("the memory and origin gates sit behind the gate's kill switch");
+        let containment = source
+            .find("Some(\"space\" | \"agent_run\")")
+            .expect("space and agent-run origins are refused");
+        assert!(
+            containment < gate,
+            "space and agent-run origins are refused before the kill switch"
+        );
         let insert = source
             .find("INSERT INTO session_audit_outbox")
             .expect("enqueue must insert an outbox row");
@@ -702,6 +724,13 @@ mod tests {
         let gate = source
             .find("if crate::memory_control::controls_enabled() {")
             .expect("the memory and origin gates sit behind the gate's kill switch");
+        let containment = source
+            .find("Some(\"space\" | \"agent_run\")")
+            .expect("space and agent-run origins are refused");
+        assert!(
+            containment < gate,
+            "space and agent-run origins are refused before the kill switch"
+        );
         let insert = source
             .find("INSERT INTO session_audit_outbox")
             .expect("enqueue must insert an outbox row");
@@ -718,6 +747,33 @@ mod tests {
         assert!(
             read < fold && fold < withheld,
             "read the thread's mode, fold it in, then withhold the announcement"
+        );
+    }
+
+    /// EP-8 D2/D13: a Space thread and an agent run's thread are withheld whether or not the
+    /// memory gate's kill switch is on. The check must come before the switch and must not
+    /// consult it, and its refusal is the same `SkippedOrigin` every other origin gets.
+    #[test]
+    fn containment_origins_are_never_announced_with_controls_off() {
+        let source = include_str!("learning_events.rs");
+        let containment = source
+            .find("Some(\"space\" | \"agent_run\")")
+            .expect("space and agent-run origins are refused");
+        let switch = source
+            .find("if crate::memory_control::controls_enabled() {")
+            .expect("the memory and origin gates sit behind the gate's kill switch");
+        assert!(
+            containment < switch,
+            "the containment origins are checked before the kill switch"
+        );
+        let refusal = &source[containment..switch];
+        assert!(
+            refusal.contains("return Ok(Enqueued::SkippedOrigin)"),
+            "a containment origin is withheld as SkippedOrigin, counted with the other origins"
+        );
+        assert!(
+            !refusal.contains("controls_enabled"),
+            "the containment refusal does not consult the kill switch"
         );
     }
 
