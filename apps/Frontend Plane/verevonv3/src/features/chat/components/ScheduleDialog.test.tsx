@@ -42,6 +42,72 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+describe('ScheduleDialog — a copy of a schedule (EP-6-S1)', () => {
+  it('keeps the copied task editable and saves the task that was typed', async () => {
+    mockedCreate.mockResolvedValue({ id: 'cron_copy' })
+    const { getByRole } = render(() => (
+      <ScheduleDialog
+        onClose={vi.fn()}
+        seedTitle="Kopi av Daglig"
+        seedGoal="Oppsummer dagen"
+        goalEditable
+        seedScheduleExpr="0 8 * * 1-5"
+        threadOriginHint="composer"
+      />
+    ))
+
+    const goal = getByRole('textbox', { name: 'Oppgave' }) as HTMLTextAreaElement
+    expect(goal.value).toBe('Oppsummer dagen')
+    fireEvent.input(goal, { target: { value: 'Oppsummer uken' } })
+    flush()
+    fireEvent.click(getByRole('button', { name: 'Opprett plan' }))
+
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1))
+    expect(mockedCreate.mock.calls[0]![0]).toMatchObject({ goalText: 'Oppsummer uken', scheduleExpr: '0 8 * * 1-5' })
+  })
+
+  it('starts from the cadence it copies, shown as the preset that names it', () => {
+    const { getByRole } = render(() => (
+      <ScheduleDialog
+        onClose={vi.fn()}
+        seedTitle="Kopi"
+        seedGoal="Målet"
+        goalEditable
+        seedScheduleExpr="0 8 * * 1-5"
+        threadOriginHint="composer"
+      />
+    ))
+
+    expect((getByRole('combobox') as HTMLSelectElement).value).toBe('weekday-08')
+  })
+
+  it('starts from a copied cadence that no preset names, in the custom field', async () => {
+    mockedCreate.mockResolvedValue({ id: 'cron_copy' })
+    const { getByRole, getByPlaceholderText } = render(() => (
+      <ScheduleDialog
+        onClose={vi.fn()}
+        seedTitle="Kopi"
+        seedGoal="Målet"
+        goalEditable
+        seedScheduleExpr="*/15 * * * *"
+        threadOriginHint="composer"
+      />
+    ))
+
+    expect((getByPlaceholderText(/min time dag måned ukedag/) as HTMLInputElement).value).toBe('*/15 * * * *')
+    fireEvent.click(getByRole('button', { name: 'Opprett plan' }))
+
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1))
+    expect(mockedCreate.mock.calls[0]![0].scheduleExpr).toBe('*/15 * * * *')
+  })
+
+  it('keeps the task fixed for a request from chat, as before', () => {
+    const { queryByRole } = renderDialog()
+
+    expect(queryByRole('textbox', { name: 'Oppgave' })).toBeNull()
+  })
+})
+
 describe('ScheduleDialog — cadence presets', () => {
   it('maps every preset label to its exact cron expression on submit', async () => {
     mockedCreate.mockResolvedValue({ id: 'cron_1' })

@@ -99,16 +99,13 @@ export function createScheduleFromChat(input: ScheduleFromChatInput): Promise<{ 
 }
 
 /**
- * The signed-in user's own schedules, filtered client-side by
- * `creator_subject_id` — capability-core's `GET /v1/cron` already scopes to
- * the org, and there is no server-side "mine only" filter today, so this is
- * the cheapest correct filter without a new endpoint (chat-wave2 "schedule"
- * spec §2.1). Relies on `creator_subject_id` and `myUserId` being the same
- * identity space as `AuthenticatedUser.user_id` server-side — true today, but
- * unverified against every future identity-provider change (spec §5 risk).
+ * The signed-in user's own schedules. The server narrows the list with `creator=self` (EP-6-S4), and
+ * the client still keeps only rows whose `creator_subject_id` is `myUserId`, so a server that ignores
+ * the parameter shows no other member's schedule either. Relies on `creator_subject_id` and `myUserId`
+ * being the same identity space as `AuthenticatedUser.user_id` server-side (chat-wave2 spec §5 risk).
  */
 export function listMySchedules(orgId: string, myUserId: string): Promise<CronSchedule[]> {
-  return listCronSchedules(orgId).then((result) =>
+  return listCronSchedules(orgId, { creator: 'self' }).then((result) =>
     result.schedules.filter((schedule) => schedule.creator_subject_id === myUserId),
   )
 }

@@ -114,6 +114,17 @@ describe('listMySchedules', () => {
 
     expect(mine).toHaveLength(0)
   })
+
+  it('asks the server for the caller’s own schedules, and still keeps only their rows if it sends more', async () => {
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'a', creator_subject_id: 'user-1' }), schedule({ id: 'b', creator_subject_id: 'user-2' })],
+    })
+
+    const mine = await listMySchedules('org-1', 'user-1')
+
+    expect(mockedList).toHaveBeenCalledWith('org-1', { creator: 'self' })
+    expect(mine.map((s) => s.id)).toEqual(['a'])
+  })
 })
 
 describe('SCHEDULE_PRESETS', () => {

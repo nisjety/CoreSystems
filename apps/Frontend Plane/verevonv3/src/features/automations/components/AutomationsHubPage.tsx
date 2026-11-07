@@ -4,8 +4,8 @@ import { useI18n } from '@/shared/i18n'
 import { AutomationsHub } from './AutomationsHub'
 
 /**
- * `/agents/automations`: the page frame around the hub. Reached by URL in this slice;
- * the agents landing links here once EP-6-S5 lands.
+ * `/agents/automations`: the page frame around the hub. The agents landing (EP-6-S5) and the chat
+ * panel link here.
  */
 export default function AutomationsHubPage() {
   const i18n = useI18n()

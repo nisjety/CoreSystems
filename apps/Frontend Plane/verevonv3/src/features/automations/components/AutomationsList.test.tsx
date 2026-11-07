@@ -4,7 +4,7 @@
 // cron-client calls it makes. The WS20 assertions stay in ScheduledRunsPanel.test.tsx and
 // CronSchedulesSection.test.tsx, which mount this list.
 
-import { render, screen } from '@solidjs/testing-library'
+import { render, screen, waitFor } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -25,11 +25,18 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
   }
 })
 
+vi.mock('@/shared/api/organization-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/organization-client')>()
+  return { ...actual, listOrganizationMembers: vi.fn() }
+})
+
 import { listCronSchedules, listScheduleFires, type CronSchedule } from '@/shared/api/cron-client'
+import { listOrganizationMembers } from '@/shared/api/organization-client'
 import { AutomationsList } from './AutomationsList'
 
 const mockedList = vi.mocked(listCronSchedules)
 const mockedFires = vi.mocked(listScheduleFires)
+const mockedMembers = vi.mocked(listOrganizationMembers)
 
 /** A member of the org, or an org owner, who is an admin for the Settings page. */
 function sessionAs(orgRole: 'member' | 'owner') {
@@ -56,6 +63,11 @@ function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   }
 }
 
+/** One member of the org roster, as the member list reports them. */
+function memberNamed(userId: string, name: string) {
+  return { userId, name, email: `${userId}@example.test`, role: 'member', status: 'active' }
+}
+
 /** A stored approval the way WS20-S4 writes it, with the goal the schedule was created with. */
 function approvalTemplate(expiresAt: string) {
   return {
@@ -69,6 +81,7 @@ function approvalTemplate(expiresAt: string) {
 beforeEach(() => {
   session.current = sessionAs('member')
   mockedFires.mockResolvedValue([])
+  mockedMembers.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -159,6 +172,44 @@ describe('AutomationsList', () => {
     expect(screen.queryByRole('button', { name: 'Endre tidspunkt Plan 0' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Dupliser og endre Plan 0' })).toBeNull()
     expect(mockedFires).not.toHaveBeenCalled()
+  })
+
+  it('asks the server for the caller’s own schedules when it lists mine, and for the whole org when it lists org', async () => {
+    mockedList.mockResolvedValue({ schedules: [] })
+
+    const mine = render(() => <AutomationsList scope="mine" />)
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith('org-1', { creator: 'self' }))
+    mine.unmount()
+
+    session.current = sessionAs('owner')
+    render(() => <AutomationsList scope="org" />)
+    await waitFor(() => expect(mockedList).toHaveBeenLastCalledWith('org-1'))
+  })
+
+  it('shows an admin who made each schedule by name, from the member list', async () => {
+    session.current = sessionAs('owner')
+    mockedMembers.mockResolvedValue([memberNamed('user-2', 'Kari Nordmann')])
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'theirs', name: 'Andres plan', creator_subject_id: 'user-2' })],
+    })
+
+    render(() => <AutomationsList scope="org" />)
+
+    expect(await screen.findByText(/Kari Nordmann/)).toBeTruthy()
+    expect(mockedMembers).toHaveBeenCalledWith('org-1')
+  })
+
+  it('reads the member list for an admin only, and shows a member no creator name', async () => {
+    mockedMembers.mockResolvedValue([memberNamed('user-2', 'Kari Nordmann')])
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'theirs', name: 'Andres plan', creator_subject_id: 'user-2' })],
+    })
+
+    render(() => <AutomationsList scope="org" />)
+
+    expect(await screen.findByText('Andres plan')).toBeTruthy()
+    expect(mockedMembers).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Kari Nordmann/)).toBeNull()
   })
 
   it('reads the org again when its parent bumps the revision', async () => {

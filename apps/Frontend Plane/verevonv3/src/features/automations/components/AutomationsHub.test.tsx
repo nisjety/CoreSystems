@@ -26,7 +26,13 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
   }
 })
 
+vi.mock('@/shared/api/schedule-from-chat', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/schedule-from-chat')>()
+  return { ...actual, createScheduleFromChat: vi.fn() }
+})
+
 import { ApiError } from '@/shared/api/api-error'
+import { createScheduleFromChat } from '@/shared/api/schedule-from-chat'
 import {
   deleteCronSchedule,
   listCronSchedules,
@@ -43,6 +49,7 @@ const mockedFires = vi.mocked(listScheduleFires)
 const mockedUpdate = vi.mocked(updateCronSchedule)
 const mockedDelete = vi.mocked(deleteCronSchedule)
 const mockedRun = vi.mocked(runScheduleNow)
+const mockedCreate = vi.mocked(createScheduleFromChat)
 
 function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   return {
@@ -256,7 +263,7 @@ describe('AutomationsHub', () => {
     expect(await screen.findByText(/Hver dag kl\. 09:00/)).toBeTruthy()
   })
 
-  it('opens a copy with the name prefilled, and keeps the goal the schedule was created with', async () => {
+  it('opens a copy with its name, goal and cadence, and saves the goal the person changed', async () => {
     mockedList.mockResolvedValue({ schedules: [ACTIVE] })
 
     render(() => <AutomationsHub />)
@@ -264,8 +271,21 @@ describe('AutomationsHub', () => {
 
     const name = (await screen.findByRole('textbox', { name: 'Navn' })) as HTMLInputElement
     expect(name.value).toBe('Kopi av Daglig rapport')
-    // A seeded goal is carried over; the create dialog hides its field rather than asking again.
-    expect(screen.queryByRole('textbox', { name: 'Oppgave' })).toBeNull()
+    const goal = screen.getByRole('textbox', { name: 'Oppgave' }) as HTMLTextAreaElement
+    expect(goal.value).toBe('summarise the day')
+    expect((screen.getByRole('combobox', { name: 'Gjentakelse' }) as HTMLSelectElement).value).toBe('daily-09')
+
+    fireEvent.input(goal, { target: { value: 'summarise the week' } })
+    flush()
+    mockedCreate.mockResolvedValue({ id: 'cron_copy' })
+    fireEvent.click(screen.getByRole('button', { name: 'Opprett plan' }))
+
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1))
+    expect(mockedCreate.mock.calls[0]![0]).toMatchObject({
+      name: 'Kopi av Daglig rapport',
+      scheduleExpr: '0 9 * * *',
+      goalText: 'summarise the week',
+    })
   })
 
   it('places the filters before each row’s actions in the focus order', async () => {
@@ -390,6 +410,18 @@ describe('AutomationsHub Run now (EP-6-S3)', () => {
 
     expect(await screen.findByText(sentence)).toBeTruthy()
     expect(screen.queryByText('Kjøringen er startet.')).toBeNull()
+  })
+
+  it('makes a request id where randomUUID is not available, as on a plain http origin', async () => {
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(0xab) })
+    mockedList.mockResolvedValue({ schedules: [ACTIVE], features: { run_now: true } })
+    mockedRun.mockResolvedValue(STARTED)
+
+    render(() => <AutomationsHub />)
+    fireEvent.click(await screen.findByRole('button', { name: RUN_NOW }))
+
+    expect(await screen.findByText('Kjøringen er startet.')).toBeTruthy()
+    expect(mockedRun).toHaveBeenCalledWith('org-1', 'cron_active', 'ab'.repeat(16))
   })
 
   it('reads the open results again after a Run now, so the new fire shows first', async () => {
