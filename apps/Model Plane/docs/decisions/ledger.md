@@ -22,6 +22,12 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-07 - MCP App network origins: a reserved policy key, a CSP builder, the switch off (W4-D M1)
+
+**Status: implemented, behind MCP_APPS_NETWORK_ENABLED (model-gateway, default off); the policy key is reserved.** The org agent policy gains `mcp_apps.network_origins` (kind `origin_allow_list`, `none` or `approved_only`, default and fail-closed `none`). It is reserved like `ext.skills`: only `none` is accepted, and a write of `approved_only` is refused `not_enforced` until the switch that serves it is turned on. `mcp_app_csp::build` makes an app frame's policy from the origins the app declares in `_meta.ui.csp` and the origins the org allows. An origin is granted only when both name it, and only into the directive the app declared it for. Declared and allowed entries must be canonical https origins (lowercase host, optional port without a leading zero, no path, userinfo or wildcard); anything else is dropped. `GET /v1/mcp-apps/resource` adds `csp` and `network_origins` only while the switch is on. Off, the response is what it was. The SPA keeps `PREVIEW_CSP` until it serves the built policy, so D12 (no app network) still holds for every app. A granted origin loosens the default, so it never makes a policy restrictive: its stale copy takes the 120 s permissive bound, not the 900 s restrictive one. Flipping the key to enforced changes the schema status, the golden and its pin, and is made with the switch-on step.
+
+---
+
 ## 2026-11-07 - find_in_page takes max_passages, one to five (EP-2-S2 follow-up)
 
 **Status: implemented, behind MODEL_GATEWAY_WEB_READER (default off); no proto, no migration.** `find_in_page` takes an optional `max_passages` (integer 1 to 5, default 2) and returns up to that many passages, most relevant first, across the sections of the page. The shared `mp_contracts::page_reader::find` keeps its two-passage ceiling and `find_up_to` takes the count, so the execution-core Do-loop reader (EP-2-S10) is unchanged and still returns at most two. The ranker returns at most two passages per section, so a larger count is reached only on a page with more sections. Design: docs/plans/wave3/EP-2-research-and-citations.md (S2, tool contract `find_in_page {ref, query, max_passages<=5}`).

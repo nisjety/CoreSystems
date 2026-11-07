@@ -60,6 +60,7 @@ pub mod lsp;
 mod mail_task_bridge_auth;
 mod managed_start_key;
 pub mod mcp_app_calls;
+pub mod mcp_app_csp;
 pub mod mcp_apps;
 pub mod mcp_elicitation;
 pub mod mcp_http;

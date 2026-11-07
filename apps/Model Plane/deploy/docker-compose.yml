@@ -384,6 +384,9 @@ services:
       MODEL_GATEWAY_RUN_ORIGIN_FIELD: ${MODEL_GATEWAY_RUN_ORIGIN_FIELD:-false}
       # EP-4 S8: MCP App resources (read-through, never stored). Only the literal true; EP-4 S12 flips it.
       MCP_APPS_ENABLED: ${MCP_APPS_ENABLED:-false}
+      # W4-D M1: the app frame's policy and the network origins it grants (resource response `csp`, `network_origins`).
+      # Only the literal true turns it on; off, the response is the S8 shape and the frame keeps its no-network policy.
+      MCP_APPS_NETWORK_ENABLED: ${MCP_APPS_NETWORK_ENABLED:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.

@@ -22,7 +22,9 @@ use dashmap::DashMap;
 use mp_contracts::agent_mode::{self, AgentMode, Resolved};
 use mp_contracts::autonomy;
 use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext, WebPolicyContext};
-use mp_contracts::org_agent_policy::{Kind, SettingDef, SETTINGS};
+use mp_contracts::org_agent_policy::{
+    is_https_origin, Kind, SettingDef, MCP_APPS_NETWORK_ORIGINS, SETTINGS,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -124,6 +126,9 @@ pub struct OrgPolicy {
     /// The org's `ext.skills` token (EP-11 S9): `none`, `approved_only` or `any`, or the schema's fail-closed `none` for a
     /// value this build cannot read. Read by `skills::held_ext_skills` only while SKILL_EXT_POLICY_ENFORCED is on.
     pub ext_skills: String,
+    /// The network origins the org's MCP apps may reach (`mcp_apps.network_origins`, Wave 4 W4-D M1a): the ids of an
+    /// `approved_only` value, canonical https origins, sorted and unique. Empty for any other token.
+    pub mcp_app_origins: Vec<String>,
 }
 
 impl OrgPolicy {
@@ -147,9 +152,10 @@ impl OrgPolicy {
             digest: digest.to_owned(),
             mode_cap,
             rung_cap: rung_from_token(&token("rung_cap")),
-            restrictive: SETTINGS
-                .iter()
-                .any(|def| token_of(def, settings) != def.default),
+            // An origin grant loosens the platform default (`none`), so it never makes a document restrictive.
+            restrictive: SETTINGS.iter().any(|def| {
+                def.key != MCP_APPS_NETWORK_ORIGINS && token_of(def, settings) != def.default
+            }),
             max_fan_out_items: token(mp_contracts::org_agent_policy::RESEARCH_MAX_FAN_OUT_ITEMS)
                 .parse()
                 .unwrap_or(0),
@@ -158,8 +164,33 @@ impl OrgPolicy {
                 paid: token("web.paid_providers") == "on",
             },
             ext_skills: token("ext.skills"),
+            mcp_app_origins: origins_of(settings, MCP_APPS_NETWORK_ORIGINS),
         }
     }
+}
+
+/// The origins a key grants: the ids of an `approved_only` value, each kept only when it is a canonical https origin,
+/// sorted and unique. Any other token grants none, so a value this build cannot read narrows the org.
+fn origins_of(settings: &Map<String, Value>, key: &str) -> Vec<String> {
+    let Some(def) = SETTINGS.iter().find(|def| def.key == key) else {
+        return Vec::new();
+    };
+    if token_of(def, settings) != "approved_only" {
+        return Vec::new();
+    }
+    let mut origins: Vec<String> = settings
+        .get(key)
+        .and_then(|value| value.get("ids"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|origin| is_https_origin(origin))
+        .map(str::to_owned)
+        .collect();
+    origins.sort();
+    origins.dedup();
+    origins
 }
 
 /// The token a document holds for one key, in the key's own order: its default when the key is absent, and its
@@ -175,7 +206,7 @@ fn token_of(def: &SettingDef, settings: &Map<String, Value>) -> String {
         Kind::Bool => value
             .as_bool()
             .map(|flag| if flag { "true" } else { "false" }),
-        Kind::AllowList => value.get("mode").and_then(Value::as_str),
+        Kind::AllowList | Kind::OriginAllowList => value.get("mode").and_then(Value::as_str),
         Kind::Integer => {
             count = value.as_u64().map(|n| n.to_string());
             count.as_deref()
@@ -578,6 +609,43 @@ pub fn stamp_web_policy(
     });
 }
 
+/// The network origins one MCP app of an org may reach, for the app's content security policy (Wave 4 W4-D M1b).
+/// Off reads nothing and grants none. Shadow reads and logs what would be granted and grants none. Enforce grants the
+/// org's origins. A policy that cannot be read grants none: the app is still drawn without network, never refused.
+pub async fn mcp_app_network_origins(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Vec<String> {
+    match mode {
+        PolicyMode::Off => Vec::new(),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) if !policy.mcp_app_origins.is_empty() => tracing::info!(
+                    %org_id,
+                    would_grant = policy.mcp_app_origins.len(),
+                    "org agent policy (shadow): MCP app network origins would be granted"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Vec::new()
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) => policy.mcp_app_origins.clone(),
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; MCP app network origins withheld");
+                Vec::new()
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +931,119 @@ mod tests {
         assert_eq!(context.policy_revision, 7);
         assert_eq!(context.policy_digest, "sha256:7");
         assert!(context.hook_context.is_empty());
+    }
+
+    #[test]
+    fn org_agent_policy_mcp_app_origins_are_read_only_under_approved_only() {
+        let approved = OrgPolicy::from_settings(
+            2,
+            "d",
+            &settings(json!({"mcp_apps.network_origins": {
+                "mode": "approved_only",
+                "ids": ["https://b.test", "https://a.test", "https://a.test", "http://c.test", "https://d.test/x"]
+            }})),
+        );
+        assert_eq!(
+            approved.mcp_app_origins,
+            ["https://a.test", "https://b.test"]
+        );
+        for value in [
+            json!({"mode": "none", "ids": ["https://a.test"]}),
+            json!({"mode": "bogus", "ids": ["https://a.test"]}),
+            json!("approved_only"),
+        ] {
+            let policy = OrgPolicy::from_settings(
+                2,
+                "d",
+                &settings(json!({"mcp_apps.network_origins": value.clone()})),
+            );
+            assert!(policy.mcp_app_origins.is_empty(), "{value}");
+        }
+        assert!(OrgPolicy::from_settings(0, "", &Map::new())
+            .mcp_app_origins
+            .is_empty());
+    }
+
+    #[test]
+    fn org_agent_policy_an_origin_grant_is_not_restrictive() {
+        let granted = OrgPolicy::from_settings(
+            3,
+            "d",
+            &settings(
+                json!({"mcp_apps.network_origins": {"mode": "approved_only", "ids": ["https://a.test"]}}),
+            ),
+        );
+        assert!(
+            !granted.restrictive,
+            "a grant loosens the default, so its stale copy takes the permissive bound"
+        );
+        let narrowed = OrgPolicy::from_settings(
+            3,
+            "d",
+            &settings(json!({
+                "mode_cap": "read_only",
+                "mcp_apps.network_origins": {"mode": "approved_only", "ids": ["https://a.test"]}
+            })),
+        );
+        assert!(narrowed.restrictive);
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_mcp_app_origins_follow_the_switch_and_fail_closed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let cache = OrgPolicyCache::new();
+        let granted = OrgPolicy::from_settings(
+            4,
+            "sha256:4",
+            &settings(
+                json!({"mcp_apps.network_origins": {"mode": "approved_only", "ids": ["https://a.test"]}}),
+            ),
+        );
+        cache.store("org-a", granted, Instant::now());
+        let base = server.uri();
+        assert!(
+            mcp_app_network_origins(PolicyMode::Off, &cache, &client, &base, "org-a", "token")
+                .await
+                .is_empty(),
+            "off reads nothing and grants nothing"
+        );
+        assert!(
+            mcp_app_network_origins(PolicyMode::Shadow, &cache, &client, &base, "org-a", "token")
+                .await
+                .is_empty(),
+            "shadow grants nothing"
+        );
+        assert_eq!(
+            mcp_app_network_origins(
+                PolicyMode::Enforce,
+                &cache,
+                &client,
+                &base,
+                "org-a",
+                "token"
+            )
+            .await,
+            ["https://a.test"]
+        );
+        assert!(
+            mcp_app_network_origins(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &base,
+                "org-b",
+                "token"
+            )
+            .await
+            .is_empty(),
+            "a policy that cannot be read grants nothing, and the app is not refused"
+        );
     }
 
     #[tokio::test]

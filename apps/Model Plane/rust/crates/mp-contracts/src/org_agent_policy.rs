@@ -39,6 +39,8 @@ pub enum Kind {
     Bool,
     /// `{"mode": <from strictness_order>, "ids": [...]}`. Only `approved_only` names ids.
     AllowList,
+    /// An [`Kind::AllowList`] whose ids are canonical `https` origins (see [`is_https_origin`]).
+    OriginAllowList,
     /// A JSON whole number whose decimal form is in `strictness_order`, smallest (strictest)
     /// first, so a count is tighten-only by the same rank as every other kind.
     Integer,
@@ -50,6 +52,7 @@ impl Kind {
             Self::Enum => "enum",
             Self::Bool => "bool",
             Self::AllowList => "allow_list",
+            Self::OriginAllowList => "origin_allow_list",
             Self::Integer => "integer",
         }
     }
@@ -75,6 +78,11 @@ pub fn fan_out_items_of(value: &Value) -> Option<u32> {
         .and_then(|count| u32::try_from(count).ok())
         .filter(|count| *count <= MAX_FAN_OUT_ITEMS)
 }
+
+/// The origins an MCP App may reach over the network (Wave 4 W4-D M1a): an allow-list of canonical
+/// `https` origins. Reserved until the switch that serves the app's CSP is on (`MCP_APPS_NETWORK_ENABLED`,
+/// model-gateway), so only the default `none` is accepted and every app keeps the no-network frame it has.
+pub const MCP_APPS_NETWORK_ORIGINS: &str = "mcp_apps.network_origins";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -229,6 +237,17 @@ pub const SETTINGS: &[SettingDef] = &[
         status: Status::Enforced,
         reserved_values: &[],
     },
+    // Wave 4 W4-D M1a: the origins an MCP App may reach. `approved_only` names origins; it is reserved
+    // until MCP_APPS_NETWORK_ENABLED serves them, so a write of it is refused `not_enforced`. Fail-closed is `none`.
+    SettingDef {
+        key: MCP_APPS_NETWORK_ORIGINS,
+        kind: Kind::OriginAllowList,
+        strictness_order: &["none", "approved_only"],
+        default: "none",
+        fail_closed_value: "none",
+        status: Status::Reserved,
+        reserved_values: &[],
+    },
 ];
 
 /// Why a document is refused. The codes are the closed vocabulary capability-core
@@ -330,7 +349,7 @@ fn parse(def: &SettingDef, written: &Value) -> Result<(String, Value), Refusal> 
             let token = if flag { "true" } else { "false" };
             Ok((token.to_owned(), Value::Bool(flag)))
         }
-        Kind::AllowList => parse_allow_list(def, written),
+        Kind::AllowList | Kind::OriginAllowList => parse_allow_list(def, written),
         Kind::Integer => {
             // `as_u64` refuses a fraction, a negative and a quoted number, so `8.5`, `-1` and `"8"`
             // are invalid rather than rounded or read as text.
@@ -363,7 +382,11 @@ fn parse_allow_list(def: &SettingDef, written: &Value) -> Result<(String, Value)
     let mut ids = BTreeSet::new();
     for raw in raw_ids {
         let id = raw.as_str().ok_or(Refusal::InvalidValue)?;
-        if !is_identifier(id) {
+        let well_formed = match def.kind {
+            Kind::OriginAllowList => is_https_origin(id),
+            _ => is_identifier(id),
+        };
+        if !well_formed {
             return Err(Refusal::InvalidValue);
         }
         ids.insert(id.to_owned());
@@ -383,7 +406,7 @@ fn value_of(def: &SettingDef, token: &str) -> Value {
     match def.kind {
         Kind::Enum => Value::String(token.to_owned()),
         Kind::Bool => Value::Bool(token == "true"),
-        Kind::AllowList => {
+        Kind::AllowList | Kind::OriginAllowList => {
             let mut canonical = Map::new();
             canonical.insert("mode".to_owned(), Value::String(token.to_owned()));
             canonical.insert("ids".to_owned(), Value::Array(Vec::new()));
@@ -413,6 +436,46 @@ fn is_identifier(id: &str) -> bool {
             .next()
             .is_some_and(|first| first.is_ascii_alphanumeric())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+}
+
+/// Whether `value` is one canonical `https` origin: `https://` and a lowercase host of dot-separated labels, with an
+/// optional port from 1 to 65535 written without a sign or a leading zero. There is no path, query, fragment, userinfo,
+/// wildcard or upper case, so an origin written into a CSP source list grants exactly the origin it names.
+#[must_use]
+pub fn is_https_origin(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    value.len() <= MAX_ID_LEN
+        && !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(is_dns_label)
+        && port.is_none_or(is_port)
+}
+
+/// One DNS label: lowercase letters, digits and inner hyphens, 1 to 63 bytes.
+fn is_dns_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes[0] != b'-'
+        && bytes[bytes.len() - 1] != b'-'
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+/// A port in canonical decimal: digits only, no leading zero, and at most 65535.
+fn is_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.len() <= 5
+        && !port.starts_with('0')
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
 }
 
 #[cfg(test)]
@@ -658,6 +721,113 @@ mod tests {
             ),
             Err(Refusal::InvalidValue)
         );
+    }
+
+    #[test]
+    fn org_agent_policy_mcp_app_origins_default_to_none_and_are_reserved() {
+        assert_eq!(
+            defaults()[MCP_APPS_NETWORK_ORIGINS],
+            json!({"mode": "none", "ids": []})
+        );
+        assert_eq!(
+            validate(
+                &doc(&json!({"mcp_apps.network_origins": {"mode": "none", "ids": []}})),
+                &loosest_ceiling()
+            ),
+            Ok(defaults())
+        );
+        assert_eq!(
+            validate(
+                &doc(
+                    &json!({"mcp_apps.network_origins": {"mode": "approved_only", "ids": ["https://api.example.test"]}})
+                ),
+                &loosest_ceiling()
+            ),
+            Err(Refusal::NotEnforced),
+            "reserved until MCP_APPS_NETWORK_ENABLED serves origins"
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_mcp_app_origins_refuse_malformed_origins_before_the_reserved_check() {
+        for ids in [
+            json!(["http://api.example.test"]),
+            json!(["https://api.example.test/app"]),
+            json!(["https://*.example.test"]),
+            json!(["https://API.example.test"]),
+            json!(["https://api.example.test:0443"]),
+            json!(["https://api.example.test:+443"]),
+            json!(["https://api.example.test:65536"]),
+            json!(["https://api.example.test; script-src *"]),
+            json!(["https://"]),
+            json!(["data:text/html,x"]),
+            json!([7]),
+        ] {
+            assert_eq!(
+                validate(
+                    &doc(
+                        &json!({"mcp_apps.network_origins": {"mode": "approved_only", "ids": ids.clone()}})
+                    ),
+                    &loosest_ceiling()
+                ),
+                Err(Refusal::InvalidValue),
+                "{ids}"
+            );
+        }
+        assert_eq!(
+            validate(
+                &doc(
+                    &json!({"mcp_apps.network_origins": {"mode": "none", "ids": ["https://api.example.test"]}})
+                ),
+                &loosest_ceiling()
+            ),
+            Err(Refusal::InvalidValue),
+            "ids are named only under approved_only"
+        );
+    }
+
+    #[test]
+    fn is_https_origin_accepts_only_the_canonical_form() {
+        for origin in [
+            "https://api.example.test",
+            "https://api.example.test:8443",
+            "https://a.b-c.d1.test:1",
+            "https://xn--bcher-kva.example",
+            "https://localhost:65535",
+        ] {
+            assert!(is_https_origin(origin), "{origin}");
+        }
+        for origin in [
+            "",
+            "https://",
+            "http://api.example.test",
+            "HTTPS://api.example.test",
+            "https://API.example.test",
+            "https://api.example.test/",
+            "https://api.example.test/path",
+            "https://api.example.test?q=1",
+            "https://api.example.test#f",
+            "https://user@api.example.test",
+            "https://api.example.test:",
+            "https://api.example.test:0",
+            "https://api.example.test:08",
+            "https://api.example.test:+443",
+            "https://api.example.test:65536",
+            "https://*.example.test",
+            "https://api..example.test",
+            "https://-api.example.test",
+            "https://api-.example.test",
+            "https://[::1]:443",
+            "https://api.example.test.",
+            "https://api.example.test a",
+            "https://api.example.test'",
+            "https://api.example.test;",
+            "https://api.example.test,https://evil.test",
+        ] {
+            assert!(!is_https_origin(origin), "{origin}");
+        }
+        let long_label = format!("https://{}.test", "a".repeat(64));
+        assert!(!is_https_origin(&long_label));
     }
 
     #[test]

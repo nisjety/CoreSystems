@@ -812,7 +812,8 @@ async fn get_mcp_app_resource(
 }
 
 /// The app document `tool` on `server_id` declares, `{data: {uri, html, needs_network}}`
-/// (`crate::mcp_apps`). With the switch off the route is a 404 as if it did not exist, decided
+/// (`crate::mcp_apps`), with `csp` and `network_origins` added while `MCP_APPS_NETWORK_ENABLED` is on
+/// (`crate::mcp_app_csp`). With the switch off the route is a 404 as if it did not exist, decided
 /// before anything else. A zero-retention bearer is refused before any read, with feature
 /// `mcp_execution`: the read egresses to the MCP server as a tool call does. The org and the viewer
 /// come from the verified claims only; the registry is refreshed from capability-core with the
@@ -899,12 +900,22 @@ async fn mcp_app_resource(
     )
     .await
     .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
+    let network = if crate::mcp_apps::network_enabled() {
+        let origins = crate::org_agent_policy::mcp_app_network_origins(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            &state.http_client,
+            &state.capability_core_base_url,
+            &claims.org_id,
+            bearer.as_str(),
+        )
+        .await;
+        Some(crate::mcp_app_csp::build(&resource.declared, &origins))
+    } else {
+        None
+    };
     Ok(Json(json!({
-        "data": {
-            "uri": resource.uri,
-            "html": resource.html,
-            "needs_network": resource.needs_network,
-        }
+        "data": crate::mcp_apps::resource_body(&resource, network.as_ref()),
     })))
 }
 

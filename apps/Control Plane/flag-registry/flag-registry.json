@@ -218,6 +218,17 @@
       ]
     },
     {
+      "name": "MCP_APPS_NETWORK_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "MCP App frame policy: the resource response carries the frame's csp and the network_origins it grants (the org's mcp_apps.network_origins and the app's own declaration). Off keeps the no-network response.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MCP_APPS_NETWORK_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "MCP_DNS_REVALIDATOR_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
