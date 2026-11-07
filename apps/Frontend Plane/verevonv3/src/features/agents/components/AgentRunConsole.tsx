@@ -90,6 +90,7 @@ import {
 } from '@/features/chat/components/chat-normalizers'
 import type { RunMeter } from '@/features/chat/components/chat-types'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
+import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -1002,6 +1003,7 @@ export default function AgentRunConsole() {
               reasoning={state.reasoning}
               status={state.status}
               streaming={working()}
+              runId={activeRunId()}
               onUseExample={useExample}
             />
 
@@ -1468,6 +1470,8 @@ function AnswerPanel(props: {
   reasoning: string
   status: RunStatus
   streaming: boolean
+  /** The run the answer belongs to. A finished answer is rated by it. */
+  runId: string | null
   onUseExample: (text: string) => void
 }) {
   const i18n = useI18n()
@@ -1486,6 +1490,9 @@ function AnswerPanel(props: {
   const emptyWorking = () => working() && props.answer.trim().length === 0
   const terminal = () =>
     props.status === 'done' || props.status === 'cancelled' || props.status === 'failed'
+  // A finished answer with text is rated by its run. The list keys the control by run id.
+  const rateableRunId = () =>
+    props.status === 'done' && props.runId && props.answer.trim() ? [props.runId] : []
 
   return (
     <div class="verevon-run-panel verevon-run-answer">
@@ -1580,6 +1587,9 @@ function AnswerPanel(props: {
           </div>
         </Show>
       </Show>
+      <For each={rateableRunId()}>
+        {(runId) => <ResultFeedback runId={runId} />}
+      </For>
     </div>
   )
 }

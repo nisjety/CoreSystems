@@ -13,6 +13,7 @@ import {
 import { listOrganizationMembers } from '@/shared/api/organization-client'
 import { cronExprToLabel, SCHEDULE_PRESETS } from '@/shared/api/schedule-from-chat'
 import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
+import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
 import { ScheduleDialog } from '@/features/chat/components/ScheduleDialog'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
 import { selectChatThread } from '@/features/chat/lib/chat-thread-history'
@@ -281,6 +282,9 @@ function ScheduleFires(props: { orgId: string; cronId: string; revision: number 
                           {i18n.tr('Åpne samtalen', 'Open transcript')}
                         </a>
                       )}
+                    </Show>
+                    <Show when={fire.status === 'completed' ? fire.run_id : null}>
+                      {(runId) => <ResultFeedback runId={runId()} />}
                     </Show>
                   </li>
                 )}

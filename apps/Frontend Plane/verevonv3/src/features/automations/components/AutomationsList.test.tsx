@@ -4,7 +4,7 @@
 // cron-client calls it makes. The WS20 assertions stay in ScheduledRunsPanel.test.tsx and
 // CronSchedulesSection.test.tsx, which mount this list.
 
-import { render, screen, waitFor } from '@solidjs/testing-library'
+import { fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -30,7 +30,7 @@ vi.mock('@/shared/api/organization-client', async (importOriginal) => {
   return { ...actual, listOrganizationMembers: vi.fn() }
 })
 
-import { listCronSchedules, listScheduleFires, type CronSchedule } from '@/shared/api/cron-client'
+import { listCronSchedules, listScheduleFires, type CronSchedule, type CronScheduleFire } from '@/shared/api/cron-client'
 import { listOrganizationMembers } from '@/shared/api/organization-client'
 import { AutomationsList } from './AutomationsList'
 
@@ -226,5 +226,61 @@ describe('AutomationsList', () => {
 
     expect(await screen.findByText('Ny plan')).toBeTruthy()
     expect(mockedList).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('AutomationsList scheduled-run results', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function fire(overrides: Partial<CronScheduleFire>): CronScheduleFire {
+    return {
+      id: 'fire_1',
+      fired_at: '2026-11-06T09:00:00Z',
+      status: 'completed',
+      run_id: null,
+      thread_id: null,
+      withheld_effects: 0,
+      ...overrides,
+    }
+  }
+
+  it('rates a completed fire by its run id, inside its result row, with the switch on only', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    vi.stubEnv('VITE_AGENT_RESULT_FEEDBACK', 'true')
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ accepted: true }), { headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    mockedList.mockResolvedValue({ schedules: [schedule({ id: 'cron_1', name: 'Daglig rapport' })] })
+    mockedFires.mockResolvedValue([
+      fire({ id: 'fire_done', run_id: 'run_fire_done' }),
+      fire({ id: 'fire_failed', status: 'failed', run_id: 'run_fire_failed' }),
+      fire({ id: 'fire_unrecorded', run_id: null }),
+    ])
+
+    render(() => <AutomationsList scope="mine" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Se resultater' }))
+
+    const groups = await screen.findAllByRole('group', { name: 'Vurder svaret' })
+    expect(groups).toHaveLength(1)
+    fireEvent.click(within(groups[0]!).getByRole('button', { name: 'Godt svar' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter((call) => call[0] === '/api/v1/chat/feedback')).toHaveLength(1))
+    const rating = fetchMock.mock.calls.find((call) => call[0] === '/api/v1/chat/feedback')
+    expect(JSON.parse(String(rating?.[1]?.body))).toEqual({ run_id: 'run_fire_done', rating: 'positive' })
+  })
+
+  it('shows no rating on a fire while the switch is off', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({ id: 'cron_1', name: 'Daglig rapport' })] })
+    mockedFires.mockResolvedValue([fire({ run_id: 'run_fire_done' })])
+
+    render(() => <AutomationsList scope="mine" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Se resultater' }))
+
+    await waitFor(() => expect(document.querySelector('.verevon-scheduled-runs-panel__fire')).toBeTruthy())
+    expect(screen.queryByRole('group', { name: 'Vurder svaret' })).toBeNull()
   })
 })

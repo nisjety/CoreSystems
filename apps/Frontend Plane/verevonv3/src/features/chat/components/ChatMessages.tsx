@@ -89,6 +89,7 @@ import type {
 } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { isWidgetFence } from '../lib/inline-widget'
+import { feedbackReasonLabels } from '../lib/feedback-reasons'
 import type { SettledFold } from '../lib/settled-fold'
 import type { SettledFoldChoices } from '../lib/settled-fold-choices'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
@@ -710,12 +711,7 @@ export function AssistantMessage(props: {
   // immediately, same as before -- the category row only *enriches* that
   // rating with a `note` on a second call. It never gates or re-toggles the
   // thumb, so a category pick can't be confused with un-rating the message.
-  const feedbackReasons = () => [
-    i18n.tr('Unøyaktig', 'Inaccurate'),
-    i18n.tr('Ikke relevant', 'Not relevant'),
-    i18n.tr('Ufullstendig', 'Incomplete'),
-    i18n.tr('Skadelig', 'Harmful'),
-  ]
+  const feedbackReasons = () => feedbackReasonLabels(i18n)
   const [showReasons, setShowReasons] = createSignal(false)
   const [pickedReason, setPickedReason] = createSignal<string | null>(null)
 

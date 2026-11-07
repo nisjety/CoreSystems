@@ -5314,20 +5314,61 @@ export async function submitFeedback(
 }
 
 /**
- * User-facing reason a rating did not stick. Keeps the wording in one place so
- * the chat surface only has to decide *where* to show it.
+ * Rate a durable run's result by its run id: an agent run's answer or a scheduled
+ * run's fire, where there is no chat turn to rate.
+ *
+ * Wire contract: `{run_id, rating, note}` → gateway → model-gateway `/v1/feedback`,
+ * which checks that the caller owns the run before it stores anything. A
+ * zero-retention caller is refused (412) and nothing is stored. As in
+ * `submitFeedback`, no skill id is sent.
+ *
+ * Rejects with {@link ApiError} on failure, so a caller never shows a rating that was not stored.
  */
-export function describeFeedbackFailure(error: unknown): string {
+export async function submitRunFeedback(
+  runId: string,
+  rating: ChatFeedbackRating,
+  note?: string,
+): Promise<void> {
+  await requestJson('/api/v1/chat/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ run_id: runId, rating, note }),
+  })
+}
+
+/**
+ * User-facing reason a rating did not stick. Keeps the wording in one place so
+ * the chat surface only has to decide *where* to show it. Norwegian, unless the
+ * caller passes its reader's chooser.
+ */
+export function describeFeedbackFailure(
+  error: unknown,
+  tr: (noText: string, enText: string) => string = (noText) => noText,
+): string {
   if (error instanceof ApiError) {
     if (error.code === 'turn_not_rateable') {
-      return 'Denne meldingen kan ikke vurderes lenger. Vurderingen ble ikke lagret.'
+      return tr(
+        'Denne meldingen kan ikke vurderes lenger. Vurderingen ble ikke lagret.',
+        'This answer can no longer be rated. The rating was not saved.',
+      )
     }
     if (error.status === 401 || error.status === 403) {
-      return 'Du har ikke tilgang til å vurdere denne meldingen. Vurderingen ble ikke lagret.'
+      return tr(
+        'Du har ikke tilgang til å vurdere denne meldingen. Vurderingen ble ikke lagret.',
+        'You do not have access to rate this answer. The rating was not saved.',
+      )
+    }
+    if (error.status === 404) {
+      return tr(
+        'Vi fant ikke kjøringen som skulle vurderes. Vurderingen ble ikke lagret.',
+        'The run to rate could not be found. The rating was not saved.',
+      )
     }
     if (error.status === 412) {
-      return 'Vurderinger lagres ikke når Zero Data Retention er aktivt.'
+      return tr(
+        'Vurderinger lagres ikke når Zero Data Retention er aktivt.',
+        'Ratings are not saved while zero data retention is on.',
+      )
     }
   }
-  return 'Kunne ikke lagre vurderingen. Prøv igjen.'
+  return tr('Kunne ikke lagre vurderingen. Prøv igjen.', 'The rating could not be saved. Try again.')
 }

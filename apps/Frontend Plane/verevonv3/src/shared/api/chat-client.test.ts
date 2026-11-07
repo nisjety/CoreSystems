@@ -29,6 +29,7 @@ import {
   streamChat,
   subscriptionModelDisplayName,
   submitFeedback,
+  submitRunFeedback,
 } from './chat-client'
 import type { ChatStreamHandlers } from './chat-client'
 import {
@@ -1989,6 +1990,55 @@ describe('chat feedback', () => {
     expect(describeFeedbackFailure(new Error('boom'))).toContain(
       'Kunne ikke lagre',
     )
+  })
+
+  it('describes a run that cannot be found, and every failure in English when asked', () => {
+    const english = (_noText: string, enText: string) => enText
+    expect(describeFeedbackFailure(new ApiError('gone', 404, null))).toContain('Vi fant ikke kjøringen')
+    expect(describeFeedbackFailure(new ApiError('gone', 404, null), english)).toBe(
+      'The run to rate could not be found. The rating was not saved.',
+    )
+    expect(describeFeedbackFailure(new ApiError('zdr', 412, null), english)).toBe(
+      'Ratings are not saved while zero data retention is on.',
+    )
+    expect(describeFeedbackFailure(new Error('boom'), english)).toBe(
+      'The rating could not be saved. Try again.',
+    )
+  })
+
+  it('rates a durable run by run id, with no chat turn and no skill id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ accepted: true }, 200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitRunFeedback('run_fire_1', 'negative', 'Inaccurate')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/feedback',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toEqual({ run_id: 'run_fire_1', rating: 'negative', note: 'Inaccurate' })
+    expect(body.requestId).toBeUndefined()
+    expect(body.skill_id).toBeUndefined()
+  })
+
+  it('sends no note when the rating has none', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ accepted: true }, 200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitRunFeedback('run_fire_1', 'positive')
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toEqual({ run_id: 'run_fire_1', rating: 'positive' })
+    expect('note' in body).toBe(false)
+  })
+
+  it('rejects a run rating that zero data retention refused, so nothing reads as saved', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ error: { code: 'zdr_durable_mutation_forbidden', message: 'refused' } }, 412),
+    ))
+
+    await expect(submitRunFeedback('run_fire_1', 'positive')).rejects.toBeInstanceOf(ApiError)
   })
 })
 

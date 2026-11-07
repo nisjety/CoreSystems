@@ -44,6 +44,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
 	/** "true" folds settled agent turns to one row (EP-14 S1). Default off. */
 	readonly VITE_CHAT_SETTLED_FOLD?: string;
+	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */
+	readonly VITE_AGENT_RESULT_FEEDBACK?: string;
 	readonly VITE_QUOTA_READOUT?: string;
 	readonly VITE_QUOTA_READOUT_METRIC?: string;
 	/** "1"/"0" forces the Space command palette on/off; unset is on in dev only (WS13-S6). */
