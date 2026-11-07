@@ -198,6 +198,8 @@ import {
 import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
+import { ComputerViewer, chatComputerPanelEnabled } from '@/features/chat/components/computer/ComputerViewer'
+import { pickComputerViewer } from '@/shared/computer/viewer-registry'
 
 /**
  * What an assistant turn's connected-app suggestion card needs from the page (EP-10 S8, S9). Absent where the
@@ -2873,6 +2875,9 @@ export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void
   // With the step strip on, the row reads as a sentence that already carries the count and any truncation,
   // so those marks are dropped below. Off, the raw name and both marks stay as they were.
   const label = () => (stepStripEnabled ? narrate(props.call, i18n) : props.call.name)
+  // The computer panel's viewer for this call's intent, when the panel is on. Off, or for an intent the registry
+  // does not claim, the body stays the raw output it always was.
+  const computerViewer = () => (chatComputerPanelEnabled() ? pickComputerViewer(presentation().intent) : undefined)
 
   return (
     <div class="verevon-chat-tool-call" data-intent={presentation().intent}>
@@ -2933,8 +2938,15 @@ export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void
           <Show
             when={presentation().intent === 'diff' && props.call.output}
             fallback={
-              <Show when={props.call.output}>
-                <pre>{props.call.output}</pre>
+              <Show
+                when={computerViewer()}
+                fallback={
+                  <Show when={props.call.output}>
+                    <pre>{props.call.output}</pre>
+                  </Show>
+                }
+              >
+                <ComputerViewer call={props.call} intent={presentation().intent} />
               </Show>
             }
           >

@@ -44,6 +44,8 @@ interface ImportMetaEnv {
 	readonly VITE_DEEP_RESEARCH_PLAN_TURN?: string;
 	readonly VITE_CHAT_PROJECTS_ENABLED?: string;
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
+	/** "true" draws a tool call's terminal output and workspace file in the computer panel's viewers (EP-1 W4-B P1). Default off. */
+	readonly VITE_CHAT_COMPUTER_PANEL?: string;
 	/** "true" folds settled agent turns to one row (EP-14 S1). Default off. */
 	readonly VITE_CHAT_SETTLED_FOLD?: string;
 	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */

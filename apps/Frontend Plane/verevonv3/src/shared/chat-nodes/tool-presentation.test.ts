@@ -237,3 +237,52 @@ describe('sandbox badge', () => {
     }
   })
 })
+
+describe('computer panel intents (P1)', () => {
+  it('classifies browser steps as browser', () => {
+    for (const name of ['browser.open', 'browser.observe', 'browser.act', 'browser.close', 'browser.console']) {
+      expect(toolPresentation(call({ name })).intent).toBe('browser')
+    }
+  })
+
+  it('classifies the process host tools as process', () => {
+    for (const name of ['process_start', 'process_read', 'process_stdin', 'process_signal', 'process_list']) {
+      expect(toolPresentation(call({ name })).intent).toBe('process')
+    }
+  })
+
+  it('classifies the workspace file tools as file', () => {
+    for (const name of [
+      'workspace_read',
+      'workspace_grep',
+      'workspace_glob',
+      'workspace_list',
+      'workspace_edit',
+      'workspace_put',
+    ]) {
+      expect(toolPresentation(call({ name })).intent).toBe('file')
+    }
+  })
+
+  /**
+   * A third-party server's `read_file` is not the platform's workspace tool, so it keeps the generic card. The name
+   * alone earns a kind only when the platform names the tool.
+   */
+  it('keeps one-shot commands as terminal and leaves same-looking MCP names generic', () => {
+    expect(toolPresentation(call({ name: 'shell' })).intent).toBe('terminal')
+    for (const name of ['read_file', 'mcp__fs__read_file', 'mcp__browser__open']) {
+      expect(toolPresentation(call({ name })).intent).toBe('generic')
+    }
+  })
+
+  it('still reads a patch as a diff whatever computer panel kind its name gives', () => {
+    const patch = ['--- a/f', '+++ b/f', '@@ -1,2 +1,2 @@', ' keep', '-old', '+new'].join('\n')
+    expect(toolPresentation(call({ name: 'process_read', output: patch })).intent).toBe('diff')
+  })
+
+  it('reads the truncation of a process page like any other result', () => {
+    const presentation = toolPresentation(call({ name: 'process_read', output: '{"truncated":true}' }))
+    expect(presentation.intent).toBe('process')
+    expect(presentation.truncated).toBe(true)
+  })
+})

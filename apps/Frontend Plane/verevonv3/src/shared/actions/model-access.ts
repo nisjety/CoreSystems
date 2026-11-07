@@ -373,6 +373,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.open_mcp_app': exempt('ui_state_only', 'read'),
   'chat.stage_mcp_app_message': exempt('ui_state_only', 'read'),
   'chat.mcp_app_tool_call': exempt('agent_cannot_self_govern', 'read'),
+  'chat.open_computer_viewer': exempt('ui_state_only', 'read'),
   'audio.transcribe': exempt('no_owner_executor', 'external_write'),
   'audio.dictate': exempt('no_owner_executor', 'external_write'),
   'orchestration.decide_approval': exempt('approval_authority', 'destructive'),

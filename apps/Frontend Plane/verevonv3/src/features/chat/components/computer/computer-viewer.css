@@ -1,0 +1,19 @@
+/* The computer panel's typed viewers (P1). They sit in a tool card's body, which already sets the monospace output
+   block; these rules only tell a reader what kind of line each one is. */
+
+.verevon-computer-viewer {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.verevon-computer-viewer__meta {
+  color: var(--verevon-e-subtle);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-computer-viewer pre.verevon-computer-viewer__stderr {
+  color: var(--danger);
+}

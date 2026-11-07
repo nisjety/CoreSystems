@@ -1127,6 +1127,27 @@ describe('action registry', () => {
     }
   })
 
+  it('registers the computer panel open as a low-risk read the model cannot execute (P1)', () => {
+    const open = getActionDescriptor('chat.open_computer_viewer')
+
+    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.open_computer_viewer')).toBe(false)
+    expect(MODEL_ACCESS['chat.open_computer_viewer']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
+
+    const schema = open?.inputSchema
+    expect(schema?.safeParse({ threadId: 'thr_1', callId: 'call_1' }).success).toBe(true)
+    for (const input of [
+      { threadId: '', callId: 'call_1' },
+      { threadId: 'thr_1', callId: '' },
+      { threadId: 'thr_1', callId: 'x'.repeat(257) },
+      // The viewer is picked from the call's own intent: a client never names a viewer, a kind or a path.
+      { threadId: 'thr_1', callId: 'call_1', viewer: 'terminal' },
+      { threadId: 'thr_1', callId: 'call_1', path: 'notes.txt' },
+    ]) {
+      expect(schema?.safeParse(input).success).toBe(false)
+    }
+  })
+
   it('registers the deck presentation as a low-risk read the model cannot execute (EP-5-S5)', () => {
     const present = getActionDescriptor('chat.present_deck')
 
@@ -1777,7 +1798,8 @@ describe('action registry', () => {
     // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
     // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
     // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
-    expect(ids).toHaveLength(320)
+    // +1 after P1 (W4-B) registered chat.open_computer_viewer, the computer panel's open-a-tool-call action.
+    expect(ids).toHaveLength(321)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

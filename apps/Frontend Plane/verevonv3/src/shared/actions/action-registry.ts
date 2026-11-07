@@ -1538,6 +1538,15 @@ const chatMcpAppToolCallInput = z
   })
   .strict()
 
+// A tool call the person opens in the computer panel (P1). Only the thread and the call's id: the viewer is picked
+// from the call's own intent, never named by the caller, and the call is read from the transcript the panel holds.
+const chatOpenComputerViewerInput = z
+  .object({
+    threadId: z.string().trim().min(1).max(128),
+    callId: z.string().trim().min(1).max(256),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -5087,6 +5096,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatMcpAppToolCallInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.open_computer_viewer',
+    label: 'Open a tool call in the computer panel',
+    description: 'Show one tool call of the person\'s conversation in the computer panel, in the viewer its kind calls for: a terminal for a command or a process, and a file view for a workspace file. A browser step keeps its own view. Read only, and nothing is sent to the server: the panel reads the transcript it already holds. Off until the computer panel is switched on. Never model-executable: a model does not choose what the person looks at.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatOpenComputerViewerInput,
     outputSchema: envelopeStatusOutput,
   },
   {
