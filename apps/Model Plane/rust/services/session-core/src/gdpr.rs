@@ -153,6 +153,9 @@ pub struct PurgeSummary {
     /// Thread goals, the owner's objectives and criteria (EP-7 S1). They also cascade from
     /// `threads`; counted here so the erasure proof names the content table.
     pub thread_goals: u64,
+    /// Thread share snapshots, the owner's redacted copies of a thread (EP-12 S14). They also
+    /// cascade from `threads`; counted here so the erasure proof names the content table.
+    pub thread_share_snapshots: u64,
     pub messages: u64,
     pub task_events: u64,
     pub task_assignments: u64,
@@ -209,6 +212,7 @@ impl PurgeSummary {
             + self.memory_index
             + self.artifact_revisions
             + self.thread_goals
+            + self.thread_share_snapshots
             + self.messages
             + self.task_events
             + self.task_assignments
@@ -259,8 +263,9 @@ pub(crate) const ERASURE_BLOCKED_LEGAL_HOLD: &str = "erasure_blocked_legal_hold"
 pub(crate) const ERASURE_HOLD_CHECK_UNAVAILABLE: &str = "erasure_hold_check_unavailable";
 
 /// What a hold keeps when it blocks a thread erase: every content family `delete_thread_rows`
-/// and the org purge remove, named so the refusal says what stays. Thread goals and artifact
-/// revisions are thread-bound tables of their own (C-B9) and must stay in this list.
+/// and the org purge remove, named so the refusal says what stays. Thread goals, artifact
+/// revisions and share snapshots are thread-bound tables of their own (C-B9, EP-12 S14) and must
+/// stay in this list.
 pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
     "messages",
     "runs",
@@ -270,6 +275,7 @@ pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
     "agent_memory",
     "thread_goals",
     "artifact_revisions",
+    "thread_share_snapshots",
 ];
 
 /// The most thread ids one check call may name (org-core `retention.MaxCheckThreadIDs`).
@@ -601,6 +607,14 @@ pub async fn purge_organization_data(
         .execute(&mut *tx)
         .await?
         .rows_affected();
+
+    // Thread share snapshots (EP-12 S14) go before their threads, for the same reasons.
+    summary.thread_share_snapshots =
+        sqlx::query("DELETE FROM thread_share_snapshots WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
 
     summary.messages = sqlx::query(
         "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE org_id = $1)",
@@ -1205,6 +1219,7 @@ mod tests {
             memory_index: 1,
             artifact_revisions: 1,
             thread_goals: 1,
+            thread_share_snapshots: 1,
             messages: 1,
             task_events: 1,
             task_assignments: 1,
@@ -1243,7 +1258,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            36,
+            37,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1288,6 +1303,7 @@ mod tests {
         let plans = pos("DELETE FROM plans WHERE org_id = $1");
         let artifact_revisions = pos("DELETE FROM artifact_revisions WHERE org_id = $1");
         let thread_goals = pos("DELETE FROM thread_goals WHERE org_id = $1");
+        let thread_share_snapshots = pos("DELETE FROM thread_share_snapshots WHERE org_id = $1");
         let messages = pos("DELETE FROM messages");
         let task_events = pos("DELETE FROM task_events");
         let task_assignments = pos("DELETE FROM task_assignments");
@@ -1330,6 +1346,10 @@ mod tests {
         assert!(
             thread_goals < threads,
             "thread goals (EP-7 S1) must be purged before their threads"
+        );
+        assert!(
+            thread_share_snapshots < threads,
+            "thread share snapshots (EP-12 S14) must be purged before their threads"
         );
         assert!(
             task_events < tasks,
@@ -1731,11 +1751,12 @@ mod tests {
         server.verify().await;
     }
 
-    /// C-B9: the held scope names thread goals and artifact revisions, and both erase paths
-    /// still remove them, so the list and the deletes cannot drift apart unnoticed.
+    /// C-B9 and EP-12 S14: the held scope names thread goals, artifact revisions and share
+    /// snapshots, and both erase paths still remove them, so the list and the deletes cannot
+    /// drift apart unnoticed.
     #[test]
     fn held_scope_names_goals_and_revisions_that_erasure_removes() {
-        for table in ["thread_goals", "artifact_revisions"] {
+        for table in ["thread_goals", "artifact_revisions", "thread_share_snapshots"] {
             assert!(HELD_THREAD_CONTENT.contains(&table), "{table} must be in the held scope");
             assert!(
                 include_str!("grpc.rs").contains(&format!("DELETE FROM {table} WHERE thread_id = $1")),

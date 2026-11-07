@@ -639,4 +639,31 @@ mod tests {
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
         }
     }
+
+    #[tokio::test]
+    async fn every_route_answers_disabled_while_the_switch_is_off() {
+        for (method, uri) in [
+            ("POST", "/v1/threads/thread-1/snapshots"),
+            ("GET", "/v1/threads/thread-1/snapshots"),
+            ("GET", "/v1/snapshots/snap_1"),
+            ("DELETE", "/v1/snapshots/snap_1"),
+        ] {
+            let app = router()
+                .layer(Extension(claims(false)))
+                .layer(Extension(VerifiedSessionBearer::for_test("session-token")))
+                .with_state(AppState::new());
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("a request");
+            let response = app.oneshot(request).await.expect("the router answers");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("a body");
+            let body: Value = serde_json::from_slice(&bytes).expect("a JSON envelope");
+            assert_eq!(body["error"]["code"], DISABLED, "{method} {uri}");
+        }
+    }
 }
