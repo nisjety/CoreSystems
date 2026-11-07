@@ -2024,6 +2024,7 @@ async fn approval_preview(
     Path(approval_id): Path<String>,
     enabled: bool,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::continuation_gate(&claims)?;
     if !enabled {
         return Err(run_trace_error(
             StatusCode::NOT_FOUND,
@@ -2031,7 +2032,6 @@ async fn approval_preview(
             "the approval preview is not available",
         ));
     }
-    crate::zdr_posture::continuation_gate(&claims)?;
     let response = state
         .orchestration_client
         .clone()
@@ -23367,6 +23367,19 @@ mod approval_preview_route_tests {
         assert_eq!(status, expected_status);
         assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
         assert!(body["error"]["code"].is_string());
+    }
+
+    /// The gate runs before the switch, as it does for a decision: a zero-retention bearer gets the
+    /// typed refusal even while the preview is off, never the switch's 404.
+    #[tokio::test]
+    async fn preview_route_refuses_zdr_token_before_the_switch() {
+        let (status, body) =
+            get_json(app(true), "/off/v1/orchestration/approvals/appr_1/preview").await;
+        let (expected_status, Json(expected)) =
+            crate::zdr_posture::continuation_gate(&claims(true))
+                .expect_err("a ZDR bearer is refused");
+        assert_eq!(status, expected_status);
+        assert_eq!(body, expected, "the gate decides first, not the switch");
     }
 
     #[test]

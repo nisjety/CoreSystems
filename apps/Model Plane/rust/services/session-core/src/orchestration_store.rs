@@ -7086,6 +7086,33 @@ mod approval_preview_db_tests {
             OwnerDescriptor::NoDescriptor
         );
     }
+
+    /// EP-10-S1 (D4): reading the draft writes no log line that carries its text.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn preview_read_writes_no_log_line_carrying_the_draft() {
+        use tracing::instrument::WithSubscriber as _;
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let seed = seed_run(&pool, "logs", "persistent").await;
+        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
+        let lines = crate::test_log_capture::CapturedLines::default();
+        let read = read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user)
+            .with_subscriber(lines.clone())
+            .await
+            .expect("read");
+        assert!(
+            matches!(read, OwnerDescriptor::Descriptor { .. }),
+            "the owner reads the draft"
+        );
+        for line in lines.lines() {
+            assert!(
+                !line.contains("the whole body"),
+                "the draft reached a log line: {line}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

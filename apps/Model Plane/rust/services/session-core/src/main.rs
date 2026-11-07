@@ -63,6 +63,8 @@ mod space_membership_nats;
 mod space_stream_grpc;
 mod store;
 mod terminalization;
+#[cfg(test)]
+mod test_log_capture;
 mod thread_export;
 mod thread_fork;
 mod thread_import;
