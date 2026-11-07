@@ -1799,6 +1799,7 @@ export function useChatController() {
       turn.content = answer.content
       turn.streaming = false
       turn.status = undefined
+      turn.settledAt ??= new Date().toISOString()
       turn.stopReason = undefined
       if ((answer.artifacts?.length ?? 0) > 0) turn.artifacts = answer.artifacts
       if ((answer.citations?.length ?? 0) > 0) turn.citations = answer.citations
@@ -1885,7 +1886,10 @@ export function useChatController() {
     if (outcome.kind === 'aborted' || state.threadId !== threadId) return
     const updateTurn = (update: (turn: ChatTurn) => void) => setState((s) => {
       const turn = s.turns.find((candidate) => candidate.id === assistantId)
-      if (turn) update(turn)
+      if (turn) {
+        update(turn)
+        turn.settledAt ??= new Date().toISOString()
+      }
     })
     if (outcome.kind === 'failed') {
       setState((s) => { s.error = outcome.message })
@@ -2099,7 +2103,10 @@ export function useChatController() {
       if (!isActiveThread()) return
       setState((s) => {
         const t = s.turns.find((t) => t.id === assistantId)
-        if (t) t.streaming = false
+        if (t) {
+          t.streaming = false
+          t.settledAt ??= new Date().toISOString()
+        }
       })
       setState((s) => {
         const t = s.turns.find((t) => t.id === assistantId)
@@ -3621,7 +3628,10 @@ export function useChatController() {
     const stopStreaming = (status?: ChatTurn['status']) => {
       setState((s) => {
         const turn = s.turns.find((t) => t.id === assistantId)
-        if (turn) turn.streaming = false
+        if (turn) {
+          turn.streaming = false
+          turn.settledAt ??= new Date().toISOString()
+        }
       })
       setState((s) => {
         const turn = s.turns.find((t) => t.id === assistantId)
@@ -4236,12 +4246,18 @@ export function useChatController() {
     }
     setState((s) => {
       for (const turn of s.turns) {
-        if (turn.streaming) turn.streaming = false
+        if (turn.streaming) {
+          turn.streaming = false
+          turn.settledAt ??= new Date().toISOString()
+        }
       }
     })
     setState((s) => {
       for (const turn of s.turns) {
-        if (turn.status === 'waiting') turn.status = 'stopped'
+        if (turn.status === 'waiting') {
+          turn.status = 'stopped'
+          turn.settledAt ??= new Date().toISOString()
+        }
       }
     })
     markOpenSteps('stopped', 'Stopped by the user.')
@@ -4673,6 +4689,7 @@ export function useChatController() {
       }
       turn.streaming = false
       turn.status = 'error'
+      turn.settledAt ??= new Date().toISOString()
       if (shown.action) turn.failureAction = shown.action
       if (shown.retryAt) turn.retryAt = shown.retryAt
     })
@@ -5386,6 +5403,7 @@ export function useChatController() {
     planMode,
     approveTurnPlan,
     pendingQuestion,
+    parkedTurnId,
     questionPending,
     questionError,
     answerPendingQuestion,

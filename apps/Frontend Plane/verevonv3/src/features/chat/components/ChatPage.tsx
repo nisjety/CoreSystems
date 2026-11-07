@@ -97,6 +97,7 @@ import {
   type BrowserDockVisiblePosition,
 } from '@/features/browser/dock/browser-dock-state'
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { createSettledFoldChoices } from '../lib/settled-fold-choices'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
 
@@ -185,6 +186,7 @@ export default function ChatPage() {
     dismissConnectIntent,
     acceptConnectorSuggestion,
     pendingQuestion,
+    parkedTurnId,
     questionPending,
     questionError,
     answerPendingQuestion,
@@ -595,10 +597,19 @@ export default function ChatPage() {
     }),
   )
 
+  // Settled-turn folding (EP-14 S1). The turn a run is still on, or one whose run parked, is never folded. A run
+  // holds the latest assistant turn while it streams, waits, or is held by an open question.
+  const settledFoldChoices = createSettledFoldChoices()
+  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled
+    ? foldPlan(state.turns, {
+        activeTurnId: isStreaming() || liveRunId() || pendingQuestion() ? latestAssistantTurnId() : null,
+        parkedTurnId: parkedTurnId(),
+      })
+    : undefined))
+
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
-  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -1274,6 +1285,7 @@ export default function ChatPage() {
         planApproval={row().planApproval}
         docked={row().docked}
         settledFold={row().settledFold}
+        settledFoldChoices={settledFoldChoices}
         onSelectFollowUp={setInput}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {

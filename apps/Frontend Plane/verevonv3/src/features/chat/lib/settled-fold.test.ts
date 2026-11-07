@@ -9,19 +9,27 @@ import {
 } from './settled-fold'
 import type { ConversationNodeKind } from '@/shared/chat-nodes/types'
 
+const SENT = '2026-11-07T10:00:00.000Z'
+const FOUR_MIN_12_S_LATER = '2026-11-07T10:04:12.000Z'
+
 const assistant = (id: string, overrides: Partial<FoldTurn> = {}): FoldTurn => ({
   id,
   role: 'assistant',
+  createdAt: SENT,
+  settledAt: undefined,
   streaming: false,
   status: undefined,
   reasoning: undefined,
   toolCalls: undefined,
   files: undefined,
-  timing: undefined,
+  pendingApprovals: undefined,
+  planMode: undefined,
+  grantedRung: undefined,
+  planRejected: undefined,
   ...overrides,
 })
 
-const user = (id: string): FoldTurn => ({ ...assistant(id), role: 'user' })
+const user = (id: string, createdAt = SENT): FoldTurn => ({ ...assistant(id, { createdAt }), role: 'user' })
 
 const calls = (count: number) =>
   Array.from({ length: count }, (_, index) => ({ id: `call_${index}`, name: 'web_search' }))
@@ -34,7 +42,7 @@ const file = (name: string, mime: string) => ({
   url: `https://files.example.test/${name}`,
 })
 
-const SPAN = { serverMs: 252_000, providerMs: 200_000, orchestrationMs: 52_000 }
+const APPROVAL = [{ id: 'approval_1', kind: 'APPROVAL_KIND_TOOL_CALL' }] as unknown as FoldTurn['pendingApprovals']
 
 const ALL_KINDS: ConversationNodeKind[] = [
   'reasoning',
@@ -79,12 +87,32 @@ describe('isSettled', () => {
   })
 
   it('never settles the turn a run is still on', () => {
-    expect(isSettled(assistant('a'), 'a')).toBe(false)
-    expect(isSettled(assistant('a'), 'b')).toBe(true)
+    expect(isSettled(assistant('a'), { activeTurnId: 'a' })).toBe(false)
+    expect(isSettled(assistant('a'), { activeTurnId: 'b' })).toBe(true)
+  })
+
+  it('never settles the turn of a parked run, which may resume', () => {
+    expect(isSettled(assistant('a'), { parkedTurnId: 'a' })).toBe(false)
+    expect(isSettled(assistant('a'), { parkedTurnId: 'b' })).toBe(true)
   })
 
   it('never settles a user turn', () => {
     expect(isSettled(user('u'))).toBe(false)
+  })
+
+  it('keeps a turn unsettled while an approval it waits on is open, and settles it once decided', () => {
+    expect(isSettled(assistant('a', { pendingApprovals: APPROVAL }))).toBe(false)
+    expect(isSettled(assistant('a', { pendingApprovals: [] }))).toBe(true)
+  })
+
+  it('keeps a plan turn unsettled until the plan is granted or rejected', () => {
+    expect(isSettled(assistant('a', { planMode: true }))).toBe(false)
+    expect(isSettled(assistant('a', { planMode: true, grantedRung: 'workspace_write' }))).toBe(true)
+    expect(isSettled(assistant('a', { planMode: true, planRejected: true }))).toBe(true)
+  })
+
+  it('settles a turn that was not run in plan mode, whatever its plan fields say', () => {
+    expect(isSettled(assistant('a', { planMode: false }))).toBe(true)
   })
 })
 
@@ -103,9 +131,9 @@ describe('foldPlan', () => {
     expect(foldPlan([assistant('a')]).has('a')).toBe(false)
   })
 
-  it('never gives a row to the turn a run is still on', () => {
-    const plan = foldPlan([assistant('a', { toolCalls: calls(1) })], { activeTurnId: 'a' })
-    expect(plan.size).toBe(0)
+  it('never gives a row to the turn a run is still on, or to a parked turn', () => {
+    expect(foldPlan([assistant('a', { toolCalls: calls(1) })], { activeTurnId: 'a' }).size).toBe(0)
+    expect(foldPlan([assistant('a', { toolCalls: calls(1) })], { parkedTurnId: 'a' }).size).toBe(0)
   })
 
   it('gives no row to a streaming or waiting turn', () => {
@@ -114,6 +142,24 @@ describe('foldPlan', () => {
       assistant('b', { toolCalls: calls(1), status: 'waiting' }),
     ])
     expect(plan.size).toBe(0)
+  })
+
+  it('gives no row to a turn that holds an approval or an ungranted plan, so its decision stays whole', () => {
+    const plan = foldPlan([
+      assistant('a', { toolCalls: calls(2), pendingApprovals: APPROVAL }),
+      assistant('b', { toolCalls: calls(2), planMode: true }),
+    ])
+    expect(plan.size).toBe(0)
+  })
+
+  it('gives no row to a turn that errored, so its trail and its error stay whole', () => {
+    const plan = foldPlan([assistant('a', { toolCalls: calls(3), status: 'error' })])
+    expect(plan.size).toBe(0)
+  })
+
+  it('still gives a row to a turn the person stopped, whose trail is the work done before the stop', () => {
+    const plan = foldPlan([assistant('a', { toolCalls: calls(2), status: 'stopped' })])
+    expect(plan.get('a')?.steps).toBe(2)
   })
 
   it('leaves generated images out of the file count', () => {
@@ -126,28 +172,55 @@ describe('foldPlan', () => {
     expect(plan.get('a')?.files).toBe(1)
   })
 
-  it('takes the duration from the gateway span the turn reported', () => {
-    const plan = foldPlan([assistant('a', { toolCalls: calls(1), timing: SPAN })])
-    expect(plan.get('a')?.durationMs).toBe(252_000)
-  })
+  describe('duration: from the triggering user message to the terminal frame', () => {
+    it('is the span from the user message to the turn\'s terminal frame', () => {
+      const plan = foldPlan([
+        user('u1'),
+        assistant('a', { toolCalls: calls(1), settledAt: FOUR_MIN_12_S_LATER }),
+      ])
+      expect(plan.get('a')?.durationMs).toBe(252_000)
+    })
 
-  it('keeps the duration on a restored turn, which carries only the timing totals', () => {
-    const restored = assistant('a', { toolCalls: calls(2), timing: { ...SPAN } })
-    expect(foldPlan([restored]).get('a')?.durationMs).toBe(252_000)
-  })
-
-  it('gives no duration when the turn reported none, rather than estimating one', () => {
-    const plan = foldPlan([assistant('a', { toolCalls: calls(4) })])
-    expect(plan.get('a')).toEqual({ defaultFolded: false, steps: 4, files: 0 })
-    expect(plan.get('a')?.durationMs).toBeUndefined()
-  })
-
-  it('gives no duration for a span that is not a finite, non-negative number', () => {
-    const invalid = [Number.NaN, -1, Number.POSITIVE_INFINITY]
-    for (const serverMs of invalid) {
-      const plan = foldPlan([assistant('a', { toolCalls: calls(1), timing: { ...SPAN, serverMs } })])
+    it('gives no duration to a restored turn, which has no terminal frame on this client', () => {
+      const plan = foldPlan([user('u1'), assistant('a', { toolCalls: calls(2) })])
       expect(plan.get('a')?.durationMs).toBeUndefined()
-    }
+      expect(plan.get('a')?.steps).toBe(2)
+    })
+
+    it('gives no duration when the turn has no triggering user message in view', () => {
+      const plan = foldPlan([assistant('a', { toolCalls: calls(1), settledAt: FOUR_MIN_12_S_LATER })])
+      expect(plan.get('a')?.durationMs).toBeUndefined()
+    })
+
+    it('counts from the nearest user message before the answer', () => {
+      const plan = foldPlan([
+        user('u1', '2026-11-07T10:00:00.000Z'),
+        assistant('a1', { toolCalls: calls(1), settledAt: '2026-11-07T10:01:00.000Z' }),
+        user('u2', '2026-11-07T10:05:00.000Z'),
+        assistant('a2', { toolCalls: calls(1), settledAt: '2026-11-07T10:06:30.000Z' }),
+      ])
+      expect(plan.get('a1')?.durationMs).toBe(60_000)
+      expect(plan.get('a2')?.durationMs).toBe(90_000)
+    })
+
+    it('gives no duration for a terminal frame that is earlier than its message, rather than a negative span', () => {
+      const plan = foldPlan([
+        user('u1', '2026-11-07T10:00:00.000Z'),
+        assistant('a', { toolCalls: calls(1), settledAt: '2026-11-07T09:59:00.000Z' }),
+      ])
+      expect(plan.get('a')?.durationMs).toBeUndefined()
+    })
+
+    it('gives no duration for a time that does not parse', () => {
+      const plan = foldPlan([
+        user('u1', 'not-a-time'),
+        assistant('a', { toolCalls: calls(1), settledAt: FOUR_MIN_12_S_LATER }),
+        user('u2'),
+        assistant('b', { toolCalls: calls(1), settledAt: 'not-a-time' }),
+      ])
+      expect(plan.get('a')?.durationMs).toBeUndefined()
+      expect(plan.get('b')?.durationMs).toBeUndefined()
+    })
   })
 
   it('folds the settled turns older than the last two, and leaves the last settled turn open', () => {
@@ -174,6 +247,17 @@ describe('foldPlan', () => {
     ])
     expect(plan.get('a1')?.defaultFolded).toBe(true)
     expect(plan.get('a2')?.defaultFolded).toBe(false)
+  })
+
+  it('keeps the last settled turn open while a later turn is still unsettled', () => {
+    const plan = foldPlan([
+      assistant('a1', { toolCalls: calls(1) }),
+      user('u1'),
+      assistant('a2', { toolCalls: calls(1), pendingApprovals: APPROVAL }),
+      user('u2'),
+    ])
+    expect(plan.has('a2')).toBe(false)
+    expect(plan.get('a1')?.defaultFolded).toBe(false)
   })
 })
 

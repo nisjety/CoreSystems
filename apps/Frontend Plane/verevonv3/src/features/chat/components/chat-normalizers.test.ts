@@ -209,6 +209,24 @@ describe('subscription route persistence', () => {
   })
 })
 
+describe('settled-turn fold clock (EP-14 S1)', () => {
+  it('is not kept in the transcript record, so a reloaded turn has no terminal time', () => {
+    const [stored] = turnsToTranscript([{
+      id: 'asst-1',
+      role: 'assistant',
+      content: 'Svar',
+      createdAt: '2026-11-07T10:00:05.000Z',
+      settledAt: '2026-11-07T10:04:12.000Z',
+      streaming: false,
+      tools: [],
+      attachments: [],
+    }])
+
+    expect(JSON.stringify(stored)).not.toContain('settledAt')
+    expect(transcriptTurnToChatTurn(stored!)).not.toHaveProperty('settledAt')
+  })
+})
+
 describe('missingSearchResultStep', () => {
   const waitingSearchStep = {
     id: 'asst-1:tool-search',
@@ -346,6 +364,16 @@ describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
     const merged = mergeServerTurnsWithCachedMetadata(server, cached)
     expect(merged).toHaveLength(2)
     expect(merged.at(-1)).toMatchObject({ id: 'a1', status: 'waiting', requestId: 'req_9' })
+  })
+
+  it('keeps this client\'s terminal-frame stamp when the server copy is merged in (EP-14 S1)', () => {
+    const server = [turn({ id: 'u1', content: 'question' }), turn({ id: 'a1', role: 'assistant', content: 'answer' })]
+    const cached = [
+      turn({ id: 'u1', content: 'question' }),
+      turn({ id: 'a1', role: 'assistant', content: 'answer', settledAt: '2026-11-07T10:04:12.000Z' }),
+    ]
+    const merged = mergeServerTurnsWithCachedMetadata(server, cached)
+    expect(merged.at(-1)).toMatchObject({ id: 'a1', settledAt: '2026-11-07T10:04:12.000Z' })
   })
 
   it('does NOT carry a waiting tail without a requestId — nothing to resume, would spin forever', () => {

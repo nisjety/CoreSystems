@@ -397,6 +397,11 @@ export type ChatTurn = {
   role: 'user' | 'assistant'
   content: string
   createdAt: string
+  /**
+   * When this client saw the turn's terminal frame (done, stopped or error), as an ISO time. Session-only: the
+   * transcript record does not keep it, so a reloaded turn has none and its fold row shows counts only (EP-14 S1).
+   */
+  settledAt?: string
   streaming: boolean
   tools: ComposerToolId[]
   attachments: ChatTurnAttachment[]

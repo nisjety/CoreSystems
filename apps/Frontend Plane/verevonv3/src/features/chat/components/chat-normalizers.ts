@@ -1054,6 +1054,9 @@ export function mergeServerTurnsWithCachedMetadata(
       grantedRung: serverTurn.grantedRung ?? cachedTurn.grantedRung,
       effectClass: serverTurn.effectClass ?? cachedTurn.effectClass,
       status: serverTurn.status ?? mergedCachedStatus(serverTurn, cachedTurn),
+      // This client's own terminal-frame stamp (EP-14 S1). The server's copy never has one, so the cached turn's
+      // is kept for the session; the stored transcript never carries it. Keyed only when set, as the other shapes are.
+      ...(cachedTurn.settledAt ? { settledAt: cachedTurn.settledAt } : {}),
       inputTokens: serverTurn.inputTokens ?? cachedTurn.inputTokens,
       outputTokens: serverTurn.outputTokens ?? cachedTurn.outputTokens,
       latencyMs: serverTurn.latencyMs ?? cachedTurn.latencyMs,

@@ -1,11 +1,14 @@
 /*
  * Settled-turn fold (EP-14 S1). The row reuses the steps pill's tokens, so it reads
- * as the same kind of control. The body takes no `display` of its own: a folded
- * body is `hidden`, and an author rule would override the UA's `display: none`
- * that the browsers without `hidden="until-found"` rely on.
+ * as the same kind of control. The row is one line of fixed height: the virtual
+ * planner measures a turn once and keeps that height, so a label that wraps would
+ * move the turn under the reader. The body takes no `display` of its own: a folded
+ * body is `hidden`, and an author rule would override the UA's `display: none` that
+ * the browsers without `hidden="until-found"` rely on.
  */
 
 .verevon-chat-settled-fold {
+  max-width: 100%;
   margin-bottom: 10px;
 }
 
@@ -13,9 +16,10 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  box-sizing: border-box;
   max-width: 100%;
-  min-height: 32px;
-  padding: 6px 14px;
+  height: 32px;
+  padding: 0 14px;
   border: 0;
   border-radius: 999px;
   background: var(--verevon-surface-soft);
@@ -23,9 +27,17 @@
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
+  white-space: nowrap;
   text-align: left;
   cursor: pointer;
   transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-settled-fold__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .verevon-chat-settled-fold__toggle:hover {

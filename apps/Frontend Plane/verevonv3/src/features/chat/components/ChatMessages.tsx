@@ -90,6 +90,7 @@ import type {
 import { isSafeLinkHref } from '../lib/safe-href'
 import { isWidgetFence } from '../lib/inline-widget'
 import type { SettledFold } from '../lib/settled-fold'
+import type { SettledFoldChoices } from '../lib/settled-fold-choices'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
@@ -279,6 +280,8 @@ export function MessageBlock(props: {
   docked?: DockedNodes
   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
   settledFold?: SettledFold
+  /** The page's fold choices for this view (EP-14 S1). Absent, the fold keeps its choice for this mount only. */
+  settledFoldChoices?: SettledFoldChoices
   /** The connected-app suggestion card's wiring (EP-10 S8); see `ConnectorSuggestionWiring`. */
   connectorSuggestion?: ConnectorSuggestionWiring
 }) {
@@ -604,6 +607,8 @@ export function AssistantMessage(props: {
   /** See `MessageBlock`'s doc. */
   settledFold?: SettledFold
   /** See `MessageBlock`'s doc. */
+  settledFoldChoices?: SettledFoldChoices
+  /** See `MessageBlock`'s doc. */
   connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   const i18n = useI18n()
@@ -895,7 +900,13 @@ export function AssistantMessage(props: {
           {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
             <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
-              <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+              <SettledTurnContent
+                fold={props.settledFold}
+                turnId={props.message.id}
+                choices={props.settledFoldChoices}
+                entries={nodeEntries()}
+                renderEntries={renderNodeEntries}
+              />
             </InlineWidgetAnswer>
             {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
             <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
