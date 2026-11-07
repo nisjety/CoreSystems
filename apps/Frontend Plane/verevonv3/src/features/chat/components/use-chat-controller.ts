@@ -73,6 +73,7 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   cancelRun,
+  continueRun,
   decideApproval,
   answerQuestion as answerRunQuestion,
   listApprovals,
@@ -84,6 +85,7 @@ import {
   type ApprovalEdit,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
+import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
@@ -3239,6 +3241,29 @@ export function useChatController() {
   }
 
   /**
+   * The chat side of the live panel's Give back (EP-1). The panel has handed the browser back, so the
+   * takeover approval the run waits on is decided with the person's note and the run continues under
+   * chat.run.continue. A refused or ambiguous continue is shown, and is not sent again by this path.
+   */
+  const giveBackBrowserRun = async (runId: string, note: string): Promise<void> => {
+    if (isForeignOriginThread(state.threadId)) return
+    const outcome: BrowserGiveBackOutcome = await runBrowserGiveBack(runId, note, {
+      listApprovals,
+      decideApproval: (approvalId, decision, reason) => decideApproval(approvalId, decision, reason),
+      continueRun: (continuedRunId, approvalId, claimToken, onEvent) =>
+        continueRun(continuedRunId, approvalId, claimToken, onEvent),
+      newClaimToken: () => createId('claim'),
+    }).catch((): BrowserGiveBackOutcome => ({ kind: 'decision_failed' }))
+    if (outcome.kind === 'decision_failed') {
+      showFeedbackNotice(i18n.tr('Nettleseren kunne ikke gis tilbake. Prøv igjen.', 'The browser could not be handed back. Try again.'))
+    } else if (outcome.kind === 'continue_refused') {
+      showFeedbackNotice(outcome.effect.approvalSpent === 'no'
+        ? i18n.tr('Kjøringen kunne ikke fortsette etter at nettleseren ble gitt tilbake.', 'The run could not continue after the browser was handed back.')
+        : i18n.tr('Kjøringen følges videre i panelet.', 'The run is followed in the panel.'))
+    }
+  }
+
+  /**
    * A mid-run message the run ended before receiving.
    *
    * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
@@ -5373,6 +5398,7 @@ export function useChatController() {
     handleApprovalDecision,
     handleEditedApprovalDecision,
     refreshApprovalsForRun,
+    giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,

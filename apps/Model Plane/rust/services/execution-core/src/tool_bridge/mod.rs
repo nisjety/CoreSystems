@@ -414,26 +414,14 @@ pub(crate) async fn execute_quarry_browser_mcp(
         // WS9.E: a read of the run's console, not a step: no lease, no action,
         // the same service token and 401 retry.
         BrowserMcpKind::Console(query) => {
-            return match client
-                .devtools(crate::quarry_agent::DevtoolsParams {
-                    org_id: verified_org_id,
-                    run_id: &request.quarry_run_id,
-                    levels: query.levels.as_deref(),
-                    filter: query.filter.as_deref(),
-                    after_sequence: query.since_sequence,
-                    limit: Some(query.limit),
-                    request_id: None,
-                })
-                .await
-            {
-                Ok(page) => ToolExecution {
-                    output: console_output(page),
-                    error: None,
-                },
-                Err(error) => {
-                    browser_mcp_error(format!("Quarry browser console read failed: {error}"))
-                }
-            };
+            return console_for_grant(
+                &client,
+                verified_org_id,
+                &request.quarry_run_id,
+                validated_grant.grant_id(),
+                query,
+            )
+            .await;
         }
     };
     let constraints = crate::quarry_agent::AgentConstraints {
@@ -581,6 +569,48 @@ fn browser_mcp_error(error: impl Into<String>) -> ToolExecution {
     ToolExecution {
         output: String::new(),
         error: Some(error.into()),
+    }
+}
+
+/// The refusal of a console read for a run the grant did not start. The same words answer a run that
+/// cannot be read, so the answer does not say which runs exist.
+const CONSOLE_NOT_GRANT_RUN: &str = "browser.console reads only the Quarry run its grant started";
+
+/// `browser.console` (WS9.E, EP-1 D3-652): the console of a Quarry run, for the grant the call holds
+/// and no other. The input names the run, so Quarry's own record of the run is read first, and it
+/// must name this grant as the one the run was started with. A record that names another grant, or
+/// one that cannot be read, is refused the same way, before any console is read.
+async fn console_for_grant(
+    client: &crate::quarry_agent::QuarryAgentClient,
+    org_id: &str,
+    quarry_run_id: &str,
+    grant_id: &str,
+    query: ConsoleQuery,
+) -> ToolExecution {
+    let bound = matches!(
+        client.run_control(quarry_run_id, org_id).await,
+        Ok(record) if record.grant_id == grant_id
+    );
+    if !bound {
+        return browser_mcp_error(CONSOLE_NOT_GRANT_RUN);
+    }
+    match client
+        .devtools(crate::quarry_agent::DevtoolsParams {
+            org_id,
+            run_id: quarry_run_id,
+            levels: query.levels.as_deref(),
+            filter: query.filter.as_deref(),
+            after_sequence: query.since_sequence,
+            limit: Some(query.limit),
+            request_id: None,
+        })
+        .await
+    {
+        Ok(page) => ToolExecution {
+            output: console_output(page),
+            error: None,
+        },
+        Err(error) => browser_mcp_error(format!("Quarry browser console read failed: {error}")),
     }
 }
 
@@ -3352,6 +3382,93 @@ mod tests {
     }
 
     const CONSOLE_BASE: &str = r#""grant_id":"grant-1","quarry_run_id":"run_ab-1","lease_id":"lease-1""#;
+
+    /// Quarry's owner projection of run `run-q1`, which the grant `grant_id` started.
+    fn console_projection(grant_id: &str) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "runId": "run-q1",
+                "controlMode": "agent_control",
+                "controlEpoch": 0,
+                "grantId": grant_id,
+                "tabs": []
+            },
+            "meta": { "request_id": "req_1" },
+            "error": null,
+        }))
+    }
+
+    /// One console line, as Quarry's devtools read answers it.
+    fn console_page() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "events": [{
+                    "sequence": 5, "tabId": "tab_9", "category": "console", "name": "console.error",
+                    "level": "error", "text": "boom", "timestampMs": 1, "payload": null
+                }],
+                "nextSequence": 5,
+                "zdr": false
+            },
+            "meta": {},
+            "error": null,
+        }))
+    }
+
+    /// `browser.console` for `grant-1` on run `run-q1`, whose record is `record`; the stub expects
+    /// `reads` console reads and fails the test when Quarry gets another number.
+    async fn console_as_grant_1(record: wiremock::ResponseTemplate, reads: u64) -> ToolExecution {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/v1/agent/runs/run-q1/browser-session",
+            ))
+            .respond_with(record)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/agent/runs/run-q1/devtools"))
+            .respond_with(console_page())
+            .expect(reads)
+            .mount(&server)
+            .await;
+        let client = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok")
+            .expect("a client for the stub");
+        console_for_grant(
+            &client,
+            "org_1",
+            "run-q1",
+            "grant-1",
+            console_query(&format!("{{{CONSOLE_BASE}}}")),
+        )
+        .await
+    }
+
+    /// `browser.console` reads a run only when the run's own record names the grant the call holds
+    /// (EP-1 D3-652). The input's run id is not trusted: a run another grant started, a record with no
+    /// grant, and a run that cannot be read are all refused before the console is read.
+    #[tokio::test]
+    async fn console_reads_a_run_only_for_the_grant_that_started_it() {
+        let bound = console_as_grant_1(console_projection("grant-1"), 1).await;
+        assert_eq!(bound.error, None);
+        assert!(bound.output.contains("boom"), "{}", bound.output);
+
+        for record in [console_projection("grant-2"), console_projection("")] {
+            let refused = console_as_grant_1(record, 0).await;
+            assert_eq!(refused.error.as_deref(), Some(CONSOLE_NOT_GRANT_RUN));
+            assert!(refused.output.is_empty());
+        }
+
+        let unreadable = console_as_grant_1(
+            wiremock::ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "data": null,
+                "meta": { "request_id": "req_1" },
+                "error": { "code": "NOT_FOUND", "message": "no such run" },
+            })),
+            0,
+        )
+        .await;
+        assert_eq!(unreadable.error.as_deref(), Some(CONSOLE_NOT_GRANT_RUN));
+    }
 
     // ---- E3.2-e2 tab operations through browser.act ---------------------
 

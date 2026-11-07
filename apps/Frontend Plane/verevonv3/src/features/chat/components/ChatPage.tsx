@@ -125,6 +125,7 @@ export default function ChatPage() {
     handleApprovalDecision,
     handleEditedApprovalDecision,
     refreshApprovalsForRun,
+    giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,
@@ -1601,6 +1602,7 @@ export default function ChatPage() {
         meter={activeRunTurn()?.meter}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
+        onBrowserGiveBack={(runId, note) => void giveBackBrowserRun(runId, note)}
         navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}
