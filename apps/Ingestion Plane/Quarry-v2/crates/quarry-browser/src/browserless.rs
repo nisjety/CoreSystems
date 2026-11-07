@@ -181,7 +181,6 @@ impl BrowserlessDriver {
             .with_details(json!({
                 "status": status.as_u16(),
                 "endpoint": path,
-                "body": String::from_utf8_lossy(&bytes).to_string(),
             })));
         }
 
@@ -350,6 +349,25 @@ mod tests {
     fn endpoint_without_token() {
         let d = BrowserlessDriver::new("https://chrome.browserless.io/", None);
         assert_eq!(d.endpoint("pdf"), "https://chrome.browserless.io/pdf");
+    }
+
+    #[tokio::test]
+    async fn non_success_does_not_echo_the_upstream_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/pdf"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream-probe-7f3a"))
+            .mount(&server)
+            .await;
+
+        let driver = BrowserlessDriver::new(server.uri(), None);
+        let err = driver.post_json_bytes("pdf", json!({})).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert!(!err.message.contains("upstream-probe"));
+        let details = err.details.expect("status detail").to_string();
+        assert!(!details.contains("upstream-probe"));
+        assert!(details.contains("500"));
     }
 
     #[tokio::test]

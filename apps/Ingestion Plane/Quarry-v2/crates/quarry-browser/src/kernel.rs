@@ -321,7 +321,6 @@ impl KernelDriver {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let txt = resp.text().await.unwrap_or_default();
             return Err(QuarryError::new(
                 if status == 429 {
                     ErrorCode::RateLimited
@@ -330,7 +329,7 @@ impl KernelDriver {
                 } else {
                     ErrorCode::BadRequest
                 },
-                format!("kernel create returned {status}: {txt}"),
+                format!("kernel create returned {status}"),
             ));
         }
 
@@ -484,11 +483,7 @@ impl KernelDriver {
         if !status.is_success() {
             return Err(QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!(
-                    "kernel {action} returned {}: {}",
-                    status.as_u16(),
-                    String::from_utf8_lossy(&bytes)
-                ),
+                format!("kernel {action} returned {}", status.as_u16()),
             ));
         }
         Ok(bytes)
@@ -943,6 +938,39 @@ mod tests {
         let driver = KernelDriver::new(KernelConfig::new(server.uri(), "k"));
         let err = driver.acquire(&make_lease()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn create_error_does_not_echo_the_upstream_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/v1/browsers"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream-probe-7f3a"))
+            .mount(&server)
+            .await;
+
+        let driver = KernelDriver::new(KernelConfig::new(server.uri(), "k"));
+        let err = driver.acquire(&make_lease()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert_eq!(err.message, "kernel create returned 500");
+    }
+
+    #[tokio::test]
+    async fn action_error_does_not_echo_the_upstream_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/v1/browsers/b_1/pdf"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream-probe-7f3a"))
+            .mount(&server)
+            .await;
+
+        let driver = KernelDriver::new(KernelConfig::new(server.uri(), "k"));
+        let err = driver
+            .post_bytes("b_1", "pdf", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert_eq!(err.message, "kernel pdf returned 500");
     }
 
     #[tokio::test]
