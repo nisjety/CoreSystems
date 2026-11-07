@@ -383,3 +383,12 @@ Quarry side: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes
 - **Refusals the driver must handle:** 403 `origin_consent_disabled` (flag off), 403 `attach_tab_consent_required` (no approval for the tab's current host), 403 `attach_tab_consent_denied`, 409 `attach_tab_not_visible`, `attach_tab_not_human_held`, `attach_tab_already_attached`, `no_attached_agent`, `stale_tab_epoch`; 403 `attach_zdr_refused` for a ZDR run.
 - **Open:** ending an attach-mode attachment must hand the tab back to the person, not close it (today `finish_attach` closes the attachment's tab).
 - **When:** not before counsel signs off the consent wording (OD13), like E3.2-e1.
+
+## W3-E3.2-g1 (integ, w23): admission golden for the two organization browser policy actions
+
+Built on w23/integ: `browser.get_org_policy` (read, `ui_state_only`) and `browser.set_org_policy` (high risk, approval-gated, `human_identity_or_security`, no model executor) in `action-registry.ts` and `model-access.ts`. The SPA admission golden `apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json` was regenerated: +26 lines, two rows, sha256 `fac37b718e9c0f8e51a5b09648c378d7dad42b1ec3cd7f2012e8d7d9f6183cb9`. Model Plane files were not edited (FINISH-QUEUE rule), so the SPA-copy-versus-canonical rows of `scripts/tests/zdr-contract-sync.test.sh` and `apps/Model Plane/scripts/tests/agent-action-admission-proof.sh` stay RED until the owner acts.
+
+- **Copy:** copy the SPA golden byte-identically over `apps/Model Plane/api/contracts/agent-action-admission.json` and its vendored copies: `apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json`, `apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json`, `apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json`.
+- **Pins:** then move the canonical digest pin (`apps/Model Plane/api/contracts/agent-action-admission.json.sha256`, and the `agent-action-admission.json|` row near line 209 of `scripts/tests/zdr-contract-sync.test.sh`) to the digest of the new bytes.
+- **Owner rows:** both ids are exempt (`access: none`) with no executor, so no model can run either. `browser.set_org_policy` is reached only from Settings > Browser through the gateway, under the person's own session; org-core applies it only at the revision the person read (If-Match).
+- **When:** before `BROWSER_POLICY_ADMIN_API` (gateway) or `VITE_BROWSER_POLICY_SETTINGS` (SPA) is turned on anywhere.
