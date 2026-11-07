@@ -2,7 +2,7 @@
 
 use mp_contracts::model_plane::v1::ValidateGrantResponse;
 
-use crate::{browser_agent, browser_session, wiki_agent};
+use crate::{browser_agent, browser_session, computer_action, wiki_agent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecution {
@@ -862,6 +862,20 @@ pub(crate) fn browser_do_unavailable(zdr: bool) -> ToolExecution {
     ToolExecution {
         output: String::new(),
         error: Some(error),
+    }
+}
+
+/// A computer call (W4-C C1), answered with the text [`computer_action::refusal_text`] gives: no computer
+/// backend serves it in this slice.
+pub(crate) fn computer_tool(tool_name: &str, tool_input: &str, zdr: bool) -> ToolExecution {
+    ToolExecution {
+        output: String::new(),
+        error: Some(computer_action::refusal_text(
+            tool_name,
+            tool_input,
+            zdr,
+            computer_action::computer_enabled(),
+        )),
     }
 }
 

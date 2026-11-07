@@ -38,6 +38,7 @@ use mp_contracts::model_plane::v1::{
 use tonic::transport::Channel;
 
 use crate::browser_session;
+use crate::computer_action;
 use crate::hook;
 use crate::permission::{self, PermissionDecision, PermissionMode};
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -1376,6 +1377,8 @@ async fn execute_step_inner(
         .await
     } else if browser_session::is_do_tool(tool_name) {
         tool_bridge::browser_do_unavailable(zdr)
+    } else if computer_action::is_computer_tool(tool_name) {
+        tool_bridge::computer_tool(tool_name, tool_input, zdr)
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input, org_id, user_id, run_id, state, sandbox).await
     } else if tool_name == CODE_INTERPRETER_TOOL {

@@ -137,6 +137,17 @@
       ]
     },
     {
+      "name": "EXECUTION_DO_COMPUTER_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-C C1: the Do loop's computer tools (execution-core). Only the literal true turns them on, and even on, every call is refused computer_unavailable until a backend is built.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_DO_COMPUTER_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_POST_MUTATION_VERIFY_ENABLED",
       "kind": "switch",
       "owner": "model-plane",

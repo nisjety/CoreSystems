@@ -27,7 +27,7 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// The number of enforcement rows the canonical matrix carries when this test was written. A row
 /// added or removed without this test being updated is a change nobody reviewed here.
-const ENFORCEMENT_ROWS: usize = 33;
+const ENFORCEMENT_ROWS: usize = 34;
 
 fn matrix() -> Value {
     serde_json::from_str(MATRIX).expect("the vendored matrix is JSON")

@@ -1903,6 +1903,9 @@ services:
       EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
+      # W4-C C1: the Do loop's computer tools (computer.observe, computer.act). Only the literal true turns them on, and
+      # even on, no computer backend is built yet, so every call is refused computer_unavailable.
+      EXECUTION_DO_COMPUTER_ENABLED: ${EXECUTION_DO_COMPUTER_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
       # WS14-S5: an answer continues the same run. Off by default; also needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and

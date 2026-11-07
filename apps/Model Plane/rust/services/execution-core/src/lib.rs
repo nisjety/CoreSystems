@@ -13,6 +13,7 @@ pub mod capability_client;
 pub mod capability_policy;
 pub mod code_interpreter;
 mod compaction_budget;
+pub(crate) mod computer_action;
 pub mod control_http_client;
 pub mod egress_proxy;
 pub mod executor;
