@@ -47,7 +47,7 @@ type InlineWidgetAnswerScope = {
   followupBudget: TokenBucket
 }
 
-const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | undefined>(undefined)
+const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | null>(null)
 
 /**
  * Wraps one assistant answer, so its widgets' staged follow-ups go through the
