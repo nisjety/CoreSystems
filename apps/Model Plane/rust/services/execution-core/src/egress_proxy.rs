@@ -977,7 +977,11 @@ mod tests {
             allowlist: Vec::new(),
         };
         for host in ["pypi.org", "example.org"] {
-            assert_eq!(admit_target(&egress, host, 443), Err(Denial::NotListed), "{host}");
+            assert_eq!(
+                admit_target(&egress, host, 443),
+                Err(Denial::NotListed),
+                "{host}"
+            );
         }
     }
 
