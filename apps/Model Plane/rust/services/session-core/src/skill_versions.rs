@@ -26,8 +26,8 @@ use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::record_metrics;
 
 /// The environment switch. capability-core reads the same name for its HTTP history route, so one
-/// setting turns the version reads on for both. Default off, read by the strict parser the other
-/// switches share, so only the literal `true` turns it on.
+/// setting turns the version reads on for both. Default off; only the literal `true` turns it on,
+/// which is also how capability-core reads it, so the two services cannot disagree on a value.
 pub(crate) const ENABLED_ENV: &str = "SKILL_VERSIONS_API";
 
 const DISABLED: &str = "skill_versions_disabled";
@@ -47,7 +47,13 @@ const VISIBLE_SKILL_SQL: &str = "SELECT EXISTS (
 
 /// Read where it is used: the RPCs hold no switch of their own.
 pub(crate) fn skill_versions_enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    enabled_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// The switch's reading, on the value alone. Exact, as capability-core's `SkillVersionsAPIFromLookup`
+/// is: no trimming and no case folding, so `TRUE` and ` true ` leave the version reads off.
+fn enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
 }
 
 /// The version RPCs. They hold the pool and nothing else.
@@ -289,10 +295,12 @@ mod tests {
 
     #[test]
     fn the_switch_is_off_unless_it_reads_true() {
-        assert!(!mp_contracts::loop_fold::switch_from(None));
-        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
-        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
-        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(!enabled_from(None));
+        assert!(!enabled_from(Some("")));
+        assert!(!enabled_from(Some("1")));
+        assert!(!enabled_from(Some("TRUE")));
+        assert!(!enabled_from(Some(" true ")));
+        assert!(enabled_from(Some("true")));
     }
 
     #[test]

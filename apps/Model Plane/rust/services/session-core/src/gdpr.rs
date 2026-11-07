@@ -1265,8 +1265,11 @@ mod tests {
 
         // No query ever builds its WHERE clause via string formatting of
         // the caller-supplied org_id — every statement binds `$1`.
+        // The test module below formats table names into its own coverage checks (the held-scope
+        // test), so only the code above it is scanned.
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
         assert!(
-            !source.contains("format!(\"DELETE"),
+            !production.contains("format!(\"DELETE"),
             "a DELETE must never be built with format!/string interpolation"
         );
 

@@ -14,9 +14,10 @@ import (
 // The contract files are read where they are written, beside the other Model Plane
 // contracts; mp-contracts skill_lint reads the same three files.
 const (
-	contractPath = "../../../../../api/contracts/authored-behaviour-lint.json"
-	pinPath      = "../../../../../api/contracts/authored-behaviour-lint.json.sha256"
-	goldenPath   = "../../../../../api/contracts/authored-behaviour-lint-golden.json"
+	contractPath  = "../../../../../api/contracts/authored-behaviour-lint.json"
+	pinPath       = "../../../../../api/contracts/authored-behaviour-lint.json.sha256"
+	goldenPath    = "../../../../../api/contracts/authored-behaviour-lint-golden.json"
+	goldenPinPath = "../../../../../api/contracts/authored-behaviour-lint-golden.json.sha256"
 )
 
 func readContract(t *testing.T, path string) []byte {
@@ -36,6 +37,15 @@ func TestLintContractDigestIsThePinnedOne(t *testing.T) {
 	pinned := strings.Fields(string(readContract(t, pinPath)))
 	if len(pinned) == 0 || hex.EncodeToString(sum[:]) != pinned[0] {
 		t.Fatalf("authored-behaviour-lint.json changed without its .sha256 pin being refreshed")
+	}
+}
+
+func TestLintGoldenDigestIsThePinnedOne(t *testing.T) {
+	normalised := bytes.ReplaceAll(readContract(t, goldenPath), []byte("\r\n"), []byte("\n"))
+	sum := sha256.Sum256(normalised)
+	pinned := strings.Fields(string(readContract(t, goldenPinPath)))
+	if len(pinned) == 0 || hex.EncodeToString(sum[:]) != pinned[0] {
+		t.Fatalf("authored-behaviour-lint-golden.json changed without its .sha256 pin being refreshed")
 	}
 }
 
@@ -125,7 +135,7 @@ func TestLintGoldenParity(t *testing.T) {
 			Name: c.Input.Name, Description: c.Input.Description, Content: c.Input.Content,
 			TriggerKeywords: c.Input.TriggerKeywords, ToolRestrictions: c.Input.ToolRestrictions,
 			FrontmatterName: c.Input.FrontmatterName,
-			Kind: c.Input.Kind, Settings: c.Input.Settings,
+			Kind:            c.Input.Kind, Settings: c.Input.Settings,
 		}
 		if c.Repeat != nil {
 			text := strings.Repeat(c.Repeat.Text, c.Repeat.Count)
