@@ -96,7 +96,8 @@ import {
   nextBrowserDockPosition,
   type BrowserDockVisiblePosition,
 } from '@/features/browser/dock/browser-dock-state'
-import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { activeFoldTurnId, foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { createSettledFoldState } from '../lib/settled-fold-state'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
 
@@ -595,10 +596,24 @@ export default function ChatPage() {
     }),
   )
 
+  // The reader's fold choices for this view. A turn that scrolls out of the window
+  // mounts again with its choice, and a new thread starts with none.
+  const settledFoldState = createSettledFoldState()
+  createEffect(
+    () => state.threadId,
+    (threadId, previousThreadId) => {
+      if (threadId !== previousThreadId) settledFoldState.reset()
+    },
+  )
+
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
-  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
+  const settledFolds = createMemo(() => {
+    if (!settledFoldEnabled || !transcriptDensity.rules().foldSettled) return undefined
+    const activeTurnId = activeFoldTurnId(state.turns, { streaming: isStreaming(), liveRunId: liveRunId() })
+    return foldPlan(state.turns, { activeTurnId })
+  })
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -1274,6 +1289,7 @@ export default function ChatPage() {
         planApproval={row().planApproval}
         docked={row().docked}
         settledFold={row().settledFold}
+        settledFoldState={settledFoldState}
         onSelectFollowUp={setInput}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {

@@ -6,15 +6,17 @@
  * body is `hidden="until-found"`: where the browser supports it, find in the page
  * still reaches the hidden text and opens the body, and says so with `beforematch`,
  * which the row follows; elsewhere `hidden` is `display: none`. The folded state
- * lives here, per view, and is never written to the thread.
+ * belongs to the view (see `settled-fold-state.ts`), not to the row, so a row that
+ * mounts again keeps the reader's choice. It is never written to the thread.
  */
 
-import { createMemo, createSignal, createUniqueId, onSettled, Show, untrack } from 'solid-js'
+import { createMemo, createUniqueId, onSettled, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import type { ConversationNodeEntry } from '@/shared/chat-nodes'
 import { ChevronDown } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import { settledFoldSummary, splitForFold, type SettledFold } from '../lib/settled-fold'
+import { createSettledFoldState, type SettledFoldState } from '../lib/settled-fold-state'
 import './chat-fold.css'
 
 /**
@@ -26,16 +28,28 @@ import './chat-fold.css'
  */
 export function SettledTurnContent(props: {
   fold?: SettledFold
+  /** The turn the fold belongs to. Its choice is kept under this id in `foldState`. */
+  turnId: string
+  /** The view's fold choices. Absent, the choice is kept by this row alone. */
+  foldState?: SettledFoldState
   entries: ConversationNodeEntry[]
   renderEntries: (entries: () => ConversationNodeEntry[]) => JSX.Element
 }) {
   const split = createMemo(() => splitForFold(props.entries))
   const folds = createMemo(() => Boolean(props.fold) && split().folded.length > 0)
+  const ownState = createSettledFoldState()
+  const foldState = () => props.foldState ?? ownState
   return (
     <>
       <Show when={folds() ? props.fold : undefined}>
         {(fold) => (
-          <SettledTurnFold fold={fold()}>{props.renderEntries(() => split().folded)}</SettledTurnFold>
+          <SettledTurnFold
+            fold={fold()}
+            folded={foldState().choice(props.turnId) ?? fold().defaultFolded}
+            onFoldedChange={(folded) => foldState().choose(props.turnId, folded)}
+          >
+            {props.renderEntries(() => split().folded)}
+          </SettledTurnFold>
         )}
       </Show>
       {props.renderEntries(() => (folds() ? split().visible : props.entries))}
@@ -44,19 +58,23 @@ export function SettledTurnContent(props: {
 }
 
 /**
- * The fold row and its body. It starts folded or open as the plan says, and the
- * reader's choice holds from then on, so a re-derived plan does not close a turn
- * under them.
+ * The fold row and its body. `folded` decides whether the body is shut. The row asks
+ * its owner to change it, on a click or when find in the page reveals the body, and
+ * keeps no state of its own.
  */
-export function SettledTurnFold(props: { fold: SettledFold; children: JSX.Element }) {
+export function SettledTurnFold(props: {
+  fold: SettledFold
+  folded: boolean
+  onFoldedChange: (folded: boolean) => void
+  children: JSX.Element
+}) {
   const i18n = useI18n()
   const bodyId = createUniqueId()
-  const [folded, setFolded] = createSignal(untrack(() => props.fold.defaultFolded))
   let body: HTMLDivElement | undefined
   onSettled(() => {
     const element = body
     if (!element) return
-    const reveal = () => setFolded(false)
+    const reveal = () => props.onFoldedChange(false)
     element.addEventListener('beforematch', reveal)
     return () => element.removeEventListener('beforematch', reveal)
   })
@@ -65,9 +83,9 @@ export function SettledTurnFold(props: { fold: SettledFold; children: JSX.Elemen
       <button
         type="button"
         class="verevon-chat-settled-fold__toggle"
-        aria-expanded={folded() ? 'false' : 'true'}
+        aria-expanded={props.folded ? 'false' : 'true'}
         aria-controls={bodyId}
-        onClick={() => setFolded((value) => !value)}
+        onClick={() => props.onFoldedChange(!props.folded)}
       >
         <span>{settledFoldSummary(props.fold, i18n)}</span>
         <ChevronDown size={14} aria-hidden="true" />
@@ -75,7 +93,7 @@ export function SettledTurnFold(props: { fold: SettledFold; children: JSX.Elemen
       <div
         id={bodyId}
         class="verevon-chat-settled-fold__body"
-        hidden={folded() ? 'until-found' : undefined}
+        hidden={props.folded ? 'until-found' : undefined}
         ref={(element) => {
           body = element
         }}

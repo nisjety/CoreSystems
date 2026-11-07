@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
-import { createSignal, For, flush } from 'solid-js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { createSignal, For, flush, Show } from 'solid-js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SettledTurnContent, SettledTurnFold } from './SettledTurnFold'
 import type { ConversationNode, ConversationNodeContext, ConversationNodeEntry } from '@/shared/chat-nodes'
 import type { SettledFold } from '../lib/settled-fold'
+import { createSettledFoldState } from '../lib/settled-fold-state'
 
 afterEach(() => {
   cleanup()
@@ -32,10 +33,16 @@ const renderEntries = (entries: () => ConversationNodeEntry[]) => (
   <For each={entries()}>{(item) => <i data-kind={item.node.kind}>{item.node.kind}</i>}</For>
 )
 
+/** The folded state as the view holds it: the row reads it, and asks for a change through the setter. */
+function viewState(initialFolded: boolean) {
+  const [folded, setFolded] = createSignal(initialFolded)
+  return { folded, setFolded }
+}
+
 describe('SettledTurnFold', () => {
-  it('starts folded when the plan says so, with the body hidden until found', async () => {
+  it('is folded, with the body hidden until found, when its owner says so', async () => {
     const view = render(() => (
-      <SettledTurnFold fold={fold({ defaultFolded: true })}>
+      <SettledTurnFold fold={fold()} folded onFoldedChange={() => {}}>
         <p>Trinn</p>
       </SettledTurnFold>
     ))
@@ -46,9 +53,9 @@ describe('SettledTurnFold', () => {
     expect(body?.getAttribute('hidden')).toBe('until-found')
   })
 
-  it('starts open when the plan says so', async () => {
+  it('is open when its owner says so', async () => {
     const view = render(() => (
-      <SettledTurnFold fold={fold({ defaultFolded: false })}>
+      <SettledTurnFold fold={fold()} folded={false} onFoldedChange={() => {}}>
         <p>Trinn</p>
       </SettledTurnFold>
     ))
@@ -57,9 +64,26 @@ describe('SettledTurnFold', () => {
     expect(view.container.querySelector('.verevon-chat-settled-fold__body')?.hasAttribute('hidden')).toBe(false)
   })
 
-  it('unfolds and folds again on each click, and leaves the focus on the toggle', async () => {
+  it('keeps no folded state of its own: a click only asks, and the row waits for its owner', async () => {
+    const onFoldedChange = vi.fn()
     const view = render(() => (
-      <SettledTurnFold fold={fold({ defaultFolded: true })}>
+      <SettledTurnFold fold={fold()} folded onFoldedChange={onFoldedChange}>
+        <p>Trinn</p>
+      </SettledTurnFold>
+    ))
+    await settle()
+    const toggle = view.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!
+    fireEvent.click(toggle)
+    flush()
+    expect(onFoldedChange).toHaveBeenCalledWith(false)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(view.container.querySelector('.verevon-chat-settled-fold__body')?.getAttribute('hidden')).toBe('until-found')
+  })
+
+  it('unfolds and folds again on each click, and leaves the focus on the toggle', async () => {
+    const { folded, setFolded } = viewState(true)
+    const view = render(() => (
+      <SettledTurnFold fold={fold()} folded={folded()} onFoldedChange={setFolded}>
         <p>Trinn</p>
       </SettledTurnFold>
     ))
@@ -81,16 +105,21 @@ describe('SettledTurnFold', () => {
   })
 
   it('is a native button, so Enter and Space act as a click', async () => {
-    const view = render(() => <SettledTurnFold fold={fold()}><p>Trinn</p></SettledTurnFold>)
+    const view = render(() => (
+      <SettledTurnFold fold={fold()} folded={false} onFoldedChange={() => {}}>
+        <p>Trinn</p>
+      </SettledTurnFold>
+    ))
     await settle()
     const toggle = view.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!
     expect(toggle.tagName).toBe('BUTTON')
     expect(toggle.type).toBe('button')
   })
 
-  it('opens the row when find in the page reveals the folded body', async () => {
+  it('asks for the row to open when find in the page reveals the folded body', async () => {
+    const { folded, setFolded } = viewState(true)
     const view = render(() => (
-      <SettledTurnFold fold={fold({ defaultFolded: true })}>
+      <SettledTurnFold fold={fold()} folded={folded()} onFoldedChange={setFolded}>
         <p>Trinn</p>
       </SettledTurnFold>
     ))
@@ -104,7 +133,11 @@ describe('SettledTurnFold', () => {
   })
 
   it('names the time, the steps and the files in the row', async () => {
-    const view = render(() => <SettledTurnFold fold={fold()}><p>Trinn</p></SettledTurnFold>)
+    const view = render(() => (
+      <SettledTurnFold fold={fold()} folded={false} onFoldedChange={() => {}}>
+        <p>Trinn</p>
+      </SettledTurnFold>
+    ))
     await settle()
     const label = view.container.querySelector('.verevon-chat-settled-fold__toggle')?.textContent ?? ''
     expect(label).toContain('4 min 12 s')
@@ -114,7 +147,7 @@ describe('SettledTurnFold', () => {
 
   it('keeps the folded body in the document, so its controls are still there', async () => {
     const view = render(() => (
-      <SettledTurnFold fold={fold({ defaultFolded: true })}>
+      <SettledTurnFold fold={fold()} folded onFoldedChange={() => {}}>
         <p>Verktøykall</p>
       </SettledTurnFold>
     ))
@@ -128,6 +161,7 @@ describe('SettledTurnContent', () => {
   it('puts the process trail in the folded body and keeps the answer in view', async () => {
     const view = render(() => (
       <SettledTurnContent
+        turnId="turn-1"
         fold={fold({ defaultFolded: true })}
         entries={[entry('reasoning'), entry('answer'), entry('steps')]}
         renderEntries={renderEntries}
@@ -142,7 +176,11 @@ describe('SettledTurnContent', () => {
 
   it('renders every entry in place, in order, when there is no fold', async () => {
     const view = render(() => (
-      <SettledTurnContent entries={[entry('answer'), entry('steps'), entry('files')]} renderEntries={renderEntries} />
+      <SettledTurnContent
+        turnId="turn-1"
+        entries={[entry('answer'), entry('steps'), entry('files')]}
+        renderEntries={renderEntries}
+      />
     ))
     await settle()
     expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
@@ -152,9 +190,12 @@ describe('SettledTurnContent', () => {
 
   it('keeps the reader\'s choice when the plan is re-derived', async () => {
     const [current, setCurrent] = createSignal(fold({ defaultFolded: true }))
+    const foldState = createSettledFoldState()
     const view = render(() => (
       <SettledTurnContent
+        turnId="turn-1"
         fold={current()}
+        foldState={foldState}
         entries={[entry('reasoning'), entry('answer')]}
         renderEntries={renderEntries}
       />
@@ -170,6 +211,86 @@ describe('SettledTurnContent', () => {
     expect(toggle.textContent).toMatch(/3 (steg|steps)/)
   })
 
+  it('keeps the reader\'s choice when the row mounts again, as a virtualized turn does', async () => {
+    const foldState = createSettledFoldState()
+    const [mounted, setMounted] = createSignal(true)
+    const view = render(() => (
+      <Show when={mounted()}>
+        <SettledTurnContent
+          turnId="turn-1"
+          fold={fold({ defaultFolded: true })}
+          foldState={foldState}
+          entries={[entry('reasoning'), entry('answer')]}
+          renderEntries={renderEntries}
+        />
+      </Show>
+    ))
+    await settle()
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!)
+    flush()
+
+    setMounted(false)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
+
+    setMounted(true)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold__toggle')?.getAttribute('aria-expanded')).toBe('true')
+    expect(view.container.querySelector('.verevon-chat-settled-fold__body')?.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('starts from the plan again once the view has forgotten its choices', async () => {
+    const foldState = createSettledFoldState()
+    const [mounted, setMounted] = createSignal(true)
+    const view = render(() => (
+      <Show when={mounted()}>
+        <SettledTurnContent
+          turnId="turn-1"
+          fold={fold({ defaultFolded: true })}
+          foldState={foldState}
+          entries={[entry('reasoning'), entry('answer')]}
+          renderEntries={renderEntries}
+        />
+      </Show>
+    ))
+    await settle()
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!)
+    flush()
+
+    setMounted(false)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
+    foldState.reset()
+    setMounted(true)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold__toggle')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('keeps the choice for one mount only when the view passes no state', async () => {
+    const [mounted, setMounted] = createSignal(true)
+    const view = render(() => (
+      <Show when={mounted()}>
+        <SettledTurnContent
+          turnId="turn-1"
+          fold={fold({ defaultFolded: true })}
+          entries={[entry('reasoning'), entry('answer')]}
+          renderEntries={renderEntries}
+        />
+      </Show>
+    ))
+    await settle()
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold__toggle')?.getAttribute('aria-expanded')).toBe('true')
+
+    setMounted(false)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
+    setMounted(true)
+    flush()
+    expect(view.container.querySelector('.verevon-chat-settled-fold__toggle')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('renders the same markup as the plain list when there is no fold', async () => {
     const entries = [entry('reasoning'), entry('answer'), entry('steps'), entry('files')]
     const plain = render(() => (
@@ -179,7 +300,7 @@ describe('SettledTurnContent', () => {
     ))
     const wrapped = render(() => (
       <div>
-        <SettledTurnContent entries={entries} renderEntries={renderEntries} />
+        <SettledTurnContent turnId="turn-1" entries={entries} renderEntries={renderEntries} />
       </div>
     ))
     await settle()
@@ -188,7 +309,7 @@ describe('SettledTurnContent', () => {
 
   it('renders no row when the entries hold nothing to fold', async () => {
     const view = render(() => (
-      <SettledTurnContent fold={fold()} entries={[entry('answer')]} renderEntries={renderEntries} />
+      <SettledTurnContent turnId="turn-1" fold={fold()} entries={[entry('answer')]} renderEntries={renderEntries} />
     ))
     await settle()
     expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()

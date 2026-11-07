@@ -4,7 +4,7 @@
  *
  * Pure. The page passes the thread and the turn a run is still on, and gets back
  * the fold of each turn that has one. Nothing here is stored or sent, and the
- * folded state is per view (see `SettledTurnFold`). Behind
+ * folded state is per view (see `settled-fold-state.ts`). Behind
  * `VITE_CHAT_SETTLED_FOLD`, which the page reads: off, no plan is built and the
  * transcript renders as it did.
  */
@@ -87,6 +87,20 @@ export function isSettled(turn: FoldTurn, activeTurnId?: string | null): boolean
 function turnDurationMs(turn: FoldTurn): number | undefined {
   const ms = turn.timing?.serverMs
   return ms !== undefined && Number.isFinite(ms) && ms >= 0 ? ms : undefined
+}
+
+/**
+ * The turn a run is still on, which the fold never settles: the newest turn while a
+ * reply streams or a run is live, and none once the page is idle. When the newest
+ * turn is the person's own message, that message is the one named, so the answer
+ * before it still settles.
+ */
+export function activeFoldTurnId(
+  turns: readonly FoldTurn[],
+  options: { streaming: boolean; liveRunId: string | null | undefined },
+): string | undefined {
+  if (!options.streaming && !options.liveRunId) return undefined
+  return turns.at(-1)?.id
 }
 
 /**
