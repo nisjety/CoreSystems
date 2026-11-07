@@ -143,6 +143,18 @@ async fn get_json(addr: SocketAddr, path: &str) -> (u16, Value) {
     (status, response.json().await.unwrap_or(Value::Null))
 }
 
+async fn get_text(addr: SocketAddr, path: &str) -> (u16, reqwest::header::HeaderMap, String) {
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}{path}"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    (status, headers, response.text().await.unwrap())
+}
+
 #[tokio::test]
 async fn crawl_results_pass_through_with_the_page_meta() {
     let _guard = FLAG.lock().await;
@@ -175,6 +187,69 @@ async fn crawl_results_pass_through_with_the_page_meta() {
     assert_eq!(body["data"]["items"].as_array().map(Vec::len), Some(2));
     let (status, _) = get_json(addr, &format!("/v1/batch/{BATCH}/results")).await;
     assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn an_export_projects_the_rows_as_csv_or_jsonl_with_the_kind_and_the_cursor() {
+    let _guard = FLAG.lock().await;
+    set_flag(true);
+    let seen = Seen::default();
+    let addr = spawn_edge(seen.clone()).await;
+
+    let (status, headers, body) = get_text(
+        addr,
+        &format!("/v1/crawl/{CRAWL}/results?format=csv&fields=seq,url,title"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        headers["content-type"].to_str().unwrap(),
+        "text/csv; charset=utf-8"
+    );
+    assert_eq!(
+        headers["x-quarry-result-kind"].to_str().unwrap(),
+        "page_index"
+    );
+    assert_eq!(headers["x-quarry-next-seq"].to_str().unwrap(), "3");
+    assert_eq!(
+        body,
+        "seq,url,title\r\n1,https://e.test/a,A\r\n3,https://e.test/b,\r\n"
+    );
+
+    let (status, headers, body) = get_text(
+        addr,
+        &format!("/v1/crawl/{CRAWL}/results?format=jsonl&fields=seq,bytes"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        headers["content-type"].to_str().unwrap(),
+        "application/x-ndjson; charset=utf-8"
+    );
+    let lines: Vec<Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            json!({ "seq": 1, "bytes": 900 }),
+            json!({ "seq": 3, "bytes": null })
+        ]
+    );
+
+    // A bad export option is a 400 that names the field, and control is not asked.
+    let asked = seen.results_queries.lock().unwrap().len();
+    for path in [
+        format!("/v1/crawl/{CRAWL}/results?format=xml"),
+        format!("/v1/crawl/{CRAWL}/results?fields=url"),
+        format!("/v1/crawl/{CRAWL}/results?format=csv&limit=101"),
+        format!("/v1/crawl/{CRAWL}/results?format=csv&fields=nope"),
+    ] {
+        let (status, _, body) = get_text(addr, &path).await;
+        assert_eq!(status, 400, "{path}: {body}");
+    }
+    assert_eq!(seen.results_queries.lock().unwrap().len(), asked);
 }
 
 #[tokio::test]

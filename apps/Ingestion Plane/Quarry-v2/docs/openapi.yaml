@@ -2021,6 +2021,24 @@ paths:
               schema:
                 type: object
   /v1/crawl/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_crawl_results
       summary: The pages a crawl fetched, with their artifact ids (INNH-12)
@@ -2288,6 +2306,24 @@ paths:
         '404':
           description: Not found for this organization.
   /v1/batch/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_batch_results
       summary: The pages a batch fetched, with their artifact ids (INNH-12)
@@ -2370,6 +2406,24 @@ paths:
         '501':
           description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/jobs/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_job_results
       summary: The pages any durable job fetched, with their artifact ids (INNH-12)

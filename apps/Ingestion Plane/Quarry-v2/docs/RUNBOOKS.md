@@ -2187,6 +2187,8 @@ Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cac
 
 The pages a crawl or batch fetched, with the ids of what was stored for each, come back from `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results`. The contract is `docs/CONTRACTS.md`, "Job results". It is off: `QUARRY_EDGE__JOB_RESULTS` is unset in the default composes, which is off, and no compose line is needed.
 
+Exports (E4.1-4): `format=csv` or `format=jsonl`, with an optional `fields` projection, returns the same rows as a file on the same routes, under the same flag and gates. A read is at most 100 rows and a file at most 10 MiB; an oversized export is a 400 that names `limit` (`details.reason: export_too_large`), so a caller narrows the read rather than receiving a cut file. Rollback is the same flag, `QUARRY_EDGE__JOB_RESULTS` unset or `0`.
+
 **Enable.** Set `QUARRY_EDGE__JOB_RESULTS=1` (also `true`, `yes`, `on`) on the edge and restart it. Rebuild both the edge and the orchestrator: the edge returns the artifact ids from `run_page`, the orchestrator copies them onto each `page_fetched` event, and control reads the rows back. Deploy the edge first. Pages fetched before the orchestrator carries the fields have rows without artifact ids (url, status and title only); nothing is lost and nothing needs a migration. Replaying an in-flight workflow is safe: only the payload of an event changes, no workflow command is added.
 
 **Disable.** Unset the variable or set it to `0` and restart. The three routes answer 501; the events keep the extra fields.
