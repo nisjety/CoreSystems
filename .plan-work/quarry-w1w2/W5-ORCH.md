@@ -52,7 +52,7 @@ The order follows plan sequencing (1): "open now, no decision".
 | Slice | Items | Lane / owner | Effort | Depends | Gate | Status |
 |---|---|---|---|---|---|---|
 | W5-S1 | 071a: delete `WebPageViewer` (`DashboardSearchResults.tsx:147`, no importer, `allow-same-origin`). 069 step 1: allow `pdf` and `screenshot{full_page}` in the gateway `sanitize_action` (`apps/gateway/src/domains/browser.rs:4486-4550`) | Frontend (gateway + SPA) | < 1 d | none | none | OPEN, assign first |
-| W5-S2 | 074: `ProviderError` with fixed messages in `browserbase.rs` (raw `body` still in details at 119-124), `kernel.rs` and `browserless.rs`; a bounded JWKS stale-if-error window (must not extend a revoked key); RUNBOOKS dependency matrix | Ingestion (quarry-browser, quarry-edge auth) | ~3 d | none | none | OPEN |
+| W5-S2 | 074: `ProviderError` with fixed messages in `browserbase.rs` (raw `body` still in details at 119-124), `kernel.rs` and `browserless.rs`; a bounded JWKS stale-if-error window (must not extend a revoked key); RUNBOOKS dependency matrix | Ingestion (quarry-browser, quarry-edge auth) | ~3 d | none | none | IN FLIGHT (uncommitted provider half in this worktree, see section 3) |
 | W5-S3 | 067 slice 1: one `quarry-core` UA constant replacing the five strings, plus the bot-info page | Ingestion (core, runtime, edge, compose) | ~2 d | WS14 robots gate (built, observe) | **D-W5-1** | BLOCKED on owner string |
 | W5-S4 | 068 clear-data on the stored `SessionSnapshot` through `ProfileStore` (`profile_routes.rs`), with a count-first dialog. Action contract in `src/shared/actions` first. Must not touch a live run's jar. No-op under ZDR | Ingestion + Frontend | ~5 d | WS17 owner guard (built) | none | OPEN |
 | W5-S5 | 070 tab-strip context menu (`BrowserChrome.tsx`) through gateway-to-Quarry tab routes | Frontend | M (~6 d) | WS9 merged | none | WAIT: confirm WS9 on `main` |
@@ -79,12 +79,12 @@ Model Plane has no scheduled W5 work. Its only W5 touchpoint is 076, which is pa
 | 069 step 1 | partial | partial | no | SPA `BrowserArtifactMediaKind` already includes `'pdf'` (`browser-session.ts:603`); the gateway still rejects `pdf` ("Unsupported browser action", `browser.rs:4549`); `screenshot` passes through unvalidated |
 | 068 clear-data | no | no | no | no clear route in `profile_routes.rs` |
 | 070 chrome polish | no | not checked | no | waits on WS9 |
-| 074 ProviderError + JWKS | no | no | no | no `ProviderError` and no stale-if-error in `quarry-browser`/`quarry-edge` on either branch |
+| 074 ProviderError + JWKS | in flight (uncommitted) | no | no | at 10:57 another session had UNCOMMITTED edits in this worktree: the raw `body` was removed from the error details in `browserbase.rs`, `browserless.rs` and `kernel.rs`, plus a no-echo test (`create_session_error_does_not_echo_the_upstream_body`); 78 lines ignoring CRLF; also `rb.patch` (untracked). Not committed, not run by me; JWKS stale-if-error and the runbook matrix not seen. Owner of that work: claim it as W5-S2, rebase onto `main` |
 | 067 slice 1 UA constant | no | no | no | five strings, listed above, on both branches |
 | 075 / 077 notes | no | no | n/a | no note found |
 | ADR-5 (a) mechanism (W1, prerequisite) | yes | yes | tests only | `escalation.rs` pin test; 21 runtime tests (PROGRESS 2026-10-21); no live measurement |
 
-**Wave 5: about 5 % built (effort-weighted: about 1 of about 20 scheduled days, the SPA `pdf` media kind), 0 % proven. 0 of 6 slices done.**
+**Wave 5: about 5 % built and committed (effort-weighted: about 1 of about 20 scheduled days, the SPA `pdf` media kind). About 10 % if the uncommitted 074 provider half is counted. 0 % proven. 0 of 6 slices done.**
 
 ## 4. Model Plane status (synced from `MP-W2W3-STATUS.md`, `mp-w2w3` @ `8188a6ea1`, 2026-11-02)
 
