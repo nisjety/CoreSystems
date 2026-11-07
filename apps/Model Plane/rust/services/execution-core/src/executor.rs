@@ -476,6 +476,26 @@ fn require_spawn_admission_with(
     Ok(())
 }
 
+/// The network boundary a wrapped spawn must carry (EP-9 E1, D-E1). A command whose
+/// policy allows no network, or that runs behind its own proxy, is refused when the
+/// command that would be spawned does not unshare the network namespace: the sandbox did
+/// not apply the boundary the call was admitted on. An unwrapped command is left to the
+/// admission gate, which decides what a passthrough may run.
+pub(crate) fn require_network_boundary(
+    policy: &MpSandboxPolicy,
+    proxied: bool,
+    cmd: &sandbox::SandboxedCommand,
+) -> std::io::Result<()> {
+    let disabled = matches!(policy.network(), crate::policy::MpNetworkPolicy::Disabled);
+    if (proxied || disabled) && cmd.sandboxed && !cmd.network_isolated {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "sandbox did not unshare the network namespace; refusing a spawn with network access",
+        ));
+    }
+    Ok(())
+}
+
 fn require_requested_isolation(
     policy: &MpSandboxPolicy,
     sandboxed: bool,
@@ -518,6 +538,9 @@ pub struct ExecOutcome {
     /// True if bubblewrap actually wrapped the process (Linux + `bwrap`
     /// present); false means it ran as a transparent passthrough.
     pub sandboxed: bool,
+    /// True if the spawned command unshared the network namespace (EP-9 E1). Read from
+    /// the argv that was spawned, so a report built on it says what the spawn applied.
+    pub network_isolated: bool,
     /// Set when the child was killed for exceeding a resource ceiling
     /// (WS06-S7: the per-stream output cap). `None` for a normal exit.
     pub limit_hit: Option<LimitHit>,
@@ -558,6 +581,7 @@ async fn execute_sandboxed_with_timeout(
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
     require_spawn_admission(policy, cmd.sandboxed, &SpawnAdmission::NOT_SPACE)?;
+    require_network_boundary(policy, false, &cmd)?;
     require_limits_applied_for(limits.as_ref(), &cmd)?;
     spawn_capture(&cmd, None, None, timeout, limits.as_ref()).await
 }
@@ -674,6 +698,7 @@ pub async fn execute_sandboxed_with_egress(
         egress.is_some_and(crate::egress_proxy::EgressProxy::is_live),
         admission,
     )?;
+    require_network_boundary(policy, egress.is_some(), &cmd)?;
     require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
     require_limits_applied_for(limits.as_ref(), &cmd)?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout, limits.as_ref()).await
@@ -793,6 +818,7 @@ async fn spawn_capture(
         stderr: scrub_and_cap(&stderr),
         exit_code: status.code().unwrap_or(-1),
         sandboxed: cmd.sandboxed,
+        network_isolated: cmd.network_isolated,
         limit_hit,
         limits: if cmd.limits_applied {
             sandbox::LIMITS_ENFORCED
@@ -852,7 +878,7 @@ mod tests {
     async fn legacy_attach_secret_refuses_unisolated_shell() {
         std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "test-only-secret-for-child-environment");
         let cmd = super::sandbox::SandboxedCommand {
-            program: "/bin/sh".into(), args: vec!["-c".into(), "if [ -n \"${BROWSER_ATTACH_COMPAT_HMAC_KEY+x}\" ]; then echo leaked; else echo absent; fi".into()], sandboxed: false, limits_applied: false,
+            program: "/bin/sh".into(), args: vec!["-c".into(), "if [ -n \"${BROWSER_ATTACH_COMPAT_HMAC_KEY+x}\" ]; then echo leaked; else echo absent; fi".into()], sandboxed: false, limits_applied: false, network_isolated: false,
         };
         let result = super::spawn_capture(&cmd, None, None, std::time::Duration::from_secs(5), None).await;
         std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
@@ -1379,10 +1405,44 @@ mod tests {
             args: vec![],
             sandboxed,
             limits_applied,
+            network_isolated: false,
         };
         assert!(require_limits_applied_for(Some(&l), &cmd(true, false)).is_err());
         assert!(require_limits_applied_for(Some(&l), &cmd(true, true)).is_ok());
         assert!(require_limits_applied_for(None, &cmd(true, false)).is_ok());
+    }
+
+    /// A wrapped command whose policy or proxy needs the network boundary is refused
+    /// unless its argv unshares the namespace. A passthrough is the admission gate's call,
+    /// and a policy with no network of its own needs no boundary here.
+    #[test]
+    fn a_wrapped_spawn_without_the_network_boundary_is_refused() {
+        let cmd = |sandboxed, network_isolated| sandbox::SandboxedCommand {
+            program: "bwrap".into(),
+            args: vec![],
+            sandboxed,
+            limits_applied: false,
+            network_isolated,
+        };
+        let disabled = MpSandboxPolicy::ReadOnly {
+            network: crate::policy::MpNetworkPolicy::Disabled,
+        };
+        assert!(require_network_boundary(&disabled, false, &cmd(true, true)).is_ok());
+        let err = require_network_boundary(&disabled, false, &cmd(true, false))
+            .expect_err("no boundary, no spawn");
+        assert!(err.to_string().contains("network namespace"), "{err}");
+        assert!(require_network_boundary(&disabled, false, &cmd(false, false)).is_ok());
+
+        let listed = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: Vec::new(),
+            network: crate::policy::MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        };
+        assert!(require_network_boundary(&listed, true, &cmd(true, true)).is_ok());
+        assert!(require_network_boundary(&listed, true, &cmd(true, false)).is_err());
+        assert!(require_network_boundary(&listed, false, &cmd(true, false)).is_ok());
+
+        let full = MpSandboxPolicy::DangerFullAccess;
+        assert!(require_network_boundary(&full, false, &cmd(true, false)).is_ok());
     }
 
     #[test]

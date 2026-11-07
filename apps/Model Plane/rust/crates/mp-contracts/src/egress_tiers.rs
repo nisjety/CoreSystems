@@ -11,7 +11,7 @@
 //!
 //! `all` is in the vocabulary so the wire can name it, but nothing grants it in
 //! Wave 3: Control refuses to store it, sandbox-manager records it as `off`,
-//! and the deployment switch reads it as `off`.
+//! the deployment switch reads it as `off`, and the proxy admits no host for it.
 //!
 //! # The hosts
 //!
@@ -146,9 +146,9 @@ pub fn host_admitted(tier: NetworkTier, host: &str, allowlist: &[String]) -> boo
                         .iter()
                         .any(|entry| canonical_host(entry).as_deref() == Some(host)))
         }
-        // Not storable in Wave 3; nothing produces it, and it is named here
-        // only so the match is total.
-        NetworkTier::All => true,
+        // Not grantable in Wave 3 (D-E3): no ceiling produces it, and a call that
+        // carried it anyway is refused here, never admitted to every host.
+        NetworkTier::All => false,
     }
 }
 
@@ -250,6 +250,17 @@ mod tests {
         for host in REGISTRY_HOSTS {
             assert!(!host_admitted(NetworkTier::Off, host, &[]));
         }
+    }
+
+    /// `all` is never granted in Wave 3, so no tier value that reaches the predicate
+    /// admits a host through it, whatever list it is given.
+    #[test]
+    fn all_is_not_grantable_so_it_admits_no_host() {
+        for host in REGISTRY_HOSTS {
+            assert!(!host_admitted(NetworkTier::All, host, &[]));
+        }
+        let list = vec!["example.org".to_owned()];
+        assert!(!host_admitted(NetworkTier::All, "example.org", &list));
     }
 
     #[test]

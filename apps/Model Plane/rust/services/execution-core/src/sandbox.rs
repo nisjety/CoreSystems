@@ -76,6 +76,10 @@ pub struct SandboxedCommand {
     /// `true` if the command is prefixed with `prlimit` (WS06-S8), so the
     /// per-spawn limits it was asked for are in force.
     pub limits_applied: bool,
+    /// `true` if the wrapped argv unshares the network namespace, so the process
+    /// has no route out but the one its egress boundary leaves (EP-9 E1). Always
+    /// `false` for a passthrough, which shares the host's network.
+    pub network_isolated: bool,
 }
 
 /// How the sandboxed process's environment is derived from execution-core's.
@@ -591,6 +595,7 @@ pub fn wrap_command_with(
 ) -> SandboxedCommand {
     if is_supported() {
         if let Some(argv) = build_bwrap_argv_with(policy, program, args, options) {
+            let network_isolated = unshares_network(&argv);
             // WS06-S8: limits ride in FRONT of bwrap so every process under it
             // inherits them. Requested but `prlimit` unusable => the plain bwrap
             // command with `limits_applied == false`; the spawn site refuses it.
@@ -602,6 +607,7 @@ pub fn wrap_command_with(
                         args,
                         sandboxed: true,
                         limits_applied: true,
+                        network_isolated,
                     };
                 }
             }
@@ -610,6 +616,7 @@ pub fn wrap_command_with(
                 args: argv,
                 sandboxed: true,
                 limits_applied: false,
+                network_isolated,
             };
         }
     }
@@ -618,7 +625,22 @@ pub fn wrap_command_with(
         args: args.to_vec(),
         sandboxed: false,
         limits_applied: false,
+        network_isolated: false,
     }
+}
+
+/// Whether a bubblewrap argv unshares the network namespace (`--unshare-net`). Only
+/// the options before the first `--` are read, so a program argument that spells the
+/// flag cannot make a command look isolated (EP-9 E1).
+#[must_use]
+pub fn unshares_network(argv: &[String]) -> bool {
+    let options_end = argv
+        .iter()
+        .position(|token| token == "--")
+        .unwrap_or(argv.len());
+    argv[..options_end]
+        .iter()
+        .any(|token| token == "--unshare-net")
 }
 
 #[cfg(test)]
@@ -1095,6 +1117,58 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--unshare-net"));
         assert!(windowed(&argv, &["--", "curl", "x"]));
         assert!(!argv.iter().any(|a| a.contains("mp-netbridge")));
+    }
+
+    /// The flag is read from the argv a spawn is given, so a builder that stops
+    /// emitting it is seen, and a program argument that spells it is not an option.
+    #[test]
+    fn the_network_boundary_is_read_from_the_bubblewrap_options() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        let write = |network| MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network,
+        };
+        let wrapped = |policy: &MpSandboxPolicy, egress, cmd_args: &[&str]| {
+            build_bwrap_argv_with(
+                policy,
+                "python3",
+                &args(cmd_args),
+                LaunchOptions {
+                    egress,
+                    ..LaunchOptions::default()
+                },
+            )
+            .expect("a local policy is wrapped")
+        };
+        let listed = MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]);
+
+        assert!(unshares_network(&wrapped(
+            &write(MpNetworkPolicy::Disabled),
+            None,
+            &["main.py"]
+        )));
+        assert!(unshares_network(&wrapped(
+            &write(listed.clone()),
+            Some(bridge(&root, &socket)),
+            &["main.py"]
+        )));
+        assert!(!unshares_network(&wrapped(
+            &write(MpNetworkPolicy::AllowAll),
+            None,
+            &["main.py"]
+        )));
+        assert!(!unshares_network(&wrapped(
+            &write(listed),
+            None,
+            &["main.py"]
+        )));
+        assert!(!unshares_network(&wrapped(
+            &write(MpNetworkPolicy::AllowAll),
+            None,
+            &["--unshare-net"]
+        )));
+        assert!(!unshares_network(&[]));
     }
 
     #[test]

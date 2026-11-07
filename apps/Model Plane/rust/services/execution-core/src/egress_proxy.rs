@@ -968,6 +968,19 @@ mod tests {
         );
     }
 
+    /// `all` is never granted in Wave 3. `resolve` already holds it at off, and a call
+    /// built without `resolve` must not admit a host either.
+    #[test]
+    fn a_call_carrying_all_admits_no_host() {
+        let egress = CallEgress {
+            tier: NetworkTier::All,
+            allowlist: Vec::new(),
+        };
+        for host in ["pypi.org", "example.org"] {
+            assert_eq!(admit_target(&egress, host, 443), Err(Denial::NotListed), "{host}");
+        }
+    }
+
     #[test]
     fn the_proxy_refuses_an_ip_literal() {
         let egress = registries();
