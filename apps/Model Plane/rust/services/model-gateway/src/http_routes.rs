@@ -21037,6 +21037,7 @@ mod model_access_route_tests {
     struct AccessInference {
         asked: Arc<Mutex<Vec<pb::GetModelAccessRequest>>>,
         refusal: Arc<Mutex<Option<tonic::Status>>>,
+        listed: Arc<Mutex<Vec<pb::ModelInfo>>>,
     }
 
     impl AccessInference {
@@ -21046,6 +21047,11 @@ mod model_access_route_tests {
 
         fn refuse_with(&self, status: tonic::Status) {
             *self.refusal.lock().expect("refusal setting") = Some(status);
+        }
+
+        /// The catalogue `GET /v1/models` lists through this stand-in.
+        fn list_models_with(&self, models: Vec<pb::ModelInfo>) {
+            *self.listed.lock().expect("catalogue setting") = models;
         }
     }
 
@@ -21117,7 +21123,11 @@ mod model_access_route_tests {
             &self,
             _request: tonic::Request<pb::ListModelsRequest>,
         ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
-            unused()
+            let models = self.listed.lock().expect("catalogue setting").clone();
+            Ok(tonic::Response::new(pb::ListModelsResponse {
+                models,
+                ..Default::default()
+            }))
         }
 
         async fn synthesize_speech(
@@ -21396,6 +21406,158 @@ mod model_access_route_tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["code"], "model_access_unavailable");
         assert!(!body.to_string().contains("node-3"));
+    }
+
+    /// `GET /v1/models` names a chat model's list price only while the catalogue switch is on, joined
+    /// from cost-core's catalogue by model id. The listing is served either way (EP-13-S1).
+    mod list_models_price_tests {
+        use super::*;
+        use crate::catalogue_prices::SwitchOn;
+        use crate::pricing::PricingCache;
+        use serial_test::serial;
+        use std::time::{Duration, Instant};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        fn chat(id: &str, provider: &str) -> pb::ModelInfo {
+            pb::ModelInfo {
+                id: id.to_owned(),
+                provider: provider.to_owned(),
+                modality: "chat".to_owned(),
+                streaming: true,
+                ..Default::default()
+            }
+        }
+
+        fn rates() -> Value {
+            json!({ "rates": [
+                { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD" },
+                { "model": "claude-sonnet", "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD" },
+                { "model": "gpt-4o-mini", "input_per_million": 0.15, "output_per_million": 0.6, "currency": "USD" },
+            ]})
+        }
+
+        /// A cost-core stand-in that expects `calls` pricing fetches, each answered after `delay`.
+        async fn cost_core(calls: u64, delay: Option<Duration>) -> MockServer {
+            let server = MockServer::start().await;
+            let mut response = ResponseTemplate::new(200).set_body_json(rates());
+            if let Some(delay) = delay {
+                response = response.set_delay(delay);
+            }
+            Mock::given(method("GET"))
+                .and(path("/api/v1/pricing"))
+                .respond_with(response)
+                .expect(calls)
+                .mount(&server)
+                .await;
+            server
+        }
+
+        async fn listing(models: Vec<pb::ModelInfo>, cost_core: &MockServer) -> Value {
+            let inference = AccessInference::default();
+            inference.list_models_with(models);
+            let mut state = state_with(inference).await;
+            state.pricing = PricingCache::new(Some(cost_core.uri()), reqwest::Client::new());
+            let Json(body) = list_models(State(state), Extension(claims("org-1")), bearer())
+                .await
+                .expect("the listing is served");
+            serde_json::to_value(&body).expect("the listing serializes")
+        }
+
+        fn price_of(body: &Value, id: &str) -> Option<Value> {
+            body["models"]
+                .as_array()
+                .expect("the models")
+                .iter()
+                .find(|model| model["id"] == id)
+                .and_then(|model| model.get("price").cloned())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_serves_no_price_and_fetches_no_catalogue_while_the_switch_is_off() {
+            std::env::remove_var(crate::catalogue_prices::CATALOGUE_PRICES_ENV);
+            let cost_core = cost_core(0, None).await;
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                ],
+                &cost_core,
+            )
+            .await;
+            let models = body["models"].as_array().expect("the models");
+            assert_eq!(models.len(), 2);
+            assert!(
+                models.iter().all(|model| model.get("price").is_none()),
+                "{body}"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_prices_exact_and_prefix_chat_models_and_never_the_default_row() {
+            let _on = SwitchOn::new();
+            let cost_core = cost_core(1, None).await;
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                    chat("a-model-the-catalogue-does-not-list", "azure"),
+                    pb::ModelInfo {
+                        id: "gpt-image-1".to_owned(),
+                        provider: "openai".to_owned(),
+                        modality: "image".to_owned(),
+                        ..Default::default()
+                    },
+                ],
+                &cost_core,
+            )
+            .await;
+            assert_eq!(
+                price_of(&body, "claude-sonnet-5-5"),
+                Some(
+                    json!({ "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD", "source": "prefix" })
+                ),
+            );
+            assert_eq!(
+                price_of(&body, "gpt-4o-mini"),
+                Some(
+                    json!({ "input_per_million": 0.15, "output_per_million": 0.6, "currency": "USD", "source": "exact" })
+                ),
+            );
+            assert_eq!(price_of(&body, "a-model-the-catalogue-does-not-list"), None);
+            assert_eq!(price_of(&body, "gpt-image-1"), None);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_lists_every_model_unpriced_when_cost_core_hangs() {
+            let _on = SwitchOn::new();
+            let cost_core = cost_core(1, Some(Duration::from_secs(5))).await;
+            let started = Instant::now();
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                ],
+                &cost_core,
+            )
+            .await;
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            let models = body["models"].as_array().expect("the models");
+            assert_eq!(models.len(), 2);
+            assert!(
+                models.iter().all(|model| model.get("price").is_none()),
+                "{body}"
+            );
+        }
     }
 }
 

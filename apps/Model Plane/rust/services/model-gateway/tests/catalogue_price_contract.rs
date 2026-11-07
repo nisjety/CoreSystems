@@ -61,3 +61,43 @@ fn the_listing_prices_from_one_snapshot_behind_the_named_switch() {
     );
     assert_eq!(CATALOGUE_PRICES_ENV, "MODEL_GATEWAY_CATALOGUE_PRICES");
 }
+
+#[test]
+fn the_listing_reads_its_catalogue_only_under_the_budget() {
+    let prices = include_str!("../src/catalogue_prices.rs").replace("\r\n", "\n");
+    assert!(
+        prices.contains("pub const LISTING_PRICE_BUDGET: Duration = Duration::from_millis(250);"),
+        "the budget is a named constant"
+    );
+    assert!(
+        prices.contains("tokio::time::timeout(LISTING_PRICE_BUDGET, pricing.snapshot())"),
+        "the catalogue fetch runs under the budget"
+    );
+
+    let routes = include_str!("../src/http_routes.rs").replace("\r\n", "\n");
+    let start = routes
+        .find("\nasync fn list_models(")
+        .expect("the listing handler");
+    let tail = &routes[start..];
+    let handler = &tail[..tail.find("\n}\n").expect("the handler's end")];
+    assert!(
+        handler.contains("crate::catalogue_prices::snapshot_for_listing(&state.pricing).await"),
+        "the listing takes its catalogue through the budgeted helper"
+    );
+    assert!(
+        !handler.contains("pricing.snapshot()") && !handler.contains("cost_usd("),
+        "the listing reads no catalogue around the budget"
+    );
+}
+
+#[test]
+fn compose_keeps_the_catalogue_switch_off_by_default() {
+    let compose = include_str!("../../../../deploy/docker-compose.yml").replace("\r\n", "\n");
+    assert!(
+        compose.lines().any(|line| {
+            line.trim()
+                == "MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}"
+        }),
+        "compose names the switch and defaults it off"
+    );
+}

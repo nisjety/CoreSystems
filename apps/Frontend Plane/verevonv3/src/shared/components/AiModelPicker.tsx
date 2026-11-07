@@ -113,6 +113,12 @@ export function AiModelPicker(props: {
     : groupChatModels(filterModels(flatModels(), activeQuery())),
   )
 
+  // A search belongs to one opening of the menu: closing the menu clears it.
+  createEffect(
+    () => open(),
+    (isOpen) => { if (!isOpen) setQuery('') },
+  )
+
   createEffect(
     () => props.orgId,
     (nextOrgId) => { setSelected(readAiModelSelection(nextOrgId)) },

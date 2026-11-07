@@ -1333,6 +1333,13 @@ export function DashboardComposer(props: {
 			? chatModelGroups()
 			: groupChatModels(filterModels(flatChatModels(), modelQuery())),
 	);
+	// A search belongs to one opening of the model menu: closing the menu clears it.
+	createEffect(
+		() => modelOpen(),
+		(isOpen) => {
+			if (!isOpen) setModelQuery("");
+		},
+	);
 	const selectedCatalogModel = createMemo(() => {
 		// No truthiness guard on the provider: plenty of real catalog models have
 		// no provider tag (ModelInfo.provider is optional), and `selectModel`
