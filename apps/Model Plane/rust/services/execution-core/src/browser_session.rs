@@ -337,11 +337,27 @@ pub(crate) fn with_person_note(text: String, note: &str) -> String {
     }
 }
 
-/// Whether the one fresh look a hand-back takes is the paused call itself: a paused observe is
-/// answered by that look, so the page is not read twice (EP-1 S3).
+/// Whether the one fresh look a hand-back takes is the paused call itself, so the page is not read
+/// twice (EP-1 S3). A paused observe is answered by the look. So is a paused open of the page the
+/// person holds (`held_host`): opening it again would end that page and the sign-in the person made
+/// on it, and a new Quarry run starts with an empty profile (EP-1 S4, D8). An open of another host
+/// is not answered: it runs and replaces the page, as an open does.
 #[must_use]
-pub(crate) fn hand_back_answers(tool_name: &str) -> bool {
-    tool_name == OBSERVE_TOOL
+pub(crate) fn hand_back_answers(
+    tool_name: &str,
+    tool_input: &str,
+    held_host: Option<&str>,
+) -> bool {
+    match tool_name {
+        OBSERVE_TOOL => true,
+        OPEN_TOOL => held_host.is_some_and(|host| {
+            serde_json::from_str::<OpenInput>(tool_input)
+                .ok()
+                .and_then(|input| parse_target(&input.url).ok())
+                .is_some_and(|target| target.host == host)
+        }),
+        _ => false,
+    }
 }
 
 /// The one fresh look at the page after the person gave the browser back (EP-1 S3): the page as it
@@ -2956,10 +2972,14 @@ mod tests {
         );
         assert!(look.ends_with("\n<person_note>Done.</person_note>"), "{look}");
 
-        // The paused call runs after the look; a paused observe is answered by the look itself.
-        assert!(hand_back_answers(OBSERVE_TOOL));
-        for tool in [OPEN_TOOL, CLOSE_TOOL, ACT_TOOL] {
-            assert!(!hand_back_answers(tool), "{tool} runs again after the look");
+        // The paused call runs after the look, except a paused observe and an open of the held
+        // page, which the look answers (see the test below).
+        assert!(hand_back_answers(OBSERVE_TOOL, "{}", None));
+        for tool in [CLOSE_TOOL, ACT_TOOL] {
+            assert!(
+                !hand_back_answers(tool, "{}", Some("example.com")),
+                "{tool} runs again after the look"
+            );
         }
         close(&dispatch(&state, &broker), Some(&quarry(&server))).await;
         assert_eq!(step_count(&server).await, 2, "the redispatched close reads no page");
@@ -2969,6 +2989,33 @@ mod tests {
             Err(UNAVAILABLE),
             "no Quarry, no look"
         );
+    }
+
+    #[test]
+    fn the_look_answers_a_paused_open_only_of_the_held_page() {
+        let held = Some("example.com");
+        assert!(
+            hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.com/next"}"#, held),
+            "an open of the held site is answered by the look, keeping the sign-in"
+        );
+        assert!(
+            !hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.org/"}"#, held),
+            "an open of another site runs and replaces the page"
+        );
+        assert!(
+            !hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.com/"}"#, None),
+            "with no page held there is nothing for the look to answer"
+        );
+        for input in [
+            "not json",
+            r#"{"url":"example.com"}"#,
+            r#"{"url":"https://example.com/","ref":"@e1"}"#,
+        ] {
+            assert!(
+                !hand_back_answers(OPEN_TOOL, input, held),
+                "{input} is refused by open itself, so the look does not answer it"
+            );
+        }
     }
 
     #[tokio::test]

@@ -4835,10 +4835,16 @@ async fn run_rounds(
                     };
                     let outcome = if let Some(refusal) = handback_refusal {
                         Some(StepOutcome::failed(&refusal.text()))
-                    } else if let Some((look, _)) = hand_back
-                        .as_ref()
-                        .filter(|_| crate::browser_session::hand_back_answers(&call.name))
-                    {
+                    } else if let Some((look, _)) = hand_back.as_ref().filter(|_| {
+                        browser.as_ref().is_some_and(|browser| {
+                            hand_back_answers_call(
+                                browser.state,
+                                browser.run_id,
+                                &call.name,
+                                &call.arguments_json,
+                            )
+                        })
+                    }) {
                         Some(hand_back_observed(look))
                     } else {
                         Some(
@@ -4989,14 +4995,14 @@ async fn run_rounds(
 
             // EP-1 S1: a Do browser call refused because the person holds the browser pauses the run
             // on that call (switch on). The approval is the give-back: once it is consumed, the call
-            // runs again. A released call that meets the takeover again is not paused a second time,
-            // since its approval is spent and the pause would collapse onto it; the model reads the
-            // refusal and may ask again. A run that keeps no state holds no approval: it is refused.
+            // runs again. A released call that finds the person still holding the browser pauses
+            // again, on its own release step: each release runs under a later segment than the step
+            // it resumes, so the new approval is keyed apart from every earlier pause of the run.
+            // The person is asked again rather than the model told to wait. A run that keeps no
+            // state holds no approval: it is refused.
             let human_assist = if crate::browser_session::takeover_pause_enabled()
                 && ctx.depth == 0
-                && !ctx.release.as_ref().is_some_and(|release| {
-                    release.covers(&step_id, &call.name, &call.arguments_json)
-                }) {
+            {
                 crate::browser_session::takeover_step(
                     &call.name,
                     &outcome.error,
@@ -10182,6 +10188,19 @@ fn hand_back_note_of(approval: &pb::Approval, run_id: &str) -> Option<String> {
     is_hand_back.then(|| approval.decision_reason.clone())
 }
 
+/// Whether the hand-back's one look answers the paused call (EP-1 S3, S4): an open of the page the
+/// run holds is answered by it. The held host is read here, from the run's own session, so
+/// `run_rounds` keeps no binding of it across its awaits.
+fn hand_back_answers_call(
+    state: &crate::state::StateStore,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+) -> bool {
+    let held_host = state.browser_session(run_id).map(|session| session.host);
+    crate::browser_session::hand_back_answers(tool_name, tool_input, held_host.as_deref())
+}
+
 /// A paused observe answered by the hand-back's one look (EP-1 S3).
 fn hand_back_observed(
     look: &Result<String, crate::browser_session::Refusal>,
@@ -10277,6 +10296,85 @@ mod browser_hand_back {
 
         let failed = StepOutcome::failed(&crate::browser_session::SESSION_FAILED.text());
         assert_eq!(after_hand_back(failed.clone(), &look, "n"), failed);
+    }
+
+    /// EP-1 S1: a Do browser call that finds the person still holding the browser pauses again on
+    /// its release's own step. Each release runs under the segment after the step it resumes, so
+    /// every pause the run makes is keyed by a step that no earlier pause of the run used.
+    #[test]
+    fn a_re_pause_on_a_released_browser_call_is_keyed_apart_from_every_earlier_pause() {
+        let authority = mp_contracts::loop_fold::Authority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            tool_names: Vec::new(),
+            max_rounds: 4,
+        };
+        let mut paused_step = "tool_1_open-1".to_owned();
+        let mut keys = std::collections::BTreeSet::from([paused_step.clone()]);
+        for _ in 0..3 {
+            let consumed = runtime_loop::resume::Consumed {
+                tool_name: crate::browser_session::OBSERVE_TOOL.to_owned(),
+                tool_input_json: "{}".to_owned(),
+                step_id: paused_step.clone(),
+                tools: Vec::new(),
+                mode: "ask".to_owned(),
+                snapshot_authority: authority.clone(),
+                snapshot_digest: String::new(),
+                effective: authority.clone(),
+                segment: runtime_loop::resume::next_segment_no(&paused_step),
+                revision: 0,
+                original_action_fingerprint: String::new(),
+            };
+            let (_call, released_step, _release) = released_call(
+                crate::permission::RunGate::for_run("org-repause", "run-repause"),
+                &consumed,
+            )
+            .expect("a Do browser call is releasable");
+            assert!(
+                keys.insert(released_step.clone()),
+                "{released_step} keys an earlier pause of the run"
+            );
+            paused_step = released_step;
+        }
+        assert_eq!(keys.len(), 4, "the first pause and three re-pauses");
+    }
+
+    /// EP-1 S3, S4: the look answers an open of the page the run itself holds, and nothing a run
+    /// does not hold.
+    #[test]
+    fn the_look_answers_an_open_of_the_page_its_own_run_holds() {
+        let state = crate::state::StateStore::new();
+        state.replace_browser_session(
+            "run-held",
+            crate::browser_session::BrowserSession {
+                grant_id: "grant-1".to_owned(),
+                quarry_run_id: "run-q1".to_owned(),
+                lease_id: "lease-q1".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+        let open = r#"{"url":"https://example.com/login"}"#;
+        assert!(hand_back_answers_call(
+            &state,
+            "run-held",
+            crate::browser_session::OPEN_TOOL,
+            open
+        ));
+        assert!(
+            !hand_back_answers_call(&state, "run-other", crate::browser_session::OPEN_TOOL, open),
+            "another run's page is not answered"
+        );
+        assert!(hand_back_answers_call(
+            &state,
+            "run-held",
+            crate::browser_session::OBSERVE_TOOL,
+            "{}"
+        ));
     }
 }
 
