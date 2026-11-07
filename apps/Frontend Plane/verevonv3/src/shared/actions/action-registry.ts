@@ -1230,6 +1230,46 @@ const orgSetAgentPolicyInput = z
 
 const orgPreviewEffectivePolicyInput = z.object({}).strict()
 
+// Settings > Browser (E3.2-g1): the organization browser policy, org-core's web policy (WS7.H).
+// The gateway only proxies it. A save is the whole document at the revision it was read at
+// (ifMatch, which org-core checks as If-Match); a partial set would loosen the policy by omission.
+const browserPolicyDocumentInput = z
+  .object({
+    caps: z.record(z.string().min(1).max(64), z.string().min(1).max(32)).optional(),
+    robots_max: z.string().min(1).max(32).optional(),
+    proxy_max: z.string().min(1).max(32).optional(),
+    domains: z
+      .object({
+        allow: z.array(z.string().min(1).max(253)).max(64).optional(),
+        deny: z.array(z.string().min(1).max(253)).max(64).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+const browserGetOrgPolicyInput = z.object({ orgId: z.string().min(1) }).strict()
+const browserSetOrgPolicyInput = z
+  .object({
+    orgId: z.string().min(1),
+    ifMatch: z.number().int().min(0),
+    document: browserPolicyDocumentInput,
+  })
+  .strict()
+const browserGetOrgPolicyOutput = z.object({
+  policy: z.record(z.string(), z.unknown()).nullable(),
+  effective: z.record(z.string(), z.unknown()),
+  revision: z.number().int().min(0),
+  rev: z.string(),
+  entitlements: z.record(z.string(), z.boolean()),
+  can_manage: z.boolean(),
+  updated_by: z.string().nullable(),
+  updated_at: z.string().nullable(),
+})
+const browserSetOrgPolicyOutput = z.object({
+  revision: z.number().int().min(0),
+  rev: z.string(),
+})
+
 // A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
 const orgHookRuleFields = z.object({
   event: z.enum(['pre_tool', 'post_tool']),
@@ -3131,6 +3171,30 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: orgPreviewEffectivePolicyInput,
     outputSchema: orgEffectivePolicyOutput,
+  },
+  {
+    id: 'browser.get_org_policy',
+    label: 'Read organization browser policy',
+    description:
+      'Read the organization browser policy: what agents may do in the browser, the domains they may visit, the plan entitlements and the effective view, at its current revision. Any active member may read it; the stored document is shown to an owner or admin only. Never model-executable.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserGetOrgPolicyInput,
+    outputSchema: browserGetOrgPolicyOutput,
+  },
+  {
+    id: 'browser.set_org_policy',
+    label: 'Set organization browser policy',
+    description:
+      'Replace the organization browser policy with the document given, at the revision it was read at. A stale revision is refused and nothing is merged. Owner or admin only; a switch the plan does not include is refused. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: browserSetOrgPolicyInput,
+    outputSchema: browserSetOrgPolicyOutput,
   },
   {
     id: 'org.create_hook',

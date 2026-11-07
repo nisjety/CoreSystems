@@ -1003,7 +1003,8 @@ describe('action registry', () => {
     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
     // 270 after W3-E3.4-7 registered browser_download.send_to_knowledge (downloads drawer).
-    expect(ids).toHaveLength(270)
+    // 272 after W3-E3.2-g1 registered browser.get_org_policy and browser.set_org_policy (Settings > Browser).
+    expect(ids).toHaveLength(272)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

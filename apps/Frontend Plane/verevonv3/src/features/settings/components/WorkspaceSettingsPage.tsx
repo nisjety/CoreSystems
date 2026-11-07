@@ -14,6 +14,11 @@ import { CronSchedulesSection } from '@/features/settings/components/CronSchedul
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { BrowserSitesSection } from '@/features/settings/components/BrowserSitesSection'
 import { OrgBrowserPolicySection } from '@/features/settings/components/OrgBrowserPolicySection'
+import { BrowserPolicySection } from '@/features/settings/components/BrowserPolicySection'
+import {
+  browserPolicySettingsEnabled,
+  createBrowserPolicyPort,
+} from '@/features/settings/components/browser-policy-port'
 import { DomainsPanel } from '@/features/settings/components/DomainsPanel'
 import { SsoPolicyPanel } from '@/features/settings/components/SsoPolicyPanel'
 import { ScimPanel } from '@/features/settings/components/ScimPanel'
@@ -184,6 +189,8 @@ type IntegrationSettingsRow = {
 // render as honest, DISABLED "not configured" controls — a security control is
 // never shown enabled from a literal. (No boolean-`true` posture remains, so
 // the A8 no-fabricated-state guard needs no suppression here.)
+const browserPolicyPort = createBrowserPolicyPort()
+
 function getSecurityControls(i18n: ReturnType<typeof useI18n>): { title: string; description: string }[] {
   return [
     {
@@ -528,6 +535,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'org-browser-policy'}>
         <OrgBrowserPolicySection />
+        <Show when={browserPolicySettingsEnabled()}>
+          <BrowserPolicySection port={browserPolicyPort} />
+        </Show>
       </Match>
       <Match when={props.section === 'space-policy'}>
         <OrgSpacePolicySection />
