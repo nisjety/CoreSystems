@@ -126,6 +126,17 @@
       ]
     },
     {
+      "name": "EVENT_TRIGGERS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 W4-F T1: the event trigger record store (session-core). Records only; nothing fires until the consumer and FireAuthorizer exist.",
+      "declarations": [
+        { "service": "session-core", "env": "EVENT_TRIGGERS_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_POST_MUTATION_VERIFY_ENABLED",
       "kind": "switch",
       "owner": "model-plane",

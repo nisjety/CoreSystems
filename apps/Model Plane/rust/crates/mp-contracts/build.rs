@@ -77,6 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/thread_export.proto",
         // EP-12 S14: ThreadShareService (session-core's owner-only share snapshots).
         "model_plane/v1/thread_shares.proto",
+        // W4-F T1: EventTriggerService (session-core's event trigger record store).
+        "model_plane/v1/event_triggers.proto",
     ];
 
     let dp_protos = &[

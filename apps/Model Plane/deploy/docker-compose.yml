@@ -1232,6 +1232,8 @@ services:
       SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}
       # EP-7 S1: the ThreadGoalService store. Only the literal true.
       SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
+      # EP-7 W4-F T1: the EventTriggerService record store. Only the literal true. Records only: nothing fires until the consumer and FireAuthorizer land.
+      EVENT_TRIGGERS_ENABLED: ${EVENT_TRIGGERS_ENABLED:-false}
       # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.
       SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
       # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.

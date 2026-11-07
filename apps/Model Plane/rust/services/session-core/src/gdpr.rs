@@ -163,6 +163,9 @@ pub struct PurgeSummary {
     pub cron_fires: u64,
     pub tasks: u64,
     pub cron_schedules: u64,
+    /// Event trigger records (W4-F T1), the member's configuration of connector-event wakes. They name
+    /// no thread or run; counted here so the erasure proof names the table.
+    pub event_triggers: u64,
     pub events: u64,
     pub run_trace_events: u64,
     /// Request snapshots and their system/tool blobs (EP-14 S6).
@@ -220,6 +223,7 @@ impl PurgeSummary {
             + self.cron_fires
             + self.tasks
             + self.cron_schedules
+            + self.event_triggers
             + self.events
             + self.run_trace_events
             + self.run_request_snapshots
@@ -668,6 +672,14 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.cron_schedules = sqlx::query("DELETE FROM cron_schedules WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Event trigger records (W4-F T1): the org's rows, deleted before runs and threads so a later
+    // reference from a run or thread cannot strand one. Nothing else in the purge reads them.
+    summary.event_triggers = sqlx::query("DELETE FROM event_triggers WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -1227,6 +1239,7 @@ mod tests {
             cron_fires: 1,
             tasks: 1,
             cron_schedules: 1,
+            event_triggers: 1,
             events: 1,
             run_trace_events: 1,
             run_request_snapshots: 1,
@@ -1258,7 +1271,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            37,
+            38,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1311,6 +1324,7 @@ mod tests {
         let cron_fires = pos("DELETE FROM cron_fires");
         let tasks = pos("DELETE FROM tasks WHERE org_id = $1");
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
+        let event_triggers = pos("DELETE FROM event_triggers WHERE org_id = $1");
         let events = pos("DELETE FROM events");
         let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
         let snapshot_blobs = pos("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1");
@@ -1388,6 +1402,10 @@ mod tests {
             "request snapshots must be purged before runs (their rows reference them)"
         );
         assert!(runs < threads, "runs must be purged before threads");
+        assert!(
+            event_triggers < runs && event_triggers < threads,
+            "event trigger records (W4-F T1) must be purged before runs and threads"
+        );
         assert!(
             pos("DELETE FROM agent_skills WHERE org_id = $1")
                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),

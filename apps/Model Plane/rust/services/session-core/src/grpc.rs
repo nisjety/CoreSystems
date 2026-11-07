@@ -17,6 +17,7 @@ use mp_contracts::model_plane::v1::{
     approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
     artifact_revision_service_server::ArtifactRevisionServiceServer,
     attention_service_server::AttentionServiceServer,
+    event_trigger_service_server::EventTriggerServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
@@ -12479,6 +12480,7 @@ pub async fn serve(
     let artifact_revision_pool = pool.clone();
     let thread_reference_pool = pool.clone();
     let thread_goal_pool = pool.clone();
+    let event_trigger_pool = pool.clone();
     let thread_share_pool = pool.clone();
     let skill_version_pool = pool.clone();
 
@@ -12583,6 +12585,11 @@ pub async fn serve(
         // EP-7 S1: the thread goal store; answers `unavailable` until its switch is on.
         .add_service(ThreadGoalServiceServer::with_interceptor(
             crate::thread_goals::ThreadGoalGrpc { pool: thread_goal_pool },
+            auth.clone(),
+        ))
+        // W4-F T1: the event trigger record store; answers `unavailable` until its switch is on.
+        .add_service(EventTriggerServiceServer::with_interceptor(
+            crate::event_triggers::EventTriggerGrpc { pool: event_trigger_pool },
             auth.clone(),
         ))
         // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.

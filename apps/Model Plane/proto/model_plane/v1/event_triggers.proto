@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Event triggers (Wave 4 EP-7, F-t3-047, slice W4-F T1): the trigger record.
+//
+// An event trigger binds one integration connection, one Space and one Space member, and names the
+// connector event type that may wake a budgeted run for that member. This service stores the record
+// and nothing fires: a stored trigger is not authority, so every later fire is re-authorised by
+// Control through FireAuthorizer. The record holds ids, a closed event type, a short label, a clock
+// flag and a status. Only its member reads or changes it, a service caller is refused, and a
+// zero-retention or waived credential is refused on every RPC. It is erased with its org.
+// The switch is EVENT_TRIGGERS_ENABLED (literal true only); while it is off every RPC answers
+// unavailable with event_triggers_disabled. A separate file and service, as the other Wave 4
+// stores are, so that SessionCore and every implementation of it stay source-compatible.
+
+// W4-F T1. One trigger record.
+message EventTrigger {
+  // The trigger's id, `trg_` followed by a ULID, assigned by session-core.
+  string id = 1;
+  // The org the trigger belongs to.
+  string org_id = 2;
+  // The Space the trigger acts in.
+  string space_ref = 3;
+  // The one integration connection whose events may wake the trigger.
+  string connection_id = 4;
+  // The Space member the trigger belongs to. The only person who may read or change it, and the
+  // person whose authority a later fire carries.
+  string member_user_id = 5;
+  // The connector event type the trigger reacts to, a closed token. Only "webhook_received" so far.
+  string event_type = 6;
+  // A short label the member gave the trigger, 1 to 120 characters.
+  string name = 7;
+  // Whether the trigger's clock arm is enabled. Stored and returned only: nothing reads it yet.
+  bool clock_enabled = 8;
+  // One closed token: "active", "paused" or "disabled". "disabled" is final.
+  string status = 9;
+  // The compare-and-set revision: 1 for a new trigger, raised by every change.
+  uint64 revision = 10;
+  // When the trigger was created.
+  google.protobuf.Timestamp created_at = 11;
+  // When the trigger last changed.
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+// Create a trigger for the caller, who becomes its member. The new trigger starts "active".
+message CreateEventTriggerRequest {
+  // The org the caller acts in. Must be the caller's own org.
+  string org_id = 1;
+  // The Space the trigger acts in.
+  string space_ref = 2;
+  // The integration connection whose events may wake the trigger.
+  string connection_id = 3;
+  // The connector event type. Only "webhook_received" is accepted.
+  string event_type = 4;
+  // A short label, 1 to 120 characters after trimming.
+  string name = 5;
+  // Whether the clock arm is enabled. False when unset.
+  bool clock_enabled = 6;
+}
+
+// Read one trigger the caller owns.
+message GetEventTriggerRequest {
+  // The org the caller acts in.
+  string org_id = 1;
+  // The trigger's id.
+  string trigger_id = 2;
+}
+
+// List the caller's own triggers, newest first, at most 200.
+message ListEventTriggersRequest {
+  // The org the caller acts in.
+  string org_id = 1;
+  // Only the triggers of this Space. Empty lists the caller's triggers in every Space.
+  string space_ref = 2;
+}
+
+// The caller's triggers.
+message ListEventTriggersResponse {
+  // The triggers, newest first.
+  repeated EventTrigger triggers = 1;
+}
+
+// Change one trigger under a compare-and-set on its revision. Only the fields named in update_paths
+// change.
+message UpdateEventTriggerRequest {
+  // The org the caller acts in.
+  string org_id = 1;
+  // The trigger's id.
+  string trigger_id = 2;
+  // The revision the caller saw. A stale one is refused with aborted event_trigger_revision_conflict.
+  uint64 expected_revision = 3;
+  // The fields to change: any of "name", "clock_enabled" and "status". Required.
+  repeated string update_paths = 4;
+  // The new label. Read when "name" is named.
+  string name = 5;
+  // The new clock flag. Read when "clock_enabled" is named.
+  bool clock_enabled = 6;
+  // The new status, "active", "paused" or "disabled". Read when "status" is named.
+  string status = 7;
+}
+
+// One trigger and whether it was found for the caller.
+message EventTriggerResponse {
+  // The trigger. Empty when none was found.
+  EventTrigger trigger = 1;
+  // Whether the trigger was found for the caller.
+  bool found = 2;
+}
+
+// The event trigger record store (W4-F T1). Every RPC answers unavailable while its switch is off.
+service EventTriggerService {
+  // Create a trigger for the caller.
+  // Response type is shared by several trigger RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc CreateEventTrigger(CreateEventTriggerRequest) returns (EventTriggerResponse);
+  // Read one trigger the caller owns. found is false when it is not theirs or does not exist.
+  // Response type is shared by several trigger RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc GetEventTrigger(GetEventTriggerRequest) returns (EventTriggerResponse);
+  // List the caller's own triggers.
+  rpc ListEventTriggers(ListEventTriggersRequest) returns (ListEventTriggersResponse);
+  // Change one trigger under a compare-and-set on its revision.
+  // Response type is shared by several trigger RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc UpdateEventTrigger(UpdateEventTriggerRequest) returns (EventTriggerResponse);
+}

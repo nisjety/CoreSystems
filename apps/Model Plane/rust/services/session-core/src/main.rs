@@ -21,6 +21,7 @@ mod continuation_crypto;
 mod decision_keys;
 mod dream_extractor;
 mod dreaming;
+mod event_triggers;
 mod eventlog_grpc;
 mod external_content;
 mod finetune_grpc;
