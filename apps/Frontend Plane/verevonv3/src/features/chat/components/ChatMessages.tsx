@@ -897,8 +897,9 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
-          <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
+          {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`.
+              A Space thread shown here is room content (D2), so it keeps the code block. */}
+          <InlineWidgetSurface value={inlineWidgetsEnabled() && !props.spaceScoped ? 'live' : 'inert'}>
             <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
               <SettledTurnContent
                 fold={props.settledFold}

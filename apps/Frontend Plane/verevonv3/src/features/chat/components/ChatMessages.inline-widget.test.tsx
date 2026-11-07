@@ -3,8 +3,9 @@
 /**
  * Where a ```widget fence runs (EP-4 S1, D2). Only a chat assistant answer with
  * `VITE_CHAT_INLINE_WIDGETS=true` draws the sandboxed frame; a user message, a
- * `ChatMarkdown` outside that answer (the Space room, people's posts, exports)
- * and the switch off all keep the ordinary code block.
+ * `ChatMarkdown` outside that answer (the Space room, people's posts, exports),
+ * a Space thread shown in the chat page and the switch off all keep the ordinary
+ * code block.
  */
 
 import { render } from '@solidjs/testing-library'
@@ -78,6 +79,15 @@ describe('inline widgets in the transcript', () => {
   it('with the switch off an answer keeps the code', () => {
     vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', '1')
     const { container, unmount } = render(() => <AssistantMessage {...handlers()} message={turn()} />)
+    flush()
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(container.querySelector('.verevon-chat-codeblock')?.textContent).toContain(WIDGET)
+    unmount()
+  })
+
+  it('a Space thread shown in the chat page keeps the code', () => {
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
+    const { container, unmount } = render(() => <AssistantMessage {...handlers()} spaceScoped message={turn()} />)
     flush()
     expect(container.querySelector('iframe')).toBeNull()
     expect(container.querySelector('.verevon-chat-codeblock')?.textContent).toContain(WIDGET)
