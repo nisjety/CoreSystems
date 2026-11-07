@@ -368,6 +368,17 @@ impl ToolResultStore {
         true
     }
 
+    /// Age a handle past [`HANDLE_TTL`], so a test can see it stop resolving.
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self, org_id: &str, user_id: &str, handle_id: &str) {
+        let key = (org_id.to_owned(), user_id.to_owned(), handle_id.to_owned());
+        if let Some(mut entry) = self.inner.get_mut(&key) {
+            entry.stored_at = Instant::now()
+                .checked_sub(HANDLE_TTL + Duration::from_secs(1))
+                .expect("the clock is older than one handle TTL");
+        }
+    }
+
     /// Number of live (non-expired) handles. Test/observability helper.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -693,6 +704,19 @@ mod tests {
             .expect("resolves");
         assert_eq!(resolved.artifact_ref.as_deref(), Some("art_1"));
         assert_eq!(resolved.capability_id, "mcp__s__t");
+    }
+
+    #[test]
+    fn a_handle_stops_resolving_once_its_ttl_has_passed() {
+        let store = ToolResultStore::new();
+        let handle = store.insert("org_a", "user_a", "fetch_url", rows_payload(), 512, None);
+        store.expire_for_test("org_a", "user_a", &handle.handle_id);
+
+        assert!(store
+            .resolve("org_a", "user_a", &handle.handle_id)
+            .is_none());
+        assert!(!store.attach_artifact("org_a", "user_a", &handle.handle_id, "art_1"));
+        assert!(store.is_empty());
     }
 
     #[test]

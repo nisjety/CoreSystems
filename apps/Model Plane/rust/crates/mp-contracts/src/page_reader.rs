@@ -150,13 +150,29 @@ pub fn read_section<'a>(text: &'a str, section: &Section, offset: usize) -> Sect
 /// The passages of `text` most relevant to `query`, each placed in the section it is in, most relevant
 /// first. `select` ranks and bounds the passages of one section's text; this adds only the placement
 /// and the order across sections. A passage that cannot be placed in the text is dropped rather than
-/// put in a guessed section.
+/// put in a guessed section. At most [`FIND_PASSAGES`] come back; [`find_up_to`] takes the count.
 #[must_use]
 pub fn find<F>(
     text: &str,
     sections: &[Section],
     query: &str,
     max_chars: usize,
+    select: F,
+) -> Vec<Passage>
+where
+    F: Fn(&str, &str, usize) -> Vec<String>,
+{
+    find_up_to(text, sections, query, max_chars, FIND_PASSAGES, select)
+}
+
+/// [`find`] with the number of passages the caller asks for in place of [`FIND_PASSAGES`].
+#[must_use]
+pub fn find_up_to<F>(
+    text: &str,
+    sections: &[Section],
+    query: &str,
+    max_chars: usize,
+    max_passages: usize,
     select: F,
 ) -> Vec<Passage>
 where
@@ -201,7 +217,7 @@ where
     let mut kept = Vec::new();
     for (_, passage) in found {
         let size = passage.text.chars().count();
-        if kept.len() == FIND_PASSAGES || spent + size > max_chars {
+        if kept.len() == max_passages || spent + size > max_chars {
             continue;
         }
         spent += size;
@@ -517,5 +533,31 @@ mod tests {
         let passages = find(text, &sections, "beta words", FIND_CHARS, select_chunks);
         assert_eq!(passages[0].section_id, "s2", "{passages:?}");
         assert_eq!(passages[0].heading, "Two");
+    }
+
+    #[test]
+    fn find_up_to_returns_the_number_asked_and_find_keeps_its_two() {
+        let mut text = String::new();
+        for part in 0..4 {
+            text.push_str(&format!(
+                "# Part {part}\nLice count {part} in the spring survey.\n"
+            ));
+        }
+        let sections = outline(&text);
+        let second_line = |_: &str, body: &str, _: usize| -> Vec<String> {
+            body.lines().nth(1).map(str::to_owned).into_iter().collect()
+        };
+        assert_eq!(
+            find(&text, &sections, "lice count", FIND_CHARS, second_line).len(),
+            FIND_PASSAGES
+        );
+        assert_eq!(
+            find_up_to(&text, &sections, "lice count", FIND_CHARS, 3, second_line).len(),
+            3
+        );
+        assert_eq!(
+            find_up_to(&text, &sections, "lice count", FIND_CHARS, 9, second_line).len(),
+            4
+        );
     }
 }

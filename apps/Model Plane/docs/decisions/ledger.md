@@ -22,6 +22,12 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-07 - find_in_page takes max_passages, one to five (EP-2-S2 follow-up)
+
+**Status: implemented, behind MODEL_GATEWAY_WEB_READER (default off); no proto, no migration.** `find_in_page` takes an optional `max_passages` (integer 1 to 5, default 2) and returns up to that many passages, most relevant first, across the sections of the page. The shared `mp_contracts::page_reader::find` keeps its two-passage ceiling and `find_up_to` takes the count, so the execution-core Do-loop reader (EP-2-S10) is unchanged and still returns at most two. The ranker returns at most two passages per section, so a larger count is reached only on a page with more sections. Design: docs/plans/wave3/EP-2-research-and-citations.md (S2, tool contract `find_in_page {ref, query, max_passages<=5}`).
+
+---
+
 ## 2026-11-05 - A goal continues unattended only read-only, in service identity (EP-7 S7)
 
 **Status: deferred (design-only slice; trigger: an owner ruling on DEC-02 / OD8 plus a Control Plane security review).** EP-7 S6 (a goal-bound WS20 schedule under a DEC-16 stored-consent contract, service identity, writes withheld as drafts) is the only unattended goal mode. A goal does not continue unattended in the user's delegated identity (connected apps, browser grants, or writes approved while the user is away): that needs a renewable delegated credential, which DEC-02 (b) does not allow, and no bearer is stored in a goal, a fold or a schedule (`assert_no_credentials`). Not chosen: a stored or renewable user bearer, and a service-principal mint that acts as the user (DEC-16 (c), rejected). Wave 3 builds nothing for S7: no code, no switch, no migration or proto number. Design: docs/plans/wave3/EP-7-persistent-goals.md (S7, decision D6). Supersedes nothing.
