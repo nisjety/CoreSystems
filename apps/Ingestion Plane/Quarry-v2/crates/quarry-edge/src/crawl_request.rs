@@ -120,6 +120,8 @@ pub const RESERVED_KEYS: &[&str] = &[
     "proxy",
     "proxy_url",
     "proxyUrl",
+    "redact_pii",
+    "redactPii",
     "skip_tls_verification",
     "skipTlsVerification",
     "stealth",

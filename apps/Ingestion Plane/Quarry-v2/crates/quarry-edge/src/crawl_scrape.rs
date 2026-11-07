@@ -55,7 +55,7 @@ const KEYS: [(&str, &str); 7] = [
 ];
 
 /// Keys that exist on `/v1/scrape` (or are Firecrawl options) and cannot apply per page.
-const UNSUPPORTED_KEYS: [&str; 14] = [
+const UNSUPPORTED_KEYS: [&str; 16] = [
     "actions",
     "actions_on_error",
     "actionsOnError",
@@ -67,6 +67,8 @@ const UNSUPPORTED_KEYS: [&str; 14] = [
     "summary",
     "question",
     "highlights",
+    "redact_pii",
+    "redactPii",
     "render",
     "wait_for",
     "waitFor",
@@ -408,6 +410,21 @@ mod tests {
                 pair("proxy", "reserved_field")
             ]
         );
+    }
+
+    #[test]
+    fn crawl_refuses_redact_pii_never_silently_ignores_it() {
+        // CW-1: redact_pii exists on /v1/scrape but cannot apply to every page of a
+        // crawl. In lenient mode it used to be collected as an unknown key and
+        // warned-and-ignored, so the crawl ran without the requested redaction.
+        for key in ["redact_pii", "redactPii"] {
+            let result = check(&json!({ key: "on" }), false);
+            assert_eq!(
+                codes(&result),
+                vec![pair(key, "unsupported_option")],
+                "{key}"
+            );
+        }
     }
 
     #[test]
