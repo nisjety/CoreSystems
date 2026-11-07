@@ -272,6 +272,19 @@ describe('Support thread display continuity', () => {
     }).content).toBe('What should I do next?')
   })
 
+  it('carries the server message-tree position onto the turn, and adds none where the server sent none', () => {
+    const version = {
+      parentMessageId: 'message-0',
+      siblingOrdinal: 2,
+      siblingCount: 2,
+      onActivePath: true,
+      siblings: ['message-1', 'message-2'],
+    }
+    expect(messageToTurn({ id: 'message-2', role: 'assistant', content: 'Svar', createdAt: '', version }).version)
+      .toEqual(version)
+    expect(messageToTurn({ id: 'message-3', role: 'assistant', content: 'Svar', createdAt: '' })).not.toHaveProperty('version')
+  })
+
   it('shows the operator question when restoring the same thread from the local transcript cache', () => {
     expect(transcriptTurnToChatTurn({
       id: 'turn-1',

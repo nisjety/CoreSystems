@@ -17,7 +17,17 @@ import type { ChatMessageVersion } from '@/shared/api/chat-client'
 /** The part of a transcript turn these functions read. */
 export type VersionedTurn = {
   id: string
+  role: 'user' | 'assistant'
+  content: string
   version?: ChatMessageVersion
+}
+
+/** A turn a rewind would hide, as the confirmation and the undo offer show it. */
+export type HiddenTurn = {
+  id: string
+  role: 'user' | 'assistant'
+  /** The start of the turn's text on one line. Empty for a turn with no text, such as an attachment alone. */
+  excerpt: string
 }
 
 /** What the switcher shows for a turn that has more than one version. */
@@ -32,12 +42,26 @@ export type ServerVersionBadge = {
   nextId: string | null
 }
 
-/** What a rewind to a turn would do, for the confirmation the user sees first. */
+/**
+ * What a rewind to a turn would do, for the confirmation the user sees first. Nothing is deleted, so `hidden` is
+ * also what an undo of the rewind brings back.
+ */
 export type RewindPlan = {
   /** The turns after the rewind target on the active path, which it hides. */
   hiddenTurns: number
+  /** Those turns, oldest first. */
+  hidden: HiddenTurn[]
   /** The leaf the client displays now, which the move must still find. */
   expectedLeafMessageId: string
+}
+
+const EXCERPT_LENGTH = 120
+
+/** A turn's text on one line, cut to a short excerpt with an ellipsis when it is longer. */
+export function turnExcerpt(content: string): string {
+  const text = content.replace(/\s+/g, ' ').trim()
+  if (text.length <= EXCERPT_LENGTH) return text
+  return `${text.slice(0, EXCERPT_LENGTH).trimEnd()}…`
 }
 
 /** Whether the server reports a version tree for this transcript at all. */
@@ -82,9 +106,10 @@ export function rewindPlan(turns: readonly VersionedTurn[], messageId: string): 
   if (!canMoveBranches(turns)) return null
   const index = turns.findIndex((turn) => turn.id === messageId)
   if (index < 0 || turns[index]?.version?.onActivePath === false) return null
-  const hiddenTurns = turns
+  const hidden = turns
     .slice(index + 1)
-    .filter((turn) => turn.version?.onActivePath !== false).length
-  if (hiddenTurns === 0) return null
-  return { hiddenTurns, expectedLeafMessageId: activeLeafId(turns) }
+    .filter((turn) => turn.version?.onActivePath !== false)
+    .map((turn) => ({ id: turn.id, role: turn.role, excerpt: turnExcerpt(turn.content) }))
+  if (hidden.length === 0) return null
+  return { hiddenTurns: hidden.length, hidden, expectedLeafMessageId: activeLeafId(turns) }
 }

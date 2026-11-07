@@ -359,6 +359,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
         .merge(crate::thread_goal_routes::router())
+        // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
+        .merge(crate::review_run_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
         // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
@@ -1352,7 +1354,7 @@ fn invoke_inference_error(
 /// Attach the separately verified `aud=inference-core` credential to one
 /// downstream RPC. A verified compact JWT uses only metadata-safe characters;
 /// validation happens in the auth middleware before this type can exist.
-fn authenticated_inference_request<T>(
+pub(crate) fn authenticated_inference_request<T>(
     value: T,
     bearer: &VerifiedInferenceBearer,
 ) -> tonic::Request<T> {
@@ -14706,6 +14708,9 @@ struct BranchThreadBody {
     /// The leaf the client last displayed. A move against a newer leaf is refused with
     /// 409 `active_leaf_stale`, so the client reloads before it moves again.
     expected_leaf_message_id: String,
+    /// Land on the target itself, not the newest turn beneath it: the undo of a rewind (WS17 S9).
+    #[serde(default)]
+    exact: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -14748,6 +14753,7 @@ async fn branch_thread(
                 thread_id: thread_id.to_owned(),
                 target_message_id: body.target_message_id,
                 expected_leaf_message_id: body.expected_leaf_message_id,
+                exact: body.exact,
             },
             &bearer,
         )?)
@@ -19408,7 +19414,7 @@ mod durable_trace_projection_tests {
 #[cfg(test)]
 // The inference-core stand-in answers with `tonic::Status`, as the trait does.
 #[allow(clippy::result_large_err)]
-mod speech_route_tests {
+pub(crate) mod speech_route_tests {
     //! The two audio routes, `/v1/ai/dictate` and `/v1/ai/speech`: zero
     //! retention reaches inference-core on every speech call, and their body
     //! limit is raised without touching any other route.
@@ -19438,7 +19444,7 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    pub(super) struct SpeechInference {
+    pub(crate) struct SpeechInference {
         attested: bool,
         /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
         reply: Arc<Mutex<Option<pb::InferResponse>>>,
@@ -19468,11 +19474,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        pub(super) fn answering(&self, reply: pb::InferResponse) {
+        pub(crate) fn answering(&self, reply: pb::InferResponse) {
             *self.reply.lock().expect("reply setting") = Some(reply);
         }
 
-        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(crate) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -19673,7 +19679,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
+    pub(crate) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -19719,7 +19725,7 @@ mod speech_route_tests {
         }
     }
 
-    pub(super) fn bearer() -> VerifiedInferenceBearer {
+    pub(crate) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -21712,6 +21718,29 @@ mod thread_messages_page_tests {
         ));
         assert_eq!(busy.0, StatusCode::CONFLICT);
         assert_eq!(busy.1 .0["error"]["code"], "history_branch_refused");
+    }
+
+    #[test]
+    fn a_branch_body_is_a_version_switch_unless_it_asks_for_an_exact_landing() {
+        let switch: BranchThreadBody = serde_json::from_value(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+        }))
+        .expect("a switch body parses");
+        assert!(!switch.exact);
+        let undo: BranchThreadBody = serde_json::from_value(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+            "exact": true,
+        }))
+        .expect("an undo body parses");
+        assert!(undo.exact);
+        assert!(serde_json::from_value::<BranchThreadBody>(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+            "threadId": "other",
+        }))
+        .is_err());
     }
 
     #[test]

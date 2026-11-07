@@ -1077,6 +1077,7 @@ pub async fn move_active_leaf(
                 thread_id: thread_id.to_owned(),
                 target_message_id: parent.message_id.clone(),
                 expected_leaf_message_id,
+                exact: false,
             },
             bearer,
         )?)

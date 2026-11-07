@@ -174,7 +174,8 @@ import {
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
-import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
+import type { HiddenTurn, RewindPlan, ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
+import './rewind-branch.css'
 import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
 import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
@@ -213,6 +214,25 @@ export type ConnectorSuggestionWiring = {
   pendingConnectIntent?: () => ConnectIntent | null
   resumeConnectIntent?: (intent: ConnectIntent, connectionId: string, providerLabel: string) => boolean
   dismissConnectIntent?: () => void
+}
+
+/** The turns a rewind would hide, or an undo would bring back: each one's role and the start of its text. */
+function HiddenTurnList(props: { turns: HiddenTurn[] }) {
+  const i18n = useI18n()
+  return (
+    <ol class="verevon-chat-rewind-confirm__hidden">
+      <For each={props.turns}>
+        {(turn) => (
+          <li>
+            <span class="verevon-chat-rewind-confirm__role">
+              {turn.role === 'user' ? i18n.tr('Du', 'You') : i18n.tr('Svar', 'Answer')}
+            </span>{' '}
+            {turn.excerpt || i18n.tr('(ingen tekst)', '(no text)')}
+          </li>
+        )}
+      </For>
+    </ol>
+  )
 }
 
 export function MessageBlock(props: {
@@ -259,6 +279,14 @@ export function MessageBlock(props: {
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /** The rewind this turn offers, and the turns it would hide (WS17 S9). Absent on a surface with no version tree. */
+  rewindPlan?: RewindPlan | null
+  /** Rewinds the thread to this turn, once the person has confirmed it. Nothing is deleted. */
+  onRewind?: () => void
+  /** The turns an undo of the rewind that landed on this turn would bring back. Set only under that turn. */
+  rewindUndo?: HiddenTurn[] | null
+  /** Undoes that rewind: the leaf returns to the turn it left. */
+  onUndoRewind?: () => void
   /**
    * This is the latest assistant turn. Rendered as `data-latest` so its action
    * row stays visible at rest on hover-capable devices (older turns reveal
@@ -593,10 +621,14 @@ export function AssistantMessage(props: {
    */
   serverVersion?: ServerVersionBadge | null
   onSwitchServerVersion?: (messageId: string) => void
-  /** How many turns a rewind to this turn would hide, when a rewind is offered (WS17 S9). */
-  rewindHiddenTurns?: number | null
+  /** The rewind this turn offers, and the turns it would hide, when a rewind is offered (WS17 S9). */
+  rewindPlan?: RewindPlan | null
   /** Rewinds the thread to this turn, once the user has confirmed it. Nothing is deleted. */
   onRewind?: () => void
+  /** The turns an undo of the rewind that landed on this turn would bring back. Set only under that turn. */
+  rewindUndo?: HiddenTurn[] | null
+  /** Undoes that rewind: the leaf returns to the turn it left. */
+  onUndoRewind?: () => void
   /** See `MessageBlock`'s doc — marks the article `data-latest`. */
   isLatest?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
@@ -1061,8 +1093,8 @@ export function AssistantMessage(props: {
                 </div>
               )}
             </Show>
-            <Show when={props.rewindHiddenTurns && props.rewindHiddenTurns > 0 ? props.rewindHiddenTurns : undefined}>
-              {(hidden) => (
+            <Show when={props.rewindPlan}>
+              {(plan) => (
                 <>
                   <MessageAction
                     label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
@@ -1076,13 +1108,19 @@ export function AssistantMessage(props: {
                       role="dialog"
                       aria-modal="true"
                       aria-label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                      tabindex={-1}
+                      ref={(element) => queueMicrotask(() => element.focus())}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') setConfirmingRewind(false)
+                      }}
                     >
                       <p>
                         {i18n.tr(
-                          `${hidden()} svar og meldinger etter dette punktet skjules. Ingenting slettes: de ligger fortsatt i en egen gren.`,
-                          `${hidden()} later turns will be hidden. Nothing is deleted: they stay on their own branch.`,
+                          `${plan().hiddenTurns} svar og meldinger etter dette punktet skjules. Ingenting slettes: de ligger fortsatt i en egen gren. Du kan angre rett etterpå.`,
+                          `${plan().hiddenTurns} later ${plan().hiddenTurns === 1 ? 'turn' : 'turns'} will be hidden. Nothing is deleted: they stay on their own branch. You can undo this straight after.`,
                         )}
                       </p>
+                      <HiddenTurnList turns={plan().hidden} />
                       <button type="button" onClick={() => setConfirmingRewind(false)}>
                         {i18n.tr('Avbryt', 'Cancel')}
                       </button>
@@ -1239,6 +1277,22 @@ export function AssistantMessage(props: {
             <p class="verevon-chat-feedback-reasons__note" role="alert">
               {exportError()}
             </p>
+          </Show>
+          <Show when={props.rewindUndo && props.rewindUndo.length > 0 ? props.rewindUndo : undefined}>
+            {(restored) => (
+              <div class="verevon-chat-rewind-undo" role="status">
+                <p>
+                  {i18n.tr(
+                    `Du er tilbake her. Angre gjenoppretter ${restored().length} ${restored().length === 1 ? 'melding' : 'meldinger'} etter dette punktet.`,
+                    `You are back at this point. Undo restores ${restored().length} later ${restored().length === 1 ? 'turn' : 'turns'}.`,
+                  )}
+                </p>
+                <HiddenTurnList turns={restored()} />
+                <button type="button" onClick={() => props.onUndoRewind?.()}>
+                  {i18n.tr('Angre', 'Undo')}
+                </button>
+              </div>
+            )}
           </Show>
           <Show when={props.temporaryChat && readAloudBlockedShown()}>
             <p class="verevon-chat-feedback-reasons__note" role="status">

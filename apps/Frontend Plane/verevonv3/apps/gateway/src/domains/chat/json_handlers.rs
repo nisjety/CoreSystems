@@ -258,6 +258,15 @@ pub(super) struct BranchThreadBody {
     confirm: bool,
 }
 
+/// The three moves a branch body can make. A switch moves the branch to a sibling; a rewind moves the leaf to an
+/// earlier turn of the active path and must be confirmed; an undo returns the leaf to the turn a rewind left.
+#[derive(Clone, Copy)]
+enum BranchMove {
+    Switch,
+    Rewind,
+    Undo,
+}
+
 /// A version switch: the thread's active branch moves to the turn the user picked. Model Gateway and Session
 /// Core decide whether it may move; this route forwards the caller's own credentials.
 pub(super) async fn branch_thread(
@@ -267,7 +276,7 @@ pub(super) async fn branch_thread(
     Path(thread_id): Path<String>,
     Json(body): Json<BranchThreadBody>,
 ) -> Response {
-    move_thread_branch(&state, &user, &headers, &thread_id, &body, false).await
+    move_thread_branch(&state, &user, &headers, &thread_id, &body, BranchMove::Switch).await
 }
 
 /// A rewind: the same move to an earlier turn of the active path. The client asks the user to confirm it, and
@@ -279,7 +288,19 @@ pub(super) async fn rewind_thread(
     Path(thread_id): Path<String>,
     Json(body): Json<BranchThreadBody>,
 ) -> Response {
-    move_thread_branch(&state, &user, &headers, &thread_id, &body, true).await
+    move_thread_branch(&state, &user, &headers, &thread_id, &body, BranchMove::Rewind).await
+}
+
+/// An undo of a rewind: the leaf returns to the turn the rewind left, even when a later branch continues from it.
+/// It moves nothing that was not already moved by the rewind, so it needs no confirmation.
+pub(super) async fn undo_rewind_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<BranchThreadBody>,
+) -> Response {
+    move_thread_branch(&state, &user, &headers, &thread_id, &body, BranchMove::Undo).await
 }
 
 async fn move_thread_branch(
@@ -288,13 +309,13 @@ async fn move_thread_branch(
     headers: &HeaderMap,
     thread_id: &str,
     body: &BranchThreadBody,
-    rewind: bool,
+    mode: BranchMove,
 ) -> Response {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let payload = match branch_move_body(body, rewind) {
+    let payload = match branch_move_body(body, mode) {
         Ok(payload) => payload,
         Err(message) => return bad_request(message),
     };
@@ -322,19 +343,24 @@ async fn move_thread_branch(
 }
 
 /// The body Model Gateway receives for a branch move, or the reason the route refuses before any call: a move
-/// names its target, and a rewind must be confirmed.
-fn branch_move_body(body: &BranchThreadBody, rewind: bool) -> Result<Value, &'static str> {
+/// names its target, and a rewind must be confirmed. Only an undo adds `exact`, so a switch or a rewind sends the
+/// same body an older gateway already accepts.
+fn branch_move_body(body: &BranchThreadBody, mode: BranchMove) -> Result<Value, &'static str> {
     let target = body.target_message_id.trim();
     if target.is_empty() {
         return Err("target_message_id is required.");
     }
-    if rewind && !body.confirm {
+    if matches!(mode, BranchMove::Rewind) && !body.confirm {
         return Err("a rewind must be confirmed.");
     }
-    Ok(json!({
+    let mut payload = json!({
         "targetMessageId": target,
         "expectedLeafMessageId": body.expected_leaf_message_id.trim(),
-    }))
+    });
+    if matches!(mode, BranchMove::Undo) {
+        payload["exact"] = json!(true);
+    }
+    Ok(payload)
 }
 
 pub(super) async fn get_thread_messages(
@@ -678,7 +704,7 @@ mod branch_move_tests {
     fn a_version_switch_forwards_the_target_and_the_leaf_the_client_saw() {
         let payload = branch_move_body(
             &body(r#"{"targetMessageId":" m2 ","expectedLeafMessageId":"m4"}"#),
-            false,
+            BranchMove::Switch,
         )
         .expect("a switch with a target is valid");
         assert_eq!(
@@ -691,19 +717,34 @@ mod branch_move_tests {
     fn a_rewind_is_refused_until_the_user_confirms_it() {
         let unconfirmed = body(r#"{"targetMessageId":"m2","expectedLeafMessageId":"m4"}"#);
         assert_eq!(
-            branch_move_body(&unconfirmed, true),
+            branch_move_body(&unconfirmed, BranchMove::Rewind),
             Err("a rewind must be confirmed.")
         );
         let confirmed = body(
             r#"{"targetMessageId":"m2","expectedLeafMessageId":"m4","confirm":true}"#,
         );
-        assert!(branch_move_body(&confirmed, true).is_ok());
+        assert_eq!(
+            branch_move_body(&confirmed, BranchMove::Rewind),
+            Ok(json!({"targetMessageId": "m2", "expectedLeafMessageId": "m4"}))
+        );
+    }
+
+    #[test]
+    fn an_undo_asks_for_the_exact_landing_and_needs_no_confirmation() {
+        let undo = body(r#"{"targetMessageId":" m4 ","expectedLeafMessageId":"m2"}"#);
+        assert_eq!(
+            branch_move_body(&undo, BranchMove::Undo),
+            Ok(json!({"targetMessageId": "m4", "expectedLeafMessageId": "m2", "exact": true}))
+        );
     }
 
     #[test]
     fn a_move_without_a_target_is_refused_and_unknown_fields_are_rejected() {
         assert_eq!(
-            branch_move_body(&body(r#"{"targetMessageId":"  ","expectedLeafMessageId":"m4"}"#), false),
+            branch_move_body(
+                &body(r#"{"targetMessageId":"  ","expectedLeafMessageId":"m4"}"#),
+                BranchMove::Switch,
+            ),
             Err("target_message_id is required.")
         );
         assert!(serde_json::from_str::<BranchThreadBody>(

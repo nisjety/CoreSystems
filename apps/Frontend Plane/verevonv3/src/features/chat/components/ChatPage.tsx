@@ -141,6 +141,10 @@ export default function ChatPage() {
     branchAt,
     finalExchangeVersion,
     selectExchangeVersion,
+    rewindPlanFor,
+    rewindOfferFor,
+    rewindTo,
+    undoRewind,
     startNewChat,
     state,
     activeTab,
@@ -1314,6 +1318,11 @@ export default function ChatPage() {
         version={row().version}
         isLatest={row().isLatest}
         onSelectVersion={selectExchangeVersion}
+        // A rewind on a server-versioned thread (WS17 S9): what it would hide, and the undo it leaves under the answer.
+        rewindPlan={rewindPlanFor(row().turn.id)}
+        onRewind={() => void rewindTo(row().turn.id)}
+        rewindUndo={rewindOfferFor(row().turn.id)}
+        onUndoRewind={() => void undoRewind()}
         editLocked={row().editLocked}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}

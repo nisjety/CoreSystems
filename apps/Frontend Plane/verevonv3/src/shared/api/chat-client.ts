@@ -3857,9 +3857,23 @@ export async function rewindChatThread(
   return postChatBranchMove(threadId, 'rewind', { targetMessageId: messageId, expectedLeafMessageId, confirm: true })
 }
 
+/**
+ * Undo a rewind (WS17 S9): the leaf returns to `messageId`, the turn the rewind left, even when a later branch
+ * continues from it. `expectedLeafMessageId` is the leaf the rewind landed on; a thread that moved on refuses the
+ * undo with `active_leaf_stale`, and the client reloads it.
+ */
+export async function undoChatRewind(
+  threadId: string,
+  messageId: string,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'thread.undo_rewind', threadId, messageId })
+  return postChatBranchMove(threadId, 'undo-rewind', { targetMessageId: messageId, expectedLeafMessageId })
+}
+
 async function postChatBranchMove(
   threadId: string,
-  verb: 'branch' | 'rewind',
+  verb: 'branch' | 'rewind' | 'undo-rewind',
   body: Record<string, unknown>,
 ): Promise<ChatBranchMove> {
   const raw = await requestJson<unknown>(

@@ -57,6 +57,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/rewind",
             post(json_handlers::rewind_thread),
         )
+        // Undo a rewind: the leaf returns to the turn the rewind left, even past a later branch (WS17 S9).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/undo-rewind",
+            post(json_handlers::undo_rewind_thread),
+        )
         // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
         .route(
             "/api/v1/chat/threads/{thread_id}/artifacts",

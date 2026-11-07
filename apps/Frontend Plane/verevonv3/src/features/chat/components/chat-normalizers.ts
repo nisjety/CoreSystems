@@ -100,6 +100,8 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
+    // The message-tree position, on a versioned thread only (WS17 S9); the server sends none otherwise.
+    ...(msg.version ? { version: msg.version } : {}),
     // Persisted answer quality, so a thread opened on a device that never saw
     // the stream shows the same score the stream reported. Absent for turns
     // recorded before the score was persisted — which stays distinguishable

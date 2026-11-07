@@ -9644,8 +9644,12 @@ type SetActiveLeafRequest struct {
 	// leaf, and is otherwise refused with aborted `active_leaf_stale`. Empty names a
 	// thread with no turns.
 	ExpectedLeafMessageId string `protobuf:"bytes,4,opt,name=expected_leaf_message_id,json=expectedLeafMessageId,proto3" json:"expected_leaf_message_id,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Land on the target itself, whatever continues it. An undo of a rewind sets this,
+	// so the leaf returns to the turn the rewind left even when a later branch continues
+	// from that turn. Unset, the target keeps the meaning above.
+	Exact         bool `protobuf:"varint,5,opt,name=exact,proto3" json:"exact,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SetActiveLeafRequest) Reset() {
@@ -9704,6 +9708,13 @@ func (x *SetActiveLeafRequest) GetExpectedLeafMessageId() string {
 		return x.ExpectedLeafMessageId
 	}
 	return ""
+}
+
+func (x *SetActiveLeafRequest) GetExact() bool {
+	if x != nil {
+		return x.Exact
+	}
+	return false
 }
 
 // Where the active leaf landed, and the active path up to it.
@@ -11015,12 +11026,13 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\aentries\x18\x01 \x03(\v2#.model_plane.v1.LearningLedgerEntryR\aentries\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
 	"nextCursor\x12,\n" +
-	"\x12memory_skip_reason\x18\x03 \x01(\tR\x10memorySkipReason\"\xaf\x01\n" +
+	"\x12memory_skip_reason\x18\x03 \x01(\tR\x10memorySkipReason\"\xc5\x01\n" +
 	"\x14SetActiveLeafRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12*\n" +
 	"\x11target_message_id\x18\x03 \x01(\tR\x0ftargetMessageId\x127\n" +
-	"\x18expected_leaf_message_id\x18\x04 \x01(\tR\x15expectedLeafMessageId\"m\n" +
+	"\x18expected_leaf_message_id\x18\x04 \x01(\tR\x15expectedLeafMessageId\x12\x14\n" +
+	"\x05exact\x18\x05 \x01(\bR\x05exact\"m\n" +
 	"\x15SetActiveLeafResponse\x123\n" +
 	"\x16active_leaf_message_id\x18\x01 \x01(\tR\x13activeLeafMessageId\x12\x1f\n" +
 	"\vactive_path\x18\x02 \x03(\tR\n" +
