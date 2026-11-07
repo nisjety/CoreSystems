@@ -7,6 +7,7 @@ pub(crate) mod quotas;
 mod roles;
 pub(crate) mod settings;
 mod shared;
+pub(crate) mod browser_policy;
 pub(crate) mod space_policy;
 pub(crate) mod switch;
 mod website;
