@@ -295,11 +295,12 @@ mod tests {
     }
 
     #[test]
-    fn unattended_switch_reads_literal_true_only() {
-        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes")] {
+    fn unattended_switch_reads_true_in_any_case_and_nothing_else() {
+        for value in [None, Some(""), Some("1"), Some("yes")] {
             assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
         }
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
     }
 
     #[test]
