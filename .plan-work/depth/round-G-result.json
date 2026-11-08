@@ -1,0 +1,41 @@
+[
+ {
+  "key": "mg-idempotency-renewal-survives-outage",
+  "rows": [],
+  "title": "mg-idempotency-renewal-survives-outage",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib idempotency_registry (listed twice in the record, run once)",
+    "outcome": "27 passed, 0 failed, 0 ignored",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib",
+    "outcome": "2361 passed, 0 failed, 4 ignored",
+    "passed": true
+   },
+   {
+    "command": "git status --short",
+    "outcome": "Only idempotency_registry.rs is modified. .plan-work/ and audit-verify.exe were untracked before this task.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The packet's premise was partly wrong. At HEAD, renew already answered true on an outage in the trait doc, the Redis store and the fake, so the two test failures were paused-clock timing in the tests: advance woke the renewal task but nothing polled it. The SharedRenewal enum is a correctness-preserving clarification, not the fix for a live outage hole. The lead should correct the D1-778 ledger row to match.",
+   "With the added yield, an_outage_does_not_end_the_renewal now catches a loop that stops on Unavailable: renewals would be 1, not 2. It would have passed on the old bool code too, because that code already continued on an outage. renew_tells_an_outage_from_a_lost_claim and a_lost_claim_ends_the_renewal_loop pin the new three-way contract.",
+   "No test covers the Redis renew mapping (renew_get None -> Unavailable; PEXPIRE 1 -> Renewed, 0 -> Lost, None -> Unavailable), because it needs a live Redis. Checked by reading only.",
+   "Pre-existing, documented and unchanged: a renewal in flight when the guard drops can PEXPIRE a Done claim back down to PENDING_TTL, and the 250 ms read-then-write window can extend a claim that has just passed to another request.",
+   "Every renew log line names only op=\"renew\" and never the key, which holds org and user ids. Zero data retention holds. The switch-off path is untouched, because renewal still spawns only for a won shared claim. The file is still all CRLF (1521/1521)."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Nothing to deploy from this change alone. The shared-claim switch (MODEL_GATEWAY_SHARED_IDEMPOTENCY) stays default off, and the switch-off path is untouched. No log line carries the claim key, only op names. The test binary was rebuilt after the last source edit (built 18:06:17, source edited 18:02:12), and the test outputs contain no compiler warnings.",
+  "summary": "Both failures were test-side timing: tokio::time::advance wakes the renewal task on the paused clock but does not poll it, and the tests read state before it ran. Each now calls run_ready_tasks() after the advance (inside the outage window for the outage test), as the sibling a_pending_claim_outlives_its_ttl_while_its_stream_runs already did; with that the rest of each test passes, so there is no ordering defect between stream end, guard drop and settle. The lead's premise (an outage ends the renewal) was wrong: renew already answered true on an outage. The bool merged 'renewed' with 'could not answer', so renew now returns pub enum SharedRenewal { Renewed, Lost, Unavailable } (mirroring SharedClaimOutcome) in the trait, the Redis store and the fake, with the same outcomes as before; keep_claim_alive loops on Unavailable (logging the outage and the recovery once, op only, never the key) and stops only on Lost. New tests renew_tells_an_outage_from_a_lost_claim and a_lost_claim_ends_the_renewal_loop pin the three-way contract; no assertion was weakened.\n\nLead proof: cargo test -p model-gateway --lib idempotency_registry passes 27/27 three runs in a row, and the full model-gateway --lib passes 2361 with 0 failed."
+ }
+]

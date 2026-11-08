@@ -1,0 +1,316 @@
+{
+ "batchId": "W1-10",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS06-S6",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit_compliance.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/audit-compliance-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/audit-compliance-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/AuditComplianceSection.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q --all-targets (apps/gateway, CARGO_INCREMENTAL=0)",
+     "outcome": "passed: 688 passed, 1 ignored in the bin target (includes the 10 new audit_compliance tests), plus 7, 3 and 1 in the integration targets; 0 failed"
+    },
+    {
+     "command": "pnpm vitest run src/shared/api/audit-compliance-client.test.ts src/shared/actions",
+     "outcome": "passed: 9 files, 142 tests (client test file: 14 tests)"
+    },
+    {
+     "command": "pnpm typecheck (filtered to files I touched)",
+     "outcome": "no errors in my files after fixing noUncheckedIndexedAccess in the test; the full run still fails on pre-existing quarry-client.ts '@quarry/client' errors, which I did not touch"
+    },
+    {
+     "command": "npx eslint on the 4 TS/TSX files I changed or added",
+     "outcome": "clean, 0 errors and 0 warnings. I did not run the repo-wide pnpm lint."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx: add import { AuditComplianceSection } from '@/features/settings/components/AuditComplianceSection' and render <AuditComplianceSection /> after <TrustCenterSection /> (around line 472). Check WorkspaceSettingsPage.negative-render.test.tsx still passes, since it greps rendered copy.",
+    "Live proof, depends on S5 and S7 images being deployed: rebuild the gateway image per the Frontend compose, then as owner, admin and member call GET /api/v1/audit/compliance/events, /manifest, /keys and POST /verify. Expect 200 for owner and admin, 403 for member, and the audit-core self-audit rows compliance_audit_read and compliance_audit_verify in the owner's chain. The SIEM routes return 404 until org-core has ORG_SIEM_DESTINATIONS_ENABLED=1.",
+    "Run pnpm lint repo-wide and diff the failing set against HEAD; I only linted my own files."
+   ],
+   "deviations": [
+    "DELETE of a SIEM destination: org-core answers 204 with no body, and proxy_json turns an empty body into {}, so the gateway returns 204 with an empty JSON object. The test asserts 204, not 200.",
+    "The Rust tests use a local wiremock harness (get-session plus session-context doubles) that I copied from the settings.rs test pattern, not a shared one."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof (lead): rebuild gateway image per Frontend compose; as owner, admin and member call GET /api/v1/audit/compliance/events, /manifest, /keys and POST /verify; expect 200/200/403 and the compliance_audit_read and compliance_audit_verify self-audit rows in the chain. Needs S5 audit-core image deployed.",
+     "Shared edit (lead): mount <AuditComplianceSection /> in WorkspaceSettingsPage.tsx after <TrustCenterSection /> (not an owned file), then re-run WorkspaceSettingsPage.negative-render.test.tsx.",
+     "Confirm the audit-core compose credential block grants audit:compliance:read:self to the verevon-gateway principal (S5 compose work).",
+     "Repo-wide pnpm typecheck and pnpm lint diffed against HEAD failing set not run by me; implementer reports pre-existing quarry-client typecheck failures."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The audit-core compliance routes are scoped by the audit:compliance:read:self credential in the compose block. The gateway sends the standard verevon-gateway v3 delegation, so the live proof must confirm that scope is granted to the gateway principal; I could not check the compose block from this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway has no test for the 402 plan_upgrade_required answer org-core gives on SIEM create. The client shows it as a generic error, so the UI should show an upgrade message. Add one when D3 (the commercial gate) is settled."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The exportComplianceEvents helper and the UI export buffer the whole log in memory before download. This is fine for the current volume, but a large org needs streamed or chunked download, and the UI export should show progress."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "AuditComplianceSection.tsx has no render test (hidden for a member, verify verdict wording, create form sends the secret and clears it). Add one beside OrgDeletionDangerZone.test.tsx."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The section text is hardcoded Norwegian, like sibling sections, and bypasses i18n.tr except for errors."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The five audit.* descriptors in the action registry have no gateway dispatcher, because the SPA calls the dedicated routes directly. If an action-dispatch path is wanted for them, a dispatcher in domains/actions is needed (not my file)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "audit-core compliance routes need the audit:compliance:read:self scope on the verevon-gateway principal; the gateway sends the standard v3 delegation, so the live proof must confirm the compose block grants it or every route returns 403 upstream."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "AuditComplianceSection.tsx has no render test (hidden for a member, verify verdict wording for partial/key_unavailable/verified_with_legacy, create form clears the secret); add one beside OrgDeletionDangerZone.test.tsx."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The section is not mounted in any page until the lead adds the line to WorkspaceSettingsPage.tsx, so the UI deliverable is unreachable by users until then."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No gateway or client test covers org-core's 402 plan_upgrade_required on SIEM create; UI shows a generic error until D3 is settled."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "exportComplianceEvents and the UI export buffer the whole log in memory before download; large orgs need chunked or streamed download and progress."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In action-registry.ts the new audit.* input schemas were inserted between the existing ticketConfigOutput comment block and envelopeStatusOutput, splitting that comment from the schema it documents; move the block above the comment."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Five audit.* action descriptors have no gateway dispatcher (SPA calls the dedicated routes), and AuditComplianceSection text is hardcoded Norwegian bypassing i18n."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Gateway tests do not assert that a request with a leading-owner platform role but member org membership is refused; has_authorized_org_role covers it by construction and the member test exercises the live-membership path."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "audit"
+   ],
+   "notes": "The gateway domain audit_compliance.rs is built and registered. Every route is gated by has_authorized_org_role(owner/admin) on the live membership, and a member gets a typed 403 before any upstream is called.\n\nCompliance routes: GET /api/v1/audit/compliance/{events,manifest,keys,export-status} and POST .../verify, proxied to audit-core /v1/compliance/audit/*. The org comes from authorized_org_id and the role sent in the v3 delegation is the live membership role, not the platform role, because audit-core checks UserRole. Query strings are rebuilt from a per-route allow-list. A client org_id, unknown parameters, blank values and repeated parameters are dropped, and values over 512 bytes get a 400. The verify body keeps only from_seq, from_hash and max_rows, is capped at 4 KiB, and must be a JSON object.\n\nSIEM routes: GET/POST /api/v1/audit/siem-destinations and PATCH/DELETE .../{id}, proxied to org-core /orgs/{org}/siem-destinations[/{id}]. The org is the session's, org_id/orgId are stripped from bodies because org-core refuses unknown fields, the destination id is validated as [A-Za-z0-9_-]{1,64}, and the secret is passed through and never logged. Routes sit behind require_session and rate_limit_middleware. No new switch is added: the routes are admin-gated, and org-core answers 404 until ORG_SIEM_DESTINATIONS_ENABLED=1 (S7).\n\naudit-compliance-client.ts reads the whole envelope because requestJson drops meta, which the event page needs for next_cursor and head_seq. It adds an exportComplianceEvents async generator that follows the cursor. Failures throw the usual typed ApiError.\n\naction-registry.ts gains audit.verify_chain, audit.export_log and audit.create/update/delete_siem_destination. They are human-only: model-eligibility.ts is an allowlist and I did not add them, so the catalog-manifest model-eligible set is unchanged and its test passes.\n\nSpace has not delivered an audit admin view (no audit or compliance code under features/spaces), so I built AuditComplianceSection.tsx. It shows to a live owner or admin only, offers verify, NDJSON export and SIEM destination CRUD, and shows the verdict honestly: partial, key_unavailable and verified_with_legacy are not shown as green. The section is NOT wired into any page, because WorkspaceSettingsPage.tsx is not mine; the mount line is in lead_todo.\n\nI wrote no component render test. The client has 14 tests and the gateway 10."
+  },
+  {
+   "id": "WS06-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/audit-core/cmd/siem-exporter/main.go",
+    "apps/Control Plane/audit-core/cmd/siem-exporter/main_test.go",
+    "apps/Control Plane/audit-core/internal/siem/egress.go",
+    "apps/Control Plane/audit-core/internal/siem/egress_test.go",
+    "apps/Control Plane/audit-core/internal/siem/backoff.go",
+    "apps/Control Plane/audit-core/internal/siem/backoff_test.go",
+    "apps/Control Plane/audit-core/internal/siem/cursor.go",
+    "apps/Control Plane/audit-core/internal/siem/cursor_db_test.go",
+    "apps/Control Plane/audit-core/internal/siem/format_ndjson.go",
+    "apps/Control Plane/audit-core/internal/siem/format_hec.go",
+    "apps/Control Plane/audit-core/internal/siem/orgcore_client.go",
+    "apps/Control Plane/audit-core/internal/siem/orgcore_client_test.go",
+    "apps/Control Plane/audit-core/internal/siem/runner.go",
+    "apps/Control Plane/audit-core/internal/siem/runner_test.go",
+    "apps/Control Plane/audit-core/internal/siem/testdata/audit-core-org-core-siem.contract.json",
+    "apps/Control Plane/audit-core/internal/siem/testdata/audit-core-org-core-siem.contract.json.sha256",
+    "apps/Control Plane/audit-core/internal/store/migrations/010_audit_export_cursors.sql",
+    "apps/Control Plane/audit-core/internal/store/migrations/revert/010_audit_export_cursors.down.sql",
+    "apps/Control Plane/audit-core/internal/store/export_status.go",
+    "apps/Control Plane/audit-core/internal/api/compliance.go",
+    "apps/Control Plane/audit-core/internal/api/export_status_test.go",
+    "apps/Control Plane/audit-core/Dockerfile",
+    "apps/Control Plane/docker-compose.production.yml",
+    "apps/Control Plane/observability/prometheus.yml",
+    "apps/Control Plane/observability/rules/audit-core.rules.yml",
+    "apps/Control Plane/observability/rules/audit-core.rules.test.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Control Plane/audit-core' && go test -count=1 ./internal/siem/... ./cmd/siem-exporter",
+     "outcome": "pass (about 35 siem tests: egress table of blocked ranges, DNS rebinding flip, redirect to private never followed, http refused, 1 MiB cap, at-least-once with 500 then 503 then 2xx and a single cursor advance, backoff scheduling, ordering with rows inserted mid-delivery, gap markers for missing/filtered/oversize rows, HMAC verifies, HEC token, log-capture shows no secret/URL/body, org-core client replays the S7 golden byte for byte, production refusal of the dev flag)"
+    },
+    {
+     "command": "cd 'apps/Control Plane/audit-core' && go vet ./... && go test -count=1 ./...",
+     "outcome": "pass, all 15 packages ok (api, store, subscriber, verifier, chain, cmd/server and the rest unchanged and green; DB tests skip without TEST_DATABASE_URL)"
+    },
+    {
+     "command": "gofmt -l on the new files",
+     "outcome": "clean"
+    }
+   ],
+   "db_tests_written": [
+    "TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak",
+    "TestExportStatusReadsTheCursorsOfOneOrgOnly"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml: add this service after `audit-core` (4-space indent as in the file; <<: *core-security is the file's existing anchor):\n    # WS06-S8: SIEM exporter. Absent unless the compose profile `siem` is selected;\n    # AUDIT_SIEM_EXPORT_ENABLED=0 by default, in which case it idles and exports nothing.\n    audit-siem-exporter:\n        <<: *core-security\n        profiles: [\"siem\"]\n        build:\n            context: ./audit-core\n            dockerfile: Dockerfile\n            args: *build-metadata\n        container_name: audit-siem-exporter\n        init: true\n        restart: unless-stopped\n        entrypoint: [\"/usr/local/bin/siem-exporter\"]\n        environment:\n            DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable\n            ORG_CORE_URL: http://org-core:8080\n            ORG_CORE_SERVICE_TOKEN: ${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}\n            AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-0}\n            AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS: ${AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS:-0}\n            ENVIRONMENT: ${ENVIRONMENT:-development}\n        networks:\n            - controlplane-net\n        depends_on:\n            controlplane-postgres:\n                condition: service_healthy\n        deploy:\n            resources:\n                limits:\n                    memory: 64M\n                    cpus: \"0.25\"\n                reservations:\n                    memory: 16M\n        logging:\n            driver: json-file\n            options:\n                max-size: \"10m\"\n                max-file: \"3\"\n(AUDIT_ORG_CORE_SERVICE_TOKEN and the org-core audit-core principal with scope org:siem:read:any already exist from S7. Apply this together with the production override already added to docker-compose.production.yml, and bring the exporter up only through scripts/run-control-plane.sh with --profile siem, never a bare docker compose build.)",
+    "Apply the migrate.go lines listed in needs_other_files, then rebuild audit-core through scripts/run-control-plane.sh so the server migrates 010 (deploy order: audit-core image with 010 first, then the siem profile).",
+    "Run promtool, which I could not: docker run --rm --entrypoint promtool -v \"$PWD/apps/Control Plane/observability:/o\" prom/prometheus:v2.54.1 check rules /o/rules/audit-core.rules.yml and `test rules /o/rules/audit-core.rules.test.yml`; confirm /api/v1/rules lists ControlAuditSIEMExportLag and ControlAuditSIEMExportFailing and the audit-siem-exporter target appears (down without the profile).",
+    "Run the DB tests with TEST_DATABASE_URL against postgres:16 (recipe in plan S2): cd 'apps/Control Plane/audit-core' && go test -count=1 -run 'TestPGCursors|TestExportStatusReadsTheCursors' ./internal/siem/",
+    "Live proof for the DoD (lead only): TLS local receiver on the host (the dev flag allows loopback but not http), AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=1 on a non-production stack, destination created via gateway as owner, governed actions, check the ordered NDJSON, the HMAC and audit-verify over the received rows plus the head record; stop the receiver and show lag growth and the pending alert; restart and show drain and dedup. Run the export-content-free golden check on exported rows before enabling for any ZDR org.",
+    "scripts/validate-release-credentials.sh and run-control-plane.sh need no new secret: the exporter reuses AUDIT_ORG_CORE_SERVICE_TOKEN from S7. If a release-credentials contract test lists services that need DB credentials, add audit-siem-exporter."
+   ],
+   "deviations": [
+    "Added new files the slice does not name, because the slice's own files could not host them without editing a non-owned file: internal/store/export_status.go (the store read behind GET /export-status), internal/api/export_status_test.go, internal/siem/{egress,backoff,orgcore_client,runner}_test.go, internal/siem/cursor_db_test.go, cmd/siem-exporter/main_test.go and internal/siem/testdata (the S7 golden vendored byte for byte with its sha256 pin).",
+    "Metrics live in internal/siem/runner.go on the default registry, not in internal/metrics/server.go, which is not an owned file; the exporter reuses metrics.NewServer for /metrics.",
+    "Migration 010 was not added to the store.Migrate list because migrate.go is not owned; the hand-back is in needs_other_files and lead_todo.",
+    "Both switches use audit-core's strict literal \"1\" parser (the plan's 0/1 defaults), not the literal \"true\" of the repo-wide rule.",
+    "Gap markers carry an extra additive field `reason` (missing_rows, filtered, row_too_large) and `org_id`, so an offline verifier can tell why a stretch of seqs is absent. The plan's marker had only type, from_seq and to_seq.",
+    "Even with the dev flag the scheme stays https only (the plan says https only), so the local-receiver live proof needs a TLS receiver.",
+    "docker-compose.production.yml gains an audit-siem-exporter override that is valid only once the base service exists: apply it with the shared compose edit, not before."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/audit-core/internal/store/migrate.go: add `//go:embed migrations/010_audit_export_cursors.sql` + `var auditExportCursorsSQL string`, and the list entry `{version: \"010_audit_export_cursors\", name: \"SIEM export cursors\", sql: auditExportCursorsSQL},` after the 009 entry. Without it the server never creates audit_export_cursors, so the exporter idles in its schema wait and GET /export-status returns 500."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Migration 010 is not in the store.Migrate list (migrate.go: add the //go:embed, the var and the list entry). Until the lead applies it, GET /export-status returns 500 query_failed on a real store; before this slice it returned an empty 200. The lead must apply it with this slice, ahead of or with the image roll.",
+     "The base compose service audit-siem-exporter is not in docker-compose.yml (lead_todo shared edit). docker-compose.production.yml now carries an override for a service that does not yet exist, so a compose config with the production override would be invalid until the base service lands. Apply both together.",
+     "promtool was unavailable: check rules and test rules for audit-core.rules.yml and audit-core.rules.test.yml have not run. I read the new rule expressions and their six unit tests by eye and they look consistent.",
+     "DB tests (TestPGCursorsAdvanceOnlyForwardAndResetTheFailureStreak, TestExportStatusReadsTheCursorsOfOneOrgOnly) skipped without TEST_DATABASE_URL; they need postgres:16 through docker, lead only.",
+     "Live proof is not done: TLS local receiver with the dev flag, destination created via the gateway, governed actions, ordered NDJSON, HMAC check, audit-verify over the received rows plus the head record, lag alert firing and clearing, drain and dedup after a restart. Lead only."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Before AUDIT_SIEM_EXPORT_ENABLED is switched on for any org, the S2 details guard must move from observe to enforce (or the golden content-free check run on live rows): the exporter ships `details` exactly as stored, so a producer that puts content in details would leave the database for a customer SIEM."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Egress guard, signature, ordering, lag alert and dedup are proven only against in-process fakes and httptest TLS servers; the plan's live evidence (real receiver, real org-core destination via gateway, audit-verify over received NDJSON plus head record, lag alert firing and clearing) has not been run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The exporter connects with the same DATABASE_URL user as audit-core, so it holds write rights on audit_events although it needs only SELECT on the audit tables plus read/write on audit_export_cursors; a dedicated least-privilege role would shrink the blast radius of an SSRF-adjacent bug in the one process that dials customer addresses."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No leader lock: two exporter replicas would each deliver every batch (the receiver dedups on (org_id, chain_seq), cursors never go backwards) but would double the load; compose runs one replica, so only the runbook (S9) needs to say so."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A new destination starts at cursor 0 and exports the entire retained chain; the owner may want a 'from now' option (or an org-core start_from field) for large orgs, which needs a change in org-core's schema and the golden."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "audit_export_cursors rows of a deleted destination or an erased org are never pruned (the runner forgets the destination in memory only); tie cursor deletion into the org erasure path or a periodic sweep against org-core's list."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The lag gauge is the worst destination per kind, not per destination (no destination label by design); add a per-destination view through GET /export-status in the Space admin UI, and a rules test that the 15 min lag alert resolves after a drain."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a receiver that accepts the request but is slow beyond 10 s (timeout code path), or HEC's partial-success 2xx answers (HEC can return 200 with a non-zero code body; the exporter treats any 2xx as success and discards the body)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "HEC requests carry no channel or ack header, so delivery is at-least-once without indexer acknowledgement; and the extra `reason` and `org_id` fields on gap markers should be documented in the S9 runbook as part of the export format."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Before AUDIT_SIEM_EXPORT_ENABLED is turned on for any org, the S2 details guard must be enforcing or the export-content-free golden check must run on live rows, because the exporter ships `details` exactly as stored."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The egress guard, HMAC, ordering, dedup and lag alert are proven only against in-process fakes and httptest TLS servers; the plan's live evidence is outstanding."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The exporter connects with the same database role as the audit-core server, so the one process that dials customer addresses holds write rights on audit_events; a dedicated SELECT-plus-cursor role would shrink the blast radius."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "There is no leader lock, so two exporter replicas would double-deliver every batch (the receiver dedups on (org_id, chain_seq) and cursors never go backwards); the S9 runbook must state single-replica."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A new destination starts at cursor 0 and exports the whole retained chain; the owner may want a start-from-now option, which needs an org-core schema and golden change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "audit_export_cursors rows of deleted destinations or erased orgs are never pruned; the runner forgets them in memory only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a receiver slower than 10 s (the timeout path), HEC partial-success answers (HTTP 200 with a non-zero code body, which the exporter treats as success), or the 15-minute lag alert resolving after a drain."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A destination with an unknown kind calls Cursors.Fail, but audit_export_cursors.kind has a CHECK limited to ndjson_webhook and splunk_hec, so that insert fails and is logged as a cursor_write error with the streak forced to 1; the backoff still applies but the failure is not recorded in the table."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The lag gauge reports the worst destination per kind, not per destination; per-destination detail only comes through GET /export-status. The extra `reason` and `org_id` fields on gap markers belong in the S9 runbook's export format."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "zdr",
+    "auth"
+   ],
+   "notes": "The exporter is built and unit-tested with every switch off by default. The slice is partial for two reasons, both shared-file hand-backs: the audit-core migration list (migrate.go, not owned) must list 010, and the compose service in docker-compose.yml (shared) must be added. Until both land, the exporter waits for audit_export_cursors and the export-status route returns 500 query_failed on a real store; it does not return empty. promtool was not available, so the new rules and their unit tests are YAML-checked by eye only.\n\nDesign as built. The exporter polls org-core's internal route every 30 s with principal audit-core and scope org:siem:read:any. It drains each enabled destination in chain order: 500 rows per batch, bodies packed under 1 MiB minus an 8 KiB reserve for the closing head record, up to 100 batches per pass. The cursor in audit_export_cursors advances only after a 2xx. Failures back off 5 s doubling to 15 min and are recorded as a fixed-vocabulary code such as http_503, timeout, egress_blocked or redirect_refused. Every batch closes with an audit_chain_head record carrying the newest attestation. A new destination starts at seq 0, so the whole retained chain is exported.\n\nEgress guard. https only, no userinfo, no proxy. DNS is resolved in the dialer, every answer is checked, and the checked IP is dialled, which defeats rebinding. Blocked ranges: loopback, RFC1918, link-local including 169.254.169.254, CGNAT, ULA, multicast, reserved, and IPv4-mapped, NAT64, 6to4 and Teredo forms. No redirects are followed (a 3xx is a failure), the timeout is 10 s, the body cap is 1 MiB, and the response is read to at most 64 KiB and discarded. The Destination type redacts itself under %v, %+v, %#v and JSON, and egress and org-core errors are stripped to a cause so no URL or token reaches a log.\n\nConfiguration. AUDIT_SIEM_EXPORT_ENABLED and AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS use audit-core's strict parser (only the literal \"1\" enables). The private-destination switch is a boot failure under ENVIRONMENT=production, even when the exporter is idle. Idle means metrics only.\n\nexport-status is now real. complianceExportStatus reads per-destination cursors through an optional ExportStatus interface on the store, with no URL or secret in the response. The existing empty-state test still passes.\n\nMetrics are registered in internal/siem/runner.go: audit_siem_export_lag_seconds{destination_kind}, audit_siem_export_batches_total{result} and audit_siem_destinations{state}. The prometheus scrape job audit-siem-exporter:9091 is added, plus rules ControlAuditSIEMExportLag (more than 15 min for 5 m) and ControlAuditSIEMExportFailing (failure ratio above 0.5 for 10 m), each with unit tests in the rules test file."
+  }
+ ]
+}

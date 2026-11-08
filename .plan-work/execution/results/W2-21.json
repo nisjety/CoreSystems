@@ -1,0 +1,684 @@
+{
+ "batchId": "W2-21",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS26-S1.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/nats.conf",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/go/services/nats-provisioner && go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/nats-provisioner && go test -count=1 ./...",
+     "outcome": "ok, 54.8s, exit 0"
+    },
+    {
+     "command": "go test -count=1 -run TestPublisherPrincipalsMayPublishTheirSubjects -v ./... (nats-provisioner)",
+     "outcome": "PASS model-gateway_mp.v1.security.x with no known-gap line for it; the other gap rows are unchanged and out of scope"
+    },
+    {
+     "command": "bash scripts/tests/nats-runtime-principal-contract-test.sh (apps/Model Plane)",
+     "outcome": "NATS runtime-principal contract: ok"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib --no-run",
+     "outcome": "exit 0, zero compiler warnings; queued about 7m44s behind a sibling session-core test run holding the shared target lock"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib security_events (same env)",
+     "outcome": "13 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib semantic_screening (same env)",
+     "outcome": "21 passed, 0 failed; includes shadow_decisions_are_counted_by_trust_outcome_and_agreement and a_completed_shadow_pass_is_counted_on_the_detached_task (new)"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib tool_loop::tests (same env)",
+     "outcome": "210 passed, 0 failed; includes tool_screening_counts_every_result_by_trust_class_and_posture (new) and the four include_str! source-scan tests"
+    },
+    {
+     "command": "cargo test -p model-gateway --test run_control_nats_acl_contract (same env)",
+     "outcome": "5 passed, 0 failed; parses deploy/nats.conf"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib security_events semantic_screening (the batch's combined form)",
+     "outcome": "rejected by cargo: unexpected argument 'semantic_screening' found; run as two invocations instead"
+    },
+    {
+     "command": "gofmt -d on publishers_registry_test.go with CRLF normalised to LF",
+     "outcome": "no diff"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: insert after the line `      MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}` (model-gateway service environment block, about line 305) these two lines: `      CONTENT_SAFETY_SHADOW_SAMPLE_RATE: ${CONTENT_SAFETY_SHADOW_SAMPLE_RATE:-0.2}` and, directly above it, the comment `      # WS26-S1: sample rate (0 to 1) of the semantic shadow pass over external tool results. Telemetry only; ZDR turns never reach it.`",
+    "Restart the NATS broker so it loads deploy/nats.conf. The new entry is the quoted grant mp.v1.security.* in the model-gateway-runtime publish list. The provisioner may regenerate users, so check the model-gateway principal after the restart.",
+    "Rebuild and redeploy the model-gateway image, then run the row's live proof on a non-ZDR test org: a web_search result with a planted marker in a chat turn; capture mp.v1.security.> with nats sub (expect hashes, rule ids and no content); scrape /metrics for mp_gateway_tool_screening_total and mp_gateway_semantic_screen_total.",
+    "Rollback: delete the mp.v1.security.* line from deploy/nats.conf and restart NATS. The slice has no switch.",
+    "Plan row correction: the row's single combined test command cannot run under cargo. Replace it with cargo test -p model-gateway --lib security_events, cargo test -p model-gateway --lib semantic_screening and cargo test -p model-gateway --lib tool_loop::tests."
+   ],
+   "deviations": [
+    "The tool-screening counter is recorded at the security audit's decision point (run_tool_rounds, immediately before security_events::envelope_for) for every tool outcome, not only inside assess_external_payload. This keeps it in step with the events and shows external results that no pass screened as not-applicable.",
+    "The semantic counter is recorded only from the detached shadow task in semantic_screening.rs. tool_loop drops that task's JoinHandle and never sees the shadow outcome, so the plan row's mention of the semantic counter in tool_loop.rs was not applied.",
+    "No sse.rs-style const label list with debug_assert: both labels come from exhaustive label() matches, so a second list would be duplicated dead code. The exact-line and counted-once tests pin the series instead.",
+    "The batch's combined cargo filter command was run as two invocations because cargo accepts only one TESTNAME per invocation.",
+    "publishers_registry_test.go keeps tool_loop.rs as the row's single source, because a second row with the same service and subject fails TestRegistryRowsPointAtRealSource. A comment notes that semantic_screening.rs publishes the same subject."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: declare CONTENT_SAFETY_SHADOW_SAMPLE_RATE=${CONTENT_SAFETY_SHADOW_SAMPLE_RATE:-0.2} in the model-gateway environment block. The implementer handed this back in lead_todo, and 0.2 matches the code's DEFAULT_SAMPLE_RATE.",
+     "Restart NATS with the new nats.conf, then check that the provisioner did not regenerate the model-gateway-runtime user without the mp.v1.security.* grant.",
+     "Live proof: rebuild model-gateway. Run a non-ZDR chat turn on a web_search result that has a planted marker. Capture nats sub \"mp.v1.security.>\", which should show hashes and rule ids and no content. Scrape /metrics for mp_gateway_tool_screening_total and mp_gateway_semantic_screen_total."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not live-verified: that the events reach the broker and that both counter families appear on /metrics of a rebuilt model-gateway is the slice's evidence, and is the lead's to run; no docker was run here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No principal holds a subscribe grant matching mp.v1.security.* and no JetStream stream captures it, so today the broker discards the events; S8 needs an owner decision on a consumer principal and grant (or a stream) before the events feed any evaluation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives a real tool outcome through the run_tool_rounds publish loop; the one-line record_tool_screening call there is verified by reading and by the helper's exact-line test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "mp_gateway_semantic_screen_total has no count on assess_external_payload's no-inference-bearer branch (deep-research web calls, never shadow-screened by design), so S8's Unavailable-rate denominators must exclude that population explicitly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The semantic shadow pass is already on by default at the 20 percent sample, so external results cost a classifier call today; this slice adds visibility, not spend, and S8 should budget from the existing rate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The plan row's combined command cargo test -p model-gateway --lib security_events semantic_screening is rejected by cargo (one TESTNAME per invocation); the row should list two commands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "mp_gateway_tool_screening_total counts every org-internal tool result as not-applicable on every tool call; if the series proves noisy, restrict it to the non-internal trust classes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "C:/dev/mp-target-w2 is shared with sibling slices of this batch; the cargo lock serialised this slice's build behind a session-core test run for about 8 minutes, so lead builds on that directory will queue."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nobody has yet seen the events reach the broker or the two counter families appear on a rebuilt model-gateway's /metrics. This is the row's evidence, and only the lead can run it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No principal subscribes to mp.v1.security.* and no JetStream stream captures it. After this grant the broker accepts the events but nothing consumes them, so S8 needs an owner decision on a consumer or a stream."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives a real tool outcome through the run_tool_rounds_for_model_with_attachments loop. The record_tool_screening call at tool_loop.rs:7934 is checked only by reading the code and by the test of the helper."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "assess_external_payload's branch with no inference bearer never reaches assess_with_semantic_shadow, so mp_gateway_semantic_screen_total does not count it. S8's Unavailable-rate denominators must leave that population out explicitly."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The plan row's test command `cargo test -p model-gateway --lib security_events semantic_screening` is rejected by cargo, which takes one TESTNAME per run. The row should list separate invocations."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The plan row cites the sse.rs pattern of a const label list plus debug_assert, which was not copied. The labels come from exhaustive label() matches, so the series is closed anyway. Accepted as a deviation."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "mp_gateway_tool_screening_total counts every org-internal tool result as not-applicable. Restrict it to the non-internal trust classes if the series proves noisy."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "go vet ./... (nats-provisioner)",
+      "outcome": "exit 0",
+      "passed": true
+     },
+     {
+      "command": "go test -count=1 ./... (nats-provisioner)",
+      "outcome": "ok 46.7s",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib security_events",
+      "outcome": "13 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib semantic_screening",
+      "outcome": "21 passed, 0 failed (includes the new shadow counter tests)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib tool_loop::tests",
+      "outcome": "210 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --test run_control_nats_acl_contract",
+      "outcome": "5 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib --tests",
+      "outcome": "finished, no errors",
+      "passed": true
+     },
+     {
+      "command": "bash scripts/tests/nats-runtime-principal-contract-test.sh",
+      "outcome": "NATS runtime-principal contract: ok",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "audit",
+    "zdr"
+   ],
+   "notes": "WS26-S1 code half is done and additive, with no switch (the row has none). nats.conf grants mp.v1.security.* to model-gateway-runtime; the security row's known gap is removed from the Go registry; tool_loop.rs records mp_gateway_tool_screening_total{trust,posture} at the security audit's decision point for every tool outcome; semantic_screening.rs records mp_gateway_semantic_screen_total{trust,outcome,agrees} from the detached shadow task. The semantic shadow pass was already on by default (an absent content_safety policy row keeps it running at the 20 percent sample), so this slice adds visibility, not classifier calls. Line endings are preserved: CRLF count equals LF count in all four edited files. sse.rs and security_events.rs are unchanged. The worktree's other modified files belong to sibling slices of this batch and were not touched. No docker, compose, DB harness or live proof was run; no credential or .env value was read. The live proof and the compose declaration are lead steps (see lead_todo)."
+  },
+  {
+   "id": "WS26-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/write_policy.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/skillsink/sink_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/verify-durable-layer.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "660 passed, 0 failed, 247 ignored, 0 warnings (final code). Up from 651/244 at HEAD by 9 new unit tests and 3 new ignored DB tests. Includes the source-scan test every_skill_writer_asks_the_policy_before_it_writes."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core write_policy",
+     "outcome": "22 passed, 0 failed (memory and skill policy tests; run before a clippy-only mutability fix that the full run above covers)"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts",
+     "outcome": "all test binaries ok, exit 0 (the proto change is comment-only)"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy -q -p session-core --bin session-core",
+     "outcome": "no findings in write_policy.rs after the fix; no findings inside the new grpc.rs ranges; crate-wide findings are pre-existing lines this slice did not add"
+    },
+    {
+     "command": "rustfmt --edition 2021 --check on session-core src/write_policy.rs and src/grpc.rs",
+     "outcome": "no hunk beyond HEAD's own: write_policy 18 hunks and grpc 176 hunks, the same as HEAD; CRLF intact in both files"
+    },
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go test ./internal/skillsink/... ./internal/learning/...",
+     "outcome": "ok: skillsink, learning, learning/eval"
+    },
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go test -count=1 -run TestPersist -v ./internal/skillsink/",
+     "outcome": "all 7 TestPersist tests PASS, including the new TestPersist_CountsPolicySkip"
+    },
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go vet ./internal/skillsink/",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go test -count=1 ./internal/sessionreview/...",
+     "outcome": "ok (the consumer of the sink)"
+    },
+    {
+     "command": "gofmt on sink.go, sink_test.go and sink_error_test.go",
+     "outcome": "clean apart from the CRLF line endings the package already uses"
+    },
+    {
+     "command": "bash -n \"apps/Model Plane/scripts/verify-durable-layer.sh\"",
+     "outcome": "syntax ok; the script itself was not run because it needs docker"
+    }
+   ],
+   "db_tests_written": [
+    "background_review_skill_with_marker_is_refused",
+    "enable_of_learned_skill_rechecks_policy",
+    "user_origin_skill_is_reported_not_refused",
+    "set_run_mode_and_upsert_skill_against_real_pg"
+   ],
+   "lead_todo": [
+    "DB tests through the harness, as filters, on a disposable Postgres with --ignored --test-threads=1: background_review_skill_with_marker_is_refused, enable_of_learned_skill_rechecks_policy, user_origin_skill_is_reported_not_refused, and set_run_mode_and_upsert_skill_against_real_pg (it now carries the extended assert_upsert_skill_guards).",
+    "After an unfiltered full run, update the recorded count in apps/Model Plane/scripts/tests/session-core-db-tests.sh (lines 35-36 and 248) and the self-test assertion in apps/Model Plane/scripts/tests/session-core-db-tests-test.sh (line 85); the total rises by the three new tests.",
+    "Live proof (docker, lead only) for the row's definition of done: rebuild session-core and capability-core; with CONTENT_WRITE_POLICY=report on session-core, run a learning review on a seeded transcript whose proposed skill carries an obfuscated override phrase; capture the review log (selected versus skills_persisted), confirm no agent_skills row was written, and read mp_session_skill_policy_refused_total from session-core metrics; then set enforce and repeat; return the switch to off unless the owner decides otherwise.",
+    "Run bash \"apps/Model Plane/scripts/verify-durable-layer.sh\" (docker) for the new G7 refused-enable lines.",
+    "buf generate for sessions.proto so the Go binding's skip_reason comment matches the proto (see needs_other_files).",
+    "No shared-edit is needed: CONTENT_WRITE_POLICY is already declared for session-core at apps/Model Plane/deploy/docker-compose.yml:939, off by default.",
+    "Ledger (shared file, lead or the next slice): record the skill rules in apps/Model Plane/docs/decisions/ledger.md: enable, accept and undo re-checks; user origin report-only; the tool_restriction_widened rule (pending owner confirmation)."
+   ],
+   "deviations": [
+    "check_skill takes the skill text without an origin, and gate_skill takes the origin and decides: a learned skill is refused under enforce, a person's skill is only counted. The rule set does not depend on origin, so the origin decision sits in the gate.",
+    "Two re-checks beyond set_agent_skill_enabled: decide_skill_proposal ACCEPT (accepting sets enabled = true) and undo of an enabled learned snapshot (restores enabled). The row's definition of done says no path enables flagged text, so both are in scope.",
+    "tool_restriction_widened has the rule given in depth_findings: a restriction entry must be one plain tool name of letters, digits, '_', '.' or '-'. The row names the code but gives no rule.",
+    "The capability-core counter is an OTel instrument behind a package-level function seam (policyRefused), so TestPersist_CountsPolicySkip reads the seam. Reading the instrument would need go.opentelemetry.io/otel/sdk/metric in go.mod, which is outside this slice's files.",
+    "The proto edit is comment-only. skip_reason = 4 and its closed-token doc already exist from WS07 S7, so no tag is used or added.",
+    "The row asked for a refused-write case in verify-durable-layer.sh. The SQL layer cannot see the Rust refusal, so the case asserts the SQL guard that a refused enable depends on: an UPDATE that switches on an undecided proposal writes zero rows.",
+    "No new switch: the row's flag is empty. S5 uses S4's CONTENT_WRITE_POLICY (off by default in code and in compose)."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go (comment mirror of the skip_reason doc only; not edited, regenerate with buf generate)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/session-core-db-tests.sh and C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/session-core-db-tests-test.sh (recorded full-run count; the lead updates after the DB run)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md (optional decision entry; not edited)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The 3 new ignored Postgres tests (background_review_skill_with_marker_is_refused, enable_of_learned_skill_rechecks_policy, user_origin_skill_is_reported_not_refused) and the extended assert_upsert_skill_guards compile but have never run against a real DB. They need the harness with --ignored --test-threads=1.",
+     "The recorded full-run count in scripts/tests/session-core-db-tests.sh and in session-core-db-tests-test.sh has to be updated after the DB run (+3).",
+     "Live proof from the row's definition of done is still owed: rebuild session-core and capability-core, seed a transcript with an obfuscated override phrase, then check for the sink log line skill_policy:injection_marker, confirm no agent_skills row was written, and read mp_session_skill_policy_refused_total. Do this under report and then under enforce, then return the switch to off.",
+     "The new G7 lines in verify-durable-layer.sh need docker to run, and nobody has run them yet."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "The skill upsert trusts the caller's origin: any caller holding session:skills:write can write origin 'user' with scope 'org' and get an accepted, enabled org-wide skill, which skips the learned-skill gate, the enable re-check (user rows are not re-checked) and the org-scope admin rule that registry_apis.go applies to human writes. Today only the learning path calls it, and learning/learning.go:148 forces background_review, so the guard is one line of Go; bind origin 'user' to a verified person before enforce (the same shape as D2-483 for memory)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Human CRUD in capability-core writes agent_skills by direct SQL outside session-core: the POST branch writes the request's content and enabled flag (promoted_from checks visibility only), and PATCH with enabled true switches on an accepted learned skill with no content check (registry_apis.go, update branch); the row excludes human CRUD, but the owner should decide whether a person's re-enable of learned text is screened before enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The tool_restriction_widened rule is this slice's own choice (an entry must be one plain tool name of letters, digits, '_', '.' or '-'), because the plan names the code without a rule and tool_restrictions is never enforced anywhere (GATEWAY_DEDUPLICATION_PLAN SKILL-1); the owner or MPO should confirm it or drop the code before enforce."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No Postgres test runs the undo restore path: snapshot_policy_check should refuse an undo that brings back an enabled learned snapshot under enforce and fail closed with snapshot_unreadable on a malformed snapshot, and only the source-scan test covers it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The three new ignored DB tests and the extended assert_upsert_skill_guards have compiled but never run against Postgres, and the row's live proof (sink log, no agent_skills row, counters, report then enforce) has not been done; the lead runs both."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "secret_like matches prose inside one field (the basic-auth shape reads any word after 'basic'), so a learned skill whose text contains such prose is refused under enforce; measure it in report mode before enforce, as D2-484 asks for memory. Each field is checked alone, so a field boundary cannot create a match."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "CONTENT_WRITE_POLICY is one switch for memory and skills, off in code and compose; the owner's rollout default and enforce date (D2-485) cover skills too, and a person's own skills are only ever counted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The new counters mp_session_skill_policy_refused_total (session-core) and learning_skill_policy_refused_total (capability-core) are on no dashboard or alert, and the promotion rule needs a week of them before enforce."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "consumer.go logs a completed review with candidates, selected and skills_persisted only, so a policy refusal shows as a gap between selected and persisted with no reason on the log line; the reason lives on the counter only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The capability-core counter is reached only through the policyRefused seam, because reading an OTel instrument in a test needs go.opentelemetry.io/otel/sdk/metric, a go.mod change outside this slice's files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The generated Go binding go/gen/model_plane/v1/sessions.pb.go still carries the old skip_reason comment; a buf generate of sessions.proto brings it in line (comment-only, no wire change)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "This was already in the code before the slice. upsert_agent_skill trusts the origin the caller sends, so a caller holding session:skills:write can send origin 'user' with scope 'org' and get an accepted, enabled org-wide skill. That skill is only counted by gate_skill and is skipped by check_stored_learned_skill. Origin 'user' must be bound to a verified person before CONTENT_WRITE_POLICY=enforce means anything for skills."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Human CRUD in capability-core registry_apis.go writes agent_skills by direct SQL outside session-core, and its PATCH enabled=true can switch on an accepted learned skill without any content re-check. The row excludes human CRUD, but this bypasses the 'no path enables flagged text' goal, so the owner should decide on it before enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The tool_restriction_widened rule (each entry must be one plain tool name: letters, digits, '_', '.' or '-') is the implementer's own choice, because the plan names the code without giving a rule. The owner or MPO needs to confirm it before enforce."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No DB test covers snapshot_policy_check on undo: a refused restore of an enabled learned snapshot under enforce, and snapshot_unreadable on a malformed snapshot. Only the source-scan ordering test covers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "set_agent_skill_enabled re-checks on every enable=true, including a re-enable of a skill that is already enabled. Under enforce, a sweep that re-asserts enabled on a stored flagged learned skill gets FAILED_PRECONDITION rather than a no-op, so callers should treat that code as a non-retry."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "secret_like can match ordinary prose inside a single field (for example the basic-auth shape). Measure the false-positive rate in report mode before enforce."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No dashboard or alert covers mp_session_skill_policy_refused_total or learning_skill_policy_refused_total. The consumer's review log line shows a refusal only as a selected-versus-persisted gap, with no reason."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The generated go/gen sessions.pb.go still carries the old skip_reason comment. Running buf generate fixes it; there is no wire change."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -p session-core --bin session-core (full, target C:/dev/mp-target-w2)",
+      "outcome": "660 passed, 0 failed, 247 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core write_policy",
+      "outcome": "22 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "go test ./internal/skillsink/... ./internal/learning/...",
+      "outcome": "ok: skillsink, learning, learning/eval",
+      "passed": true
+     },
+     {
+      "command": "go test -run TestPersist_CountsPolicySkip -v ./internal/skillsink/",
+      "outcome": "PASS",
+      "passed": true
+     },
+     {
+      "command": "go vet ./internal/skillsink/ ./internal/api/ and go build ./... (capability-core)",
+      "outcome": "no output, clean",
+      "passed": true
+     },
+     {
+      "command": "bash -n verify-durable-layer.sh",
+      "outcome": "syntax ok (script itself needs docker, not run)",
+      "passed": true
+     },
+     {
+      "command": "ignored PG tests (3 named)",
+      "outcome": "present in session-core grpc.rs; ignored (need DB/docker), not run",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "policy",
+    "authority"
+   ],
+   "notes": "Implemented WS26-S5 on the existing CONTENT_WRITE_POLICY switch (off by default; only the exact words report and enforce turn it on). No new switch; the row's flag is empty. session-core: write_policy::check_skill and gate_skill are new. They are wired into upsert_agent_skill (a learned write is refused under enforce with skip_reason skill_policy:<rule> and writes no row; a refused refresh keeps the stored text), set_agent_skill_enabled (the stored text of a learned skill is re-checked before it is switched on), decide_skill_proposal ACCEPT (same re-check; reject is never refused) and undo of an enabled learned snapshot. A person's own skill (origin user) is counted and logged in report and enforce and never refused. Refusal logs and counters carry rule, origin, mode and a BLAKE3 hash of the text, never the text. With the switch off, every new path returns before any query or check, so behaviour is unchanged. capability-core skillsink: a skill_policy: skip is counted on learning_skill_policy_refused_total with its reason, the batch carries on, and no error is returned, so the delivery is not retried. Human CRUD in registry_apis.go is read and left unchanged, as the row says. The worktree also holds uncommitted edits from sibling slices in this wave (nats.conf, execution-core, model-gateway, capability-core availability and registry files). None of them is mine and I did not touch them. Nothing was committed, staged, pushed or run in docker."
+  },
+  {
+   "id": "WS24-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0018_workspace_read_capability.up.sql (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0018_workspace_read_capability.down.sql (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\api\\availability.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\api\\availability_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\migration_security_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\migration_security_integration_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\capability_tools_seed_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\workspace_tools.rs (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\grpc.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\capability_policy.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\health_attest.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\permission\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\tool_class_registry_parity.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd capability-core && go vet ./...",
+     "outcome": "pass (exit 0)"
+    },
+    {
+     "command": "cd capability-core && go test ./...",
+     "outcome": "pass, every package ok (exit 0)"
+    },
+    {
+     "command": "go test -count=1 -v -run 'TestWorkspaceReadCapabilityStaysReadOnlyAndUnattested|TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes|TestEverySeededToolIsClassifiedOnPurpose|TestSeededCeilingsAreTheStrictestOfTheirTools|TestSeededCapabilityIDsExistInTheRegistry|TestBackgroundProcessCapabilityStaysLowRiskBehindASecondGate' ./internal/registry/ ./internal/api/",
+     "outcome": "all PASS, including the new 0018 text test"
+    },
+    {
+     "command": "go vet -tags integration ./internal/registry/",
+     "outcome": "compiles (exit 0); the DB tests were NOT run (they need an isolated database or Docker)"
+    },
+    {
+     "command": "gofmt output compared with the file, CR characters stripped, for the five edited Go files",
+     "outcome": "no differences"
+    },
+    {
+     "command": "rustfmt --edition 2021 src/workspace_tools.rs (new LF file, applied), then rustfmt --check on it",
+     "outcome": "clean"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on the seven edited Rust files",
+     "outcome": "all parse; remaining format diffs are pre-existing drift, none in the new code"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib",
+     "outcome": "NOT RUN: the crate cannot compile until lib.rs declares pub mod workspace_tools (shared edit listed in needs_other_files)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test tool_class_registry_parity",
+     "outcome": "NOT RUN (same blocker)"
+    }
+   ],
+   "db_tests_written": [
+    "TestWorkspaceReadCapabilityMigrationSeedsAnUnattestedReadRow (go, -tags integration, internal/registry/migration_security_integration_test.go; needs CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL)",
+    "TestSeedClassifiesEveryBuiltInToolAndTheCeilingFollows (existing, internal/registry/capability_tools_integration_test.go; now counts the 0018 seed rows; needs Docker)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: after the line `pub mod workspace_promote;` insert `pub mod workspace_tools;`. Apply before any execution-core build.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment, after the line `      EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}` (line 1450) insert `      WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}`.",
+    "Rust tests after both shared edits: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib; then the same with --test tool_class_registry_parity. Names to watch: workspace_tools tests (the_switch_is_strict_and_defaults_off, workspace_tools_absent_*, every_read_tool_is_bound_to_the_read_capability, no_workspace_tool_name_trips_the_risky_substring_gate, every_schema_is_a_json_object_schema, a_read_returns_the_version_token_the_edit_engine_checks, a_path_that_leaves_the_workspace_is_refused_with_its_code), permission workspace_reads_are_allowed_under_ask_and_read_only_rung, health_attest workspace_attestation_needs_the_switch_and_both_stores, the capability_binding_contract tests and the health_attest allowlist test. If results contradict the tree, run cargo clean -p execution-core under C:/dev/mp-target-w2 first (memory note on stale targets).",
+    "Go DB checks, lead-run against an isolated database and not run here: CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL=<isolated> go test -tags integration ./internal/registry/ -run TestWorkspaceReadCapabilityMigrationSeedsAnUnattestedReadRow -v; and the Docker-backed TestSeedClassifiesEveryBuiltInToolAndTheCeilingFollows through the DB harness, which now counts the 0018 seed rows.",
+    "Lead-only proof, not run here: rebuild capability-core and execution-core; restart capability-core so 0018 applies at boot; with WORKSPACE_TOOLS unset confirm cap.workspace.read stays unavailable (health_not_attested); then WORKSPACE_TOOLS=read on the proof stack: a Space Do run asking where X is defined in the workspace, plus a non-Space run and a ZDR run that must show the tools absent."
+   ],
+   "deviations": [
+    "workspace_attestations takes (switched_on, cas_configured, sandbox_manager_configured) rather than the row's two inputs, so an attestation cannot be posted while the switch is off.",
+    "Dispatch also refuses the workspace tools while the switch is off, not only at offer time (defence in depth; no existing tool name is affected).",
+    "The offer rules are pure functions (workspace_tools::parse_mode and offered), and the named tests use them, because the crate forbids env mutation in tests; no merged_tool_defs-level test was added for them.",
+    "Test files beside the change were edited so the existing seed-parity tests see the 0018 rows: capability_tools_seed_test.go (readSeedRows reads 0018), tests/tool_class_registry_parity.rs (later seed list includes 0018) and migration_security_test.go (new 0018 text test). The integration test TestSeedClassifiesEveryBuiltInToolAndTheCeilingFollows would fail its count without the first of these.",
+    "The code_interpreter lease and hydrate block was factored into ensure_space_workspace in runtime_loop/mod.rs; the behaviour is the same by inspection, not yet tested.",
+    "models/availability.go, registry.go, workspace_edit.rs and sandbox_lease.rs were not edited; none needed a change for this slice.",
+    "Write tools (WS24-S4) are not added; WORKSPACE_TOOLS=all offers exactly the read set for now."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs (add pub mod workspace_tools; after pub mod workspace_promote; at line 60; required for the crate to compile)",
+    "apps/Model Plane/deploy/docker-compose.yml (shared; add the WORKSPACE_TOOLS line below)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edit: add `pub mod workspace_tools;` after `pub mod workspace_promote;` in apps/Model Plane/rust/services/execution-core/src/lib.rs. lib.rs is not in this slice's owned set, and the crate does not compile in the tree without that line. I checked it in a scratch copy of apps/Model Plane with exactly that one line added: `cargo test -q -p execution-core --lib` gave 1461 passed, 0 failed, and `--test tool_class_registry_parity` gave 6 passed. No warnings point at the new code.",
+     "Lead shared-edit: add `WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}` to the execution-core environment in apps/Model Plane/deploy/docker-compose.yml. The switch already defaults off in code, so this is about honest compose config, not safety.",
+     "DB/Docker tests the verifier did not run (Docker is forbidden here): `go test -tags integration ./internal/registry/...`, including TestWorkspaceReadCapabilityMigrationSeedsAnUnattestedReadRow and the 0018-aware TestSeedClassifiesEveryBuiltInToolAndTheCeilingFollows. The tester's report says it passed in 118.7s.",
+     "Live proof, which only the lead can run: rebuild the capability-core and execution-core images, then restart capability-core. The entrypoint re-applies every *.up.sql on each boot, and 0018 is idempotent through ON CONFLICT. Then capability-health-proof.sh must show cap.workspace.read unavailable while WORKSPACE_TOOLS is unset and available with WORKSPACE_TOOLS=read. Run a Space Do chat asking where X is defined (SSE tool_call/tool_result, EvaluatePolicy evidence, step audit). Non-Space and ZDR runs must show the tools absent and a forced call refused."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row's dispatch tests (workspace_read_dispatches_through_gate_with_signed_evidence and workspace_tool_unbound_is_refused) are not written; they need a CapabilityPolicy test double in runtime_loop/mod.rs and must exist before WORKSPACE_TOOLS is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The cap.workspace.read attestation is configuration-level (switch plus CAS and sandbox-manager configured), so a Space without sandbox entitlement or an unreachable sandbox-manager still shows only as a per-call failure; a per-round probe of the lease path would make the attestation truthful."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "grep and glob read each matching file up to the 1 MiB per-file cap with no total byte budget per call, so one call over a large Space can read a lot of data; add a per-call budget in workspace_edit before the proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On the gRPC ExecuteStep path the delegated sandbox bearer is authenticated before the ZDR check, as for code_interpreter; the dispatch guard still refuses, but confirm the order against the live Z-18 tree."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The in-process static seed in internal/registry/registry.go does not declare cap.workspace.read although cap.process.background has one; decide whether the static seed is used at runtime and mirror the row if so."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Once Z-18 lands, add the typed zdr-refusals key workspace_tools (live-only); until then the ZDR and switch-off refusal uses a plain message."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test applies the 0018 down migration; the lead's DB run should revert it and confirm capability_health, capability_versions and skill_packages exist at that point in the chain, since the 0015 down relies on them too."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The four tool descriptions are long and are offered on every Space run while the switch is on; measure their token cost and trim after the first proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "WS08 also edits the code_interpreter arm; the ensure_space_workspace factor in runtime_loop/mod.rs is a first-lander conflict to resolve at integration."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The two dispatch tests the row names are missing: workspace_read_dispatches_through_gate_with_signed_evidence and workspace_tool_unbound_is_refused. Nothing tests that a workspace call goes through the signed capability gate or that an unbound tool is refused at dispatch. They need a CapabilityPolicy test double in runtime_loop/mod.rs and must exist before WORKSPACE_TOOLS is switched on anywhere."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The offer and refusal rules are tested only as pure functions (workspace_tools::offered and parse_mode). No test covers the merged_tool_defs_governed call site, the dispatch guard in execute_step_inner (zdr || waived || mode Off), or the reads_sandbox/grpc sandbox-bearer changes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The lease and hydrate block was moved out of the code_interpreter arm into ensure_space_workspace in runtime_loop/mod.rs. It matches the old code by inspection (same calls, now mapped to String errors), but no test covers the Space code_interpreter path after the move."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The cap.workspace.read attestation depends only on configuration (switch on, CasClient::from_env Ok(Some), SandboxManagerClient::from_env ok). A Space without sandbox entitlement, or an unreachable sandbox-manager, still shows the capability as available and fails per call."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "workspace_grep reads every candidate file up to the 1 MiB cap and has no total byte budget per call, so one grep over a large hydrated Space can read a lot of data while the shared lock is held. Add a per-call budget in workspace_edit before the live proof."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The ZDR, waived and switch-off refusal in execute_step_inner is a plain StepOutcome::failed message. Replace it with the typed zdr-refusals key workspace_tools once Z-18 lands, as the row's ZDR clause says."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test applies 0018_workspace_read_capability.down.sql. The lead's DB run should revert it and check that only cap.workspace.read rows go."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "internal/registry/registry.go has an in-process static seed that mirrors cap.process.background (0015) but not cap.workspace.read. Decide whether that seed is used at runtime and mirror the row if it is."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In permission/mod.rs the new test workspace_reads_are_allowed_under_ask_and_read_only_rung sits between the existing doc comment ('`read_only` is what a plan-mode run is held to...') and read_only_refuses_everything_plan_mode_refuses. That doc comment now documents the wrong test. Move the new test above the doc comment."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The four tool descriptions are long and are offered on every Space run while the switch is on. Measure their token cost after the first proof and trim."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "WS08 also edits the code_interpreter arm in runtime_loop/mod.rs. The ensure_space_workspace move will collide with it at integration, and the rule there is that whichever lands first wins."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd capability-core && go test -count=1 ./...",
+      "outcome": "pass: every package ok, no failures",
+      "passed": true
+     },
+     {
+      "command": "cd capability-core && go vet ./...",
+      "outcome": "pass (exit 0)",
+      "passed": true
+     },
+     {
+      "command": "cd capability-core && go test -tags integration -count=1 ./internal/registry/...",
+      "outcome": "pass: ok internal/registry 118.7s (DB-backed integration tests ran)",
+      "passed": true
+     },
+     {
+      "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+      "outcome": "FAIL to compile: 14 errors, first is E0433 'cannot find workspace_tools in crate' at src/grpc.rs:1367 (also health_attest.rs:1086, runtime_loop/agent.rs:1155/1156/3893/6183, runtime_loop/mod.rs:734/735/933/1387). Cause: src/lib.rs has no 'mod workspace_tools' declaration (grep confirms). No Rust tests ran.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "policy"
+   ],
+   "notes": "The Go half of WS24-S3 is complete and verified: migration 0018 registers cap.workspace.read (low risk, read class, no approval floor, unavailable until attested) with four read-only seed rows; the generic health allow-list admits the id; and the seed, allow-list and migration tests are updated and pass. The Rust half is written: the new workspace_tools.rs (switch parsing, offer rule, four read tools over workspace_edit with the shared lock, JSON results, tests), the offer and read-sandbox wiring in agent.rs, the ZDR, switch and Space guards plus dispatch arm and the shared ensure_space_workspace in runtime_loop/mod.rs, the sandbox-bearer predicate in grpc.rs, the cap.workspace.read binding in capability_policy.rs, the attestation in health_attest.rs (attested only while the switch is on and both stores are configured), a permission test, and the parity-test seed list. The Rust code does not compile until lib.rs declares the module, so none of the Rust tests were run. With WORKSPACE_TOOLS unset, nothing is offered, no attestation is posted, and no new arm runs; the code_interpreter path is unchanged by inspection, not by test. No docker or DB harness was run. Write tools (S4) are not included."
+  }
+ ]
+}

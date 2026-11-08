@@ -1,0 +1,7 @@
+title: Denne tilkoblingen støtter ZDR
+continue: Lukk
+cancel: Lukk
+
+Organisasjonen din har Zero Data Retention (ZDR) på, og denne tilkoblingen er registrert som ZDR-godkjent hos Verevon. Samtaler som kjøres med tilkoblingen, holder ZDR.
+
+Registreringen gjelder bare for denne tilkoblingen. Den endres hvis grunnlaget for den endres.

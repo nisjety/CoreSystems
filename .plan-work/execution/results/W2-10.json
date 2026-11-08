@@ -1,0 +1,586 @@
+{
+ "batchId": "W2-10",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS25-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs (one line: pub mod org_agent_policy)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/org-agent-policy-schema.json (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256 (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_integration_test.go (new, build tag integration)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/authz/authz_test.go (appended TestAuthorizeHTTPPinsOrgAgentPolicyRoutes)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/cmd/main.go (two lines after NewPluginsHandler: handler registration behind the flag)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0023_org_agent_policy.up.sql (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0023_org_agent_policy.down.sql (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-contracts org_agent_policy (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+     "outcome": "pass: 9 unit tests in org_agent_policy and 3 golden tests in tests/org_agent_policy_golden.rs; re-run after rustfmt"
+    },
+    {
+     "command": "cargo clippy -q -p mp-contracts --all-targets",
+     "outcome": "no findings in org_agent_policy.rs or org_agent_policy_golden.rs after two pedantic fixes"
+    },
+    {
+     "command": "go test -count=1 ./internal/api/ ./internal/authz/ -run 'OrgAgentPolicy|AuthorizeHTTP' (capability-core)",
+     "outcome": "pass, re-run after the audit action rename"
+    },
+    {
+     "command": "go test -count=1 ./... (capability-core, before the audit action rename)",
+     "outcome": "pass, every package ok"
+    },
+    {
+     "command": "go vet ./... and go vet -tags integration ./internal/api/ (capability-core)",
+     "outcome": "clean; the integration-tagged test compiles, not run"
+    },
+    {
+     "command": "sha256sum -c org-agent-policy-schema.json.sha256 (api/contracts)",
+     "outcome": "OK"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the DB test through the harness: cd \"apps/Model Plane/go/services/capability-core\" && go test -tags integration -run TestOrgAgentPolicyAgainstPostgres ./internal/api/ (testcontainers; migration 0023 applies with the rest).",
+    "Rebuild the capability-core image (migration 0023 applies at boot; flag stays off). Then with ORG_AGENT_POLICY_API=true on the dev stack: admin PUT If-Match 0 -> 200 revision 1; admin PUT If-Match 1 -> revision 2; a repeat PUT with If-Match 1 -> 409 stale_revision; member GET shows revision 2; history lists 2 then 1; a registry_audit_log row with action org_agent_policy_changed and no values; a ZDR admin PUT -> 403 org_agent_policy_write_under_zdr_refused; with the flag off every route -> 404.",
+    "shared-edit apps/Model Plane/api/contracts/README.md: add a table row for org-agent-policy-schema.json (authored WS25-S7; read by mp-contracts org_agent_policy and capability-core internal/api org_agent_policy; pinned by its .sha256).",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: add to GOLDENS `org-agent-policy-schema.json` with digest 4e845cb768ad0d9df4b6cfee5af242df612b161b2e2fb5029f2da178deb270a1, in the same form as the existing entries.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add a row for org_agent_policy and org_agent_policy_history, owner capability-core, DEC-14 (the WS25-S0 ledger entry already exists in docs/decisions/ledger.md).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml capability-core block: pass through ORG_AGENT_POLICY_API with default false (needed before anyone can enable it).",
+    "Commit hygiene: cmd/main.go and authz_test.go already carry other slices' uncommitted hunks in this worktree. Stage only this slice's lines: the two-line NewOrgAgentPolicyHandler registration after NewPluginsHandler in cmd/main.go, and the appended TestAuthorizeHTTPPinsOrgAgentPolicyRoutes in authz_test.go."
+   ],
+   "deviations": [
+    "The reserved-key rule applies to every reserved key (ext.skills, ext.plugins, user_hooks), not only ext.plugins as D11 names, so non-default writes are refused not_enforced uniformly.",
+    "Routes are always registered and answer 404 while ORG_AGENT_POLICY_API is off, so the handler carries the switch rather than the mux.",
+    "The error body is the typed code string under the capability-core convention ({\"error\": code}), not a typed envelope.",
+    "locked_by_policy is not in the refusal vocabulary: it belongs to user-side enforcement in S9 and S11, so it is not added here."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/contracts/README.md (add a row for the new golden)",
+    "scripts/tests/zdr-contract-sync.test.sh (add the GOLDENS entry)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md (add an org_agent_policy row)",
+    "apps/Model Plane/deploy/docker-compose.yml (ORG_AGENT_POLICY_API passthrough, default false)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the DB integration test through the harness: cd \"apps/Model Plane/go/services/capability-core\" && go test -tags integration -run TestOrgAgentPolicyAgainstPostgres ./internal/api/ (testcontainers; migration 0023 applies with the rest). Not run here because it needs Docker.",
+     "Live proof on the rebuilt capability-core image with ORG_AGENT_POLICY_API=true: admin PUT If-Match 0 -> 200 revision 1; admin PUT If-Match 1 -> revision 2; repeat PUT If-Match 1 -> 409 stale_revision; member GET shows revision 2; history lists 2 then 1; a registry_audit_log row with action org_agent_policy_changed and no values; ZDR admin PUT -> 403 (body is the middleware's generic refusal, not the typed code, unless authz ordering changes); with the flag off every route -> 404 for admin and member principals.",
+     "Shared edits still to apply by the lead: apps/Model Plane/api/contracts/README.md (table row for org-agent-policy-schema.json); scripts/tests/zdr-contract-sync.test.sh (GOLDENS entry org-agent-policy-schema.json with digest 4e845cb768ad0d9df4b6cfee5af242df612b161b2e2fb5029f2da178deb270a1, verified against the .sha256 file); apps/Model Plane/docs/capability-ownership-matrix.md (row for org_agent_policy and org_agent_policy_history, owner capability-core, DEC-14); apps/Model Plane/deploy/docker-compose.yml capability-core block (ORG_AGENT_POLICY_API passthrough, default false).",
+     "Commit hygiene: git diff --stat shows exactly this slice's lines in the shared files (cmd/main.go +2 for the NewOrgAgentPolicyHandler registration, authz_test.go +31 for TestAuthorizeHTTPPinsOrgAgentPolicyRoutes, mp-contracts lib.rs +1), so stage only those hunks.",
+     "Owner decision on the platform-ceiling source (HARNESS_POSTURE_FLOOR and ZDR facts) is still open and gates meaningful exceeds_platform_ceiling behaviour before S9."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "WS05-S5 tool policies are unwired: NewToolPoliciesHandler is never constructed and WithToolPolicies is never called in cmd/main.go, so TOOL_POLICY_ENFORCED is inert and PUT /api/v1/tool-policies is not registered at runtime."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The platform ceiling has no source yet: this build uses the loosest value for every key, so exceeds_platform_ceiling can never fire in production (only in tests with an injected ceiling); the owner must decide the source (HARNESS_POSTURE_FLOOR, org-core entitlement or a fixed table)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Go verifiedIsAdmin twin of rust model-gateway ownership.rs is reused without the WS05-S5 shared-vector test the row names, so admin-scope agreement between Rust and Go is unverified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The validator exists twice (Rust validate and Go validateOrgAgentSettings) and only the key table is pinned by the golden; add shared behaviour vectors before S9 enforcement relies on both."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "This slice chose the allow-list semantics (ids only under approved_only), the fail-closed values (rung_cap read_only, lockdown true, mcp_tool_approval approved_only) and the default of reserved keys (non-default writes refused not_enforced); confirm them in S6 and S9."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "mode_cap's four ids duplicate what S6's AgentMode will own (agent_mode.rs is not built); align them when S6 lands so there is one owner."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "GET /history is readable by any org member and returns prior documents; the owner should confirm whether history is admin-only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 23505 race mapping and the insert-versus-update CTE path are only proven by the unrun Postgres test; the lead's harness run is the first real check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "/effective shows only the org layer; a person's own layer and the locked_by_policy refusal join in S9 and S11."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "exceeds_platform_ceiling can never fire in production: capability-core passes loosestOrgAgentCeiling() (every key at its loosest value), while the row and design name the ceiling source as env floor HARNESS_POSTURE_FLOOR plus ZDR facts; the owner must choose that source before S9 enforcement relies on it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "authctx HTTPMiddleware runs authz.AuthorizeHTTP before the handler, so a ZDR admin PUT returns the generic 403 'request is not authorized' and a non-admin or unauthenticated call with the flag off gets 403/401 rather than the handler's typed code or 404; the typed org_agent_policy_write_under_zdr_refused and 404-when-off are therefore reachable only in unit tests, and the lead's live check must expect those bodies."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "verifiedIsAdmin is reused for the admin check without the WS05-S5 shared-vector test the row names, so Rust-side and Go-side admin-scope agreement is unverified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The validator exists twice (Rust validate and Go validateOrgAgentSettings); I checked by reading that the allow-list, ids, reserved-key, ceiling-rank and refusal-order rules agree, but only the key table is pinned by the golden, so shared behaviour vectors should be added before S9 relies on both."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "GET /api/v1/org-agent-policy/history is readable by any org member and returns prior full documents; the row is silent on history visibility, so the owner should confirm member read is intended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The concurrent first-write race relies on the 23505 mapping to stale_revision and the insert-versus-update CTE path, which are proven only by the integration test that has not been run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "load() does not fill a missing key from its default, so a stored document written before a future schema key is added would report null with source org_policy for that key; fill defaults on load before any new key is introduced."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Errors are returned as {\"error\": code} following capability-core's existing convention rather than the root CLAUDE.md typed envelope {error:{code,message,details}}; this is a deliberate deviation the implementer flagged."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No unit or integration assertion covers the effective endpoint's source label at revision greater than 0 (org_policy versus platform_default), so that branch in effective() is untested."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "audit",
+    "zdr"
+   ],
+   "notes": "WS25-S7 built as specified, flag off by default. Org agent policy document in capability-core: GET (any member; platform defaults at revision 0 when no row), PUT (org admin, If-Match revision, refused for ZDR/unstated/workload/non-admin), GET /effective?user=me, GET /history (newest first). Closed key schema (8 keys, 4 reserved) validated in mp-contracts (validate) and the Go twin (validateOrgAgentSettings); golden pins the table. Writes are one CTE statement that updates or inserts the document, appends history and a content-free registry_audit_log row (action org_agent_policy_changed, diff holds digest and key names only). Enforcement not built (S9). Nothing was committed or run against Docker; the DB test is written but not run."
+  },
+  {
+   "id": "WS20-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/contract.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/contract_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/schedule_contract_create_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/schedule_contract_intent_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/scheduled_contract.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/spaces/schedule_create_decision.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/spaces/schedule_contract_create_decision_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/http/server.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/schedule-contract.test.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go test -count=1 ./...",
+     "outcome": "exit 0, 30 packages ok (run before the final text-form rewrite of contract.go)"
+    },
+    {
+     "command": "cd \"apps/Model Plane/go/services/capability-core\" && go test -count=1 ./internal/cron/ ./internal/api/ && go build ./... && go vet ./...",
+     "outcome": "all ok after the rewrite, line-ending and gofmt normalisation"
+    },
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go test ./internal/spaces/... -count=1 && go test ./internal/http/ -run 'SpaceDecision|Schedule' -count=1 && go build ./... && go vet ./internal/spaces/",
+     "outcome": "all ok"
+    },
+    {
+     "command": "scratch crate (scratchpad, #[path] include of scheduled_contract.rs, sha2 =0.10.9, CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0) cargo test --offline",
+     "outcome": "7 passed, 0 failed; includes the digest pin equal to the Go vector. Scratch crate deleted afterwards. cargo test -p mp-contracts NOT run: needs the shared edits below."
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3/apps/gateway\" via cargo test --manifest-path .../gateway/Cargo.toml schedule_",
+     "outcome": "25 passed, 0 failed, exit 0 (includes the 4 new contract tests)"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && npx vitest run src/shared/api/schedule-contract.test.ts src/shared/api/schedule-from-chat.test.ts src/features/chat/components/ScheduleDialog.test.tsx src/shared/api/cron-client.test.ts",
+     "outcome": "4 files, 19 tests passed"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && npx tsc --noEmit -p . && npx eslint <3 changed files>",
+     "outcome": "tsc zero errors; eslint 0 errors, 1 warning on a pre-existing line (ScheduleDialog createSignal(props.seedTitle))"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/user-core/internal/http/spaces.go (issueScheduleCreateDecision, ~line 894; struct scheduleCreateDecisionRequest ~line 772): add `ContractDigest string `json:\"contract_digest\"`` and `ContractExpiresAt string `json:\"contract_expires_at\"`` to the request struct; in the spaces.IssueScheduleCreateDecision call add `ContractDigest: request.ContractDigest, ContractExpiresAt: request.ContractExpiresAt, ContractsEnabled: s.scheduleContractsEnabled`. Without this every contract create fails closed.",
+    "shared-edit apps/Control Plane/user-core/cmd/server/main.go (near httpServer.SetSpaceRepository at ~line 382): add `httpServer.SetScheduleContractsEnabled(os.Getenv(\"SCHEDULE_CONTRACT_ENABLED\") == \"true\")` (strict literal true; default off).",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go (right after `cronHandler := api.NewCronHandler(pool)` near line 307, outside the verifier if/else): add `cronHandler.WithScheduleContract(os.Getenv(\"SCHEDULE_CONTRACT_ENABLED\") == \"true\")`. Another session has already edited this file (ORG_AGENT_POLICY lines); add on top.",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/Cargo.toml [dependencies]: add `sha2 = \"0.10\"` (the MP workspace lock already resolves sha2 0.10.9; the scratch check used =0.10.9). Required for scheduled_contract.rs digest().",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/lib.rs: add `pub mod scheduled_contract;` after `pub mod run_origin;` (lib.rs is already modified by another session: org_agent_policy line). Then run `cargo test --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p mp-contracts` with CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0.",
+    "deploy env (default unset = off): pass SCHEDULE_CONTRACT_ENABLED through user-core (apps/Control Plane/scripts/run-control-plane.sh or its compose), capability-core (apps/Model Plane/deploy/docker-compose.yml), and the gateway. Deploy order per plan: capability-core and user-core first (accept), then gateway (sends). Nothing is enabled by default.",
+    "rebuild and live proof (lead only; not run here): rebuild user-core (scripts/run-control-plane.sh), capability-core, gateway and frontend; seed or confirm one read tool with approval_floor none in capability_tools; create a schedule through the dialog with that tool; show the decision claims and the stored template text; then the three negatives from the plan: tampered approval_contract text, a non-read tool, and an expiry 400 days out."
+   ],
+   "deviations": [
+    "Stored form: `approval_contract` is JSON text, not a nested object as the plan row (`{\"v\":1,...}`) specifies. Reason: gateway check_digest_stable refuses nested objects whose keys storage re-orders, and every contract object would fail it. Owner or lead should ratify and update the plan row and S5/S6 parsing.",
+    "Authority binding: Control signs contract_digest and contract_expires_at inside the payload digest (schema v2), not as new claims on the Decision token, because decision.go is not owned. Equivalent authority for create; S5 verifiers that expect claims will need the claim fields.",
+    "No migration in S4: the contract is persisted inside task_template (its digest is already the template digest). The plan's cron_schedules contract_digest and contract_expires_at columns are deferred to S5/S8 (capability-core migration, not owned).",
+    "Expiry ceiling is a constant 90 days in Control and capability-core, not the SCHEDULE_CONTRACT_MAX_DAYS env the plan names.",
+    "Gateway reads SCHEDULE_CONTRACT_ENABLED per request from the environment (agent_actions.rs schedule_contract_enabled), not from AppState, because AppState and its config file are not owned.",
+    "Flag off: the gateway drops approval_contract silently (schedule stays draft-only) rather than refusing the create; Control and capability-core refuse any contract that reaches them with the switch off.",
+    "Consent card lists no tools yet (DELEGABLE_SCHEDULE_TOOLS = []), so the default is draft-only as the owner ruling requires; the read-tool list endpoint is not built."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must apply the shared edits listed in the implementer's lead_todo (mp-contracts lib.rs and Cargo.toml, user-core spaces.go and cmd main.go, capability-core cmd main.go WithScheduleContract), then re-run `cargo test --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p mp-contracts` and confirm the scheduled_contract tests (7) actually run; today the command runs zero of them.",
+     "Live proof is owed, with the switch on and rebuilt images: user-core (scripts/run-control-plane.sh), capability-core, gateway and frontend; a read tool with approval_floor none seeded in capability_tools; a dialog-created contract schedule; decision claims and stored row captured; the three negatives (tampered text, non-read tool, 400-day expiry) refused.",
+     "The K3-4 audit rows and the audit-sink startup refusal depend on WS06-S2 (declared dependency); not closable in this slice. SCHEDULE_CONTRACT_ENABLED must stay off outside dev until they land.",
+     "The consent-card tool source (GET /v1/cron/delegable-tools across capability-core, model-gateway and BFF) is not built; the dialog stays draft-only until it exists or DELEGABLE_SCHEDULE_TOOLS is populated.",
+     "Deploy order from the plan must hold when enabling: capability-core and user-core accept first, then the gateway sends."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Ratify the stored form (contract as JSON text, digest over exact bytes) and amend the plan row and the S5/S6 parsing; the plan row still says a nested object."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Audit rows for schedule.contract.created, refused and expired are not written (K3-4 requires them and the flag must refuse to start without the sink); blocked on the WS06-S2 emitter."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The read-tool list endpoint (GET /v1/cron/delegable-tools in capability-core, model-gateway proxy route, gateway BFF route) is not built, so the consent card offers no tools; needs the model-gateway route, which is not owned."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof: rebuild services, create a contract schedule through the dialog, capture decision claims and the stored row, and run the three negatives (tampered text, non-read tool, 400-day expiry)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "declaredTools (capability-core workplane_apis.go) runs a capability_tools query with no DB integration test; add an ignored Postgres test for org-override and global-row agreement."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ScheduleDialog consent card branches (empty note versus tool checkboxes and expiry select) have no component test; the existing ScheduleDialog.test.tsx is unchanged."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "mp-contracts scheduled_contract.rs has been compiled and tested only through a scratch crate; cargo test -p mp-contracts and clippy are pending the shared edits."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The NON_DELEGABLE name list (memory.write, skill.write, schedule.*) is a guess; the registry class and floor check is the real gate, so reconcile the names with the WS05 seed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SCHEDULE_CONTRACT_ENABLED is read per request from the environment in the gateway; move it to AppState once that file is owned, since env reads in handlers race under parallel tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Expiry ceiling 90 days is a constant in Control and capability-core; the plan names an SCHEDULE_CONTRACT_MAX_DAYS env."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "PATCH on cron schedules still accepts enabled=true with no check. It does not touch the template so no contract bypass exists today, but S8 must refuse un-pausing an expired contract schedule."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The contract digest is pinned in three places (Go contract_test.go, Rust scheduled_contract.rs tests, gateway spaces.rs tests) with one value; any change to the vector text must update all three."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "New Go and Rust files were written as CRLF to match neighbours; gofmt -l flags every CRLF file in these packages, which is pre-existing and not caused by this slice."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof exists: rebuild user-core, capability-core, gateway and frontend, approve one read tool with approval_floor none, create through the dialog, capture decision claims and the stored row, and run the three negatives (tampered contract text, a non-read tool, a 400-day expiry)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The K3-4 audit rows (schedule.contract.created, refused, expired, withheld and fire-refused) are not written and the flag does not refuse to start without an audit sink; there is no emitter in the tree and WS06-S2 is a declared dependency, so SCHEDULE_CONTRACT_ENABLED must not be set outside dev until that lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The consent card is effectively empty: DELEGABLE_SCHEDULE_TOOLS is [] in schedule-from-chat.ts, so no tool can be chosen and the dialog never sends a contract. The row's GET /v1/cron/delegable-tools is not built; the capability-core handler could live in the owned workplane_apis.go, but the model-gateway and BFF proxy routes are not owned."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Ratify the deviations before S5 and S6 parse the contract: the stored form is JSON text under approval_contract (the plan row says a nested object), and the binding is carried in the signed payload digest with schema v2 rather than as Decision claims (decision.go is not owned); update the plan row accordingly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Shared wiring is pending and the lead must apply it: lib.rs add `pub mod scheduled_contract;`; mp-contracts Cargo.toml add `sha2 = \"0.10\"`; user-core http spaces.go request struct and IssueScheduleCreateDecision call (ContractDigest, ContractExpiresAt, ContractsEnabled); user-core cmd main.go SetScheduleContractsEnabled(os.Getenv(\"SCHEDULE_CONTRACT_ENABLED\") == \"true\"); capability-core cmd main.go WithScheduleContract(...). Until applied the contract path fails closed and is unreachable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Go ParseScheduleContract uses case-insensitive key matching and last-wins duplicate keys, while Rust serde refuses both; a text Go accepts can be refused in S5 (fail closed), but the twins must agree before S5 relies on them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Tool-name charset differs between twins: Go allows 1-64 characters with no hyphen, Rust allows up to 128 characters and hyphens; align them so the same contract text gets the same verdict on both sides."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row's PATCH item (recompute digest, reject contract on legacy schedule, PATCH requires a fresh decision) is not implemented; there is no bypass today because PATCH never writes task_template, but S8 must refuse un-pausing an expired contract schedule."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The planned cron_schedules migration (contract_digest, contract_expires_at) is absent; the expiry lives only in the template text, which S8's expiry guard and sweeper will have to parse per fire unless the column lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The expiry ceiling is a constant 90 days in Control and capability-core, not the SCHEDULE_CONTRACT_MAX_DAYS env the plan names; the gateway also reads SCHEDULE_CONTRACT_ENABLED per request from the environment rather than from AppState."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "declaredTools (the capability_tools org-override and global-row agreement query) has no Postgres integration test, and the ScheduleDialog consent branches have no component test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The NON_DELEGABLE name list (memory.write, skill.write, schedule.*) is a guess; the registry class and floor check is the real gate, so reconcile the names with the WS05 seed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ContractDefaultDays in contract.go is used only by tests (the consent card holds its own default), and the vector expires 2026-11-23, so any future full-path window test built on it will start failing after that date."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The user-core server.go diff realigns the whole Server struct field block (gofmt), which adds noise to a small change."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "audit",
+    "zdr"
+   ],
+   "notes": "Built the consent-contract slice in breadth-first wave mode, with every switch off by default. Stored form and digest: the contract is stored as JSON text under `approval_contract` in task_template, not as the nested object the plan row describes, because the gateway's check_digest_stable refuses nested objects that storage would re-order. The contract digest is sha256 over the exact text bytes. The same vector is pinned in Go (contract_test.go), Rust (scheduled_contract.rs tests) and the gateway (spaces.rs), value sha256:3d4828c85b976a25447098498e5077de75aa531a0e64aebe2d68bfc8f7953d55 (cross-checked with Python).\n\nControl binding: ScheduleCreateRequest gets ContractDigest, ContractExpiresAt and ContractsEnabled; when a contract is present the schema is sha256:space-cron-create-v2 and the payload digest appends contract_digest, contract_expires_at and contract_max_class=read. The binding travels in the signed payload digest, not as separate claims on the Decision token (decision.go is not owned). Expiry must be canonical UTC, in the future, and at most 90 days. A contract with the switch off is refused by Control and capability-core, and the gateway drops approval_contract from the template so the schedule stays draft-only.\n\nCapability-core: VerifyScheduleCreate accepts v1 only for contract-free intents and v2 only for contract intents, so a decision cannot be moved between the two. createIntentFor parses the contract strictly, checks the window and checks every tool against capability_tools (read class, floor none, no call refinement, capability match, every matching row agrees). Non-delegable names are refused in parse and in registry verification.\n\nConsent card: the dialog shows an empty-state note because DELEGABLE_SCHEDULE_TOOLS is an empty list until a list endpoint exists. With no tools chosen no contract is sent, so the default stays draft-only. Expiry choices are 30, 60 and 90 days.\n\nNOT done in this slice: no migration (contract lives in the template, so the digest covers it), no audit rows, no list endpoint, no deploy, no live proof, no DB tests. The shared-edit lines below must be applied before `cargo test -p mp-contracts` can run and before a contract create can succeed end to end.\n\nConcurrency: other sessions are editing this same worktree (org-agent-policy, browser-sites, inference-core, capability-core cmd/main.go and mp-contracts lib.rs). I edited only my hunks; the lead's shared-edit lines must go on top of those."
+  },
+  {
+   "id": "WS21-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/org-core/migrations/023_org_browser_sites.up.sql (new)",
+    "apps/Control Plane/org-core/migrations/023_org_browser_sites.down.sql (new)",
+    "apps/Control Plane/org-core/internal/browsersites/types.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/validate.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/resolve.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/repository.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/service.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/validate_test.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/resolve_test.go (new)",
+    "apps/Control Plane/org-core/internal/browsersites/repository_postgres_test.go (new, ignored DB test)",
+    "apps/Control Plane/org-core/internal/browsersites/testdata/browser-domain-canonical.json (new, vendored copy of the S0 golden)",
+    "apps/Control Plane/org-core/internal/browsersites/testdata/browser-site-policy-matrix.json (new, vendored copy)",
+    "apps/Control Plane/org-core/internal/http/browser_sites_handlers.go (new)",
+    "apps/Control Plane/org-core/internal/http/browser_sites_handlers_test.go (new)",
+    "apps/Control Plane/org-core/internal/http/browser_sites_contract_test.go (new)",
+    "apps/Control Plane/org-core/internal/http/server.go (edited: field, routes)",
+    "apps/Control Plane/org-core/internal/http/service_auth.go (edited: allowlist scope, broker pin, scope mapping)",
+    "apps/Control Plane/org-core/cmd/server/main.go (edited: SetBrowserSites wiring)",
+    "apps/Control Plane/scripts/run-control-plane.sh (edited: BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN in required_credentials)",
+    "apps/Model Plane/api/contracts/browser-site-policy-matrix.json (new golden, 21 rows)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Control Plane/org-core && go test -count=1 ./internal/browsersites/",
+     "outcome": "ok. Covers the vendored broker golden (41 vectors, list rule), canonical host refusals, ValidatePut/ValidatePref, and the 21-row decision matrix via Decide."
+    },
+    {
+     "command": "cd apps/Control Plane/org-core && go test -count=1 -run 'BrowserSite|BrowserBroker|GatewayCannot|UnconfiguredService|OnlyTheBrowser|OnlyOwnerAndAdmin|StaleAdmin|MemberChoice|MemberBody|BrokerResolves' ./internal/http/",
+     "outcome": "ok. Real service-auth middleware with delegation signing; owner/admin gating, 409 on stale revision, 400 on invalid body and unknown field, member-only choices, 200-choice cap (422 on 201st), broker-only resolve, gateway refused, 503 when unconfigured, scope mapping."
+    },
+    {
+     "command": "cd apps/Control Plane/org-core && go test -p 1 -count=1 ./...",
+     "outcome": "all packages ok except internal/http, where exactly two tests fail: TestComposeGivesBrowserBrokerExactlyTheResolveScope and TestComposeBrokerResolveIsAdmittedByTheRealMiddleware (browser_sites_contract_test.go). Both read docker-compose.yml, which has no browser-broker principal until the shared-edit in lead_todo is applied. Every other http test passes."
+    },
+    {
+     "command": "cd apps/Control Plane/org-core && go vet ./...",
+     "outcome": "ok"
+    },
+    {
+     "command": "cmp of apps/Model Plane/api/contracts/browser-site-policy-matrix.json and browser-domain-canonical.json against internal/browsersites/testdata copies",
+     "outcome": "byte-identical"
+    }
+   ],
+   "db_tests_written": [
+    "TestControlLifecycleBrowserSitesRepositoryUnderRLS (apps/Control Plane/org-core/internal/browsersites/repository_postgres_test.go; run with CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set, from apps/Control Plane/org-core: go test -p 1 -count=1 ./internal/browsersites/ -run TestControlLifecycleBrowserSitesRepositoryUnderRLS)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml: in the ORG_CORE_SERVICE_CREDENTIALS JSON line (the line after `ORG_CORE_SERVICE_CREDENTIALS: >-`, currently line 543), insert before the final `]`: ,{\"principal\":\"browser-broker\",\"audience\":\"org-core\",\"token\":\"${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:?BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN is required}\",\"scopes\":[\"org:browser-site:read:any\"]}. This turns green TestComposeGivesBrowserBrokerExactlyTheResolveScope and TestComposeBrokerResolveIsAdmittedByTheRealMiddleware. The gateway line needs no change.",
+    "Minted-token name BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN is already added to apps/Control Plane/scripts/run-control-plane.sh required_credentials (done in this slice). The S4 broker's env must present the same variable.",
+    "If apps/Control Plane/scripts/validate-release-credentials.sh enumerates the org-core principal tokens (it lists AUDIT_ORG_CORE_SERVICE_TOKEN near line 43), add BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN there too.",
+    "Deploy after the compose edit: bash \"apps/Control Plane/scripts/run-control-plane.sh\" up -d --no-deps --build org-core. Confirm schema_migrations has version 023_org_browser_sites. Then, with the broker token from the minted secrets, check GET /internal/orgs/<org>/browser-sites/resolve?host=example.com (expect effective ask, cap act, source default). PUT a block rule as an owner and expect deny with source org_block. Make a member choice and expect user_pref. Check org_browser_site_history for the rows. Do not echo any token value.",
+    "Run the ignored DB test with CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set: go test -p 1 -count=1 ./internal/browsersites/ -run TestControlLifecycleBrowserSitesRepositoryUnderRLS from apps/Control Plane/org-core. It proves RLS, the revision race, history append-only, the 200 cap and the erasure cascade."
+   ],
+   "deviations": [
+    "User choice routes are under /api/v1/organizations/:id/browser-sites/me and /me/:host, not the row's /api/v1/users/me/browser-sites. Choices are per organisation, so the organisation must be in the path.",
+    "resolve takes no space_id and has no space_floor source. The Space floor (browser_entitled) and its migration 032 belong to S8, which the row assigns there.",
+    "apps/Control Plane/config/plane-service-principals.json is not edited. It governs the Auth Core minted plane tokens, and org-core's static principals (audit-core, inference-core) are not listed there. browser-broker lives only in ORG_CORE_SERVICE_CREDENTIALS.",
+    "Only /api/v1 routes are mounted, with no /orgs proxy form. S6's BFF will call the /api/v1 paths.",
+    "Member choice writes take expected_revision equal to the policy revision the member read, because there is no per-member revision column. The 409 therefore fires when the admin changes the policy.",
+    "Admin writes and member writes both use the existing gateway scope org:settings:write:self, so no new gateway credential scope is needed. Splitting them into their own tier is an owner decision for S6.",
+    "Non-plan limits chosen here: 500 admin rules per organisation, a 200-character note, and at most 32 raw hosts in a resolve request (the golden's cap)."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/docker-compose.yml (shared-edit, see lead_todo)",
+    "apps/Control Plane/scripts/validate-release-credentials.sh (only if it enumerates org-core tokens; see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead applies the docker-compose.yml shared-edit from lead_todo (the browser-broker entry inserted before the final ] on the ORG_CORE_SERVICE_CREDENTIALS JSON line at docker-compose.yml:543). Until then TestComposeGivesBrowserBrokerExactlyTheResolveScope and TestComposeBrokerResolveIsAdmittedByTheRealMiddleware fail, which is the only reason go test -p 1 ./... is red in org-core. The test's token derivation (browser_broker_org_core_service_token) matches the variable name in the shared edit, so the edit should turn both green; not executed here.",
+     "Lead checks apps/Control Plane/scripts/validate-release-credentials.sh (names list near line 43 with AUDIT_ORG_CORE_SERVICE_TOKEN) and adds BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN if that script checks presence, since compose now requires the variable.",
+     "The Postgres DB test (TestControlLifecycleBrowserSitesRepositoryUnderRLS) and the 023 up/down SQL have not been executed against Postgres; lead runs it with CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set from apps/Control Plane/org-core, which also exercises RLS, the revision race, history append-only, the 200 cap and the erasure cascade.",
+     "Live proof (lead, docker): deploy org-core via run-control-plane.sh, confirm schema_migrations has 023_org_browser_sites, GET internal resolve for a host (expect ask, cap act, source default), PUT a block as owner (expect deny, org_block), member choice (expect user_pref), and history rows; confirm the org_core_app role has the sequence grant the migration assumes.",
+     "Verdict pass is conditional on the lead applying the compose shared-edit; without it the two named contract tests keep org-core ./... red."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "user_browser_site_prefs rows keyed by user_id are not erased when a user self-erases in user-core or when a member leaves the organisation; this must be closed before S6 turns the choice UI on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A member choice does not bump the org policy revision, so S4's broker positive cache (at most 30 s) must key on the member and the choice state, or it can serve a stale decision after a member changes a choice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Expired choices are never purged and still count toward the 200-per-member limit until the member deletes them; a sweeper or an expiry-aware count is needed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Race: when no policy row exists yet, a member's FOR SHARE lock locks nothing, so a choice can be recorded at revision 0 while the first admin write creates revision 1; the outcome is a benign stale record, not a grant, but it should be serialised."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No audit event is emitted for pref changes; the history rows exist, but the WS06 browser_site_pref_changed event (K3-11) is still missing and is an S6 dependency."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The canonicaliser refuses IP literals and single-label names but cannot see a public name that resolves to a private address; the dial-time guard in S4/S5a and Quarry must cover that."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to decide whether member choice writes should move to their own gateway scope tier rather than sharing org:settings:write:self (S6)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Postgres DB test and the migration SQL have not been executed; the lead's harness run is the first real check of RLS, the grants and the revision lock."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Space floor (browser_entitled, migration 032) and a space_id parameter on resolve are still missing; they are S8's work and must be added before a Space run can be refused."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The internal resolve (getBrowserSitesInternal -> Service.Resolve -> Repository.Snapshot -> loadPrefsFor) applies a user's live choice with no membership check, so a member who leaves the organisation keeps their remembered read or act until expires_at (up to 90 days); close this in S4 or before the broker consumes resolve, by checking membership or removing prefs on member removal, with a test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "user_browser_site_prefs and the user_pref rows in org_browser_site_history are keyed by user_id and are not erased on user self-erasure or on leaving the organisation (only organisation hard-delete cascades); this must be closed before S6 turns the choice UI on (already in the depth register)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "repository.go Snapshot's comment says the policy and prefs reads share one transaction so no write can land between them, but under READ COMMITTED each statement takes its own snapshot and the policy read takes no lock, so an admin Put can commit between them; fix by taking lockPolicy FOR SHARE first in Snapshot (or REPEATABLE READ) and add a test."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Member choice routes are /api/v1/organizations/:id/browser-sites/me[/:host] instead of the plan row's /api/v1/users/me/browser-sites; the per-org path is justified because choices are per organisation, so the plan row should be amended and S6's BFF must call the implemented paths."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 200-per-member cap counts expired choices and nothing purges them (no expiry-aware count, no sweeper), and no unit or DB test covers an expired row still counting toward the cap (already in the depth register)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Control Plane/org-core/cmd/server/main.go places the internal/browsersites import after metricsserver, out of sorted order (gofmt flags it once CRs are stripped); move it above internal/config."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Migration 023's host CHECK regex accepts an all-digit final label (for example a.123) that the Go CanonicalHost refuses, so the DB backstop is looser than the service; align the regex or document the gap."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "apps/Control Plane/config/plane-service-principals.json was listed in the row but not edited; this is justified because that file contains no org-core principal entries (only Auth Core minted-token consumers), so record the decision in the plan."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "audit",
+    "data-loss"
+   ],
+   "notes": "Built the org-core browser site policy store and API for WS21-S3, with no feature flag (the row's flag is blank). Routes are mounted but have no caller until S4 (broker) and S6 (BFF). Decide() is the pure decision: block wins; ceiling is the admin read/act rule (open mode with no rule gives act, otherwise none); a live member choice applies within the ceiling; otherwise ask. Source is org_block, org_cap, user_pref or default. Hosts are canonicalised to the broker golden's rules, with IP literals, single-label names, ports and wildcards refused. Writes are compare-and-set on the policy revision (409 with current_revision); every policy write and every member pref write or delete appends to org_browser_site_history (append-only by grant). Member choices are capped at 200 per org, expire at 90 days by default, and are checked against the policy revision the member read. The new migration is 023 (021 and 022 are already on disk). The gateway needs no new scope: admin writes and member writes reuse org:settings:write:self, reads use org:read:self. The only new scope is org:browser-site:read:any, pinned to the browser-broker principal. The tests in browser_sites_contract_test.go turn green only after the docker-compose shared-edit is applied. Nothing has been run against Postgres (the DB harness is the lead's); the SQL is unexecuted."
+  }
+ ]
+}

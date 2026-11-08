@@ -1,0 +1,89 @@
+[
+ {
+  "key": "capcore-cron-sweeper-errors-and-savepoints",
+  "rows": [],
+  "title": "capcore-cron-sweeper-errors-and-savepoints",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_failure_test.go",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_failure_integration_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go build ./...",
+    "outcome": "exit 0, no output",
+    "passed": true
+   },
+   {
+    "command": "go vet ./...",
+    "outcome": "exit 0, no output",
+    "passed": true
+   },
+   {
+    "command": "go vet -tags integration ./internal/cron/",
+    "outcome": "exit 0, integration test compiles",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/cron/ ./internal/taskexec/",
+    "outcome": "ok cron 14.9s; ok taskexec 19.5s",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "A transient DB error inside a fire (for example a serialization or connection blip on the tasks INSERT) now uses up that slot. It is recorded as status=failed and advances next_fire_at, so the run is lost but visible. This reuses the existing failed-task-creation path the brief allowed. The lead should confirm the trade-off is acceptable.",
+   "The PgError text is written to cron_fires.error and to the sweep log. PgError.Error() leaves out Detail, so row values should not leak, but any future error type that wraps template content would end up in both. The behaviour matches the old terr.Error() write.",
+   "Fresh-authorization failures still return (false, nil) from sweepDue. They are logged and recorded but not added to RunOnce's error, which is unchanged from before but differs from how other failures are handled.",
+   "The RunOnce count no longer includes failed task creations. sweepAndLog now logs a partial sweep at Warn together with the committed count. No external caller depends on the old count (checked by grep: only sweepAndLog, the cron tests and the taskexec integration test).",
+   "pgx's savepoint Rollback leaves the savepoint defined until the batch commits. With up to 100 schedules there can be many nested subtransactions under mass failure. Correctness holds; this is a performance note only.",
+   "db_tests: internal/cron/sweeper_failure_integration_test.go TestFailedFireIsIsolatedInItsBatch (tag integration, testcontainers postgres:16-alpine). It compiles but has not been run. The lead must run it to confirm the isolation and the stays-due behaviour when the failure record cannot be written. On the old code it fails: the poison insert aborts the shared transaction, so fired=0."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No migration and no configuration change. Behaviour change for operators: a partial sweep now returns a non-nil error alongside its committed count, and the sweep log line changed from \"cron sweep failed\" to \"cron sweep reported errors\" (with fired and error fields). A failed fire now appears as a status=failed cron_fires row with its Postgres error text, and its schedule advances past that slot. Run TestFailedFireIsIsolatedInItsBatch and TestScheduleTemplateDigestSurvivesJSONB through the docker harness before merge.",
+  "summary": "Each due schedule now fires inside its own savepoint, so a failing fire rolls back only its own statements and the rest of the batch commits. Every tx.Exec error on the fire path is checked, rows.Err() is checked after the scan, and a failed fire is logged once with its schedule and org id and the Postgres error text, never template content. A failed fire reuses the existing failed-fire path (a cron_fires row with status=failed and its fire_key, then the schedule advances), so a poisoned schedule is visible instead of blocking every sweep; it stays due only when that failure row cannot be written. Trade-off accepted by the lead: a transient error consumes that one slot, recorded as failed. RunOnce returns the committed count and, on a partial sweep, an error joining each failure; sweepAndLog logs both. The successful-fire SQL and its order are unchanged.\n\nLead proof (testcontainers postgres:16): go test -tags integration -count=1 -p 2 ./... in capability-core passes all 32 packages, the first fully green integration run of the service. TestFailedFireIsIsolatedInItsBatch, TestToolPoliciesAgainstPostgres and TestScheduleTemplateDigestSurvivesJSONB pass; with HEAD's sweeper.go swapped back in, TestFailedFireIsIsolatedInItsBatch fails with 'fired = 0, want 1 ... commit unexpectedly resulted in rollback'."
+ },
+ {
+  "key": "capcore-tool-policies-allow-needs-digest",
+  "rows": [],
+  "title": "capcore-tool-policies-allow-needs-digest",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0025_tool_policies_allow_needs_digest.up.sql",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0025_tool_policies_allow_needs_digest.down.sql"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet -tags integration ./internal/api/",
+    "outcome": "exit 0, no output",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/skillbundle/ ./internal/api/ ./internal/policy/",
+    "outcome": "ok for all three packages (skillbundle, api, policy)",
+    "passed": true
+   },
+   {
+    "command": "bash ../../../scripts/tests/migration-expand-contract-test.sh",
+    "outcome": "migration expand/contract lint ok",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The SQL has never run. The first real run is the lead's harness run of TestToolPoliciesAgainstPostgres (go test -tags integration ./internal/api/, plus ./internal/server/ and ./internal/registry/). setupMCPToolsDB (mcp_tools_integration_test.go:60-72) applies every *.up.sql through pool.Exec, so 0025 is applied and the x2 row (a live allow with no digest) should now be refused.",
+   "The predicate is wider than the packet asked for: it also exempts a row when revoked_at IS NOT NULL. A revoked allow with no digest can still be stored. This is harmless because every API read filters on revoked_at IS NULL (tool_policies.go:106, :156, :392) and making a row live again is re-checked. It also stops the boot from failing on a row inserted by direct SQL. The lead should accept this or switch to the literal form.",
+   "The revoke in the up file writes no registry_audit_log row, unlike the API's revoke. On live databases it probably matches nothing, since the API never writes an allow without a digest, but any row it does revoke leaves no audit trail.",
+   "With TOOL_POLICY_ENFORCED on, revoking a live unpinned allow on a relaxable MCP tool drops the extra ask that row caused, so the tool's base decision applies. With the switch off, behaviour is unchanged.",
+   "The constraint is added in a DO block, which makes it a no-op on re-apply. The down file drops only the constraint and leaves the revocations in place."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "0025 runs at every capability-core boot. After the first success the revoke matches nothing and the constraint is not re-added. With TOOL_POLICY_ENFORCED off, no decision changes. The three choices in the summary need the lead's decision before commit.",
+  "summary": "New migration 0025 (0017 is applied on live databases): revokes any live allow row whose pinned_digest is NULL (set revoked_at and updated_at as the API's revoke does; nothing is deleted), then adds tool_policies_allow_digest_present_check (decision <> 'allow' OR pinned_digest IS NOT NULL OR revoked_at IS NOT NULL) inside a pg_constraint guard, because capability-core re-applies every up file at boot. A revoked unpinned allow stays exempt (never read; reviving it is re-checked). The down file drops the constraint. The expand-contract lint and the reserved-word scan pass.\n\nLead proof (testcontainers postgres:16): go test -tags integration -count=1 -p 2 ./... in capability-core passes all 32 packages, the first fully green integration run of the service. TestFailedFireIsIsolatedInItsBatch, TestToolPoliciesAgainstPostgres and TestScheduleTemplateDigestSurvivesJSONB pass; with HEAD's sweeper.go swapped back in, TestFailedFireIsIsolatedInItsBatch fails with 'fired = 0, want 1 ... commit unexpectedly resulted in rollback'."
+ }
+]

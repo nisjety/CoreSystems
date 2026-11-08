@@ -1,0 +1,57 @@
+.plan-work/quarry-w1w2/INNH-10-status.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-A.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-B.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-C.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-D.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-phaseB.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-sse.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/REVIEW.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-sse.raw
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/ai_spec.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/zdr_matrix.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/api_key_runs.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_status.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/scrape_contract/ai_formats.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/webhook_subscription_routes.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/api_key_fence.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_scrape.rs	
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/ai_scrape.rs	
+apps/Ingestion Plane/Quarry-v2/docs/ZDR_MATRIX.md	
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_subscriptions.go	
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/crawl_sitemap_test.go	
+apps/Model Plane/api/contracts/run-trace-envelope.golden.json	
+apps/Model Plane/api/openapi.yaml	
+apps/Model Plane/deploy/docker-compose.yml	
+apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go	
+apps/Model Plane/go/pkg/authctx/apikey_test.go	
+apps/Model Plane/go/pkg/authctx/authctx.go	
+apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json	
+apps/Model Plane/go/services/browser-broker/cmd/keyrevoke.go	
+apps/Model Plane/go/services/browser-broker/cmd/main.go	
+apps/Model Plane/go/services/browser-broker/internal/authz/apikey_authz_test.go	
+apps/Model Plane/go/services/browser-broker/internal/authz/authz.go	
+apps/Model Plane/go/services/browser-broker/internal/grant/extension_test.go	
+apps/Model Plane/go/services/browser-broker/internal/grant/key_grant_test.go	
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_integration_test.go	
+apps/Model Plane/go/services/browser-broker/internal/server/config.go	
+apps/Model Plane/go/services/browser-broker/internal/server/key_grants.go	
+apps/Model Plane/go/services/browser-broker/internal/server/key_grants_test.go	
+apps/Model Plane/go/services/browser-broker/internal/server/key_issue_test.go	
+apps/Model Plane/go/services/capability-core/migrations/0031_web_crawl_tool_capabilities.up.sql	
+apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json	
+apps/Model Plane/rust/crates/mp-scrub/src/lib.rs	
+apps/Model Plane/rust/services/execution-core/src/browser_agent.rs	
+apps/Model Plane/rust/services/execution-core/src/browser_agent/admission.rs	
+apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs	
+apps/Model Plane/rust/services/model-gateway/src/auth.rs	
+apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs	
+apps/Model Plane/rust/services/model-gateway/src/browser_run.rs	
+apps/Model Plane/rust/services/model-gateway/src/grpc.rs	
+apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+apps/Model Plane/rust/services/model-gateway/src/org_quota.rs	
+apps/Model Plane/rust/services/model-gateway/src/web_extraction.rs	
+apps/Model Plane/rust/services/session-core/src/audit_publisher.rs	
+apps/Model Plane/rust/services/session-core/src/trace_nats.rs	
+apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json	

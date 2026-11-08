@@ -1,0 +1,358 @@
+{
+  "ws": "WS03",
+  "header_decisions": ["DEC-01", "DEC-02", "DEC-03", "DEC-06", "DEC-32", "DEC-39"],
+  "notes": "Scope and sources. WS03 section lines 423-461 of docs/plans/model-plane-chat-build-plan-2026-10-14.md (slice table lines 435-445), Appendix B lines 2253-2322 (binding; applied below), section 4.2 DAG row WS03 (line 1777), section 4.3 proto finals (1811-1900), section 4.4 migration plan (1902-1918), section 6.6 ZDR rows (2138), DEC register rows DEC-01, 02, 03, 06, 32, 39 (117-161) and the hot-spot matrix (1926-1935). Built record: git log --oneline afb83928..HEAD (read-only), the plan Build ledger (lines 2328-2360), and Glob and Grep on the worktree. No docker or cargo was run. The only file written is .plan-work/execution/slices/WS03.json (its directory was created).\n\nAppendix B applied. N2: every proto slice (S2, S3, S4, S5, S8) carries WS12-S2 in depends_on and needs a tag-number diff against git show HEAD in its checks; apps/Model Plane/proto/baseline.binpb is now 530476 bytes (commit e45caa71), so buf breaking is live, but the tag diff stays required. N4: the resume tag is 19 (the table's 18 is superseded). N5: S1 lists the mp-contracts Cargo.toml; the dependency set lands once through the integrator. N6: all three built migrations ship a revert file. N7: S2 and S4 list the canonical api/contracts/zdr-posture-matrix.json and its .sha256 for the new durable RPCs. N1: needs_live_stack is true for runtime slices S2 to S8. K1-7: S3 depends on WS04-S2 (cycle breaker). B.4: S6 and S7 are flagged as tight estimates; the table ranges are kept. Header and section 4.2: WS01-S0 is a dependency of every slice that edits agent.rs, grpc.rs or sessions.proto (S2 to S8); the WS01-S0 live ZDR files are present in this worktree (mp-contracts zdr_refusal.rs and retention.rs, migrations 0044 and 0045 with reverts). DEC-02 gates none of the slices; S2 and S3 carry it as the acknowledgement the header asks for.\n\nTags and files. S3 is [FINISH]+[BUILD] in the plan; the tag enum holds one value, so it is recorded as BUILD. files follows the Change column, plus NEW test files and test files named in the Tests column (S3: durable_loop_contract.rs and orchestration_http_test.rs; S9: durable_loop_contract.rs). Flag defaults are set in apps/Model Plane/deploy/docker-compose.yml, which no Change column names; flip defaults there. Integrator-frozen tags from 4.3: AgentResume 1-8; RunAgentRequest.resume 19; CreateApprovalRequest.continuation_mode 12; Approval.consumed_at 14; Approval.continuation_mode 15; ReserveToolActionRequest args_digest 7 and effect_class 8; FinalizeToolActionRequest receipt_id 4; OrchestrationEvent RunParked 24 and RunResumed 25; RunDetail resumable 17 and park_reason 18. Test commands use single quotes around paths and are per crate, as the table gives them. Rust unit tests named only in the Tests column have no explicit command; per CLAUDE.md run cargo test -q -p execution-core -p model-gateway --all-targets. The ignored DB tests need DATABASE_URL.\n\nBuilt status (source-verified unless stated; the ledger records all switches default off; nothing here is production evidence):\n- S1 built, commit eb131970. loop_fold.rs, lib.rs and loop_fold_golden.rs are present; refuse_if_zdr is at loop_fold.rs line 717. The ledger entry was not checked.\n- S2 built, commits 6a302ef3, 7a531a5f, 3dfaaa1e, ef790ab7, 4a2e9f76, e8f3561c. Migration 0046 and its revert are present; the ConsumeApproval rpc and tags 12, 14 and 15 are in orchestration.proto; AGENT_CONTINUE_AFTER_APPROVAL_ENABLED defaults to false in deploy/docker-compose.yml lines 255 and 1114; commit 4a2e9f76 records deploy evidence.\n- S3 partly built, commits df30270a, 9888de79, 34bd4574, bf60cbc1, 53f97b2c, 20df3dcb, 74260949, f5a90cc2, 9d35aa99, 78a3d169, 1625d1f9, 34db0298. execution.proto has resume = 19 and AgentResume; resume.rs and durable_loop_contract.rs are present. continue_run.rs was NOT created: the /continue handler is pub(crate) async fn continue_run in model-gateway sse.rs (about line 14824), with resume_mode_for at sse.rs line 14128. The BFF continue handling is in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs, not in domains/chat/streams.rs or domains/chat.rs (neither contains continue_run_stream, /continue or chat.run.continue). The FE contract is in orchestration-client.ts, action-registry.ts and chat-run-continue-contract.ts (the last is not in the table). The ledger records no stage-1 live proof.\n- S4 built, commits e3b42b7f, 73209561, cf9a2372, a74ba601, 840f41de, 40b6c884, e8f3561c. Migration 0047 and its revert are present (4.4 planned 0048); loop_checkpoint.rs is present; the three loop-checkpoint RPCs are in sessions.proto; resumable 17 and park_reason 18 are in runs.proto. Source-verified 2026-10-18 (595 DB tests passed); not live-verified.\n- S5 built, commits b8792341, 78a3d169, 45803d1a. Migration 0048 and its revert are present (4.4 planned 0049); effect.rs and closers.rs are present; args_digest 7, effect_class 8 and receipt_id 4 are in sessions.proto. The sweep task is spawned in session-core main.rs; per the ledger its code is in tool_ledger.rs (not in the table). Live-verified on a developer stack 2026-10-17 (docs/compliance/evidence/live-proof-ws03-s5-effect-ledger-2026-10-17.txt). Extra switch SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED (compose line 811).\n- S6 built as the fold writer, commits 698bdec2, 899a39bd, 499d23cf. fold.rs is present. The table's LoopState refactor of run_rounds was NOT done: fold.rs line 22 says 'No LoopState refactor'. Source-verified 2026-10-18; not live-verified.\n- S7 built: S7a commits 698bdec2, 5aefccfe, 40b6c884, d5f98a0d; S7b commits e8a6a871, 67e8f972, e89ef854; S7c commits 672babea, 19fcec68, e2e4890f, 30e0cee6, 6f020b81, 8c32988a, 70ffa68f; fixes e22befde, 387203e0, 3e567e75. resume.rs has select_stage and restore_in_place; agent.rs has begin_continuation. The mode choice is in sse.rs, not continue_run.rs. Live-verified on a developer stack 2026-10-19.\n- S8 partly built: S8-A only, commits 5c1b674d, 267668e3, f5ff99e8, 3e973f8a, 999e8d66, c6a95ae0, beeca491, 59edb6c1, 6ddfae42, 3b3c2a69, 2807c06b, be3b598a, fbec49e5, 92e00400, 9f3f8c6b, 2d56d8e0. runtime_loop/park.rs is present (not in the table). Not built: S8-B crash-park, which the ledger splits off for its own design. Partly live-verified 2026-10-20 (ledger). Also built but not in the table: RunAgentResponse.park_reason = 11 in execution.proto (4.3 lists failure_code = 10 and no park_reason) and SaveLoopCheckpointResponse.park_accepted = 2 in sessions.proto. Executor parking stays off until the owner approves.\n- S9 partly built, commits 1bdd66ae and 2aafc0b5: loop_fold_zdr_matrix.rs and durable_loop_contract.rs are present. durable-loop-proof.sh and durable-loop-live-proof.sh are NOT present; the ledger says the live-proof runner is not built.\n\nGaps and conflicts for the integrator. (1) N7 gap: the canonical api/contracts/zdr-posture-matrix.json has no loop, consume, park or fold row (case-insensitive grep, 0 matches), so ConsumeApproval and the loop-checkpoint RPCs have no matrix row yet. The execution-core copy at tests/fixtures/zdr-posture-matrix.json (with its .sha256) is pinned separately and must be re-synced in the same change. (2) Built migration numbers 0046, 0047 and 0048 differ from the 4.4 provisional plan for S4 and S5 (0048 and 0049); the integrator confirms. (3) park_reason = 11 on RunAgentResponse is not reserved in 4.3. (4) S3 and S7 name continue_run.rs, which does not exist; the logic lives in sse.rs. (5) Switches built but not in the table: SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED (S5), SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED (S8-0), SESSION_CORE_PARK_RECOVERY_ENABLED (S8-4 and S8-5), MODEL_GATEWAY_LOOP_PARKING_ENABLED and VEREVON_GATEWAY_CONTINUE_PARK_ENABLED (S8-7 and S8-8). In compose, model-gateway's EXECUTION_LOOP_PARKING_ENABLED reads MODEL_GATEWAY_LOOP_PARKING_ENABLED (line 282). (6) The B.4 effort risk sits in S6 and S7 (agent.rs refactor); the table ranges are kept. (7) S3 refuses Space runs with continue_space_scope_unsupported until Space ships space_scope_for_thread (DEC-06).",
+  "slices": [
+    {
+      "id": "WS03-S1",
+      "title": "ADR and shared contract types",
+      "tag": "BUILD",
+      "summary": "Records the durable-loop decision (DEC-01 and D1-D8: execution-core hosts the loop, session-core stores the fold, Temporal stays on ExecuteStep) in the Model Plane decisions ledger and adds mp-contracts loop_fold: LoopFoldV1 with its 4 MiB cap, authority digest and narrowing, closer and park vocabularies, and refuse_if_zdr for feature agent_run, with a golden test. No wire change.",
+      "files": [
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/Cargo.toml"
+      ],
+      "depends_on": [],
+      "needs_live_stack": false,
+      "needs_external": "DEC-01 owner ruling (loop host) before the ADR entry merges; the integrator allocates the ADR number (K1-12) and lands the mp-contracts dependency set once (N5)",
+      "risk": ["zdr", "authority"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "decisions": ["DEC-01"],
+      "flag": "",
+      "migration": false,
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs"
+      ],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -q -p mp-contracts loop_fold",
+        "cd 'apps/Model Plane/rust' && cargo fmt --all -- --check",
+        "cd 'apps/Model Plane/rust' && cargo check --workspace --all-targets"
+      ]
+    },
+    {
+      "id": "WS03-S2",
+      "title": "Approval consume and continuation mode",
+      "tag": "BUILD",
+      "summary": "Adds continuation_mode (cold, segment, loop) on CreateApprovalRequest and Approval, Approval.consumed_at, and a user-bearer ConsumeApproval RPC that claims a granted loop-mode approval exactly once; loop-mode grants write no outbox row and the gateway reports awaiting_continue, while cold approvals are unchanged. Migration 0046 adds the consume columns with a revert.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+        "apps/Model Plane/rust/services/session-core/migrations/0046_approval_consume_and_mode.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0046_approval_consume_and_mode.down.sql",
+        "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+        "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+        "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/session_core_rules_double.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+      ],
+      "depends_on": ["WS03-S1", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-03 acknowledgement by the owner; DEC-39 integrator freezes proto tags 12, 14 and 15 and the migration number",
+      "risk": ["authority", "auth", "audit", "zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "decisions": ["DEC-03", "DEC-02", "DEC-39"],
+      "flag": "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (default false; read by execution-core and model-gateway)",
+      "migration": true,
+      "new_files": [
+        "apps/Model Plane/rust/services/session-core/migrations/0046_approval_consume_and_mode.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0046_approval_consume_and_mode.down.sql"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/services/session-core/migrations/0046_approval_consume_and_mode.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0046_approval_consume_and_mode.down.sql"
+      ],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": true,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -p session-core --bin session-core approval_consume -- --ignored --test-threads=1",
+        "cd 'apps/Model Plane/rust' && cargo test -q -p session-core -p execution-core -p model-gateway --all-targets",
+        "buf generate",
+        "buf breaking proto --against proto/baseline.binpb"
+      ]
+    },
+    {
+      "id": "WS03-S3",
+      "title": "Stage 1: continue as a fresh segment",
+      "tag": "BUILD",
+      "summary": "Adds RunAgentRequest.resume (final tag 19; AgentResume 1-8) and an approved-call release gate so one approved, granted call runs exactly once in a continuation segment (exact step, tool and args digest; Deny stays Deny). Adds POST /v1/orchestration/runs/{run_id}/continue (owner-checked SSE; a second continue gets 409) in model-gateway, the BFF route, and the chat.run.continue contract with no UI caller; the [FINISH] part replaces the dead-end resume_durable_approval_continuation and the gateway quarantine.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+        "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/continue_run.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs"
+      ],
+      "depends_on": ["WS03-S1", "WS03-S2", "WS01-S0", "WS02-S4", "WS04-S2", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-02 and DEC-03 acknowledgement by the owner; DEC-06 SPACE owner (typed refusal ships, Space behaviour waits); DEC-39 integrator freezes RunAgentRequest.resume = 19",
+      "risk": ["authority", "auth", "audit", "zdr"],
+      "effort_days_low": 8,
+      "effort_days_high": 12,
+      "decisions": ["DEC-02", "DEC-03", "DEC-06", "DEC-39"],
+      "flag": "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (default off; the same switch as WS03-S2, set in execution-core and model-gateway together; flip on the proof stack only after S9 evidence)",
+      "migration": false,
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/continue_run.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+      ],
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": true,
+      "test_commands": [
+        "cd 'apps/Frontend Plane/verevonv3' && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+        "cd 'apps/Frontend Plane/verevonv3' && pnpm exec vitest run src/shared/api/orchestration-client.test.ts src/shared/actions/action-registry.test.ts",
+        "cd 'apps/Frontend Plane/verevonv3' && pnpm lint && pnpm typecheck"
+      ]
+    },
+    {
+      "id": "WS03-S4",
+      "title": "Fold store in session-core",
+      "tag": "BUILD",
+      "summary": "Adds migration 0047 (run_loop_checkpoints: one AEAD-encrypted fold per run, latest-wins compare-and-set on seq) with session-core loop_checkpoint.rs, and SaveLoopCheckpoint, ClaimLoopCheckpoint and CloseLoopCheckpoint RPCs appended to sessions.proto, with purge on terminalization and GDPR erasure and RunDetail.resumable 17 and park_reason 18 in runs.proto. ZDR and waived runs are refused; the store sits behind SESSION_CORE_LOOP_CHECKPOINT_ENABLED.",
+      "files": [
+        "apps/Model Plane/rust/services/session-core/migrations/0047_run_loop_checkpoints.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0047_run_loop_checkpoints.down.sql",
+        "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+        "apps/Model Plane/rust/services/session-core/src/main.rs",
+        "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+        "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+        "apps/Model Plane/proto/model_plane/v1/runs.proto",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+      ],
+      "depends_on": ["WS03-S1", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-03 owner ruling and security review of the descriptor key reuse under the loopfold AAD domain; DEC-32 owner ruling (waived runs refuse fold persistence); DEC-39 integrator confirms migration 0047 (4.4 planned 0048) and the RPC and runs.proto tags",
+      "risk": ["zdr", "data-loss", "audit"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "decisions": ["DEC-03", "DEC-32", "DEC-39"],
+      "flag": "SESSION_CORE_LOOP_CHECKPOINT_ENABLED (default false; session-core)",
+      "migration": true,
+      "new_files": [
+        "apps/Model Plane/rust/services/session-core/migrations/0047_run_loop_checkpoints.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0047_run_loop_checkpoints.down.sql",
+        "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/services/session-core/migrations/0047_run_loop_checkpoints.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0047_run_loop_checkpoints.down.sql",
+        "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs"
+      ],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": true,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -p session-core --bin session-core loop_checkpoint -- --ignored --test-threads=1",
+        "cd 'apps/Model Plane/rust' && cargo test -q -p session-core --all-targets",
+        "buf breaking proto --against proto/baseline.binpb"
+      ]
+    },
+    {
+      "id": "WS03-S5",
+      "title": "Effect ledger and typed closers",
+      "tag": "BUILD",
+      "summary": "Adds migration 0048 (tool_action_effect_ledger: not_run and unknown_outcome statuses, args_digest, effect_class, closed_by, provider_receipt_id) with ReserveToolAction args_digest 7 and effect_class 8 and FinalizeToolAction receipt_id 4, and a session-core sweep that closes stale reserved rows of terminal or parked runs as unknown_outcome. Execution-core gets effect.rs (reserve before and finalize after each effectful dispatch, fail closed when on) and closers.rs (typed closers; closer text carries class and tool, never arguments), behind EXECUTION_EFFECT_LEDGER_ENABLED.",
+      "files": [
+        "apps/Model Plane/rust/services/session-core/migrations/0048_tool_action_effect_ledger.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0048_tool_action_effect_ledger.down.sql",
+        "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/session-core/src/main.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/closers.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+      ],
+      "depends_on": ["WS03-S1", "WS05-S1", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-39 integrator freezes ReserveToolAction tags 7 and 8, FinalizeToolAction tag 4 and the migration number (built 0048; 4.4 planned 0049)",
+      "risk": ["authority", "audit", "data-loss", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": ["DEC-39"],
+      "flag": "EXECUTION_EFFECT_LEDGER_ENABLED (default false; execution-core)",
+      "migration": true,
+      "new_files": [
+        "apps/Model Plane/rust/services/session-core/migrations/0048_tool_action_effect_ledger.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0048_tool_action_effect_ledger.down.sql",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/closers.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/services/session-core/migrations/0048_tool_action_effect_ledger.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/0048_tool_action_effect_ledger.down.sql",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/closers.rs"
+      ],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": true,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -q -p execution-core --all-targets",
+        "buf breaking proto --against proto/baseline.binpb"
+      ]
+    },
+    {
+      "id": "WS03-S6",
+      "title": "Fold writer in the Do loop",
+      "tag": "BUILD",
+      "summary": "Adds execution-core runtime_loop/fold.rs, which saves a scrubbed LoopFoldV1 through SaveLoopCheckpoint at round (best effort), pre_effect (fail closed before any effectful dispatch) and pause (before CreateApproval, pause_ref run_id:step_id; a refused pause fold becomes a tombstone). Also refactors agent.rs run_rounds onto a LoopState as one early PR (hot file) and extends scrub_checkpoint_test.rs; with the flag off nothing changes.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/lib.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/scrub_checkpoint_test.rs"
+      ],
+      "depends_on": ["WS03-S1", "WS03-S4", "WS03-S5", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-01 owner ruling before the S6 merge (code may be written first; the LoopState refactor is the early PR)",
+      "risk": ["zdr", "data-loss"],
+      "effort_days_low": 6,
+      "effort_days_high": 9,
+      "decisions": ["DEC-01"],
+      "flag": "EXECUTION_LOOP_CHECKPOINT_ENABLED (default false; needs SESSION_CORE_LOOP_CHECKPOINT_ENABLED on session-core per the table)",
+      "migration": false,
+      "new_files": ["apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs"],
+      "new_files_already_present": ["apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs"],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -q -p execution-core --all-targets"
+      ]
+    },
+    {
+      "id": "WS03-S7",
+      "title": "Stage 2: in-place resume",
+      "tag": "BUILD",
+      "summary": "Adds resume_from_fold to runtime_loop/resume.rs: it claims the pause fold by compare-and-set, decrypts it, checks schema_version, prompt_digest and Authority::narrows, closes dangling calls with typed closers, releases the approved call and rebuilds the round in its original call order without counting a new round. Any restore failure falls back to stage 1 under the same consume; model-gateway picks mode loop when RunDetail.resumable is set and the flag is on.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/continue_run.rs"
+      ],
+      "depends_on": ["WS03-S3", "WS03-S4", "WS03-S5", "WS03-S6", "WS04-S2", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-01 owner ruling before the S7 merge (code may be written first); DEC-03 acknowledgement",
+      "risk": ["authority", "auth", "data-loss"],
+      "effort_days_low": 10,
+      "effort_days_high": 14,
+      "decisions": ["DEC-01", "DEC-03"],
+      "flag": "EXECUTION_LOOP_RESUME_ENABLED (default false; needs the S4 and S6 switches)",
+      "migration": false,
+      "new_files": [],
+      "new_files_already_present": [],
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -q -p execution-core --all-targets"
+      ]
+    },
+    {
+      "id": "WS03-S8",
+      "title": "Parking",
+      "tag": "BUILD",
+      "summary": "Adds RoundsOutcome Parked (credential window, provider exhausted, upstream unavailable, reauth required): the executor writes a park fold and returns status parked without terminalizing, sse.rs emits a raw run_parked frame, and orchestration.proto adds RunParked 24 and RunResumed 25. The recovery worker parks a resumable fold left active by a crash (CrashInterrupted), treats parked and resuming folds like open approvals, and expires unclaimed parks after the TTL to outcome_unknown; ZDR and waived runs never park, and chat-client.ts handles run_parked minimally.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+        "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+        "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+        "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+      ],
+      "depends_on": ["WS03-S4", "WS03-S6", "WS03-S7", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "owner approval before EXECUTION_LOOP_PARKING_ENABLED is switched on (it stays off until then); DEC-39 integrator freezes RunParked 24 and RunResumed 25",
+      "risk": ["zdr", "data-loss", "audit"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "decisions": ["DEC-39"],
+      "flag": "EXECUTION_LOOP_PARKING_ENABLED (default false); SESSION_CORE_PARK_TTL_SECONDS (default 86400)",
+      "migration": false,
+      "new_files": [],
+      "new_files_already_present": [],
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": true,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test -p session-core --bin session-core recover_parks -- --ignored --test-threads=1",
+        "cd 'apps/Model Plane/rust' && cargo test -q -p execution-core -p model-gateway -p session-core --all-targets",
+        "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+        "buf breaking proto --against proto/baseline.binpb"
+      ]
+    },
+    {
+      "id": "WS03-S9",
+      "title": "Proof scripts, matrix test, contract tests",
+      "tag": "BUILD",
+      "summary": "Adds scripts/tests/durable-loop-proof.sh (modelled on approval-continuation-proof.sh, disposable Postgres) and durable-loop-live-proof.sh (live-stack flows of S3, S7 and S8; not CI), execution-core tests/loop_fold_zdr_matrix.rs over the enforcement_rows (fold, consume and park refused unless persistent), and extends durable_loop_contract.rs so the gateway builder and the executor validator agree and tool_loop.rs has no resume path. The evidence bundle goes to MODEL_PLANE_STATUS.md; capability rows stay source_only.",
+      "files": [
+        "apps/Model Plane/scripts/tests/durable-loop-proof.sh",
+        "apps/Model Plane/scripts/tests/durable-loop-live-proof.sh",
+        "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+      ],
+      "depends_on": ["WS03-S1", "WS03-S2", "WS03-S3", "WS03-S4", "WS03-S5", "WS03-S6", "WS03-S7", "WS03-S8", "WS01", "WS12"],
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 5,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "new_files": [
+        "apps/Model Plane/scripts/tests/durable-loop-proof.sh",
+        "apps/Model Plane/scripts/tests/durable-loop-live-proof.sh",
+        "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs"
+      ],
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "test_commands": [
+        "cd 'apps/Model Plane/rust' && cargo test --workspace --no-fail-fast"
+      ]
+    }
+  ]
+}

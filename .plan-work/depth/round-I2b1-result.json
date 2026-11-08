@@ -1,0 +1,88 @@
+[
+ {
+  "key": "ws11-s8-anthropic-effort-log",
+  "rows": [],
+  "title": "ws11-s8-anthropic-effort-log",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib anthropic",
+    "outcome": "88 passed, 0 failed, 0 ignored",
+    "passed": true
+   },
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib effort",
+    "outcome": "51 passed, 0 failed, 0 ignored",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "a_dropped_budget_logs_no_effort_resolved would also pass on the old code because it only checks that no line appears. The positive tests (once_per_body, claude_5_5 default) are the ones that fail without the change, and the negative test pins where the log sits.",
+   "The run_logged retry loop works around tracing's process-wide callsite-interest cache. If a parallel test's subscriber caches a stale 'never', an attempt that only records the guard warning returns early, which could make the negative test flaky. Four full-crate runs and my own run were green.",
+   "Every Claude 5.5 request now emits one INFO effort_resolved line whatever the adaptive switch says. That is expected because 5.5 always takes the ladder, but deploy log volume grows by one line per 5.5 call.",
+   "The logged max_tokens is the raised ceiling actually sent, not the caller's value. Readers of WS11-S8 evidence should know this."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No switch, env var or compose change was added. Because a Claude 5.5 request always takes the ladder (the 5.5 wire ignores INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING), every 5.5 model call now emits one INFO effort_resolved line. Budget-class models log only when that switch is the literal true. The log has no content, and no request body changes. Nothing was committed, and no docker, git write or .env access was used.",
+  "summary": "Added one info! line, effort_resolved, in apply_thinking's ladder branch of anthropic.rs. It sits after the wire match and immediately before the max_tokens write, so a level is logged only when it reached the body: a budget the no-room guard drops and a wire the adapter does not render log nothing. Fields: request_id, model, wire, requested, applied, clamped, max_tokens (the raised value actually sent). Ids and closed tokens only, no content. Added three tests in a new effort_log_tests module at the end of the file: (1) anthropic_ladder_logs_effort_resolved_once_per_body: one line for a High request on sonnet-4-5 with the right fields and no content marker; (2) a_dropped_budget_logs_no_effort_resolved: max_tokens 0 drops the budget, no line, and the guard's own warning is checked to prove the capture worked; (3) a_claude_5_5_request_logs_its_default_level: for opus, sonnet and haiku 5.5 with no level, one line whose applied and requested equal claude_5_5_default_effort. The capture mirrors the Recorder in codex_subscription_tools.rs, with the same retry for tracing's process-wide callsite cache. The diff against the original is two pure insertions: 13 lines before the max_tokens write and 183 lines appended. No request body, switch, legacy branch or other file changed. Coordination note: the task text rendered 'Files you may edit: (none)'; I followed the packet's files field, which names this file, as the task record instructs.\""
+ },
+ {
+  "key": "ws11-s9-codex-clamp-test-switch-aware",
+  "rows": [],
+  "title": "ws11-s9-codex-clamp-test-switch-aware",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -p inference-core --lib provider::codex_subscription (switch off)",
+    "outcome": "60 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "INFERENCE_CORE_CODEX_WIDE_EFFORT=true cargo test -p inference-core --lib provider::codex_subscription",
+    "outcome": "60 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -p inference-core --lib provider::effort",
+    "outcome": "21 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "INFERENCE_CORE_CODEX_WIDE_EFFORT=true cargo test -p inference-core --lib provider::effort",
+    "outcome": "21 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "INFERENCE_CORE_CODEX_WIDE_EFFORT=true cargo test -p inference-core --lib",
+    "outcome": "554 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo fmt -p inference-core -- --check",
+    "outcome": "exit 1. 19 hunks in codex_subscription.rs (lines 153, 168, 176, 311, 713, 864, 871, 885, 1041, 1123, 1143, 1184, 1641, 1720, 1730, 1779, 1821, 1928, 1951), none inside the edited fn at 1071-1092; plus pre-existing hunks in other files (cache.rs, entitlement.rs, grpc.rs and others). This matches the coder's claim of 19 remaining pre-existing hunks, so the failure is pre-existing and not caused by this task.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The test works out the mode from the ladder (wide = support(Family::Codex, \"gpt-6-astra\").levels contains XHigh) rather than from the env. If a future change to effort.rs made that check give the wrong answer, the test would follow along and still pass. The tester's switch-on run guards against this today: 60 passed with production giving \"medium\", and that only happens if wide was detected correctly. effort.rs wide_codex_clamp_keeps_medium_and_xhigh pins the wide ladder on its own.",
+   "cargo fmt -p inference-core -- --check exits 1. The 19 hunks it reports in codex_subscription.rs (and others in cache.rs, entitlement.rs, grpc.rs and more) are all outside the edited fn and were there before this change. The new fn (lines 1071-1092) is rustfmt-clean.",
+   "anthropic.rs shows as modified in git status from another task. It was not touched here, but the lead should stage only codex_subscription.rs hunks for this commit.",
+   "The CRLF checkout versus LF index is preserved per the coder's report. The diff is +14/-9 ignoring CR, entirely within every_level_clamps_into_low_or_high, with no production code, effort.rs or catalogue change."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Test-only change with no production code touched. The switches stay default off, and no env file, compose file or container was touched. Nothing to deploy.",
+  "summary": "Edited only the test fn every_level_clamps_into_low_or_high (now lines 1071-1092) in codex_subscription.rs. Its expectations now follow the ladder that effort::support resolves for this process: wide = support(Family::Codex, \"gpt-6-astra\").levels contains XHigh. With wide on, Medium gives \"medium\", XHigh gives \"xhigh\" and Max gives \"xhigh\"; with it off these give \"low\", \"high\" and \"high\". Clamped flags: Minimal and Max always, Medium and XHigh only when not wide, Low and High never. The test does not read the env, codex_wide_enabled is untouched, and no production code or catalogue entry changed. Line endings are preserved: every LF is CRLF, and the diff ignoring CR is 14 insertions and 9 deletions, all inside that fn. Single-file rustfmt (edition 2021, rustfmt 1.9.0) reported 20 hunks before the edit and 19 after; the one removed sat inside the edited fn, and the 19 that remain are pre-existing and outside it. Two judgement calls for review: the packet's files field names codex_subscription.rs while the task text said (none), and I followed the packet record; I also added XHigh and Low clamp assertions beyond the packet's list, and the comment cites effort.rs wide_codex_clamp_keeps_medium_and_xhigh by name because the packet's :730 is stale (the test is at :748). The cargo runs were started in the background and had not finished when I reported, so no pass or fail outcome is confirmed yet. The per-command exit codes will appear in C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/clamp-summary.txt, with one log per command in that same folder."
+ }
+]

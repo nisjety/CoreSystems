@@ -1,0 +1,73 @@
+// intended path: apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (hunk: append inside `mod tests`, before its closing brace; verified in a scratch copy, passes, and goes red when WriterGate::decide stops reading self.waived; wrap to rustfmt before committing, CI runs cargo fmt --check)
+    /// The writer gate and the pause site, driven by the posture matrix. `tests/loop_fold_zdr_matrix.rs`
+    /// proves the SHARED gate over every row but no production code calls it, so this is the test
+    /// that puts the same rows through the gates this crate really has: for every enforcement row
+    /// the resolver serves, the flags the run hands `WriterGate` (`zdr` from the request, `waived`
+    /// from the route, as `run_agent` reads them) must leave the writer on for a persistent row and
+    /// off, for the right reason, for a ZDR or a waived one. A waived row has `zdr == false`, so a
+    /// gate that looked at `zdr` alone would write a fold for it. The pause site is held to the same
+    /// rows through `run_pause_mode`, fed the expression `agent.rs` passes it.
+    #[test]
+    fn the_writer_gate_and_the_pause_mint_follow_the_posture_matrix_row_by_row() {
+        use mp_contracts::retention::{
+            resolve_turn, ClaimsView, Resolution, RouteView, WaiverView,
+        };
+        const MATRIX: &str = include_str!("../../tests/fixtures/zdr-posture-matrix.json");
+        let matrix: serde_json::Value = serde_json::from_str(MATRIX).expect("the matrix is JSON");
+        let _continue = crate::runtime_loop::resume::ContinueSwitch::set(true);
+        let (mut open, mut zdr_off, mut waived_off) = (0_usize, 0_usize, 0_usize);
+        for row in matrix["enforcement_rows"].as_array().expect("rows") {
+            let id = row["id"].as_str().unwrap_or("?");
+            let claims: Vec<ClaimsView<'_>> = row["inputs"]["bearers"]
+                .as_array()
+                .expect("bearers")
+                .iter()
+                .map(|bearer| ClaimsView {
+                    zdr: bearer["zdr"].as_bool().expect("zdr"),
+                    org_zdr: bearer["org_zdr"].as_bool(),
+                    waiver: (!bearer["waiver"].is_null()).then(|| WaiverView {
+                        version: u32::try_from(bearer["waiver"]["version"].as_u64().expect("v"))
+                            .expect("fits"),
+                        provider: bearer["waiver"]["provider"].as_str().expect("provider"),
+                        connection: bearer["waiver"]["connection"].as_str().expect("connection"),
+                    }),
+                })
+                .collect();
+            let route = RouteView {
+                provider: row["inputs"]["route"]["provider"].as_str().expect("provider"),
+                connection: row["inputs"]["route"]["connection"].as_str(),
+                explicit_zdr: row["inputs"]["route"]["explicit_zdr"].as_bool().expect("zdr"),
+            };
+            let resolution = resolve_turn(&claims, &route);
+            // What the run knows about itself: a refused turn never becomes a run.
+            let (zdr, waived, expected) = match resolution {
+                Resolution::Refuse(_) => continue,
+                Resolution::Persistent { .. } => (false, false, None),
+                Resolution::Zdr { .. } => (true, false, Some(OffReason::Zdr)),
+                Resolution::Waived { .. } => (false, true, Some(OffReason::Waived)),
+            };
+            let gate = WriterGate {
+                zdr,
+                waived,
+                ..all_good()
+            };
+            assert_eq!(gate.decide(), expected, "{id}: the fold writer's gate");
+            // The pause site (agent.rs): `!req.zdr && !ctx.route.is_waived()`.
+            assert_eq!(
+                crate::runtime_loop::resume::run_pause_mode(
+                    !zdr && !waived,
+                    "",
+                    "",
+                    "delete_records"
+                ),
+                if expected.is_none() { "loop" } else { "" },
+                "{id}: the pause site's loop mint"
+            );
+            match expected {
+                None => open += 1,
+                Some(OffReason::Zdr) => zdr_off += 1,
+                Some(_) => waived_off += 1,
+            }
+        }
+        assert_eq!((open, zdr_off, waived_off), (3, 4, 2), "every served row was checked");
+    }

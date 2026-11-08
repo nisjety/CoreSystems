@@ -1,0 +1,856 @@
+{
+ "batchId": "W3-01",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\catalogue_prices.rs (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\pricing.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\lib.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\http_routes.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\catalogue_price_contract.rs (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.model-price.test.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\components\\ModelSearchField.tsx (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\components\\ModelSearchField.test.tsx (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\components\\AiModelPicker.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\components\\AiModelPicker.model-entitlement.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\components\\AiModelPicker.model-price.test.tsx (new, test beside changed code)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\dashboard\\home\\DashboardComposer.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\dashboard\\home\\DashboardComposer.model-entitlement.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib list_models (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0), final sources",
+     "outcome": "ok: 5 passed, 0 failed (catalogue_prices and descriptor tests)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test catalogue_price_contract, final sources",
+     "outcome": "ok: 2 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full lib, same binary, shared worktree)",
+     "outcome": "ok: 2672 passed, 0 failed, 4 ignored; the run includes another slice's uncommitted model-gateway sse.rs edits present in the worktree"
+    },
+    {
+     "command": "rustfmt --edition 2021 --check on catalogue_prices.rs, tests/catalogue_price_contract.rs and src/pricing.rs",
+     "outcome": "clean (exit 0) after formatting the two new files and the three added test blocks in pricing.rs; http_routes.rs shows no rustfmt hunks in the changed ranges"
+    },
+    {
+     "command": "pnpm exec vitest run on the five touched FE test files (chat-client.model-price, ModelSearchField, AiModelPicker.model-entitlement, AiModelPicker.model-price, DashboardComposer.model-entitlement)",
+     "outcome": "ok: 5 files, 31 tests passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api src/shared/components src/features/dashboard/home",
+     "outcome": "155 files and 1609 tests passed; 1 file failed to load: src/shared/api/quarry-client.test.ts cannot resolve @quarry/client (file not touched by this slice)"
+    },
+    {
+     "command": "pnpm exec eslint on the touched FE files",
+     "outcome": "0 errors; warnings only on pre-existing lines (DashboardComposer.tsx:1075, AiModelPicker.model-entitlement.test.tsx:49/59/67)"
+    },
+    {
+     "command": "pnpm lint (full app)",
+     "outcome": "exit 1 with 43 errors and 246 warnings app-wide; none reported in files this slice touched (touched-file hits are pre-existing warnings)"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "22 errors, all pre-existing: 21 in src/shared/api/quarry-client.ts and 1 in src/shared/api/schedule-contract.test.ts; none in touched files"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, directly after the line `      MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}` (about line 226), add the line `      MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert above the first entry (line 25, newest first) a new entry titled `## 2026-11-02 - The model record joins price by id at read time; limits come from a per-model table, unknown is 0 (EP-13 S1/S2)` stating: the /v1/models list price is read at request time from cost-core's catalogue by model id inside model-gateway and is never copied into inference-core's record; only chat models are priced; exact or prefix matches only (the default row, unknown models and subscription routes give no price); behind MODEL_GATEWAY_CATALOGUE_PRICES, off by default; D10 (product owner flips the switch) and D11 (cost-core is a Model Plane service; Control is not involved).",
+    "needs_other_files apps/Frontend Plane/verevonv3/src/styles/global.css: append these rules (the classes are used by the new components; without them the search input is unstyled and the price is an inline run after the model name): `.dashboard-composer-model-search { display: block; box-sizing: border-box; width: calc(100% - 20px); margin: 6px 10px 4px; padding: 6px 10px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 13px; }` `.dashboard-composer-model-price { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }` `.dashboard-composer-model-empty { margin: 6px 12px; font-size: 13px; color: var(--verevon-text-muted); }`",
+    "Live proof (lead, docker; not run by this slice): rebuild model-gateway and the frontend on the Anthropic-only dev stack. With MODEL_GATEWAY_CATALOGUE_PRICES unset, curl /api/v1/models and byte-compare with the previous build (no price key anywhere). With it set to true, claude-sonnet-5-5 must carry price 3.00/15.00 with source prefix (claude-sonnet row). Screenshot both pickers at 1280 and 375 px with a search typed, and record the evidence in docs/compliance/evidence/ep13-s1-catalogue-<date>.txt.",
+    "Owner decision before the switch is flipped on (D10): product owner rules that every member sees list price per million tokens."
+   ],
+   "deviations": [
+    "The design's four handler-level http_routes tests became helper-level tests in catalogue_prices.rs (names keep the list_models prefix; the switch and snapshot behaviour are asserted against a stub cost-core that counts fetches). http_routes.rs gains one descriptor test. The listing wiring itself is covered only by the source-scan contract test.",
+    "Currency is carried from the catalogue row instead of a constant USD; a rate with an empty currency is not priced.",
+    "The search matches name, id and the raw provider id, not the group label; the Verevon pinned modes are not searched; the no-match message is shown inside the catalogue list.",
+    "Norwegian letters ae, oe and aa are kept distinct rather than folded (read of 'Norwegian letters preserved'): 'bla' does not find 'bla' with ring-a and 'so' does not find 'sok' with o-stroke. The owner should confirm this reading.",
+    "The composer search is inside the 'Velg modell selv' disclosure, so it is hidden until that disclosure is opened; the design text said above the groups, and the groups live in that disclosure.",
+    "ModelPrice is produced only for modality chat, so image, speech and embedding models never carry a price."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not run: rebuild model-gateway and the frontend. With MODEL_GATEWAY_CATALOGUE_PRICES unset, byte-compare /api/v1/models against the previous build. With it set to true, claude-sonnet-5-5 must show 3.00/15.00 with source prefix. Screenshot both pickers at 1280 and 375 px with a query typed. Record the evidence under docs/compliance/evidence/.",
+     "Shared-edit for the lead in apps/Model Plane/deploy/docker-compose.yml: add `MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}` to the model-gateway environment. The code already treats a missing variable as off, so this line is for documentation.",
+     "Shared-edit for the lead in apps/Model Plane/docs/decisions/ledger.md: add the EP-13 S1 entry (price joined by id at read time, D10/D11).",
+     "global.css needs the three new classes: .dashboard-composer-model-search, -price and -empty. This file is outside the slice's ownership.",
+     "D10 owner sign-off is needed before the switch is flipped on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the switch on and cost-core unreachable while the catalogue is cold or empty, every /v1/models request waits up to the 2 s FETCH_TIMEOUT, because an empty catalogue is refetched on each pricing call; bound it (negative cache or time budget) before the switch is enabled."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The S1 live proof (switch off byte-compare, switch on prefix price, both pickers at 1280 and 375 px) is not run; it is the lead's step in lead_todo."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No router-level test drives list_models with an inference-core stub; the listing wiring is covered only by a source-scan contract test plus the helper tests."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the six-model threshold (six chat models hide the search field), the composer price line, or the composer no-match message in the composer."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner should confirm the Norwegian-letter rule (ae, oe and aa kept distinct, so 'bla' does not match 'blå') and that search matches the raw provider id rather than the group label and leaves the Verevon modes unsearched."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Search has no flag (design: pure view), so the search field appears above six chat models even with the price switch off; the owner should know it ships on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The worktree carries uncommitted edits from other slices of this batch (shared/i18n/errors.ts and errors.test.ts, model-gateway sse.rs, EP-14 chat fold files, EP-8-S9 settings files); the lead must commit only this slice's files. The full model-gateway lib test count moved from 2675 to 2676 during my run, so another slice's tests landed meanwhile."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "global.css rules for the three new classes are missing (see needs_other_files); until they land the search input is unstyled."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Rate struct gained a currency field; the ten test literals in pricing.rs were updated; existing callers are unchanged in behaviour."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The Norwegian price line keeps the English phrase per million tokens; a product copy review may want a Norwegian phrase."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Pre-existing, not from this slice: app-wide pnpm lint shows 43 errors and 246 warnings; quarry-client.test.ts cannot resolve @quarry/client in this worktree; tsc6 reports 22 errors in quarry-client.ts and schedule-contract.test.ts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the switch on and cost-core unreachable or the catalogue empty, every /v1/models request can wait up to the pricing FETCH_TIMEOUT. An empty catalogue is refetched on each snapshot. Bound this with a negative cache or a time budget before the switch is enabled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No router-level test drives list_models with an inference-core stub. The handler wiring in http_routes.rs is covered only by the include_str source-scan contract test, plus the helper tests in catalogue_prices.rs."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the six-model threshold (the search field hidden and the query ignored at six or fewer), or the DashboardComposer price line and no-match message."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Search ships with no flag. With the price switch off, both pickers still show the new search field once there are more than six chat models. Search folds accents but keeps ae/oe/aa (æ, ø, å) distinct, and it matches name, id and the raw provider, not the group label. The owner should confirm all of this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The search query is not reset when the picker menu closes, so a stale filter can still be applied when the menu reopens."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The worktree holds uncommitted edits from other slices: errors.ts, sse.rs, the session-core files, memory.proto, the chat fold files and the settings files. The lead must stage only this slice's 13 files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Norwegian price line keeps the English phrase 'per million tokens'. Product copy review is pending."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib list_models (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "ok: 5 passed, 0 failed, 2671 filtered out",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test catalogue_price_contract",
+      "outcome": "ok: 2 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p model-gateway --all-targets",
+      "outcome": "exit 0 (only an unused-result warning in an existing test near line 4780 of the lib)",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/shared/api src/shared/components src/features/dashboard/home --pool=threads (run via node node_modules/vitest/vitest.mjs, because pnpm exec tries a workspace install and fails with ENOENT on a missing Ingestion Plane Quarry sdk path)",
+      "outcome": "155 files passed, 1 failed to load. 1609 tests passed, 0 failed. The failed file is src/shared/api/quarry-client.ts, which cannot resolve '@quarry/client'. The slice did not touch that file.",
+      "passed": false
+     },
+     {
+      "command": "eslint on the 9 touched frontend files (full pnpm lint not re-run)",
+      "outcome": "0 errors, 4 warnings, all on pre-existing lines: DashboardComposer.tsx:1075 and AiModelPicker.model-entitlement.test.tsx:49, 59 and 67",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "22 errors: 21 in src/shared/api/quarry-client.ts (the same unresolved @quarry/client) and 1 in src/shared/api/schedule-contract.test.ts. None are in files this slice touched.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built EP-13-S1 (picker search and list price at /v1/models) in worktree epic-shaw-4d613b. Backend: catalogue_prices.rs holds the switch MODEL_GATEWAY_CATALOGUE_PRICES (strict parser: trimmed literal true, off by default), ModelPrice wire struct (input_per_million, output_per_million, currency, source exact|prefix), snapshot_for_listing (one PricingCache snapshot per listing, none taken while off) and model_price (chat modality only; exact or prefix matches only; default row, unknown and subscription routes give no price; empty currency not priced). pricing.rs adds ListPrice and RateSnapshot::list_price (same resolver) and a currency field on the cached rate (cost-core already serves it; 10 test literals updated). http_routes.rs ModelDescriptor gains an optional price field (skip when None) and list_models wires the snapshot. Off = /v1/models JSON unchanged and no catalogue fetched. No proto, no migration, no DB tests. Frontend: chat-client.ts parses price (whole or dropped), exports filterModels (case- and accent-insensitive; name, id, raw provider id) and formatModelListPrice; ModelSearchField is a new shared search input (Escape clears a non-empty query without closing the menu); AiModelPicker and DashboardComposer mount it above six chat models, filter the catalogue groups, show 'Ingen modeller passer' on no match, and show the price as a second line. The composer search sits inside the 'Velg modell selv' disclosure where the catalogue lives. Search has no flag (design: pure view), so with the switch off the picker still shows the search field above six chat models. Rebase on WS10-S6: not run (git rebase not permitted); HEAD already contains the WS10-S6 picker and entitlement edits and the tests pass on top of them. Concurrency: the worktree carries uncommitted edits from other slices of this batch (shared/i18n/errors.ts and errors.test.ts, model-gateway sse.rs, EP-14 chat fold files, EP-8-S9 settings files). I touched none of them; the lead must commit only this slice's files. I ran cargo clean -p model-gateway once against the designated target directory before the first build."
+  },
+  {
+   "id": "EP-8-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\memory_control.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\grpc.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\memory_grpc.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\dreaming.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\memory.proto",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\i18n\\errors.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\i18n\\errors.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core memory_control (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0), final source",
+     "outcome": "ok: 19 passed, 0 failed, 12 ignored (ignored = DB tests, not run)"
+    },
+    {
+     "command": "session-core memory_grpc filter, run by executing the cargo-built test binary C:\\dev\\mp-target-w2\\debug\\deps\\session_core-9c8a27d1061f5ecd.exe directly (cargo was queued on the shared target lock; this binary post-dates every session-core edit)",
+     "outcome": "ok: 17 passed, 0 failed, 15 ignored (DB tests, not run)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib memory_prefetch, final source",
+     "outcome": "ok: 7 passed, 0 failed. An earlier run failed every_prefetch_exit_records_an_outcome because my new sse.rs test called record_memory_prefetch_outcome, which that source scan counts; the call was removed and the corrected build passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/i18n (apps/Frontend Plane/verevonv3)",
+     "outcome": "6 test files, 200 tests passed, including the new errors.test.ts case"
+    },
+    {
+     "command": "pnpm exec eslint src/shared/i18n/errors.ts src/shared/i18n/errors.test.ts",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "exit 2, 22 errors, none in a file this slice touched: 21 in src/shared/api/quarry-client.ts (generated @quarry/client not built in this worktree) and 1 TS2352 in untouched src/shared/api/schedule-contract.test.ts. Not caused by this slice"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on memory_control.rs, memory_grpc.rs, sse.rs, grpc.rs, dreaming.rs",
+     "outcome": "no diff in any line this slice added; remaining drift is in lines this slice did not touch"
+    },
+    {
+     "command": "NOT RUN (lead or depth): session-core DB harness, buf lint/breaking/generate, live proof, cargo test --workspace, execution-core text-scan contract tests over sse.rs",
+     "outcome": "not run"
+    }
+   ],
+   "db_tests_written": [
+    "space_turn_creates_no_personal_memory_inline",
+    "agent_run_turn_creates_no_memory_inline",
+    "chat_thread_unchanged",
+    "space_thread_context_assembly_has_no_user_or_org_rows",
+    "scheduled_agent_run_reads_as_its_creator_and_writes_none",
+    "space_thread_search_memory_returns_skip_reason_space_scope",
+    "index_memory_refuses_in_space_thread_with_space_scope",
+    "agent_run_thread_still_recalls_owner_memory",
+    "agent_run_index_memory_refused_with_agent_run_scope",
+    "pause_blocks_inline_and_dreaming_extraction",
+    "resume_does_not_mine_messages_written_while_paused",
+    "paused_user_still_gets_org_rows_and_no_user_rows",
+    "off_hides_list_but_delete_still_works",
+    "inflight_extraction_cannot_persist_after_pause",
+    "zdr_caller_cannot_set_state",
+    "space_thread_messages_never_reach_user_memory",
+    "thread_off_blocks_search_and_index_for_that_thread_only"
+   ],
+   "lead_todo": [
+    "Run the session-core DB harness (scripts/tests/session-core-db-tests.sh) with each db_tests_written name as a filter. The first nine are new; the last eight are existing gate tests that must pass against the changed gate. Diff the failing set against the c18196af2 baseline (1031 passed); do not trust the exit code alone.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert above the 2026-11-01 entry (line 25): '## 2026-11-02 - Space threads read and write no personal or org memory; agent-run threads read but do not write (EP-8 S2)' then '**Status: implemented, no switch (containment is always on).** One rule, `memory_control::thread_containment`: a Space thread (a Space id or origin `space`) reads no agent_memory row and writes none (reason `space_scope`); an `agent_run` thread reads the owner's memory and writes none (refusals name `agent_run_scope`). It applies before the MEMORY_CONTROLS_ENABLED early return (D1, D2, D13). Dreaming's batch predicate names the same set and a source-scan test pins the two. Space rows and their recall come in EP-8 S6/S7. Open: the learning origin check still sits inside the kill switch.'",
+    "Proto (comment-only edit to memory.proto at lines 90-95 and 311-313): in apps/Model Plane/proto run buf lint and buf breaking --against proto/baseline.binpb, then buf generate to refresh apps/Model Plane/go/gen/model_plane/v1/memory.pb.go, whose embedded comments change. No field or tag changes.",
+    "Evidence file docs/plans/wave3/evidence/EP-8-S2.md was not written by this slice (see deviations). Write it with the live proof.",
+    "Live proof (depth phase, lead-run): in a personal Space room send 'Jeg heter Ima og jobber med anbud'; agent_memory row counts for the user must be unchanged and a normal chat must not recall anything from the room. The design's expectation that the SSE memory_recall frame shows skipped: space_scope needs revisiting first (depth finding 5).",
+    "Apply or assign the three needs_other_files edits. The learning_events.rs edit is the P1 finding (depth finding 1).",
+    "Before the scheduled-result switch: confirm the scheduled-fire thread origin is agent_run in the WS20 path (depth finding 2)."
+   ],
+   "deviations": [
+    "containment_ignores_the_controls_kill_switch became containment_is_applied_before_the_kill_switch, a source-order scan, because a behavioural test would need env mutation, which the crate forbids.",
+    "The metric label is skipped_space_scope, matching the existing skipped_* labels, not space_scope.",
+    "No memory-recall chip for space_scope: no skip reason reaches the client today and the design says no contract change in S2. The FE string sits in errors.ts, keyed by memory_not_enabled with details.reason.",
+    "agent_run decisions: skip_reason stays empty (reads are not left out) while the refusal names agent_run_scope. contain() also sets learning_allowed false for AgentRunScope (not in the design; fail-closed; no current thread path reads it).",
+    "The design's combined DB test was split into four named tests so harness filters match the plan's list.",
+    "The evidence file was not written: it records the live proof, which is lead-run, and a wave-mode stub would be a report file.",
+    "dreaming.rs changed by a comment only; the pin test lives in memory_control.rs.",
+    "The shared target directory was held by other agents' cargo builds, so memory_grpc was run by executing the cargo-built session-core test binary directly. memory_prefetch was rebuilt through cargo on the corrected source."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx: remember flow (around lines 536-547 and the paused note near line 1048). Show translateApiError(err, i18n.tr) when err.details.reason is space_scope or agent_run_scope.",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs: save_memory_refusal (around line 3621). Add an arm for 'memory_not_enabled:space_scope' that returns 'save_memory: memory is not saved in shared Spaces; nothing was saved'.",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\learning_events.rs: lines 330-333. Move the thread_origin != chat check above the controls_enabled() block (owner decision; depth finding 1).",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md: shared file; the ledger entry is in lead_todo as a shared-edit."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Session-core DB harness not run (needs docker/DATABASE_URL). Nine new tests and eight existing gate tests need it: space_turn_creates_no_personal_memory_inline, agent_run_turn_creates_no_memory_inline, chat_thread_unchanged, space_thread_context_assembly_has_no_user_or_org_rows, scheduled_agent_run_reads_as_its_creator_and_writes_none, space_thread_search_memory_returns_skip_reason_space_scope, index_memory_refuses_in_space_thread_with_space_scope, agent_run_thread_still_recalls_owner_memory, agent_run_index_memory_refused_with_agent_run_scope, the six D1-532 gate tests and space_thread_messages_never_reach_user_memory. Diff the failing set against the c18196af2 baseline (1031 passed).",
+     "Evidence file docs/plans/wave3/evidence/EP-8-S2.md (listed in new_files) does not exist; it holds the live proof (Space room 'Jeg heter Ima og jobber med anbud', agent_memory counts unchanged, no recall in a normal chat).",
+     "buf lint, buf breaking --against proto/baseline.binpb and buf generate were not run for the comment-only memory.proto edit. go/gen/model_plane/v1/memory.pb.go embeds the comments and needs regenerating.",
+     "Shared-edit to apps/Model Plane/docs/decisions/ledger.md (the implementer's lead_todo) is not applied yet."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "learning_events.rs (C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\learning_events.rs, lines 330-333): the thread_origin == chat rule sits inside `if controls_enabled()`. With MEMORY_CONTROLS_ENABLED off, a Space or agent_run run can be announced to the learning loop, which D13 forbids. Fix outside this slice by moving the origin check above the switch; the no-thread case is an owner decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Scheduled-fire origin is unverified. Containment applies only to origin space or agent_run; design risk 7 (D2-120) says a scheduled result may keep origin chat, and then it is still mined. Verify in the WS20 path before SESSION_CORE_SCHEDULED_RESULT_PERSIST goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "mail_task, support and system origins are not contained. A mail_task thread carries inbound email text into the same extractor, so untrusted mail can write the owner's memory. Owner decision; the design is silent."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "dreaming.rs permits_extraction applies no thread containment; the Dreaming exclusion is the batch SQL predicate alone, pinned by a source-scan test. A future writer that bypasses the batch loader would not be stopped by the gate."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The design's live-proof expectation (room reply's SSE memory_recall frame shows skipped: space_scope) cannot hold. sse.rs fetch_chat_memory_context returns no skip for a skipped recall, so no frame carries it; a client chip needs a contract change outside S2."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ChatMessages.tsx (C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx): the remember flow maps every memory_not_enabled refusal to the 'paused' note (around lines 547 and 1048), so a Space refusal says memory is paused. The new copy in errors.ts is ready for it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "execution-core runtime_loop/mod.rs save_memory_refusal tells the model 'memory is not enabled for this user (space_scope)'; the design wanted 'Memory is not saved in shared Spaces'."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The kill-switch-off path is covered only by a source-order scan, because the crate forbids env mutation; a behavioural test needs an env-injection seam."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "execution-core's text-scan contract tests over model-gateway sse.rs (autonomy_ladder_contract, cross_service_loop_contract, durable_loop_contract) were not run. A grep shows none of their patterns in the lines this slice added."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "learning_events.rs (around lines 330-333) applies the thread_origin == 'chat' rule only inside `if controls_enabled()`, so with MEMORY_CONTROLS_ENABLED off a Space or agent_run run can still be announced to the learning loop, which goes against D13 (containment always on); the file is outside this slice's ownership."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Containment keys on origin 'space'/'agent_run' only; whether the WS20 scheduled-fire thread is created with origin agent_run (and not chat, per D2-120) is unverified, and must be confirmed before SESSION_CORE_SCHEDULED_RESULT_PERSIST goes on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Model-facing copy: execution-core runtime_loop save_memory_refusal still renders 'memory is not enabled for this user (space_scope)' instead of the design's 'Memory is not saved in shared Spaces' (file outside ownership)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ChatMessages.tsx's remember flow maps every memory_not_enabled refusal to the 'paused' note, so the new MEMORY_SCOPE_COPY in errors.ts is never shown to a user in a Space or agent run until that component is changed (outside ownership)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The design's live-proof expectation that the SSE memory_recall frame shows skipped: space_scope cannot hold, because fetch_chat_memory_context forwards no skip reason to the client; the live proof wording needs revising or a contract change in a later slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "mail_task, support and system origins are not contained: a mail_task thread feeds inbound (untrusted) email text into the inline extractor that writes the owner's memory; owner decision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The kill-switch-off path is pinned only by a source-order scan (containment_is_applied_before_the_kill_switch), with no behavioural test; the design's containment_table 'controls on/off' axis is not exercised at runtime."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With the controls switch off, resolve_for_thread and resolve_in_tx_for_thread now always run the thread_facts query, where before they returned early; this adds one indexed PK lookup per gated call and changes no behaviour."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The plan's test command 'cargo test -p session-core --lib memory_control' is invalid for the bin-only crate; correct it in the plan to '--bin session-core'."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p session-core --lib memory_control (plan literal)",
+      "outcome": "error: no library targets found in package session-core (session-core is bin-only); plan command cannot run as written",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core memory_control (CARGO_INCREMENTAL=0, C:/dev/mp-target-w2)",
+      "outcome": "19 passed, 0 failed, 12 ignored (DB tests); also compiles session-core",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core memory_grpc",
+      "outcome": "17 passed, 0 failed, 15 ignored (DB tests)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib memory_prefetch",
+      "outcome": "7 passed, 0 failed (only unrelated warnings); also compiles model-gateway lib",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/shared/i18n --pool=threads (apps/Frontend Plane/verevonv3, via node vitest directly because pnpm exec fails its deps-status check)",
+      "outcome": "6 files, 200 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "session-core DB harness tests (17 named DB tests)",
+      "outcome": "not run: needs DATABASE_URL and docker, forbidden to testers; tests are #[ignore] and were counted as ignored",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "data-loss"
+   ],
+   "notes": "Wave-mode build of EP-8-S2 (Memory containment, Space and agent_run threads), no switch. One rule, memory_control::thread_containment(origin, has_space) -> Containment::{None, SpaceScope, AgentRunScope}, applied in resolve_for_thread and resolve_in_tx_for_thread BEFORE the MEMORY_CONTROLS_ENABLED early return (D13). thread_mode became thread_facts, reading memory_mode, origin and space_id in one query. Space threads: access None, reason space_scope (an existing ZDR or org denial keeps its reason). agent_run threads: reads unchanged, generation refused, reason agent_run_scope on refusals; skip_reason stays empty because nothing was left out. New wire tokens space_scope and agent_run_scope. Writers covered: inline append (grpc.rs gate; comment added), IndexMemory via resolve_for_thread plus index_agent_memory under the row lock. Readers covered: SearchMemory and context assembly (access None gives no memory_index rows, no agent rows, no Letta). Dreaming unchanged (K3-5 SQL), pinned by a source-scan test. grpc.rs learned_skill_withheld match extended (exhaustive). sse.rs: skipped_space_scope outcome label, listed in MEMORY_PREFETCH_OUTCOMES and mapped from space_scope; the gRPC twin in grpc.rs inherits it. errors.ts: reason-keyed copy for memory_not_enabled with details.reason space_scope or agent_run_scope. memory.proto: comment-only. No flag, no migration, no new field. Intended behaviour change: Space threads and agent_run threads can no longer write memory; the save_memory tool gets memory_not_enabled:<reason> there. recall_conversations (WS17-S5) already excludes Space and agent_run threads: it requests origin chat and message_search.rs SEARCH_SQL requires space_id IS NULL on the owner branch, so no change was made. Round A C5 is covered by memory_control::scheduled_agent_run_reads_as_its_creator_and_writes_none and memory_grpc::agent_run_thread_still_recalls_owner_memory, using agent_run fixtures; the production scheduled-fire origin is not verified (depth finding 2)."
+  },
+  {
+   "id": "EP-8-S9",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/SettingsPage.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/SettingsPages.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-search.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-search.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/settings/lib/settings-search.test.ts (run first before settings-search.ts existed)",
+     "outcome": "red: failed to resolve the import, as expected"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/settings/lib/settings-search.test.ts (after the module and the two synonyms were added)",
+     "outcome": "passed, 6 of 6"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/settings/components/SettingsPages.test.tsx -t \"settings search\" --reporter=verbose (before the platform-admin test was added)",
+     "outcome": "passed, 3 of 3 route tests"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/settings (final state)",
+     "outcome": "passed, 19 files and 159 tests, exit 0"
+    },
+    {
+     "command": "pnpm exec eslint on settings-sections.ts, settings-search.ts, settings-search.test.ts, SettingsPage.tsx, SettingsPages.test.tsx (final state)",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "pnpm lint (full project, run before the last two edits)",
+     "outcome": "exit 1 with 43 errors and 246 warnings in other files; none in the five changed files; not compared against HEAD"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (final state)",
+     "outcome": "22 error lines, all pre-existing: 21 in src/shared/api/quarry-client.ts (generated @quarry/client not present in this worktree; pnpm build:quarry-client not run) and 1 in src/shared/api/schedule-contract.test.ts; zero in features/settings"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the S9 screenshot proof on a second dev server (the main checkout owns :5173): queries 'tone', 'tidssone' and 'minne' at 1280px and 375px, and confirm the save bar at the bottom of a settings page can be scrolled into view.",
+    "Commit only the five files in files_changed; the same frontend folder holds other batches' uncommitted changes that must not go into this commit. No shared-file edits were needed for this slice."
+   ],
+   "deviations": [
+    "The search box sits in SettingsPage.tsx, the route wrapper, above the section page rather than inside WorkspaceSettingsPage.tsx, because that file is not owned; the wrapper is a flex column so the bar stays above the scrolling settings surface.",
+    "Layout and dropdown use inline style objects plus existing shared classes (verevon-floating-panel, verevon-menu-item, verevon-settings-panel-note), because no owned file is a stylesheet.",
+    "SettingsPage keys the section page (Show keyed) so every section change remounts it; this also applies to sidebar navigation, which previously updated the page in place. It was needed so a jump starts at the top.",
+    "The platform-admin filter mirrors the sidebar rule in CoreSidebarSettingsPanels.tsx; the model-access rule (gateway switch) is not mirrored because the switch lives in CoreSidebar.tsx, which is not owned."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (only if the search must hide Modelltilgang while the gateway model-access switch is off; the switch is read there)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Screenshot proof for the queries 'tone' and 'tidssone' (and 'minne') on a second dev server at 1280px and 375px is not taken; confirm the save bar can still be scrolled into view now that the search bar sits above the scrolling surface.",
+     "Full-project pnpm lint was not compared against HEAD (the implementer saw 43 errors in other files); the scoped eslint on the slice files is clean.",
+     "Commit only the 5 settings files; the verevonv3 folder holds other batches' uncommitted changes."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The screenshot proof for the queries 'tone', 'tidssone' and 'minne' has not been taken on a running settings page; run it at 1280px and 375px and confirm the save bar at the bottom can still be scrolled into view, because the search bar is now a flex sibling above the scrolling surface inside an overflow-hidden panel."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The personal time zone (the Tidssone field on /account, AccountSettingsPage Preferences) is not reachable from settings search; 'tidssone' lands on the Tidssone field of the Planlagte kjøringer schedule form, so the owner must decide whether search should also reach non-section destinations such as /account#preferences."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "'tone' lands on Persona before the tone preset exists (EP-8 S3 is not built); re-check that result and the Persona keywords when S3 adds the selector to PersonaSection."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Search still offers Modelltilgang when the sidebar hides it because the gateway model-access switch is off (CoreSidebar modelAccessEnabled); matching needs that switch passed into SettingsPage, which means editing CoreSidebar.tsx outside this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The keyed Show remounts the section page on every section change, including sidebar clicks, so scroll position and page-local state reset there too; click through the sidebar after deploy to confirm nothing regressed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Mouse selection of a result (li onClick) and closing the list on blur are not covered; the tests cover Enter, the arrow keys, Escape, the no-match state and the platform-admin filter."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Six sections (trust, quotas, org-instructions, browser-sites, org-browser-policy, learning) are absent from the sidebar, so search is now the only in-app route to them; confirm with the owner that this discoverability is intended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The search layout uses inline style objects and shared classes because global.css is not owned; move these into a settings stylesheet rule if the search grows."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The dark-mode look of the results dropdown and of the active-row highlight (var(--verevon-surface-soft)) has not been checked visually."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Folding maps ø to o and æ to ae, so the ASCII spelling 'laring' does not find 'læring' while 'laering' does; decide whether a broader ASCII fallback is wanted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The keyword lists were written from the section copy at this commit and no check compares them with the UI copy, so a renamed field can leave a synonym pointing at the wrong place."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SettingsPage now renders the section page inside a keyed Show, so every sidebar navigation between sections remounts VerevonWorkspaceSettingsPage and resets its scroll position and local state, which was not the case before."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Search offers Modelltilgang even when the sidebar hides it because the gateway model-access switch is off; mirroring that rule needs a change in CoreSidebar.tsx, which this slice does not own."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'tidssone' opens the cron schedule page, not the personal time zone field on /account; the owner should decide whether search should also reach non-section destinations."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "'tone' opens Persona before the EP-8 S3 tone preset exists; check the Persona keywords again when S3 lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Mouse selection (mousedown preventDefault followed by an li click) and closing the list on blur have no test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The platform-admin filter reads getSession() inside a createMemo; if the session is not a reactive source, a role change during the session does not update the results until the query changes."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The search layout uses inline style objects instead of stylesheet rules, because global.css is not owned by this slice."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "vitest run src/features/settings --pool=threads (run via node node_modules/vitest/vitest.mjs, because pnpm exec fails on a deps-status install check)",
+      "outcome": "19 files passed, 159 of 159 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm lint, scoped to src/features/settings (eslint, run directly)",
+      "outcome": "0 errors, 4 warnings, all solid/reactivity in BrowserSitesSection.tsx and WorkspaceSettingsPage.tsx (not slice files). The full-project pnpm lint was not run; the implementer reported 43 errors in other files.",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "22 errors: 21 in src/shared/api/quarry-client.ts (generated @quarry/client missing in this worktree) and 1 TS2352 in src/shared/api/schedule-contract.test.ts line 28. 0 errors in src/features/settings. The command exits non-zero, but none of the errors are in the slice's files.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Frontend only; no flag, proto, migration or server change, and nothing new needs a switch. settings-sections.ts: SectionDetail gains a required keywords field and all 22 sections carry Norwegian and English synonyms. settings-search.ts is a pure ranking: each query word must match a section's id, label, title or keywords (case, diacritics and hyphens folded; ø and æ folded by hand); the score is the best match per word, with name and id outranking synonyms, so \"minne\" opens Minne before Org security. SettingsPage.tsx now renders a search combobox with a listbox, arrow keys, Enter, Escape and mouse selection, and the section page is keyed so a jump starts at the top. Results drop platform-users unless the user is a platform admin, matching the sidebar. Working-copy line endings were kept: SettingsPage.tsx is CRLF as checked out (core.autocrlf), the other edited files and the two new files are LF. Git status in the same verevonv3 folder shows other batches' uncommitted changes (chat, dashboard, i18n errors, model picker); stage only the five files above. Wave mode: no live proof, no browser run, no screenshot."
+  },
+  {
+   "id": "EP-14-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/settled-fold.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/settled-fold.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/SettledTurnFold.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/SettledTurnFold.test.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-fold.css (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx (modified: mount, prop, renderer)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.plan-gate.test.tsx (modified: 4 fold cases)"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run --pool=forks src/features/chat/lib/settled-fold.test.ts src/features/chat/components/SettledTurnFold.test.tsx src/features/chat/components/ChatMessages.plan-gate.test.tsx (cwd apps/Frontend Plane/verevonv3)",
+     "outcome": "3 files, 50 tests passed (final run)"
+    },
+    {
+     "command": "pnpm exec vitest run on the same three files (pnpm_config_verify_deps_before_run=false)",
+     "outcome": "exit 0, 49 passed; run before the innerHTML-equality test was added, which then passed (50 total)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run --pool=forks src/features/chat/components/ChatMessages src/shared/chat-nodes",
+     "outcome": "29 files, 276 tests passed (existing suites, switch-off path)"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "22 errors, all pre-existing: 21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts; none in slice files"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on the six slice files",
+     "outcome": "exit 0, 0 errors; ChatMessages.tsx carries the same 10 warnings HEAD has, shifted by the inserted lines"
+    },
+    {
+     "command": "pnpm_config_verify_deps_before_run=false pnpm lint",
+     "outcome": "exit 1: 289 problems, 43 errors all in src/features/chat/components/chat-normalizers.ts (file unmodified in this worktree, so pre-existing), 246 warnings; none in slice files"
+    },
+    {
+     "command": "pnpm-lock.yaml SHA256 compared with the backup taken before the first pnpm run",
+     "outcome": "unchanged"
+    },
+    {
+     "command": "python3 scripts/gates/size-ratchet.py --check",
+     "outcome": "did not finish within 300 s (repo-wide walk); neither a pass nor a fail"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit ChatPage.tsx (apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx): (1) after line 82 add `import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'`; (2) before `const messageRows = createMemo(` (line 452) add `const settledFolds = createMemo(() => (settledFoldEnabled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))`; (3) in the messageRows row object, after `docked: dockedNodesFor(dockedTrays(), turn.id),` (line 462), add `settledFold: settledFolds()?.get(turn.id),`; (4) in renderMessageRow's `<MessageBlock`, after `docked={row().docked}` (line 1101), add `settledFold={row().settledFold}`. Until these four lines are in, VITE_CHAT_SETTLED_FOLD changes nothing.",
+    "Commit with the lead: the seven files in files_changed (five new, two modified). Nothing was staged, committed, reset or pushed here, and no database or docker step was run.",
+    "Owner decision before VITE_CHAT_SETTLED_FOLD is flipped on: the duration source (timing.serverMs now, versus the design's settledAt stamp, which would need edits to chat-types.ts and the controller's terminal paths) and whether non-error lifecycle notices may fold.",
+    "Live proof (depth phase, not run here): second dev server from this worktree, a seeded 40-turn thread with tools, an approval and a question. Settled turns fold, the approval and question stay visible, the running turn never folds; screenshots at 1280 and 375 px; keyboard-only and find-in-page pass; WS09-S1 perf spec with the switch on and off once D1-002 is recorded.",
+    "Ledger: record 'FE: Folding never hides a decision node' (design D7) in apps/Model Plane/docs/decisions/ledger.md with the commit.",
+    "Size: ChatMessages.tsx is 4,854 lines (4,839 at HEAD) against a ceiling of 4,033 it already exceeds; accept the +15 or move renderNodeEntries out (that needs CHAT_NODE_REGISTRY exported)."
+   ],
+   "deviations": [
+    "Duration comes from timing.serverMs (the gateway's admission-to-end span on one clock, kept for restored turns as well), not from 'assistant terminal time minus user createdAt'. ChatTurn has no terminal timestamp, and a live assistant turn's createdAt is its send time, so the design formula would show about 0 s. A turn with no timing shows step counts only; no user-turn lookup is made, so a leading paged turn with timing shows its time.",
+    "The per-turn loop is ChatPage.tsx (messageRows and renderMessageRow), not ChatMessages.tsx. ChatMessages takes a settledFold prop that the page must pass (see lead_todo), so ChatPage.tsx is listed in needs_other_files and not edited.",
+    "foldPlan returns Map<turnId, SettledFold> rather than a FoldRow[] array, and takes no `now` argument (no rule uses a clock).",
+    "Fold body membership is an allowlist (reasoning, tool-chips, steps), with an exhaustive Record so a new node kind fails the build until placed. The design's never-fold list is covered by default; grounding, confidence, memory-recall, source-scope, truncated, attachments, files, artifacts, image previews and follow-ups also stay in view.",
+    "lifecycle-notices stay in view, because LifecycleNotice has no error variant and the design's 'with an error' rule cannot be expressed.",
+    "Rows exist only for settled turns that ran reasoning or at least one tool step.",
+    "The process body renders at the top of the message content, above the answer. For open settled turns with tools this moves tool chips and steps above the answer; before, they sat after it. The answer and the other nodes keep their order."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The four ChatPage.tsx shared-edit lines from the implementer's lead_todo (import, settledFolds memo, settledFold in the messageRows row, settledFold prop on MessageBlock) are not applied. Until the lead applies them, VITE_CHAT_SETTLED_FOLD has no effect.",
+     "Live proof at 1280 and 375 px with a seeded thread that has tools, an approval and a question: settled turns fold, decisions stay visible, the running turn never folds. Also a keyboard-only pass and a real browser find-in-page check (hidden=until-found), plus the display:none fallback.",
+     "Check virtualisation (VITE_CHAT_VIRTUALIZE) and the paged transcript with the switch on: re-measuring after a toggle, and whether fold state survives a remount.",
+     "Record ledger entry D7 ('FE: Folding never hides a decision node') in apps/Model Plane/docs/decisions/ledger.md with the commit.",
+     "Owner decision on the duration source (timing.serverMs vs. the design's user-message-to-terminal-frame formula) before the switch is flipped on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Duration source differs from the design formula (no terminal timestamp on ChatTurn; built on timing.serverMs); the owner or lead must confirm before the switch is flipped, since turns without timing show step counts only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The fold renders nothing until the four ChatPage.tsx lines in lead_todo are applied; with the switch on and those lines absent the transcript is unchanged."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Layout check needed at 1280 and 375 px: on open settled turns with tools, tool chips and steps now sit above the answer, where they used to sit below it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "lifecycle-notices stay in view because LifecycleNotice has no error variant, so the design's 'with an error' rule cannot be expressed; the owner may allow non-error notices to fold."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Find-in-page and the display:none fallback are checked only with a synthetic beforematch event in jsdom; a real browser find and a browser without hidden=until-found still need proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Keyboard behaviour is asserted as a native button, not as an Enter keypress (jsdom does not turn Enter into a click); a keyboard-only pass in a browser is still needed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Virtualisation (VITE_CHAT_VIRTUALIZE) and the paged transcript are not exercised: a toggled fold should re-measure through the existing ResizeObserver, and the arrow-key walk over a folded turn is untested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Fold state is per mount: under virtualisation a turn that scrolls out and back re-applies its default and can re-fold a turn the reader opened; confirm this is acceptable or hold the state in the page."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ChatMessages.tsx is 4,854 lines (4,839 at HEAD) against a size-ratchet ceiling of 4,033 it already exceeds; the ratchet check did not finish here (repo-wide walk over 300 s), so its result is unknown."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test covers the page's activeTurnId expression (isStreaming() || liveRunId()); it is untested until the lead applies the ChatPage lines."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "settled-fold.ts imports formatElapsedWait and isGeneratedImageFile from chat-media-markdown.tsx, which pulls katex into a pure module; move the two helpers to a light module when the file next changes."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The design's ledger entry 'FE: Folding never hides a decision node' (D7) is not recorded here; the lead records it in apps/Model Plane/docs/decisions/ledger.md with the commit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "pnpm lint exits 1 on the untouched baseline: 43 errors in src/features/chat/components/chat-normalizers.ts (Norwegian text outside i18n.tr), unrelated to this slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The fold has no effect until the lead applies the four ChatPage.tsx lines (that file is outside the slice's ownership set), so the activeTurnId expression `(isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined` is untested and unproven."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Duration comes from timing.serverMs, not from D7's 'user message to terminal frame'. A turn with no timing shows only 'Worked · N steps'. The owner must accept this before the switch is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "lifecycle-notices never fold, because LifecycleNotice has no error marker. This is stricter than D7, so it is safe, but the owner may want non-error notices folded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With a fold present, SettledTurnContent renders the process body above all visible entries. On settled turns (open or folded), tool chips and steps therefore move above the answer, where they used to sit below it. This is a layout change that needs a visual check."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Fold state lives in a per-mount signal. Under virtualisation, a turn that scrolls out and back in returns to defaultFolded and can re-fold a turn the reader had opened."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ChatMessages.tsx grows by 15 lines on a file already over its size-ratchet ceiling (4,033). The size-ratchet check was not run to completion by the implementer or by me."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The fold body moves entries between two separate keyed For lists (folded and visible). When a turn first gains a fold, its DOM is recreated rather than kept. No test covers focus or scroll stability on that transition."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "settled-fold.ts (meant to be pure) imports formatElapsedWait and isGeneratedImageFile from chat-media-markdown.tsx, which pulls the katex/markdown graph into the module."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "VITE_CHAT_SETTLED_FOLD is not declared in src/vite-env.d.ts next to the other VITE_CHAT_* switches. It typechecks through the generic env type, but the declaration should be added for consistency."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "node node_modules/vitest/vitest.mjs run --pool=forks settled-fold.test.ts SettledTurnFold.test.tsx ChatMessages.plan-gate.test.tsx (verevonv3)",
+      "outcome": "3 files passed, 50 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+      "outcome": "22 errors, all outside slice files: 21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts. Zero in settled-fold, SettledTurnFold or ChatMessages.",
+      "passed": true
+     },
+     {
+      "command": "eslint on the 6 slice ts/tsx files (ChatMessages.tsx, plan-gate test, settled-fold.ts/test, SettledTurnFold.tsx/test)",
+      "outcome": "exit 0, 0 errors, 10 warnings (solid/reactivity in ChatMessages.tsx, same count the implementer says HEAD has)",
+      "passed": true
+     },
+     {
+      "command": "pnpm lint (whole repo)",
+      "outcome": "Not run by me. The implementer reports 43 pre-existing errors in chat-normalizers.ts (unmodified); I only linted the slice files.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the settled-turn fold in wave mode. settled-fold.ts holds isSettled, foldPlan (default folded for settled turns older than the last two, except the last settled turn), splitForFold (allowlist: reasoning, tool-chips and steps fold; everything else stays in view), settledFoldSummary and the literal-'true' parser for VITE_CHAT_SETTLED_FOLD. SettledTurnFold.tsx holds the row button (aria-expanded, aria-controls), the body (hidden=\"until-found\", follows beforematch, no display rule) and SettledTurnContent, which renders every entry in place when there is no fold. ChatMessages.tsx gets a settledFold prop on MessageBlock and AssistantMessage, a module-level renderNodeEntries (the old keyed/legacy For pair, moved) and one SettledTurnContent in the content div. Switch off: no plan is built, so the markup is identical (innerHTML equality is tested). No proto, migration, store, egress or model call, so no ZDR matrix row. The switch changes nothing until the ChatPage lines in lead_todo are applied. The per-turn loop lives in ChatPage.tsx, not ChatMessages.tsx as the design's file list implies, so the page wiring could not be done here."
+  }
+ ]
+}

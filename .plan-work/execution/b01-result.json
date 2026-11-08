@@ -1,0 +1,309 @@
+[
+ {
+  "id": "WS01-S6",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/model-gateway/src/retrieval.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cd 'apps/Model Plane/rust' && cargo test -q -p model-gateway --lib",
+    "outcome": "1906 passed, 0 failed, 4 ignored (includes the new retrieval and tool_loop tests)"
+   },
+   {
+    "command": "cd 'apps/Model Plane/rust' && cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+    "outcome": "128 passed, 0 failed (124 existing + 4 new); this target does build and run on Windows"
+   },
+   {
+    "command": "mutation: durable retrieval_notice emission in sse.rs disabled, then the ZDR one (sse.rs restored byte-identical after each, git shows sse.rs unmodified)",
+    "outcome": "the new e2e tests failed on each mutation (waived test: no notice frame; zdr test: no notice frame)"
+   },
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh (from the worktree root)",
+    "outcome": "70 passed, 22 failed. The 22 are missing or digest-mismatched goldens of other planes (Quarry-v2 dp-contracts, Data Plane rerank-v1 and usage-ledger fixtures, *.sha256 pin files) and 4 'pending' vendor rows; none touch model-gateway source. Not caused by this slice; I did not run it against a clean HEAD to confirm baseline."
+   },
+   {
+    "command": "rustfmt --check --edition 2021 on retrieval.rs, tool_loop.rs, sse.rs, e2e_invoke_chain_test.rs",
+    "outcome": "every Z-41b hunk and every hunk I added is clean; remaining diffs are pre-existing unformatted code outside this slice (files were deliberately not reformatted whole)"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/docs/ZDR.md section 5.10 (the line 'the `retrieval_notice` SSE event' bullets stay): replace the third bullet '- `retrieval_notice` in the knowledge-search tool result that the model reads.' with '- `retrieval_notice` in the knowledge-search tool result that the model reads. A ZDR turn runs no tool loop (it offers no tools), so only a waived turn reaches this place; the turn emits the same typed event where it emits the tool result, so a resumed stream replays it.'",
+   "shared-edit apps/Model Plane/docs/ZDR.md section 5.10: replace the sentence 'Where the Data Plane refuses a restrictive retrieval instead of answering it (`failed_precondition` with the reason `zdr_dense_unavailable`, the form its streaming retrieval uses), the turn gets the typed `zdr_unavailable` refusal, not an empty answer.' with 'Where the Data Plane refuses a restrictive retrieval instead of answering it (the reason `zdr_dense_unavailable` leads the status message; its streaming retrieval sends it as `failed_precondition`, and the gateway matches the reason, not the code), the turn gets the typed `zdr_unavailable` refusal, not an empty answer. A refused knowledge search inside a waived turn\\'s tool loop reaches the model as a tool error that carries only the typed code (`knowledge_search refused: retrieval_reduced`), never the Data Plane\\'s sentence; a persistent turn gets a plain failure named by its status code.'",
+   "shared-edit apps/Model Plane/docs/ZDR.md section 5.10: replace the whole paragraph beginning 'Not covered yet:' with 'Not covered: the source-verification retrieval that runs after a durable answer, whose verdict does not carry the notice. Accepted limit (Z-41b finding b, owned by the Data Plane): the gateway\\'s unary Data Plane call never receives the typed refusal today, so the typed path is proven by a Data Plane double only. With hybrid search switched off on the Data Plane, the unary retrieve returns the refusal as `internal` with the embedding error text and no typed reason (retrieval-engine `retrieve` handler, `Status::internal(e.to_string())`), so the answer goes on ungrounded with no notice; the gateway cannot match a reason the Data Plane does not send. The typed refusal has to come from the Data Plane (task Z-41) and this item is raised to its owner. Proof of what is built: the streamed notice before the first chunk, on resume, on a persistent turn (absent) and from a waived tool call is covered by the `stream_answer` and `knowledge_search_says` tests in `model-gateway/tests/e2e_invoke_chain_test.rs`. The live proof needs an attested ZDR route, so it waits for Z-40 and Z-60.'",
+   "Add the verification command 'cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test e2e_invoke_chain_test' to the slice's checks (128 passed here, about 4 minutes); the plan lists only --lib/--all-targets.",
+   "Tell the owner of the Data Plane retrieval-engine that finding (b) is theirs: unary Retrieve with hybrid off and a ZDR embed refusal should return failed_precondition with the 'zdr_dense_unavailable: ...' message (as stream_refusal does) instead of Status::internal(e.to_string()); the gateway already maps it. Record it as an accepted limit in the S7 evidence file.",
+   "Re-run scripts/tests/zdr-contract-sync.test.sh on the committed tree: in this worktree it reports 22 failures that are missing or mismatched goldens of other planes (unrelated to model-gateway); confirm they are the baseline on the integration branch.",
+   "Warn concurrent slices: any new test calling tool_loop::dispatch_tool must pass the new trailing data_plane_mode argument."
+  ],
+  "deviations": [
+   "The streamed notice tests are in apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs, not in sse.rs: invoke_stream_sse needs the session-core and inference-core gRPC mocks and the signed-token harness that only that file has; the lib test module has none. sse.rs is therefore unchanged. The plan command cargo test --lib does not run them; the e2e target does run on Windows (128 passed in about 225 s), so the lead should add 'cargo test -q -p model-gateway --test e2e_invoke_chain_test -- stream_answer knowledge_search_says' (or the whole target) to the verification.",
+   "Finding (e) is closed by threading the Data Plane mode through dispatch_tool (signature change, 33 mechanical test call sites in tool_loop.rs) rather than by remapping zdr inside it; any other slice that adds a dispatch_tool call in a test must append one trailing argument (None, or data_plane_zdr_mode(zdr, false)).",
+   "Finding (c) drops the status-code check entirely instead of widening it to a second code, because the Data Plane picks the code per call and the reason is the typed part. This is a loosening for restrictive turns only and only toward refusing (fail closed).",
+   "Finding (b) is not implemented, by plan; the gateway cannot match a refusal the Data Plane unary path does not type."
+  ],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Lead must apply the three ZDR.md 5.10 shared edits from the implementer's lead_todo (third bullet, reason-not-code sentence, 'Not covered' paragraph with the accepted limit for finding b). Not applied, as instructed.",
+    "Finding (b), the unary Data Plane retrieve, is an accepted limit owned by the Data Plane retrieval-engine (Status::internal(e.to_string()) with no typed reason). Raise it to that owner and record it in the S7 evidence file.",
+    "scripts/tests/zdr-contract-sync.test.sh gives 70 passed, 22 failed here. The 22 are missing goldens and digest or sha256 mismatches: Quarry-v2 dp-contracts, Data Plane rerank-v1 and usage-ledger fixtures, the auth-core quarry-token-claims and zdr-posture-matrix .sha256 copies. None are files this slice touches. The sha256 pins may be a CRLF checkout artefact. Confirm 70 and 22 is the baseline on the integration branch. I did not run HEAD.",
+    "Add 'cargo test -q -p model-gateway --test e2e_invoke_chain_test' (about 220 s) to the slice checks. The four new streamed-notice tests live there, not in sse.rs, so the plan's --lib command does not run them.",
+    "cargo fmt was not applied crate-wide. About 1420 pre-existing diffs remain, most outside this slice's hunks (the rest are in code the slice did not change). The Z-41b hunks themselves are clean. Any whole-crate format belongs to a separate commit.",
+    "Live proof of a typed refusal on a real ZDR route needs an attested route (Z-40, Z-60, WS01-S7, WS01-S13). Docker is out of scope for the verifier."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Findings a-g:\n(a) CLOSED by four handler-level tests in tests/e2e_invoke_chain_test.rs (not sse.rs, see deviations). They drive the real /v1/invoke/stream and /v1/invoke/resume routes with signed tokens and a Data Plane double that answers degraded: ZDR turn gets one retrieval_notice zdr_dense_unavailable before the first chunk (zdr_mode ephemeral); waived turn gets one retrieval_notice retrieval_reduced before the first chunk, the Data Plane saw reject, the resume replays the identical frame, and zdr_dense_unavailable never appears; persistent turn gets no notice live or on resume; a waived turn whose model calls knowledge_search gets a second notice from the tool loop. Mutation-checked for the two grounding emission sites.\n(b) NOT CHANGED. Data Plane owns it: retrieval-engine unary retrieve returns Status::internal(e.to_string()) when hybrid search is off and the embed refusal is not degraded (apps/Data Plane v2/services/retrieval-engine-rs/src/grpc/retrieval_svc.rs, the retrieve handler; pipeline/orchestrator.rs around the dense_degraded branch), so the message carries no typed reason the gateway could match. Record as an accepted limit and raise to the Data Plane owner.\n(c) retrieval.rs dense_unavailable_refusal now matches the typed reason (the token before the first colon) and no longer requires failed_precondition. Test only_the_data_plane_dense_reason_maps_to_the_typed_refusal covers failed_precondition, invalid_argument, internal, unavailable mapping, and other reasons, a reason that is not leading, and an empty message not mapping. Callers already guard on a restrictive turn, so a persistent turn is never refused for it.\n(d) tool_loop.rs knowledge_search error arm now builds its text with knowledge_search_failure: on a restrictive turn that hit the dense refusal it says knowledge_search refused: zdr_dense_unavailable (ZDR) or retrieval_reduced (waived, same rule as notice_for_mode); otherwise knowledge_search failed: <tonic code name>. A transient failure (per tool_retry on the original message) keeps the phrase (temporarily unavailable), so the dispatcher retry decision is unchanged; a test pins before/after parity over seven statuses. Nothing else in the repo matches the old text.\n(e) dispatch_tool takes a new trailing data_plane_mode: Option<String> and passes it to dispatch_tool_with_cost instead of deriving it from zdr, so a waived caller keeps reject. All 33 in-file test call sites updated mechanically (None where zdr was false, data_plane_zdr_mode(true,false) where true). dispatch_web_tool_audited keeps data_plane_zdr_mode(zdr,false): it is web tools only and deep research is refused on a waived turn at the stream entry (its comment already says so). knowledge_search_on_turn gained a waived flag; new test proves a waived turn sends reject and is told only retrieval_reduced.\n(f) ZDR.md section 5.10: shared file, lead applies, text below.\n(g) The Z-41b hunks that failed rustfmt (tool_loop.rs notice call in the knowledge_search arm; retrieval.rs two notice tests and the zdr_posture mode test) are now formatted, hunk by hunk. sse.rs had no failing Z-41b hunk.\nThe e2e mock MockOk now names the pinned subscription model and provider on a planned tool round when the request carries a connection (it only did when a refusal was set); no existing test depended on the old mismatch (all 128 pass). signed_delegated_user_tokens became a wrapper over signed_delegated_user_tokens_with_retention, same behaviour.\nAnother slice is editing prompt_context.rs, inference-core and mp-contracts in the same worktree; I did not touch them. Because other agents compile model-gateway concurrently, the two sse.rs mutations were live in the tree for roughly a minute each; sse.rs is back to byte-identical (git shows it unmodified)."
+ },
+ {
+  "id": "WS02-S5",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs",
+   "apps/Model Plane/rust/services/execution-core/tests/prompt_tier_contract.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p mp-contracts",
+    "outcome": "129 lib tests (9 new in prompt_tier) and all integration targets pass"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib prompt_context",
+    "outcome": "15 passed, including every_slot_has_a_tier_and_stable_order_never_decreases"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib format_guidance",
+    "outcome": "12 passed (run before the final rustfmt-only edits)"
+   },
+   {
+    "command": "cargo test -q -p execution-core --test prompt_tier_contract",
+    "outcome": "4 passed"
+   },
+   {
+    "command": "cargo fmt -p model-gateway -p mp-contracts -p execution-core -- --check, filtered to my files",
+    "outcome": "no diffs in my files after fixing three; whole-repo check has ~2850 pre-existing diffs elsewhere"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Per Appendix B N1 the DoD needs a rebuilt model-gateway: bash 'apps/Model Plane/scripts/compose.sh' up -d --no-deps --build model-gateway, confirm healthy.",
+   "Run a 3-turn thread pinned to provider openai (or azure-openai) with MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1 and show unchanged answers plus the date-notice position (now after the prior conversation, before the inventory/grounding/memory blocks).",
+   "Confirm with the flag unset that the prompt is byte-identical to before (legacy path untouched).",
+   "Optionally run the wider model-gateway --lib suite and sse.rs shedding tests (drop_oldest_history_group) once, since only the prompt_context and format_guidance filters were run here."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Appendix B N1: rebuild model-gateway via compose.sh and show a flagged (MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1) 3-turn thread pinned to openai/azure-openai with unchanged answers and the date notice now after the prior conversation (needs docker; verifier did not run it).",
+    "Live confirmation that with the flag unset the prompt is byte-identical (unit tests prove it for render(Legacy); not proven on a running stack).",
+    "render_tiered, TieredPrompt::plan and prompt_tier::blocks_of have no non-test caller yet. This is intended by the plan; S9 and S10 are the consumers, so they must wire them or the code stays unused."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Added mp-contracts prompt_tier.rs with the PromptTier enum (Stable < Context < Conversation < Volatile < Current), PromptTierPlan {stable, context}, plan_of and blocks_of. In prompt_context.rs, render_stable_prefix now returns a TieredPrompt (messages plus a tier per message, with a plan() method), and a new render_tiered(order) returns None for Legacy. render(Legacy) is untouched; the legacy tests pass unchanged.\n\nThe flagged order (render(StablePrefix)) changes bytes, as the plan intends, and the change is wider than the date notice alone. The date notice moved from the standing blocks to the first Volatile block, after the conversation. The standing blocks were also regrouped so the tiers never decrease: Stable is scope + discipline, then Context is authored instructions, identity, supplied-args notice, verbosity. Before, instructions and identity came ahead of discipline. Every existing test that pinned the old order or position was updated: the stable-order table, and the shared-prefix index (11 to 10, now measured at the date notice).\n\nNew tests: a_new_day_changes_only_bytes_after_the_conversation, every_slot_has_a_tier_and_stable_order_never_decreases (several histories), each_slot_lands_in_its_tier, and the_legacy_order_is_not_tiered.\n\nThe execution-core prompt_tier_contract.rs reads prompt_context.rs and prompt_tier.rs as source, normalising CRLF. It checks that every PromptContext field has exactly one `out.add(PromptTier::X, slot)` call in render_stable_prefix, that the tier ranks (from the enum's declaration order) never decrease so a Volatile block cannot precede the Conversation, that the history is Conversation, that the date notice is Volatile, and that the user turn is last under Current. It also has a self-check that a misordered source is detected.\n\nNo Cargo change and no new flag. MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER still gates the order. render_tiered has no non-test caller yet; its consumers are S9 and S10. CRLF was preserved in lib.rs and prompt_context.rs; the two new files are LF. A cargo test in this worktree can take 10-25 minutes when other agents are building in parallel."
+ },
+ {
+  "id": "WS12-S3",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.approval-locale.test.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.metrics.test.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatArtifactPanel.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatArtifactPanel.test.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatLiveRunPanel.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatLiveRunPanel.test.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\FleetRunConsole.tsx",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\FleetRunConsole.test.tsx"
+  ],
+  "tests_run": [
+   {
+    "command": "pred first: pnpm exec vitest run src/features/chat/components/ChatMessages.approval-locale.test.tsx (before the ChatMessages edits)",
+    "outcome": "4 of 7 failed (the English cases); the 3 Norwegian cases passed"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/ChatMessages.approval-locale.test.tsx src/features/chat/components/ChatArtifactPanel.test.tsx src/features/chat/components/ChatPanels.test.tsx src/features/agents/components/FleetRunConsole.test.tsx src/features/chat/components/ChatLiveRunPanel.test.tsx src/features/chat/components/ChatMessages.metrics.test.tsx src/features/chat/components/ChatMessages.plan-gate.test.tsx src/features/chat/lib/chat-localization.test.ts (final, after all edits)",
+    "outcome": "8 files, 151 passed, 0 failed"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat src/features/agents src/shared/i18n",
+    "outcome": "89 files, 1164 passed, 3 failed: use-chat-controller.stream-churn.test.ts x2 (untracked file from another session; storage write counts) and use-chat-controller.zdr-refusal.test.ts x1 (see notes)"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/spaces src/app",
+    "outcome": "18 files, 256 passed, 0 failed"
+   },
+   {
+    "command": "pnpm exec vitest run zdr-refusal",
+    "outcome": "6 files, 3 failed (7 tests): http.zdr-refusal.test.ts x2, chat-client.zdr-refusal.test.ts x4, use-chat-controller.zdr-refusal.test.ts x1; pre-existing at HEAD (see notes)"
+   },
+   {
+    "command": "pnpm typecheck (tsc -b, run in background)",
+    "outcome": "exit 1, 34 errors, none in slice files: quarry-client.ts 21 (@quarry/client not generated), RemoteSupportPage.tsx 12, chat-client.ts 1 (TS6133); all three unmodified in git"
+   },
+   {
+    "command": "pnpm exec eslint on the 9 changed or new files",
+    "outcome": "0 errors; 12 solid/reactivity warnings on source lines this slice did not edit"
+   },
+   {
+    "command": "pnpm exec vite build --outDir <scratchpad> (pnpm build is not usable: it runs tsc first)",
+    "outcome": "3517 modules transformed; stops on the unbuilt workspace package @verevon/remote-core imported by RemoteSupportPage.tsx (pre-existing)"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Live evidence (S3 DoD): in apps/Frontend Plane/verevonv3 run `pnpm dev --port 5174 --strictPort` (restart after host edits, Docker bind mount), toggle to English, and capture: the approval block; the plan-grant control with both rungs and the granted sentence; the artifact header toggles and file card; the live-run status and reconnect fallback; the fleet console at /agents/fleets/<id>. Then build the production image in the verevonv3-ci.yml:215-223 form.",
+   "Apply the needs_other_files change in ChatPage.tsx (or hand it to the session that owns it). After it, the composer's Kjor plan pill follows the locale, and RUNG_LABEL can stop being exported. DashboardComposer.tsx needs no change because only one of its two sentences renders per locale.",
+   "Commit only the 9 slice paths in files_changed. Do not include the untracked ChatMessages.render-budget.test.tsx or use-chat-controller.stream-churn.test.ts, or the other sessions' modified files (playwright.config.ts, tests/e2e/*, the chat-workspace plan .md, Model Plane Rust). At the time of checking, ChatMessages.tsx contained only this slice's hunks; re-check before staging.",
+   "Confirm at HEAD that the 7 zdr-refusal failures predate this slice (see notes). The design requires *.zdr-refusal.test.ts to stay green, so this is an existing red for the lead to triage.",
+   "Line endings: FleetRunConsole.tsx and FleetRunConsole.test.tsx are CRLF in the working copy (index blobs are LF, eol=lf). They were CRLF before the edit and were kept that way; the other edited files are LF.",
+   "Known gap from the design, unchanged here: the fleet fetches and the PATCH to /v1/fleets/:id have no BFF route, so the Cancel fleet control may not reach the backend."
+  ],
+  "deviations": [
+   "FleetRunConsole: the design named lines 155 and 159 only. The summary's fleet-console scope also covered the header (Fleet), the status line (runs, max parallel), Budget, OVER BUDGET, uncapped and the live-view placeholder, so those are i18n'd too. The pause icon became XCircle and the ShieldCheck cascade note was dropped (D6).",
+   "Named sites extended within the same categories: ChatArtifactPanel header toggles (Vis versjonen, Vis endringer, Vis kode, Vis forhandsvisning), copy controls (Kopier, Kopiert, Kunne ikke kopiere), the load-failure sentence; ChatMessages PlanApprovalControl lead paragraph and minimum-length hint (bare Norwegian JSX inside the plan-grant control), ToolCallCard status words (flagged by the sweep at line 2028); ChatLiveRunPanel reconnect button, stream-error text, step-label fallbacks and the expanded-step caption.",
+   "RUNG_LABEL stays exported as Norwegian because ChatPage.tsx imports it. Added RUNG_LABEL_EN and rungLabel(rung, tr) in ChatMessages.tsx; the grant radios and the granted sentence use rungLabel.",
+   "The English granted sentence lower-cases the rung name so it reads as a sentence ('the agent can now write in the workspace'); the English radio labels keep D12's capitalised wording.",
+   "ChatLiveRunPanel activity titles and details (approval, pause, resume, browser events) are NOT translated: chat-run-watch.ts stores them and is not owned. Left to the S4 baseline, which the design allows.",
+   "Existing assertion changed: FleetRunConsole.test.tsx matched /live view:/; it now matches /direkte visning:/ under the default locale, and English and Norwegian cases were added. Also added English cases to ChatArtifactPanel.test.tsx, ChatLiveRunPanel.test.tsx and ChatMessages.metrics.test.tsx (beside the changed files)."
+  ],
+  "needs_other_files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: line 34 import RUNG_LABEL becomes rungLabel (import from './ChatMessages'); line 249 `RUNG_LABEL[approvedPlanView()!.rung]` becomes `rungLabel(approvedPlanView()!.rung, i18n.tr)`. ChatPage has `i18n` at line 73."
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Locale-toggled screenshots on a second dev server (pnpm dev --port 5174 --strictPort, restarted after host edits): approval block, plan-grant control with both rungs and the granted sentence, artifact header toggles and file card, live-run status, fleet console. Lead only.",
+    "The production image build in the verevonv3-ci.yml:215-223 form needs Docker. Lead only. The implementer's vite build stops on the unbuilt @verevon/remote-core package, which is pre-existing.",
+    "ChatPage.tsx (not owned) still imports RUNG_LABEL. The composer's Kjor plan pill therefore stays Norwegian under en until it switches to rungLabel(approvedPlanView()!.rung, i18n.tr). The slice row does not name that site, so I do not count it against the slice, but the lead should hand it to the ChatPage owner.",
+    "Confirm at HEAD that the 7 *.zdr-refusal.test.ts failures predate the slice. The plan says these tests must stay green, and I found no link from the slice's edited files to the failing modules.",
+    "Commit only the 9 slice paths. Leave out the untracked ChatMessages.render-budget.test.tsx and use-chat-controller.stream-churn.test.ts, which belong to another session. FleetRunConsole.tsx and its test are CRLF in the working copy and LF in the index; the diff is small (27 and 63 lines), so there is no whole-file flip, but check the line endings when staging."
+   ]
+  },
+  "review_defects": [],
+  "notes": "WS12-S3 owned-file work is built and unit-tested. Status is partial for two reasons: (1) the composer's \"Kjor plan\" pill still shows Norwegian rung names in the English locale until ChatPage.tsx passes rungLabel (not owned, see needs_other_files); (2) live locale screenshots and the production image build are lead-only. Covered: the approval buttons (Approve/Reject, Approving...), the plan-grant control (rung radios via rungLabel, the granted sentence, the lead paragraph, the minimum-length hint, the approve button), the reasoning-popover tab labels, ToolCallCard status words, the artifact header toggles and copy controls, the file card and load-failure sentence, live-run status words, the stream-error text and reconnect button, and the fleet console (Cancel fleet, D6). Every Norwegian string that existed before is unchanged under no. The fleet console's English-only labels now default to Norwegian. No flags, protos, migrations or DB tests. ZDR: copy only; no data path changed. Pre-existing red in a must-stay-green set: 7 tests across http.zdr-refusal.test.ts (2), chat-client.zdr-refusal.test.ts (4) and use-chat-controller.zdr-refusal.test.ts (1) fail because the typed refusal's code/feature fields are missing from error objects. None of these modules is in an edited file's import graph, and src/shared has no git changes, so these predate this slice; the lead should confirm at HEAD. Stream-churn failures are in an untracked file created by another session. The worktree also has other sessions' edits (render-budget test, playwright config, tests/e2e, Model Plane Rust); only the 9 paths above belong to this slice."
+ },
+ {
+  "id": "WS11-S1.code",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/inference-core/src/provider/effort.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+   "apps/Model Plane/rust/services/inference-core/src/cache.rs",
+   "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p inference-core --lib effort",
+    "outcome": "18 passed, 0 failed (16 in effort.rs, plus cache.rs a_different_effort_misses_the_cache and no_effort_is_distinct_from_every_level)"
+   },
+   {
+    "command": "cargo test -q -p inference-core --lib",
+    "outcome": "440 passed, 0 failed"
+   },
+   {
+    "command": "cargo clippy -q -p inference-core --lib (pedantic workspace lints)",
+    "outcome": "no warnings in effort.rs or my cache.rs/mod.rs hunks; the one existing cache.rs warning (unnecessary_sort_by in evict_lru) is untouched"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert after the first `---` rule (newest first): `## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)` / `**Status: implemented (code only, inert).** The canonical ladder (`Level` Minimal..Max, `Wire`, `support(family, model)` table with a per-row `verified_on`, `resolve` clamping to the nearest weaker supported level, `from_legacy_budget`, `allowance`, deployment aliases from INFERENCE_CORE_EFFORT_MODEL_ALIASES) lives in `inference-core/src/provider/effort.rs`; model-gateway derives only the requested level (WS11-S5) and never a per-provider shape. One owner, so the three per-path budget derivations (normal, ZDR, source validation) stop being three decisions. `InferRequest.reasoning_effort` and `ModelInfo.effort_levels` exist but no adapter reads them yet; the response-cache key now hashes the level so a quick and a deep turn of one prompt cannot share an entry. Q3 default applied: provider ceiling rises by the per-level allowance (Low 1024 to Max 16384), total cap 32768, pending per-model measurement. Every support row is verified_on=None until the P0 live probe runs; the Anthropic split (budget through 4.6, adaptive from 4.7, unknown claude names adaptive) comes from the plan's cached claude-api reference, not a live check. A model with no declared row is treated as having no effort control, because an unsupported parameter is a 400 and an omitted one is a no-op.`",
+   "Rebuild inference-core and run the N1 cache proof: send the same prompt at quick then deep and show two distinct cache keys and a miss. The effort value only reaches the cache once WS11-S5 maps the proto field, so this runs after S5 on a route the dev stack has. The unit test a_different_effort_misses_the_cache already proves it at the cache layer.",
+   "P0 live probes (external): gpt-5-family reasoning_effort, claude-opus-4-8 on Foundry with adaptive thinking plus output_config.effort, and with legacy budget_tokens. Their results set verified_on on the rows in effort.rs ROWS and decide the S3 default for INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING.",
+   "Run `cargo check --workspace --all-targets` once the whole batch lands, to confirm no other crate constructs provider::InferRequest or provider::ModelInfo by literal. I grepped execution-core and model-gateway and found only the pb types, but did not build those crates."
+  ],
+  "deviations": [
+   "Edited four files outside my ownership, one additive line each, because the two new struct fields break the build otherwise: grpc.rs `reasoning_effort: None,` in `to_internal_request`, and `effort_levels: Vec::new(),` in the ModelInfo literals in anthropic.rs, openai.rs and codex_subscription.rs. No other batch-1 slice owns these files, and the plan row for S1 also says adapters are unchanged. S2-S5 replace these lines when they fill the field and map the proto.",
+   "ModelInfo.effort_levels is Vec<Level>, not Vec<String>. S5 converts at the gRPC edge with `as_str()`.",
+   "No ledger entry was edited, per the lead's instruction. The lines are in lead_todo."
+  ],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+   "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "N1 (binding): the rebuilt inference-core run at quick then deep showing two distinct cache keys and a miss. Needs docker and WS11-S5 to map the proto field, so only the lead can run it. The unit tests a_different_effort_misses_the_cache and no_effort_is_distinct_from_every_level already prove it at the cache layer.",
+    "P0 live probes (gpt-5-family reasoning_effort; claude-opus-4-8 on Foundry with adaptive thinking plus output_config.effort; the same with legacy budget_tokens) are external. Every support row has verified_on None until they run, and they decide the S3 default for INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING.",
+    "Ledger entry for apps/Model Plane/docs/decisions/ledger.md (ladder lives in inference-core). The implementer correctly left it untouched and supplied the text in lead_todo for the lead to apply.",
+    "Run cargo check --workspace --all-targets once the whole batch lands. I checked the lib targets of model-gateway, execution-core and session-core, not their test targets."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built the ladder module and the effort half of the cache key. It is inert: nothing in the request path reads it, no wire, proto or migration change, and no switch was added.\n\n**effort.rs**\n- `Level` is Minimal, Low, Medium, High, XHigh, Max, with `ALL`, `as_str` and `from_name`.\n- `Wire`, `Family`, `Support` and `Resolved` follow the plan row.\n- `declared_support` and `support` use an ordered row table, first match wins. OpenAI rows: gpt-5 series (Minimal to High), gpt-5.x (Low to High), o1/o3/o4 (Low to High); gpt-5-chat, o1-mini, o1-preview and gpt-4/3/chatgpt are declared as no effort control. Anthropic rows are chosen by version parsed from the model id, skipping date stamps: below 3.7 none, up to 4.6 budget (Low/Medium/High), 4.7 and later adaptive (Low to Max). A claude name with no readable version is treated as adaptive. Codex is any model, levels [Low, High].\n- `resolve` picks the nearest weaker supported level, falls back to the weakest supported level, and returns `None` for no request or an unsupported model. `from_legacy_budget` maps 0 to none, up to 1024 to Low, up to 2048 to Medium, otherwise High.\n- `allowance` is Minimal 512, Low 1024, Medium 2048, High 4096, XHigh 8192, Max 16384, so Low, Medium and High equal the legacy budgets (S3 can reuse it as `budget_tokens`). `raised_ceiling` adds the allowance, capped at `TOTAL_TOKEN_CAP` 32768, and never lowers a ceiling the caller set above the cap (DEC-36 Q3).\n- `ModelAliases` parses `INFERENCE_CORE_EFFORT_MODEL_ALIASES` as `deployment=base` pairs. Malformed pairs are skipped with a warning.\n- Every row has `verified_on: None`, meaning not probed yet. The P0 probe sets the dates.\n\n**mod.rs and cache.rs**\n- mod.rs: `pub mod effort;`, `InferRequest.reasoning_effort: Option<effort::Level>`, `ModelInfo.effort_levels: Vec<effort::Level>`.\n- cache.rs: effort is hashed as a one-byte tag, 0 for none and level+1 otherwise, separate from the thinking budget because a level-driven adapter sends budget 0.\n\n**Test coverage**\n- Covered: all the test names the plan lists, plus the alias, claude-version and Codex-pair tests.\n- `every_configured_default_model_has_a_declared_support` calls `InferenceConfig::from_env()`, so it follows any roster env vars set on the machine running it. It also covers `RoutingPolicy::default()` (table, tool ladder, cheap fallback)."
+ },
+ {
+  "id": "WS09-S1",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.render-budget.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.stream-churn.test.ts",
+   "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-fixtures.ts",
+   "apps/Frontend Plane/verevonv3/tests/e2e/chat-transcript-performance.spec.ts",
+   "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-budget.json",
+   "apps/Frontend Plane/verevonv3/playwright.config.ts",
+   "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+  ],
+  "tests_run": [
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/ChatMessages.render-budget.test.tsx src/features/chat/components/use-chat-controller.stream-churn.test.ts src/shared/chat-nodes/derive.budget.test.ts",
+    "outcome": "3 files passed; 15 tests passed, 1 expected fail (it.fails for the ZDR first-send gap)"
+   },
+   {
+    "command": "pnpm exec playwright test --project=chat --no-deps tests/e2e/chat-transcript-performance.spec.ts -g \"fixture-only\"",
+    "outcome": "5 passed in real Chromium with no stack and no sign-in: fixture determinism and size, stream script, request accounting, percentile/CV/summarise, and the in-page fetch shim (serves fixtures, streams at 25 ms cadence, records requests, storage writes, marks, frames, mutations)"
+   },
+   {
+    "command": "pnpm exec eslint on the 2 vitest files, 2 e2e files and playwright.config.ts",
+    "outcome": "clean, 0 warnings"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Start a second dev server (cd \"apps/Frontend Plane/verevonv3\" && pnpm dev --port 5174 --strictPort; note the dev container needs a restart to see host edits) and run: LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/chat-transcript-performance.spec.ts --repeat-each=3. Needs the local stack for the local-setup sign-in only; the chat endpoints and stream are answered in-page.",
+   "Check the first live run: that A reaches the allTurnsMounted mark (200 .verevon-chat-message elements; if the page caps or wraps turns, adjust expectTurns in shimConfig), that B/C find form button[type=submit], and that unmocked hydrators (runs, effect classes, approvals) tolerate the fixture thread. Fix selectors in the spec if needed.",
+   "Copy the three-run means and the CV from test-results/chat-perf/summary-*.json (scenario E) into tests/e2e/chat-perf-budget.json baseline (and budget with headroom), flip status from \"unmeasured\" to \"baseline\", and fill the pending rows of section 21.5 in VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md; list the Chromium version from the reports.",
+   "Decide who fixes the temporary-thread first-send local write (use-chat-controller.ts ~2439/2517): S3 is the natural home; when fixed, delete .fails from the 'a temporary thread keeps the first send out of local storage too' test.",
+   "Commit the 7 files (CRLF in the plan doc was preserved; others are LF). No docker, migration or proto work is involved."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The DoD asks for three Playwright runs against the second dev server (pnpm dev --port 5174 --strictPort, LOCAL_E2E_BASE_URL=http://localhost:5174, --project=chat --repeat-each=3). Only the 5 fixture-only tests have been run. Scenarios A-D have never run against the app. The first live run must confirm that 200 .verevon-chat-message elements mount (the allTurnsMounted wait) and that the form button[type=submit] selector matches.",
+    "tests/e2e/chat-perf-budget.json still has status \"unmeasured\" with every baseline and budget value null. Section 21.5 of VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md still has four \"pending\" rows (A-D) and no Chromium version. After the live runs, copy the three-run means and CV from test-results/chat-perf/summary-*.json into both places and flip status to \"baseline\".",
+    "ZDR defect found by the slice and pinned as it.fails: the first send of a new temporary (zdr:true) thread writes the user's message to verevon.chat.threadTranscripts.v1. markThreadTemporary (use-chat-controller.ts:2439) is a signal write with no flush before writeThreadSnapshot (:2517), so the isTemporaryThread guard reads a stale set. use-chat-controller.ts is not in this slice's owned files. Assign the fix to S3 or WS01-S0, then delete .fails from 'a temporary thread keeps the first send out of local storage too'. Until then the first-send ZDR gap is real in the shipped code.",
+    "The files are uncommitted. The 7 owned files are still working-tree changes: 2 modified and 5 untracked."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Status is partial only because the Playwright scenarios A-D need the dev stack to sign in, which I may not touch; the DoD asks for measured browser baselines and I did not invent any. `chat-perf-budget.json` has status \"unmeasured\", all baseline and budget values are null, and with PERF_ENFORCE=1 the spec fails on a null budget rather than passing it.\n\nStructural numbers measured (jsdom, counts not times), pinned as assertions with \"S2 target\"/\"S3 target\" notes so those slices flip single lines:\n- 84 tokens, 19 final blocks: 803 sealed-block mounts (every block but the last, every token); AnswerRegion remounts on all 84 tokens; 1 parser call per token through ChatMarkdown, 2 through AssistantMessage, each reading the whole message (123,240 chars total, 246,480 via AssistantMessage).\n- Solid 2 rc <For>: default reference-keyed rebuilds every row when item objects are replaced; keyed={false} and keyed={fn} keep every row. This confirms the mapArray reading S2 relies on, so keyed={false} for ChatMarkdown is viable.\n- Controller, 160 deltas at 40 fps: 1 transcript-key setItem per delta to EACH of localStorage and sessionStorage (727,860 bytes total vs a 7,979-byte final value, quadratic); 0 server snapshots mid-stream (the effect passes persistServer:false; saved only at submit and terminal); 1 Trace row per delta; taskSteps array and the Compose-response step replaced on all 160 deltas.\n- Cold-open request accounting and frame timings are not measured; section 21.5 of the plan doc has them as \"pending\" with the exact command.\n\nFINDING (real ZDR defect, not fixed because use-chat-controller.ts is not owned): the first send of a NEW temporary (zdr:true) thread writes the user's message to verevon.chat.threadTranscripts.v1 in both storages. Cause is sendContent: markThreadTemporary is a signal write, then writeThreadSnapshot runs at use-chat-controller.ts ~2517 with no flush between, so its isTemporaryThread guard reads the stale set (stack confirmed at 2517 via writeThreadSnapshot -> upsertChatThreadTranscript). All later writes in that stream are correctly refused (asserted zero from connected to terminal for both a temporary thread and an org ZDR posture). The gap is pinned with it.fails; when fixed it reports an unexpected pass and the .fails marker should be deleted. The org-posture case is clean from the first send. Fix suggestion: flush() after markThreadTemporary, or gate the submit-time write on options.zdr directly. Worth folding into S3's ZDR guard list.\n\nDeviations/notes: the plan says `FP/src/demo/install.ts` is the pattern for the fetch shim, but it is live-only and absent from this worktree, so the shim is written from the description. Fixture-only tests live inside the spec (runnable with --no-deps) instead of a separate tests/*.test.ts, to stay within ownership. The spec's page scenarios (A-E) were type-parsed and loaded but never run against the app; the cold-open wait assumes all 200 turns render as .verevon-chat-message elements (expectTurns=200), which the first live run must confirm. No runtime code changed; PERF_ENFORCE is read only in the spec (strict \"1\")."
+ }
+]

@@ -1,0 +1,758 @@
+{
+ "batchId": "W3-19",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-9-W3",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-1",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/site_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/site_policy_client.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/execution-core/src/site_policy_client.rs",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs"
+   ],
+   "notes": "EP-9-W3 is built with unit tests written. Nothing was compiled or run, per the code-first rule. The worktree was clean; its one allowed detach checkout moved HEAD from 21d636a5a to model-plane 0e30f09. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-9-W3.patch (83348 bytes, 7 files; staged tree 241bf5e3934871a634874a1cffdaa5c7907bde43). Staging used `git -c core.autocrlf=true add -A`: the worktree is CRLF, the blobs are LF, and the local .git/config sets core.autocrlf=false, so plain `git diff --cached` shows whole-file churn. The patch is `git -c core.autocrlf=true diff --cached --binary`. A scratch-index apply check was refused by the guard and not run; if git apply rejects CRLF context in the lead tree, retry with --ignore-whitespace. Line counts: proto +3; mp-contracts lib.rs +1; site_policy.rs +334 (new); model-gateway site_policy_client.rs +684 (new); model-gateway tool_loop.rs +40; execution-core site_policy_client.rs +670 (new); execution-core web_tools.rs +162/-1. The design's plane-service-principals.json edit was not made (see deviations). Weekly usage read 89% before finishing, under the 95% stop line.",
+   "deviations": [
+    "No exclude_domains on search: no service can read the org block list (resolve answers only the hosts named), so search enforcement is a post-filter on returned hits.",
+    "The org-core grant is not in apps/Control Plane/config/plane-service-principals.json as the design says. That file holds Auth Core token scopes and no org scopes; the org-core grant is the ORG_CORE_SERVICE_CREDENTIALS list in apps/Control Plane/docker-compose.yml, and org-core pins the scope to browser-broker. Listed under needs_other_files.",
+    "Cache key is (organisation, host); the revision rides on the verdict, because a revision is known only from an answer, so the design's (org, host, revision) key cannot be looked up.",
+    "resolve is called without user_id (admin answer only, matching the goal's org blocked hosts); the design's URL template named user_id.",
+    "Scope added beyond the design's fetch_url and web_fetch: extract_structured (refuses the call if any URL is refused), knowledge.map and knowledge.crawl_site (start URL only), knowledge.batch (every URL).",
+    "Enforce fails closed beyond the design's fetch rule: search drops hits whose host cannot be read, and a blank organisation id refuses every host.",
+    "site_policy_revision is carried on WebPolicyContext field 4 but the gateway does not stamp it; execution-core logs its own revision."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "org-core pins org:browser-site:read:any to browser-broker (service_auth.go:211; browser_sites_contract_test.go:24 fails on any other holder). Granting model-gateway and execution-core needs an owner ruling and Control acknowledgment; until then enforce refuses every web fetch and search (unreadable, fail closed), and shadow only logs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "exclude_domains is not built because org-core's resolve (browsersites/resolve.go Resolve) answers only the hosts named, so no service can read the org's block list. The Quarry pre-filter and its request-layer deny list (Quarry plan, D-W2 b) remain open, so the design's 'Quarry log shows exclude_domains' proof step cannot pass."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "C-B1 is open in code: branch w23/integ holds organization_web_policy (org-core migrations 025-027), a second org web-policy store, while W3 reads only the DEC-19 browsersites store. The owner must rule C-B1 and record it in the ledger before enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Only the requested host is canonicalised, but Quarry follows redirects and scrape_readable escalates to the browser driver (tool_loop fetch arm comment), so an allowed URL can end on a blocked host; a final-URL check or the Quarry deny list is needed before enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Other egress is not covered: knowledge.crawl_site follows links to any host (only its start URL is checked; the crawl itself needs Quarry's deny list), and the gRPC WebSearch in model-gateway tools.rs and the BFF search route do not pass the check."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing was built, linted or run. Guard checks: cargo test -q -p mp-contracts --lib site_policy; -p model-gateway --lib site_policy; -p execution-core --lib site_policy (covers site_policy_client and web_tools::site_policy_tests); buf lint and buf breaking on apps/Model Plane/proto. The live proof (design section 6) waits on the Control change and the proof stack."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Admin answers only: no user_id is sent, so a member's remembered refusal does not block a fetch; the design's URL template named user_id, and the owner should confirm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Fail-closed effects under enforce: an unreadable org-core empties search results and refuses fetch with a retryable message, and a blank organisation id refuses every host. Confirm personal and Space runs carry an org id before enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The strict host reader refuses under enforce any URL with userinfo, an IP literal, a percent-encoded host, a trailing dot, a backslash, whitespace, a non-http scheme or a non-digit port; confirm against real page URLs before enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Scope added beyond the design: extract_structured (multi-URL), knowledge.map, knowledge.crawl_site and knowledge.batch. The owner should confirm the list."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No direct tests of the tool_loop arms. Decision logic is covered in the two client modules (off, shadow, enforce, unreadable, blank org, 30 s cache, 32-host batching, search filter), and web_tools tests cover fetch, search, map, crawl and batch refusal."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "site_policy_revision (WebPolicyContext field 4) is not stamped by the gateway; decide whether org_agent_policy::stamp_web_policy should stamp it from the site cache."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The FE error catalogue entry for org_site_blocked (design section 5) is not in this slice; the refusal is a tool error string, not a BFF envelope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Comments that describe the broker-only grant need updating with the Control change: server.go:342, browser_sites_handlers.go:259-261, service_auth.go:82-85, and run-control-plane.sh:508."
+    }
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: insert the line `pub mod site_policy_client;` immediately before `pub mod skills;` (after `mod session_terminal_auth;`). Keep CRLF.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: insert the line `pub mod site_policy_client;` immediately before `pub mod skill_mounts;`. Keep CRLF.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs (stamp_web_policy, about L569-572): in the `WebPolicyContext { mode, paid_providers, revision }` literal add `        site_policy_revision: 0,` after `        revision,`. Compile-blocking once the proto field lands.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (test helper request_under_web_mode, about L32586): in `pb::WebPolicyContext { ... }` add `                    site_policy_revision: 0,` after `                    revision: 3,`. Compile-blocking in cfg(test).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `      WEB_DOMAIN_POLICY_MODE: ${WEB_DOMAIN_POLICY_MODE:-off}` to the model-gateway environment next to ORG_AGENT_POLICY_MODE (about L425; model-gateway service from L194), and to the execution-core environment (service from L1491).",
+    "shared-edit apps/Model Plane/deploy/.env.example: add `WEB_DOMAIN_POLICY_MODE=off` with a comment: off|shadow|enforce, an unknown value means enforce, EP-9 W3.",
+    "regen (lead): after the batch, `buf generate --template \"apps/Model Plane/proto/buf.gen.go-only.yaml\" \"apps/Model Plane/proto\"` regenerates the Go bindings; Rust regenerates in cargo through tonic-build. Then `buf lint \"apps/Model Plane/proto\"` through scripts/gates/buf-lint-ratchet.py and `buf breaking \"apps/Model Plane/proto\" --against \"apps/Model Plane/proto/baseline.binpb\"`. The change is additive, so no baseline refresh.",
+    "regen: none for prompt-tool-manifest.json or the SSE golden (no tool definition, platform prompt or SSE event changed). Check whether the scenario-touch gate keys on tool_loop.rs.",
+    "lead-only: ledger entry in apps/Model Plane/docs/decisions/ledger.md. D-W1: host lists stay in org-core browsersites, switches stay in capability-core. D-W2 (b): no request-layer rules are sent to Quarry in this slice, and Model-side checks are the fetch enforcement. Admin answers only, no user_id; cache keyed by organisation and host.",
+    "lead-only: apply .plan-work/execution/patches/W3-19/EP-9-W3.patch. Hunks are in LF blob form; if git apply rejects CRLF context in the lead tree, retry with --ignore-whitespace."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/docker-compose.yml (ORG_CORE_SERVICE_CREDENTIALS, about L620): principal execution-core scopes [\"org:read:any\"] -> [\"org:read:any\",\"org:browser-site:read:any\"]; principal model-gateway scopes [\"org:read:any\",\"org:model-entitlement:read:any\"] -> [\"org:read:any\",\"org:model-entitlement:read:any\",\"org:browser-site:read:any\"]. Needs Control acknowledgment.",
+    "apps/Control Plane/org-core/internal/http/service_auth.go (L211, and the const block at L24-35): let model-gateway and execution-core hold org:browser-site:read:any while keeping it refused for every other principal. Owner ruling required (authority change).",
+    "apps/Control Plane/org-core/internal/http/browser_sites_contract_test.go (TestComposeGivesBrowserBrokerExactlyTheResolveScope, L24): update with the Control change; it fails on any other holder of the scope."
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-T2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/policy_effective.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Built EP-9-T2 code-first; no test, build, lint, cargo, pnpm or docker command was run. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-9-T2.patch (8 files, index form LF, base model-plane 0e30f09319a5f44c82b31f8cd643acf0e3773a12, 56702 bytes). Model-gateway: GET /v1/policy/effective?thread_id= in policy_effective.rs, mounted in authed_routes; it answers 404 while MODEL_GATEWAY_POLICY_EFFECTIVE is off (strict parser via loop_fold::switch_from). The thread gate is session-core RunService.ResolveThreadOwner with the caller's own identity; not owned gives 404 thread_not_found, a lookup failure gives 503 policy_unavailable. Items: approval.posture (locked when the floor is ask), budget.max_rounds and budget.max_subagents (platform, locked), and mode_cap, rung_cap, web.mode, web.paid_providers, research.max_fan_out_items, where origin is org only for a value the enforced policy changed from the default (revision included; enforce plus unreadable gives unavailable per key; off or shadow reads the defaults). Reserved SETTINGS keys (ext.skills, ext.plugins, user_hooks, reference_uploads) are listed at their platform default (C-B11). BFF: GET /api/v1/policy/effective in domains/policy_effective.rs, mounted only when POLICY_EFFECTIVE_VIEW_ENABLED is exactly true. It fans out to model-gateway, org-core model-entitlement explain, org-core browser-sites (admin only) and the org ZDR posture, with a 2 s budget per owner. Members get no revision and counts for the allow and deny lists; the query may name only thread_id. Frontend: policy-effective-client.ts with a test, and the action policy.read_effective (registry count 301 to 302). Line endings: the index stores LF; the worktree was LF; the epic tree is CRLF on disk, so check for EOL churn when applying.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: line 11653 `fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {` becomes `pub(crate) fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {` (nothing else); required for model-gateway to compile.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: insert the line `pub mod policy_effective;` between `pub mod page_reader;` (line 72) and `pub mod pricing;` (line 73); required for model-gateway to compile.",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs: after line 131 `        .merge(domains::agent_policy::router(state.clone()))` insert `        .merge(domains::policy_effective::router(state.clone()))` with the same indentation; without it the BFF route is never mounted.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after line 252 `  'org.preview_effective_policy': exempt('ui_state_only', 'read'),` insert `  'policy.read_effective': exempt('ui_state_only', 'read'),`; MODEL_ACCESS is a Record keyed by every ActionId and admission-contract.test.ts builds from it.",
+    "guard regenerates apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json: add a row for policy.read_effective shaped like the org.preview_effective_policy row (registry true, access none, authority control_run_decision, sideEffectClass read, exemptReason ui_state_only, eligible false, executor {}, hashBasis catalog_entry, zdr_allowed false, schemaHash from the new input schema).",
+    "guard: action-registry.test.ts asserts 302 ids after this slice; recount after the other contract additions in this batch (EP-4-S3 adds two) because the count assertion collides across slices.",
+    "lead: flags and ledger. apps/Model Plane/deploy/docker-compose.yml and apps/Model Plane/deploy/.env.example get `MODEL_GATEWAY_POLICY_EFFECTIVE=false` on the model-gateway service; the BFF switch `POLICY_EFFECTIVE_VIEW_ENABLED=false` goes in the gateway env example (lead chooses the file); apps/Model Plane/docs/decisions/ledger.md gets one entry: effective policy view (EP-9 T2), thread read in model-gateway plus BFF aggregate, both switches off, reads only.",
+    "no proto, no migration, no platform prompt or tool definition change: no proto, migration-revert or prompt-tool-manifest regeneration is needed for this slice; no docker, no live stack was run."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/deploy/.env.example",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "deviations": [
+    "space_id scope is not built: the BFF refuses it with 400 space_scope_unsupported, while design section 4 T2 names a thread or a Space.",
+    "The routing item is not built: model-gateway has no per-thread routing setting (route notes exist per call), so routing is reported only through web.paid_providers.",
+    "No second BFF read of capability-core's effective view: model-gateway reports the organization layer it enforces with the capability-core revision, so off and shadow never claim an org origin.",
+    "Browser-site mode is omitted for members because org-core reads GET browser-sites for an owner or admin only; the design wanted member values.",
+    "Unavailable placeholders are owner-level at the BFF (model_plane, model_access, browser_sites, zdr), not one per key."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The EP-9 T2 live proof is not run: admin and member bearers on one thread must return both JSON bodies, and setting mode_cap to read_only must show origin org with the new revision (EV/live-proof-ep9-t2-<date>.txt; the lead runs docker)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The Space scope is not built, so T3's Space settings mount needs a Space ownership check (user-core, with E2) and an owner decision on whether it waits."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The model-gateway handler has no route-level test for the thread gate (a non-owned thread gives 404, a lookup failure 503), the switch-off 404, or a held policy read; add an AppState harness test before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Routing is not reported as its own item because model-gateway has no per-thread routing setting, so the owner should confirm that web.paid_providers is the routing answer the panel shows."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Members get no browser-site item because org-core reads GET browser-sites for an owner or admin only, and a member read needs an org-core read change the owner must approve."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ext.skills, ext.plugins, user_hooks and reference_uploads are listed at their platform default because SETTINGS marks them Reserved, so EP-11 S9 must add a typed row when it enforces ext.skills or the view shows the default while an org value is in force."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "BFF unavailable is owner-level (model_plane, model_access, browser_sites, zdr), so T3's panel must show one unavailable row per owner and never a guessed value for the keys behind it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Members see the organization switch values and the model-access values, with the allow and deny lists as counts, which applies the design's admin-only rule; the owner should confirm that split."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The view reports the standard-route run budget only, while subscription routes use AGENTIC_SUBSCRIPTION_* budgets this view does not show."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "model_access items are omitted rather than unavailable while the model-entitlement admin switch is off, so the panel must not read that absence as an outage."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-C2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/retention_sweeper.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0107_retention_sweep_runs.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0107_retention_sweep_runs.down.sql"
+   ],
+   "notes": "I built the dry-run retention sweeper in session-core. Nothing was compiled or run (code-first rule). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-9-C2.patch (55905 bytes, 4 files). My worktree started at the default-branch HEAD; I detached it to model-plane 0e30f0931 before editing.\n\nHow it works:\n- It lists the orgs that own personal threads here and asks org-core's C1 route POST /internal/orgs/:orgId/retention/check for each, reusing ORG_CORE_URL, SESSION_ORG_CORE_SERVICE_TOKEN and the x-service-id/x-service-token headers from org_policy.rs. The first call has an empty list and reads the window, revision and org hold. After that, candidates go in pages of 500 (org-core's MaxCheckThreadIDs), one check call per page.\n- No row is written when org-core answers 404 or the window is null. Any other failure ends the org's pass with error_code policy_unavailable and zero counts (fail closed). A window outside 30..3650 days gives policy_window_invalid. A revision or window that changes mid-pass gives policy_changed.\n- A thread is a candidate when it has no space_id and no space_kind, has been idle past the window, and has no unfinished run (status not completed, failed or cancelled). Idle time uses the later of threads.last_activity_at and the newest updated_at/ended_at of its runs. The cutoff is read once per pass from the database clock.\n- Counts: threads whose every run was 'zdr' go to skipped_zdr and are not sent to org-core. Waived threads hold content, so they are swept. Threads named in held_thread_ids, or every thread while org_held is true, go to held. The rest go to would_delete.\n- For the would-delete threads it also counts rows per table in the THREAD_BOUND_TABLES list (16 tables) and stores them in rows_by_table JSONB. This list is the registered list C-B9 asks for. One test scans the migration files and one checks the real schema; each fails when a table with a thread_id column is missing from the list.\n- One retention_sweep_runs row and one audit outbox row (event retention_sweep, flat audit-core shape, counts only) are written in the same transaction.\n- A session advisory lock stops two replicas sweeping at the same time.\n- The switch SESSION_RETENTION_SWEEP: unset, empty or off means off, and the task in main.rs then makes no database read and no org-core call. dry_run and enforce are read as written. Any other value means dry_run, never enforce. enforce runs dry in this build and the row records mode dry_run. SESSION_RETENTION_SWEEP_INTERVAL_SECS defaults to 21600 with a floor of 300. A pass runs at start, then once per interval.\n\nTests:\n- Unit: switch parser, interval, window bounds, strict check parsing, page split, audit body, migration-scan table coverage, and a wiremock client test (headers, path, body, 404 means no policy, 503 is an error).\n- Real-Postgres #[ignore] tests: window boundary, a recent run keeps an old thread, held thread and org hold kept, Space thread kept and ZDR thread skipped, org-core unreachable means no candidates, no window or unknown org writes nothing, the counts row and audit row are written with nothing deleted, and the registered list matches information_schema.\n\nChanges from the design: migration 0095 is free on model-plane (round B reservation). The table has two columns the design did not list, skipped_zdr and rows_by_table; window_days and created_at were also added. Orgs are listed from the local threads table instead of an org-core /internal/orgs list, because org-core has no such list route and the check route already answers per org.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core service environment, directly after the line `ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}`, add:\n      # EP-9 C2 retention sweeper: off|dry_run|enforce, default off; any other value is dry_run, never enforce.\n      # This build only counts (enforce runs dry). Needs SESSION_ORG_CORE_SERVICE_TOKEN with org:retention-policy:read:any.\n      SESSION_RETENTION_SWEEP: ${SESSION_RETENTION_SWEEP:-off}\n      SESSION_RETENTION_SWEEP_INTERVAL_SECS: ${SESSION_RETENTION_SWEEP_INTERVAL_SECS:-21600}",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2, D-C4). It must say: SESSION_RETENTION_SWEEP treats an unknown value as dry_run, a deliberate deviation from K3-26 because this switch deletes data; enforce runs dry until EP-9 C3; the retention clock is last activity (newest message, or latest run change if later), with 30..3650-day bounds; org-core unreachable means no candidates.",
+    "owner (.env / Control credential registry, not code): the session-core credential org-core accepts must add the scope org:retention-policy:read:any. Without it every check gets 403 and every pass records policy_unavailable.",
+    "guard: compile session-core (cargo test -q -p session-core --bin session-core retention_sweep). If another batch-W3-19 builder added a table with a thread_id column (EP-7 S2 thread_goal_turns, EP-11 rows), add that table to THREAD_BOUND_TABLES in retention_sweeper.rs; thread_bound_tables_cover_every_migration will fail until it is there.",
+    "lead: run the ignored real-Postgres tests (cargo test -q -p session-core --bin session-core retention_sweep -- --ignored --test-threads=1) with DATABASE_URL pointing at a scratch database whose name contains 'test'.",
+    "live proof (EP-9 C2, after C1 is live with ORG_RETENTION_POLICY_ENABLED=true): seed an org with old personal threads, set a 30-day window, run SESSION_RETENTION_SWEEP=dry_run with a short interval, and capture the retention_sweep_runs row, the retention_sweep audit event in audit-core, and psql row counts before and after."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs: the org erasure purge should also run DELETE FROM retention_sweep_runs WHERE org_id = $1 (counts only, but keyed by org)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The candidate query filters threads by (org_id, last_activity_at) with a correlated max over runs, and the only threads index with last_activity_at (idx_threads_owner_activity) leads with user_id and is partial on archived_at IS NULL, so large orgs may scan; an index on threads (org_id, last_activity_at) WHERE space_id IS NULL must be added CONCURRENTLY outside the boot migration before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "count_bound_rows runs count(*) WHERE thread_id = ANY($1) on all 16 registered tables per page, and some of them (space_event_log, message_mentions, cron_fires, skill_revisions) may have no index on thread_id, so a dry pass on a large org could seq-scan those tables."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The sweeper's whole path (org-core check with the session-core credential holding org:retention-policy:read:any, counts row, retention_sweep audit event accepted by audit-core on verevon.audit.v2.model.session-core.retention_sweep) is unproven live and must be proven before SESSION_RETENTION_SWEEP=dry_run is set anywhere."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Space threads are excluded only by space_id IS NULL AND space_kind IS NULL; a personal-Space thread (space_kind = 'personal') is never swept in W3, which matches the design's 'Space threads excluded' but leaves personal-Space content outside any retention window."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "EP-9 C3 must replace RECORDED_MODE with the real mode, erase every THREAD_BOUND_TABLES table (several, e.g. message_mentions, message_revisions, run_questions, approval_scope_grants, are not named in delete_thread_rows today), and keep the per-org cap and second hold check."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "retention_sweep_runs grows by about four rows per org per day and has no sweep of its own; it needs a bounded retention once the dry-run review week is over."
+    }
+   ],
+   "deviations": [
+    "The org list comes from local threads (SELECT DISTINCT org_id FROM threads WHERE space_id IS NULL) instead of an org-core /internal/orgs list. org-core has no such list route; an org with no window (null) or unknown to org-core (404) writes no row.",
+    "The retention_sweep_runs table has more columns than the design lists: skipped_zdr (named in the design summary), window_days, rows_by_table JSONB (row counts per table for the C-B9 'dry-run counts them' rule) and created_at.",
+    "SESSION_RETENTION_SWEEP=enforce runs dry in this build and the row records mode 'dry_run', because the delete path is EP-9 C3."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-C4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-4",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Control Plane/org-core/internal/http/gdpr_handlers.go",
+    "apps/Control Plane/org-core/internal/http/gdpr_hold_test.go",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/privacy.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts"
+   ],
+   "notes": "The code and unit tests are written but none have been run (code-first rule). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-9-C4.patch (43 KB). I detached the worktree to model-plane 0e30f0931 before editing. All files are LF and I kept them LF.\n\nWhat the slice does, behind the switch ERASURE_HOLD_CHECK (only the literal \"true\" turns it on; off, nothing is asked and behaviour is unchanged):\n\n- **session-core gdpr.rs**: new hold gate with three states (Off, Unconfigured, On). When on, it asks org-core with POST /internal/orgs/{org}/retention/check, sending up to 500 thread ids per call, and reuses the existing ORG_CORE_URL and SESSION_ORG_CORE_SERVICE_TOKEN.\n  - A held org or thread is refused with FailedPrecondition and the trailer x-mp-error-code=erasure_blocked_legal_hold.\n  - An outage, a non-404 error status, a body that does not parse, or missing credentials is refused with Unavailable and erasure_hold_check_unavailable. The message never carries the internal cause.\n  - org-core's 404 lets the erasure through: the org is not live, and its holds were deleted with it.\n  - The refusal message names what stays, from HELD_THREAD_CONTENT, which includes thread_goals and artifact_revisions (C-B9).\n  - purge_organization_data asks the gate before it opens its transaction.\n- **session-core grpc.rs**: delete_thread checks after the owner check and before the transaction. delete_threads checks inside the transaction, after its FOR UPDATE, and refuses the whole bulk delete if the org or any thread is held.\n- **org-core gdpr_handlers.go**: both hard delete and soft delete are refused with 409 erasure_blocked_legal_hold while any org or thread hold is active. If holds cannot be read, the answer is 503 erasure_hold_check_unavailable. The switch is read per request; refusals are logged with the actor.\n- **BFF privacy.rs**: erase maps the two upstream codes to typed 409 and 503 envelopes built from fixed words. Every other answer passes through unchanged.\n- **errors.ts**: copy added for both codes.\n\nTests:\n- **gdpr.rs (wiremock)**: strict switch parsing; Off makes no network call; Unconfigured refuses; thread hold and org hold each refuse until released; failures refuse while a 404 does not; large deletes are paged; the C-B9 tables stay named and deleted; the purge checks holds before its transaction.\n- **gdpr_hold_test.go**: switch strictness; refused while held, allowed after release; a thread hold blocks org erasure; unreadable holds give a retryable refusal; the real routes refuse before HardDelete.\n- **privacy.rs**: the three mapping tests.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in delete_thread and in the bulk delete-threads handler, replace `.map_err(|error| session_thread_error(\"session-core delete_thread failed\", &error))` with a mapper that first reads `error.metadata().get(\"x-mp-error-code\").and_then(|v| v.to_str().ok())`: on Some(\"erasure_blocked_legal_hold\") return (StatusCode::CONFLICT, Json(json!({\"error\":{\"code\":\"erasure_blocked_legal_hold\",\"message\":error.message(),\"details\":{\"retryable\":false}}}))); on Some(\"erasure_hold_check_unavailable\") return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({\"error\":{\"code\":\"erasure_hold_check_unavailable\",\"message\":\"Legal holds could not be checked, so nothing was deleted.\",\"details\":{\"retryable\":true}}}))); else fall through to session_thread_error. Without this, FailedPrecondition is mapped to thread_persistence_not_permitted and the SPA never sees the hold code.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/gdpr_nats.rs: in run()'s `Err(e) =>` branch, replace `msg.ack_with(AckKind::Nak(None))` with `msg.ack_with(AckKind::Nak(e.downcast_ref::<crate::gdpr::ErasureHoldError>().map(|_| Duration::from_secs(300))))` and add the label `counter!(\"mp_session_gdpr_erasure_total\", \"result\" => \"held\")` when the downcast matches. Otherwise a held org's erasure event is redelivered at once, in a hot loop, while the switch is on.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): add the entry 'D-C1 Legal hold versus erasure (EP-9 C4): a hold blocks thread delete, bulk history delete, org hard and soft delete and the session-core org purge with erasure_blocked_legal_hold; a check outage refuses with the retryable erasure_hold_check_unavailable; org-core 404 means the org and its holds are gone; release happens in Control (legal-hold routes), no override in Model Plane; switch ERASURE_HOLD_CHECK on session-core and org-core, default off. Decided by the owner at the recommended option 2026-11-04; counsel input outstanding.'",
+    "deploy note, no code: ERASURE_HOLD_CHECK must be switched on in session-core and org-core together. session-core's principal must hold org:retention-policy:read:any in plane-service-principals.json (EP-9 C1 grants it) or every delete is refused as unavailable.",
+    "guard: run the gateway error-code scan (src/shared/i18n/gateway-error-codes.test.ts) — privacy.rs now emits erasure_blocked_legal_hold and erasure_hold_check_unavailable through error_with_details, and both have copy in errors.ts."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/org-core/internal/org/service_enhanced.go (PurgeDeletedOrganizations: the 30-day cron purge must also skip an org with an active legal hold)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (map the hold trailer, see lead_todo)",
+    "apps/Model Plane/rust/services/session-core/src/gdpr_nats.rs (delayed NAK for a held org, see lead_todo)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The org-core cron purge of a soft-deleted org (PurgeDeletedOrganizations) does not check holds, and session-core's org_held check cannot catch it: the retention check route answers 404 for a non-live org, and gdpr_hard_delete cascades the holds away before the fan-out, so a hold placed during the 30-day grace window does not stop the automatic purge."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Refused erasures are only logged (org-core log.Printf, session-core tracing). No durable audit row is written, so D-C1's 'the attempt is audited' needs an audit-outbox event (org_retention_audit_outbox or session_audit_outbox) before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway's session_thread_error maps every FailedPrecondition to thread_persistence_not_permitted, so until the http_routes.rs shared edit lands the SPA shows the wrong refusal for a held thread delete."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "delete_thread checks holds before its transaction, so a hold placed in the milliseconds between the check and the commit is not honoured; delete_threads checks under its FOR UPDATE locks, but org-core hold placement is not serialised against either."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF privacy erase mapping cannot be reached today: user-core's per-user erasure does not consult holds and does not delete Model Plane conversations, so only the unit test exercises it until user-core forwards the codes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A thread hold blocks the whole org erasure, and any held thread refuses the whole bulk delete of a user's history (all-or-nothing), not just the held threads; the refusal returns counts, not thread ids."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof still to run with both switches on: place a thread hold, delete it from the SPA and see erasure_blocked_legal_hold, release, delete succeeds; place an org hold, org hard and soft delete both give 409; stop org-core, delete gives a 503 retryable refusal."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "heldErasureContent in org-core and HELD_THREAD_CONTENT in session-core are two copies of the same list; a shared contract file would stop them drifting."
+    }
+   ],
+   "deviations": [
+    "No session-core test reaches a real-PG delete_thread through the gRPC service: the global gate is a OnceLock, so the 'refuses while held, succeeds after release' tests run against the gate's ensure_not_held with wiremock (the function the RPCs call), plus a source-order test for the purge.",
+    "org-core reads ERASURE_HOLD_CHECK on every request inside gdpr_handlers.go, not once in NewServer, because server.go is not this slice's file."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-5",
+   "files_changed": [
+    "apps/Model Plane/api/contracts/authored-behaviour-lint.json",
+    "apps/Model Plane/api/contracts/authored-behaviour-lint.json.sha256",
+    "apps/Model Plane/api/contracts/authored-behaviour-lint-golden.json",
+    "apps/Model Plane/rust/crates/mp-contracts/src/skill_lint.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/go/services/capability-core/internal/skilllint/lint.go",
+    "apps/Model Plane/go/services/capability-core/internal/skilllint/lint_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skilllint/metrics.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_lint_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/frontmatter_name_test.go",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLintNotes.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.ts",
+    "apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.test.ts"
+   ],
+   "notes": "I built the slice as code only. Nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-11-S4.patch (104 KB). It was made from a worktree detached at model-plane 0e30f0931.\n\n**Contract.** authored-behaviour-lint.json holds 13 closed rules: code, field, severity and limit. Lengths count Unicode characters, not bytes. It also holds the mode, the refusal shape and the transcript and tool-name rules. The .sha256 pin uses the `<hash>  <name>` form over LF text. The golden file has 28 input cases with the codes each must produce.\n\n**Rust and Go.** mp-contracts skill_lint (std-only, plus test-only reads of the three files) and capability-core internal/skilllint implement the same rules. Both have tests that check the pin, check the rules against the contract in order, and run the golden cases.\n\n**session-core.** `upsert_agent_skill` runs the lint after `gate_skill` and before the INSERT. Under enforce it returns `skip_reason` `skill_lint:<first error code>`. Under report it only counts `skill_lint_findings_total{code,severity,mode}`.\n\n**D2-509 fix (no switch).** A human write (`origin = \"user\"`) from a caller without a verified user id now gets `skip_reason` `origin_requires_person`. The old fallback that took the owner from the request for service callers is gone. The learning sink sends `background_review` and is not affected.\n\n**capability-core.**\n- `SkillsHandler` and `SkillBundlesHandler` read `SKILL_LINT_MODE` when they are built. Only the exact words `report` and `enforce` turn it on.\n- POST lints the request body.\n- PATCH lints the stored row with the edit applied, inside the transaction after the owner check. It runs only for a description or content edit, or for switching a skill on. A sharing change or a switch-off is not linted.\n- Under enforce, a refused write gets 422 `{error:{code:\"skill_lint_failed\",message,details:{findings:[{code,field,severity}]}}}`.\n- A write that goes ahead adds `warnings` to its 2xx body only when there are findings.\n- Bundle PUT applies only the front-matter name rule, comparing against the skill's stored name.\n- With the lint off, nothing extra is read and every body is byte-identical to before. The bundle summary's `warnings` is `omitempty`.\n- `skillbundle.FrontMatterName` reuses the front-matter reader that `Parse` already uses.\n\n**Frontend.** skill-lint.ts reads findings from the 422 error and from the 2xx `warnings`, and gives each code a Norwegian and English message. SaveAsSkillDialog and SkillsSection show errors next to the field they are about. A save with warnings shows a soft note; the dialog stays open with a Done button.\n\n**Tests written.**\n- Rust: `skill_lint` tests; in session-core `lint_off_runs_nothing`, `lint_report_mode_counts_and_writes`, `lint_enforce_refuses_with_token`, `upsert_agent_skill_lints_before_the_write`, plus `service_caller_cannot_write_origin_user` and `learning_path_still_writes_proposals` (both need Postgres and are `#[ignore]`).\n- Go: `TestLintGoldenParity` and the contract/pin tests, `TestPostLintEnforce422`, `TestPostLintReportWritesAndAddsWarnings`, `TestSkillWritesAreUnchangedWhileLintIsOff`, `TestPatchLintsReenableOfLearnedText`, `TestBundleFrontmatterMismatch`, and `FrontMatterName` tests.\n- Vitest: skill-lint.test.ts and two new dialog tests.\n\nNo proto change, no migration and no ZDR matrix row: the findings carry no content.",
+   "deviations": [
+    "The design shows `details` as a list. I put the findings under `details.findings`, because the hard rule says details is an object and the SPA client drops array details.",
+    "The design names metric `skill_lint_findings_total{code}`. Both services also carry `severity` and `mode` labels.",
+    "Bundle upload checks only the front-matter name rule, not the whole skill text, so an upload is never refused for a row it does not change. If the skill row is missing, nothing is checked.",
+    "The README rule says consumers vendor a copy of each golden. Instead, the Rust and Go tests read the canonical api/contracts files directly, as the existing runwatch and org_agent_policy tests and mp-contracts zdr_refusal already do."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core service environment block and the capability-core service environment block add `SKILL_LINT_MODE: ${SKILL_LINT_MODE:-off}` (values are off|report|enforce, not a boolean, so the default is `off`).",
+    "owner: add `SKILL_LINT_MODE=off` with a comment `# EP-11 S4 skill lint: off | report | enforce` to apps/Model Plane/deploy/.env.example (I did not edit it).",
+    "shared-edit apps/Model Plane/proto/model_plane/v1/sessions.proto, UpsertAgentSkillResponse.skip_reason comment (comment only): change `// \"owner_required\", or \"skill_policy:<rule>\" when the content policy refused` to `// \"owner_required\", \"origin_requires_person\" (origin \"user\" from a caller that is not a person, D2-509), \"skill_lint:<code>\" when the skill lint refused the text under enforce (EP-11 S4), or \"skill_policy:<rule>\" when the content policy refused`. Regenerate bindings only if the guard regenerates on comment changes.",
+    "shared-edit apps/Model Plane/api/contracts/README.md table, add the row: `| authored-behaviour-lint.json (+ authored-behaviour-lint-golden.json) | authored (EP-11 S4); pinned by its .sha256 | the one closed lint every skill write passes: rule codes, fields, severities, limits, SKILL_LINT_MODE and the refusal shapes (HTTP 422 skill_lint_failed with details.findings; gRPC skip_reason skill_lint:<code>). Read by mp-contracts skill_lint and capability-core internal/skilllint against the same golden cases |`.",
+    "guard: compile and run mp-contracts --lib skill_lint, session-core lint tests, capability-core ./internal/skilllint/... ./internal/api/... ./internal/skillbundle/..., and the vitest dirs src/features/settings/components and src/features/skills. The two `#[ignore]` session-core tests need session-core-db-tests.sh."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before enforce, run SKILL_LINT_MODE=report on dev for a week and read skill_lint_findings_total by code from both services. Flip to enforce only if under 1% of existing rows would fail (D8), then show a 40,000-char skill refused with the same code from both writers."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Check that the BFF passes capability-core's 422 skill_lint_failed envelope (with details.findings) and the 2xx warnings field through unchanged on /api/v1/skills (FE/apps/gateway/src/domains/agent_actions.rs). The SPA field notes depend on it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "service_caller_cannot_write_origin_user and learning_path_still_writes_proposals are #[ignore] Postgres tests. The D2-509 fix ships with no switch, so these two must run on the DB harness before merge."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Under enforce, a learned write the lint refuses comes back as skip_reason skill_lint:<code>. skillsink.Persist treats it as a silent continue: unlike skill_policy refusals, it is not counted, so learned-skill lint refusals show up only in session-core's metric."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "SkillsSection.tsx has no component test. Its lint field notes and the create warnings note are covered only through the shared skill-lint helpers and the SaveAsSkillDialog tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "updateSkill in the SPA never reads PATCH warnings, so a report-mode re-enable or edit shows no soft note. Only creates and Save-as-skill do."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "transcript_shape matches only the case-sensitive prefixes User:, Assistant: and Bruker:. Other export labels (for example Assistent: or Human:) need a contract change in both languages."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-6",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+   ],
+   "notes": "Built EP-4-S2 in the isolated worktree. It was detached from worktree-wf_d6c5dad7-a53-6 (21d636a5a) to model-plane (0e30f093) before any edit, and it was clean, so there were no partial edits to keep. format_guidance.rs: WIDGET_NOTICE, widget_notice, a shared asks_for matcher (chart behaviour unchanged), for_turn(user_text, widgets_offered), message_for_turn_with, and the MODEL_GATEWAY_WIDGET_GUIDANCE OnceLock switch (trim == \"true\"). sse.rs (CRLF kept, verified): the one call passes widgets_offered = switch && features contains inline_widgets. chat-client.ts: inline_widgets is sent only when VITE_CHAT_INLINE_WIDGETS === 'true'. With the switches off the prompt and the request body are unchanged. Tests are written and not run. Patch, staged and not committed: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-4-S2.patch (16,295 bytes, 4 file diffs). Compile watch-list for the guard: the generic asks_for closure (|&noun| inside is_some_and), the into_iter().chain array in message_for_turn_is_unchanged_when_widgets_not_offered, and the const captures inside format! in chart_notice_unchanged. No build, test, lint, cargo, pnpm or docker command was run; only read-only git and python measurements (line endings, notice text).",
+   "deviations": [
+    "Design line references drifted: the call is at sse.rs around 3857-3860 (the design said :3209). format_guidance.rs is LF, not CRLF as the design said; sse.rs is CRLF and stays CRLF.",
+    "for_turn gained a widgets_offered argument; its only callers are in format_guidance.rs. message_for_turn keeps its one-argument signature and calls message_for_turn_with(user_text, false).",
+    "Widget nouns match as substrings, so compounds such as lånekalkulator and skyveknappene count; the design left the matching rule open.",
+    "Two unit tests beyond the design's list: the_switch_is_the_literal_true and the_widget_notice_states_the_frame_limits.",
+    "The design's open check is answered: zdr_direct_stream does not assemble format_guidance, and only sse.rs sets the slot."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service, after line 250 (`      MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}`; the file is LF), insert two lines at the same 6-space indent: `      # EP-4 S2: widget prompt notice, literal true only. VITE_CHAT_INLINE_WIDGETS must also be on in the frontend.` and `      MODEL_GATEWAY_WIDGET_GUIDANCE: ${MODEL_GATEWAY_WIDGET_GUIDANCE:-false}`.",
+    "regen: in apps/Model Plane/rust run `MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest`. The format_guidance.rs items changed: asks_for_chart, for_turn, message_for_turn; new items: WIDGET_NOTICE, WIDGET_NOUN_STEMS, is_widget_noun, asks_for, asks_for_widget, widget_notice, message_for_turn_with, widget_guidance_enabled_from, widget_guidance_enabled. This rewrites apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json and, if the test does not, its .sha256 pin.",
+    "scenario-touch: scripts/gates/scenario-touch.py fails when the manifest changes without a scenario. Add an eval case under apps/Model Plane/python/eval-lab-py/cases/ (new folder widget_notice/, following the existing folders' layout) or a replay cassette under apps/Model Plane/rust/crates/mp-inference-replay/cassettes/. It should cover: the request 'Lag en lånekalkulator med skyveknapp for rente' with inline_widgets on gets the WIDGET_NOTICE text, and with it off there is no notice.",
+    "owner, not this slice: VITE_CHAT_INLINE_WIDGETS needs documenting in the verevonv3 .env.example (D3-511). The slice did not edit it."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (switch wiring, see lead_todo)",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json and its .sha256 pin (guard regenerates)",
+    "apps/Model Plane/python/eval-lab-py/cases/ (new widget_notice scenario for the scenario-touch gate)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not run (wave mode). With both switches on, 'Lag en lånekalkulator med skyveknapp for rente' should carry WIDGET_NOTICE and return a closed widget fence; with either switch off the prompt is unchanged. An interactive-chart request gets both notices, so the model's choice needs a live check."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ZDR turns never receive the notice: the ZDR branch (sse.rs around 2414, returning at around 2513 into zdr_direct_stream) returns before the slot is set at around sse.rs 3859. The design allowed the notice on ZDR (it stores nothing); the chart notice has the same gap today. Decide before the S12 flip."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WIDGET_NOTICE says 'no links' and 'no forms'. When S3 adds open_link and staged follow-ups, the notice must change in the same edit, and the prompt manifest regenerates again."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The OnceLock switch cannot be flipped in a unit test, so the sse.rs wiring (switch && features contains inline_widgets) is covered only by review; add a request-level test with the switch on once the guard can run tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "buildChatWireBody is shared with ag-ui-client.ts, and support-read-only threads keep the family (the BFF strips only tools and agentic), so AG-UI and support answers can receive the notice. Confirm both should offer widgets."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Widget nouns match as substrings and the verb list is shared with the chart notice, so 'turn the slider off' or 'show the slider value' gets the notice. This is harmless prompt text and no test pins it."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-7",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Code and tests are written. Nothing was run, per the code-first order. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-4-S3.patch (999 lines). HEAD was detached to model-plane 0e30f0931 before editing.\n\n- **widget-bridge.ts** is new and pure:\n  - Envelope parser per D4: the source must be the frame's window, the origin must be 'null', the message must be at most 8 KiB as UTF-8 JSON, and the height is clamped to 80-1200.\n  - A follow-up is trimmed, at most 500 characters, and dropped (not cut) when longer. open_link goes through isSafeLinkHref.\n  - Token buckets: 5 follow-ups per answer per minute, shared by the answer's widgets, and 20 size messages per second per frame. One staged follow-up per widget at a time, checked before the budget is spent.\n  - Drops are counted per reason, except foreign-source traffic.\n  - BRIDGE_SHIM sets a frozen window.verevon with resize, suggest and openLink.\n- **sandbox-html.ts**: sandboxWidgetDocument takes an optional third argument { bridgeShim }. It writes the script after the CSP and theme and before the body. Without it the output is byte-identical to S1.\n- **InlineWidget.tsx**:\n  - widgetBridgeEnabled() reads VITE_CHAT_WIDGET_BRIDGE (literal 'true' only), once per frame.\n  - With the switch on, each frame gets the shim and exactly one window 'message' listener, removed on cleanup.\n  - size sets an inline height, except while the widget is expanded.\n  - followup stages a chip labelled \"Forslag fra widgeten:\" with a Dismiss button. Clicking the chip calls the answer's onSelectFollowUp once.\n  - open_link shows the full URL with an \"Åpne lenken\" anchor (target _blank, rel noopener noreferrer) and a Cancel button, one at a time. An unsafe link shows \"Lenke blokkert: ukjent adresse\".\n  - New InlineWidgetAnswer wrapper provides the follow-up handler and the per-answer budget. Without it a widget stages nothing.\n- **action-registry.ts**: added chat.stage_widget_followup and chat.open_widget_link (low risk, not model-executable) with strict schemas. The count test is now 303.\n\n**Deviations from the design:**\n- ownerPlane is 'model', not 'frontend', because the PlaneOwner type has no 'frontend'. This follows chat.present_deck.\n- The transcript has no external-link confirmation (transcript links open directly with target _blank), so the widget's link confirmation is a new in-widget row.\n\nThe follow-up chip only works after the ChatMessages.tsx shared edit in lead_todo is applied.",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: in the import at line ~126 `import { InlineWidget, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'` add `InlineWidgetAnswer`; in AssistantMessage (~line 867-869) wrap the existing child so it reads `<InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>` / `<InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>` / `<SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />` / `</InlineWidgetAnswer>` / `</InlineWidgetSurface>`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `'chat.goal_auto_toggle': exempt('agent_cannot_self_govern', 'context_write'),` add `'chat.stage_widget_followup': exempt('ui_state_only', 'read'),` and `'chat.open_widget_link': exempt('ui_state_only', 'read'),`. MODEL_ACCESS is Record<ActionId, ...>, so typecheck fails without these.",
+    "Regenerate the agent-action-admission golden (src/shared/api/contracts/agent-action-admission.json) for the two new action ids.",
+    "action-registry.test.ts count is 303 on model-plane HEAD 0e30f0931 (301 + 2). Re-base it if other slices in this batch also add actions."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "With both switches on, a widget calling verevon.suggest in a 20-iteration loop must show one chip, clicking it must reach the composer once, and verevon.openLink('javascript:...') must be refused in a real browser (the tests fake contentWindow and the event source)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The transcript has no external-link confirmation to reuse, so open_link uses a new in-widget row showing the full URL with an anchor the person clicks; if a shared confirmation dialog is wanted later, the widget should switch to it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On the chat page onSelectFollowUp only fills the composer (FollowUpChips doc), so a widget chip never sends a turn by itself; this is stricter than the design's 'clicking sends one visible user turn' and the live proof should expect a filled composer."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The staged-chip and link rows reuse global .verevon-chat-followups/.verevon-chat-followup-chip and the widget's __note/__action classes because inline-widget.css is not in this slice; a small spacing rule (e.g. padding inside .verevon-inline-widget) may be needed after the visual check."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A widget can still mislead with its own chip text or link label; the chip names the widget as the source and the link row shows the full URL, but there is no domain allowlist."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json"
+   ],
+   "deviations": [
+    "ownerPlane 'model' instead of the design's 'frontend': the PlaneOwner type has no 'frontend' value (same choice as chat.present_deck).",
+    "The design's 'transcript external-link confirmation' does not exist; open_link shows its own confirmation row under the widget (full URL plus a person-clicked anchor with noopener noreferrer, and a Cancel button)."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S6",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_d6c5dad7-a53-8",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx"
+   ],
+   "notes": "EP-4-S6 built in the isolated worktree, detached at model-plane 0e30f09 (confirmed equal); nothing committed, patch staged. Usage at start: 86% weekly, under the 95% stop line. Gateway: run_question_value adds origin and origin_label only for a non-empty, non-model origin; ChatEvent::UserQuestion gains origin and origin_label (Option String), serialised only when Some; the sse.rs emit passes them from the run_question_value fields. SPA: ChatUserQuestionEvent gains origin and originLabel; questionOrigin in chat-client.ts reads origin only for mcp_elicitation with a trimmed label of 1 to 80 code points; QuestionCard shows 'Spoersmaal fra <server>' above the items and 'Svaret sendes til <server>' under them, with model questions unchanged (keys omitted, no card change). No switch, migration, proto, ZDR row or refusal. S5 is already in model-plane (proto fields 15/16 and 8/9, session-core store and migration 0105, validate_origin), so the origin reaches the gateway now and the card once S7 sends one. The SSE golden and its pins are NOT edited (regeneration is in lead_todo). Line endings measured with python: sse.rs stays CRLF, the other six files are LF. Nothing built, linted or run. Hot-file note (round A line 70): the chat-client.ts and sse_events.rs edits are local (one type, one helper, one switch case; one variant, one writer arm). Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-19/EP-4-S6.patch (7 files, 202 insertions, 9 deletions, 17284 bytes).",
+   "lead_todo": [
+    "Regenerate the SSE golden once every slice that changes ChatEvent has landed (S6 adds optional user_question keys origin and origin_label; the EP-5 deck note also regenerates it): in apps/Model Plane/rust run MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 cargo test -q -p model-gateway --lib sse_event_payload_golden. It rewrites apps/Model Plane/api/contracts/sse-event-payloads.json and returns early; the output is LF.",
+    "In apps/Model Plane/api/contracts run sha256sum -b sse-event-payloads.json > sse-event-payloads.json.sha256 (the pin form is '<hex> *sse-event-payloads.json').",
+    "Copy apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256 to apps/Frontend Plane/verevonv3/src/shared/api/contracts/ (the vendored copy; zdr-contract-sync compares them).",
+    "In apps/Frontend Plane/verevonv3 run node scripts/gen-chat-event-types.mjs, then node scripts/gen-chat-event-types.mjs --check (must exit 0). The generated file gains optional origin and origin_label on user_question.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: line 203, replace the 64-hex digest after 'sse-event-payloads.json|' (currently 07670b8fd14fede1fdf149a6045f68b687c97cd539957316360efc6bb267eb59) with the hex from the new .sha256 file. The file is LF.",
+    "Guard checks: cd 'apps/Model Plane/rust' and cargo test -q -p model-gateway --lib run_question_origin_tests; cargo test -q -p model-gateway --lib user_question; cargo test -q -p model-gateway --lib sse_event_payload_golden; cargo fmt --all -- --check. Then python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check (no event name changed, expected to pass) and bash scripts/tests/zdr-contract-sync.test.sh. In apps/Frontend Plane/verevonv3: pnpm exec vitest run src/shared/api/chat-client.test.ts src/shared/chat-nodes/QuestionCard.test.tsx; pnpm lint; node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit, diffed against HEAD's failing set.",
+    "Until the regeneration steps above run, sse_event_payload_golden and gen-chat-event-types --check fail by design because the golden now lists origin and origin_label. No zdr-posture-matrix row is added (S6 refuses nothing), and no flag exists to flip."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts"
+   ],
+   "deviations": [
+    "Test cases are named in prose, following each file's convention; the design identifiers origin_read_only_for_known_values, server_origin_line_and_notice and model_question_unchanged are not used verbatim. The Rust tests use the design names user_question_without_origin_is_byte_identical, user_question_with_server_origin_carries_it and run_question_value_omits_model_origin, plus run_question_value_names_a_server_origin."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "chat-client.ts questionOrigin drops a server-origin frame whose label is blank or over 80 code points, so the card shows it as the model's question; producers cannot send one today (session-core validate_origin requires a label and elicitation_server_label falls back to the server id), and the defensible fix is a generic 'an MCP server' label rather than dropping the origin."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The card title stays 'Agenten trenger et svar' (The agent needs an answer) for a server question, so only the origin line and the notice attribute it to the server; a server-specific title is needed before S7 is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The origin label is the registered server's name (runtime_registries.rs elicitation_server_label, falling back to the server id), so the phishing mitigation depends on who may register or rename a server that an org's runs use; confirm in the depth phase."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No stylesheet in apps/Frontend Plane/verevonv3 styles any verevon-question-card class (checked across the whole app), so the new origin line and notice render as plain text, indistinguishable from the note."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "sse_event_payload_golden and gen-chat-event-types --check fail until the lead_todo regeneration runs, because the golden now lists origin and origin_label as optional user_question keys."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "questionAnswerSummary (use-chat-controller.ts:317) words a server's answer exactly like a model answer, so the sent message never names the server; S7 should decide whether it does."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The card copy at 375 px and 1280 px and the origin line on a live server question are unproven until the EP-4 F2 flow runs with S4 to S7 on the proof org."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-9-W3, EP-9-T2, EP-9-C2, EP-9-C4, EP-11-S4, EP-4-S2, EP-4-S3, EP-4-S6",
+    "outcome": "All 8 patches applied. The only conflict was the id-count assertion in action-registry.test.ts (EP-9-T2 expected 302, EP-4-S3 expected 303). I kept both comments and set the count to 304. Then ran git reset -q; git diff --stat shows every slice's files.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (Go), copy changed files, then bash scripts/tests/go-gen-drift.sh",
+    "outcome": "execution.pb.go and sessions.pb.go copied. Drift check: 50 generated Go files match.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml (Python)",
+    "outcome": "Only execution_pb2.py differed and was copied into mp-events-py/_gen. sessions_pb2.py did not change, since the descriptor carries no comments.",
+    "clean": true
+   },
+   {
+    "command": "buf breaking apps/Model Plane/proto --against baseline.binpb",
+    "outcome": "exit 0 (additive only)",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5/5 passed. The golden gained policy.read_effective, chat.stage_widget_followup and chat.open_widget_link. Copied byte-identically to the 4 vendored copies. New .sha256 is c6e7da85...; the zdr-contract-sync pin was updated to match.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 passed. Rewrote prompt-tool-manifest.json and its .sha256.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden",
+    "outcome": "The first run failed to compile (policy_effective.rs E0308; fixed, see fixes). The rerun passed. New .sha256 is 4e2aa8fe...; it was written, vendored to the SPA contracts dir and pinned in zdr-contract-sync.test.sh line 203. node scripts/gen-chat-event-types.mjs, then --check: exit 0.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust, mp-target-w2)",
+    "outcome": "The first run failed: session-core retention_sweeper.rs:649 had a malformed assert_eq! (fixed, see fixes). The rerun exits 0 with no warnings in batch files.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Clean. The 3 unused-import warnings are in files this batch did not touch (marketing/website_list_tests.rs, browser.rs).",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... in Model Plane capability-core (go.work) and Control Plane org-core (GOWORK=off)",
+    "outcome": "Clean in both modules.",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "exit 0 with zero errors, so the expected baseline error in schedule-contract.test.ts no longer appears.",
+    "clean": true
+   },
+   {
+    "command": "cargo fmt --all -- --check (information only)",
+    "outcome": "Many files are not rustfmt-formatted, both batch files and files outside the batch (mp-content-safety, mp-scrub, grpc_space_*_tests). Left untouched: whole-file reformatting is forbidden here.",
+    "clean": false
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/policy_effective.rs",
+    "slice": "EP-9-T2",
+    "what": "The handler took `session: VerifiedModelBearer` (auth.rs's unit struct). http_routes::authenticated_session_request needs the session bearer: http_routes imports `VerifiedSessionBearer as VerifiedModelBearer`. Changed the import and the parameter to VerifiedSessionBearer (E0308)."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/session-core/src/retention_sweeper.rs",
+    "slice": "EP-9-C2",
+    "what": "Test line 649: `assert_eq!(mode_from(Some(\"dry_run\")));` is missing its expected value. It now reads `assert_eq!(mode_from(Some(\"dry_run\")), Mode::DryRun);`."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-9-T2 + EP-4-S3",
+    "what": "Merge conflict on the id count: kept both slices' comments and set toHaveLength(304)."
+   },
+   {
+    "file": "5 files edited by the guard (verevonv3 gateway main.rs, api/contracts/README.md, proto sessions.proto, execution-core lib.rs, session-core gdpr_nats.rs)",
+    "slice": "guard",
+    "what": "These were CRLF on disk but LF in HEAD (the stat cache hid it), so any edit showed as a whole-file diff. Converted them back to LF, the committed form, so the lead's diffs show only real changes."
+   }
+  ],
+  "still_broken": [
+   "EP-4-S2 scenario-touch gate: the prompt-tool-manifest changed, so scripts/gates/scenario-touch.py will fail until someone adds a widget_notice eval case under apps/Model Plane/python/eval-lab-py/cases/ or a replay cassette. That is a new scenario file, not a shared edit; the lead or a builder writes it."
+  ],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go (comment)",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/execution_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json, plus copies in api/contracts, capability-core internal/api/testdata, execution-core tests/fixtures and model-gateway tests/fixtures; api/contracts/agent-action-admission.json.sha256 (c6e7da85...)",
+   "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json and .sha256",
+   "apps/Model Plane/api/contracts/sse-event-payloads.json and .sha256 (4e2aa8fe...), plus the SPA vendored copies",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+   "scripts/tests/zdr-contract-sync.test.sh: agent-action-admission and sse-event-payloads pins"
+  ],
+  "shared_edits_applied": [
+   "model-gateway/src/lib.rs: added pub mod policy_effective; (after page_reader) and pub mod site_policy_client; (before skills). File is LF.",
+   "execution-core/src/lib.rs: added pub mod site_policy_client; before skill_mounts.",
+   "model-gateway/src/org_agent_policy.rs stamp_web_policy: added site_policy_revision: 0",
+   "execution-core/src/runtime_loop/agent.rs test helper: added site_policy_revision: 0",
+   "model-gateway/src/sse.rs: posture_floor is now pub(crate)",
+   "model-gateway/src/http_routes.rs (EP-9-C4): new thread_erase_error mapper that reads the x-mp-error-code trailer (erasure_blocked_legal_hold -> 409, details {retryable:false}; erasure_hold_check_unavailable -> 503, details {retryable:true}; anything else falls through to session_thread_error). Used by delete_thread and delete_threads.",
+   "session-core/src/gdpr_nats.rs (EP-9-C4): when the error downcasts to ErasureHoldError, the message is NAKed with a 300 s delay and counted with result=held; other errors still count as error and NAK immediately.",
+   "deploy/docker-compose.yml model-gateway: MODEL_GATEWAY_WIDGET_GUIDANCE (default false) and MODEL_GATEWAY_POLICY_EFFECTIVE (default false) after ROLE_ROUTING; WEB_DOMAIN_POLICY_MODE (default off) after ORG_AGENT_POLICY_MODE.",
+   "deploy/docker-compose.yml execution-core: WEB_DOMAIN_POLICY_MODE (default off) after EXECUTION_ORG_CORE_SERVICE_TOKEN.",
+   "deploy/docker-compose.yml session-core: SESSION_RETENTION_SWEEP (default off), SESSION_RETENTION_SWEEP_INTERVAL_SECS (default 21600) and SKILL_LINT_MODE (default off) after ORG_LEARNING_DEFAULT.",
+   "deploy/docker-compose.yml capability-core: SKILL_LINT_MODE (default off) after SKILL_BUNDLE_READ_RULE_ENABLED.",
+   "verevonv3 apps/gateway/src/main.rs: added .merge(domains::policy_effective::router(state.clone())).",
+   "verevonv3 src/shared/actions/model-access.ts: added policy.read_effective, chat.stage_widget_followup and chat.open_widget_link as exempt('ui_state_only','read').",
+   "verevonv3 ChatMessages.tsx: imported InlineWidgetAnswer and wrapped SettledTurnContent in it (onSelectFollowUp={props.onSelectFollowUp}).",
+   "proto sessions.proto UpsertAgentSkillResponse.skip_reason: comment only (origin_requires_person, skill_lint:<code>).",
+   "api/contracts/README.md: added the authored-behaviour-lint.json row."
+  ],
+  "shared_edits_skipped": [
+   "All ledger.md entries (EP-9-W3, EP-9-T2, EP-9-C2, EP-9-C4): left for the lead.",
+   "Every .env.example line (WEB_DOMAIN_POLICY_MODE, MODEL_GATEWAY_POLICY_EFFECTIVE, SKILL_LINT_MODE, POLICY_EFFECTIVE_VIEW_ENABLED in the BFF env, VITE_CHAT_INLINE_WIDGETS): left for the owner.",
+   "ERASURE_HOLD_CHECK in compose: the report gives it as a deploy note, not a shared edit, so it is not wired in session-core or org-core compose.",
+   "EP-9-C2 needs_other_files item, gdpr.rs org purge adding DELETE FROM retention_sweep_runs WHERE org_id=$1: not a shared edit, so not applied; the lead decides.",
+   "EP-9-W3 needs_other_files items: Control Plane docker-compose scopes, org-core service_auth.go and browser_sites_contract_test.go need an owner ruling.",
+   "EP-9-C4 needs_other_files item: org-core service_enhanced.go PurgeDeletedOrganizations should skip held orgs. Not applied.",
+   "EP-9-W3 lead-only step to apply EP-9-W3.patch: already applied in step 0.",
+   "EP-9-C2 THREAD_BOUND_TABLES: nothing to add; the batch's only new table, retention_sweep_runs, has no thread_id column."
+  ],
+  "notes": "The batch compiles: the Model Plane Rust workspace, the verevonv3 gateway, Go capability-core and org-core, and the SPA typecheck (0 errors) all pass. No tests were run beyond the generation steps.\n\nWeekly usage was 89% at the last check, under the 95% stop line.\n\nFor the lead:\n1. EP-9-C2's migration is numbered 0095, but 0100-0105 already exist (0096-0099 are a gap). On a database already at 0105, sqlx will apply 0095 out of order. Consider renumbering it to 0106 together with its revert file.\n2. EP-9-T2's BFF reads POLICY_EFFECTIVE_VIEW_ENABLED with std::env::var inside the handler (domains/policy_effective.rs:54). The repo's gateway rule is to keep config on AppState, because a handler-level env read raced under parallel tests.\n3. Five tracked files I edited were CRLF on disk but LF in HEAD. I converted them back to LF so the diffs stay minimal. Other worktree files may carry the same hidden CRLF.\n4. zdr-posture-matrix.json was not touched, so step 4b did not apply.\n5. I did not run buf lint (the ratchet).\n6. Scripts I used are in the scratchpad: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/dd1422b4-41fe-4a36-a56c-2d620fad0a29/scratchpad/rep.py; the full cargo check log is ws.out in the same folder.\n7. Nothing was staged or committed apart from the step-0 merge and the one git reset -q."
+ }
+}

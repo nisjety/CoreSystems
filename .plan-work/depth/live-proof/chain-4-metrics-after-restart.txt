@@ -1,0 +1,5 @@
+audit_core_chain_appends_total{result="appended"} 7
+audit_core_chain_broken_total 0
+audit_core_chain_head_lock_wait_seconds_sum 0.190509642
+audit_core_chain_head_lock_wait_seconds_count 11
+audit_core_chain_last_verify_timestamp_seconds 1.793081227e+09

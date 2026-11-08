@@ -1,0 +1,12 @@
+## WS14-S7
+shared-edit apps/Model Plane/deploy/.env.example: append at end of file the lines below. Block: '# WS14 human-in-the-loop switches (build plan WS14). All off; only the literal true turns one on, and each is flipped in the proof stack only, from captured evidence (docs/decisions/ledger.md, WS14 entries).' / '# The approve-then-execute walk needs MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (the WS03 flip, coupled) on; MODEL_GATEWAY_DURABLE_PLAN_GRANT is already true in compose.' / '# The ask_user walk needs AGENT_ASK_USER_ENABLED on in both model-gateway and execution-core. AGENT_ASK_USER_RESUME_ENABLED stays off until the WS14-S5 gateway and SPA halves exist.' / 'MODEL_GATEWAY_PLAN_EXECUTE_ENABLED=false' / 'MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE=false' / 'AGENT_ASK_USER_ENABLED=false' / 'AGENT_ASK_USER_RESUME_ENABLED=false'
+
+## WS14-S7
+shared-edit apps/Model Plane/docs/capability-ownership-matrix.md line 26: replace the text 'behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off;' with 'behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT` (compose default `true` since the WS04-S9 proof; the gateway reads it unset as off);'. Reason: docker-compose.yml sets it to true, and the code test asserts durable_plan_grant_from(None) is false.
+
+## WS14-S7
+shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: insert after line 56 (the 'Plans / steps / todos / approvals / subagent-lineage' ownership row) this row: '| ask_user questions (`run_questions`, WS14 S3-S5) | **session-core** (`orchestration_store.rs`, `orchestration_grpc.rs`; migrations 0054 and 0071); execution-core offers the tool (`ask.rs`) | Postgres | gateway list and answer routes; `user_question` control event | - | ✅ one owner; an answer is information and never reads as an approval (DEC-05) |'
+
+## WS14-S7
+shared-edit apps/Model Plane/docs/ZDR.md: insert after line 98 (the '**Do mode and delegation children**' row) this row: '| **ask_user questions (`run_questions`)** | No question is offered or stored for a zero-retention or waived run: the tool is not offered (`max_questions` 0), and the list and answer routes refuse a ZDR caller with `zdr_durable_mutation_forbidden` (412) before they read anything. A question prompt and the owner answer are stored with their run and erased with it (`ON DELETE CASCADE`). | Built behind `AGENT_ASK_USER_ENABLED` (off). The ZDR matrix row `ask_user_zdr_not_offered` is not authored yet, so this is checked by code path, not by a golden. |'
+

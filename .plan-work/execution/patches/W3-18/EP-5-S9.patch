@@ -1,0 +1,571 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx
+index da7af4cb1..f9ecdc019 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx	
+@@ -43,6 +43,10 @@ function preview(): GeneratedFilePreview {
+   }
+ }
+ 
++function previewWith(pages: number, thumbs: string[]): GeneratedFilePreview {
++  return { ...preview(), pages, thumbs }
++}
++
+ function renderDeck(
+   options: { content?: string; file?: GeneratedFile; fallback?: ArtifactRendererProps['fallback'] } = {},
+ ) {
+@@ -62,6 +66,11 @@ function titles(container: HTMLElement): Array<string | null | undefined> {
+   return cards(container).map((card) => card.querySelector('.verevon-deck__title')?.textContent)
+ }
+ 
++/** The picture each card draws, or null where it draws none. */
++function pictures(container: HTMLElement): Array<string | null> {
++  return cards(container).map((card) => card.querySelector('img.verevon-deck__thumb')?.getAttribute('src') ?? null)
++}
++
+ describe('ArtifactDeckView', () => {
+   beforeEach(() => {
+     window.localStorage.setItem(localeStorageKey, 'en')
+@@ -193,4 +202,29 @@ describe('ArtifactDeckView', () => {
+     expect(screen.getByText('No slides yet')).toBeTruthy()
+     expect(container.querySelectorAll('.verevon-deck__card')).toHaveLength(0)
+   })
++
++  it('draws each slide render as its card picture when the render has one per slide, in order', () => {
++    const thumbs = [
++      'data:image/png;base64,AAAA',
++      'data:image/png;base64,BBBB',
++      'data:image/png;base64,CCCC',
++      'data:image/png;base64,DDDD',
++    ]
++    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(4, thumbs) }) })
++    expect(pictures(container)).toEqual(thumbs)
++    expect(cards(container).every((card) => card.classList.contains('verevon-deck__card--picture'))).toBe(true)
++  })
++
++  it('draws no card picture when the render has a different page count from the slides', () => {
++    const thumbs = ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB', 'data:image/png;base64,CCCC']
++    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(3, thumbs) }) })
++    expect(pictures(container)).toEqual([null, null, null, null])
++    expect(cards(container).some((card) => card.classList.contains('verevon-deck__card--picture'))).toBe(false)
++  })
++
++  it('draws no card picture when the render kept only some of its pages', () => {
++    const thumbs = ['data:image/png;base64,AAAA', 'data:image/png;base64,BBBB']
++    const { container } = renderDeck({ file: generatedFile({ preview: previewWith(4, thumbs) }) })
++    expect(pictures(container)).toEqual([null, null, null, null])
++  })
+ })
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx
+index 2a6e1d98c..7f47b4951 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx	
+@@ -76,6 +76,14 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
+   // A newer revision can have fewer slides than the pick, so the pick stays on a slide that exists.
+   const current = createMemo(() => Math.min(pickedIndex(), Math.max(0, (manifest()?.slides.length ?? 0) - 1)))
+   const selected = createMemo(() => manifest()?.slides[current()])
++  // A picture goes on a card only when the render made one per slide, in slide order. A render whose page count
++  // differs from the slides, or that kept only some of its pages, would put a picture on the wrong card or on none.
++  const pictures = createMemo<string[]>(() => {
++    const preview = props.file?.preview
++    const slides = manifest()?.slides.length ?? 0
++    return preview && preview.pages === slides && preview.thumbs.length >= slides ? preview.thumbs : []
++  })
++  const cardClass = () => `verevon-deck__card${pictures().length > 0 ? ' verevon-deck__card--picture' : ''}`
+ 
+   return (
+     <Show
+@@ -104,13 +112,16 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
+                   <li>
+                     <button
+                       type="button"
+-                      class="verevon-deck__card"
++                      class={cardClass()}
+                       aria-current={index() === current() ? 'true' : undefined}
+                       onClick={() => {
+                         setPickedIndex(index())
+                         setNotesOpen(false)
+                       }}
+                     >
++                      <Show when={pictures()[index()]}>
++                        {(picture) => <img class="verevon-deck__thumb" src={picture()} alt="" loading="lazy" />}
++                      </Show>
+                       <span class="verevon-deck__head">
+                         <span class="verevon-deck__number">{index() + 1}</span>
+                         <Dynamic component={LAYOUT_ICONS[slide.layout]} size={14} />
+diff --git a/apps/Model Plane/rust/services/execution-core/src/office_verify.rs b/apps/Model Plane/rust/services/execution-core/src/office_verify.rs
+index 6f1d8283e..1ca391b1f 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/office_verify.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/office_verify.rs	
+@@ -18,8 +18,10 @@
+ //! * `CODE_INTERPRETER_OFFICE_VERIFY` — `off` (default, and any unset or unknown
+ //!   value), `structural`, or `render`. `render` adds the LibreOffice layer: a
+ //!   PDF render, page and font facts, a recalculated copy of each workbook and
+-//!   up to three page previews. Its failures are warnings, never failures of the
+-//!   file.
++//!   up to three page previews (see `OFFICE_PREVIEW_PAGES` for a deck). Its
++//!   failures are warnings, never failures of the file.
++//! * `OFFICE_PREVIEW_PAGES` — the page thumbnails a deck (pptx) keeps, one per
++//!   slide, default 3, capped at [`MAX_PREVIEW_PAGES`]. Other kinds keep three.
+ //! * `OFFICE_VERIFY_MAX_FILES` — files checked per call, capped at
+ //!   [`MAX_FILES`].
+ //! * `OFFICE_VERIFY_TIMEOUT_SECS` — per file, default 60.
+@@ -64,8 +66,16 @@ const RENDER_ARG: &str = "render";
+ /// The page caps are fixed here and in `check.py`; the PDF cap is configurable.
+ const RENDER_DIR: &str = "render";
+ const PREVIEW_PDF: &str = "preview.pdf";
+-const MAX_THUMBS: usize = 3;
++/// The pages a preview draws for any kind but a deck, and for a deck unless
++/// `OFFICE_PREVIEW_PAGES` asks for more.
++const DEFAULT_PREVIEW_PAGES: usize = 3;
++/// The most pages a deck's preview draws: one per slide, at the slide cap.
++const MAX_PREVIEW_PAGES: usize = 40;
+ const MAX_THUMB_BYTES: u64 = 150 * 1024;
++/// All the thumbnails of one file together. The frame carries them as base64
++/// next to the PDF and the delivered files, and the gateway's decode limit has
++/// to hold the whole frame.
++const MAX_THUMB_TOTAL_BYTES: u64 = 3 * 1024 * 1024;
+ 
+ /// Whether verification runs, and how far.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -154,6 +164,19 @@ fn parse_preview_max(raw: Option<&str>) -> u64 {
+         .min(MAX_PREVIEW_BYTES)
+ }
+ 
++/// The page thumbnails a file gets. Only a deck is asked for more than the
++/// default: its strip needs one picture per slide, and the other kinds have
++/// always had three pages. Unset, unknown or zero is the default.
++fn parse_preview_pages(kind: OfficeKind, raw: Option<&str>) -> usize {
++    if kind != OfficeKind::Pptx {
++        return DEFAULT_PREVIEW_PAGES;
++    }
++    raw.and_then(|value| value.trim().parse::<usize>().ok())
++        .filter(|&value| value > 0)
++        .unwrap_or(DEFAULT_PREVIEW_PAGES)
++        .min(MAX_PREVIEW_PAGES)
++}
++
+ fn env(var: &str) -> Option<String> {
+     std::env::var(var).ok()
+ }
+@@ -263,7 +286,7 @@ fn preview_for(name: &str, rendered: RenderedFiles) -> Option<FilePreview> {
+ /// under check can leave anything in its directory, a link included, so a render
+ /// directory or file that is not a plain one is ignored: a link would read a file
+ /// on the host.
+-fn collect_render(root: &std::path::Path, pdf_max_bytes: u64) -> RenderedFiles {
++fn collect_render(root: &std::path::Path, pdf_max_bytes: u64, pages: usize) -> RenderedFiles {
+     let render = root.join(RENDER_DIR);
+     let is_plain_dir = std::fs::symlink_metadata(&render).is_ok_and(|metadata| metadata.is_dir());
+     if !is_plain_dir {
+@@ -271,11 +294,23 @@ fn collect_render(root: &std::path::Path, pdf_max_bytes: u64) -> RenderedFiles {
+     }
+     RenderedFiles {
+         pdf: read_capped(&render.join(PREVIEW_PDF), pdf_max_bytes),
+-        thumbs: (1..=MAX_THUMBS)
+-            .filter_map(|index| {
+-                read_capped(&render.join(format!("thumb-{index}.png")), MAX_THUMB_BYTES)
+-            })
+-            .collect(),
++        thumbs: thumbs_for(&render, pages),
++    }
++}
++
++/// The page thumbnails, in page order, from page 1 up to the first page without
++/// one: a page over its cap, or a page the render did not make. A later picture
++/// never moves up onto a missing page, so index `i` is always page `i + 1`. The
++/// set is dropped whole past the byte budget. The PDF is kept either way.
++fn thumbs_for(render: &std::path::Path, pages: usize) -> Vec<Vec<u8>> {
++    let thumbs: Vec<Vec<u8>> = (1..=pages)
++        .map_while(|index| read_capped(&render.join(format!("thumb-{index}.png")), MAX_THUMB_BYTES))
++        .collect();
++    let total: u64 = thumbs.iter().map(|bytes| bytes.len() as u64).sum();
++    if total > MAX_THUMB_TOTAL_BYTES {
++        Vec::new()
++    } else {
++        thumbs
+     }
+ }
+ 
+@@ -321,6 +356,7 @@ async fn run_checker(
+     timeout: Duration,
+     mode: Mode,
+     preview_max_bytes: u64,
++    pages: usize,
+ ) -> Result<(String, RenderedFiles), String> {
+     let workspace = Workspace::create(WORKSPACE_TAG, kind.as_str())
+         .map_err(|error| format!("the verifier could not create its workspace: {error}"))?;
+@@ -333,6 +369,7 @@ async fn run_checker(
+     let mut args = vec![CHECKER_NAME.to_owned(), subject];
+     if mode == Mode::Render {
+         args.push(RENDER_ARG.to_owned());
++        args.push(pages.to_string());
+     }
+     let outcome = executor::execute_sandboxed_in_dir(
+         &policy,
+@@ -352,7 +389,7 @@ async fn run_checker(
+     }
+     // Read before `workspace` is dropped at the end of this function.
+     let rendered = if mode == Mode::Render {
+-        collect_render(root, preview_max_bytes)
++        collect_render(root, preview_max_bytes, pages)
+     } else {
+         RenderedFiles::default()
+     };
+@@ -369,8 +406,10 @@ pub async fn verify_outputs(files: &[OutputFile]) -> Verification {
+     let max_files = parse_max_files(env("OFFICE_VERIFY_MAX_FILES").as_deref());
+     let timeout = parse_timeout(env("OFFICE_VERIFY_TIMEOUT_SECS").as_deref());
+     let preview_max_bytes = parse_preview_max(env("OFFICE_PREVIEW_MAX_BYTES").as_deref());
++    let preview_pages = env("OFFICE_PREVIEW_PAGES");
+     verify_with(subjects(files), max_files, gate(), |kind, bytes| {
+-        run_checker(kind, bytes, timeout, mode, preview_max_bytes)
++        let pages = parse_preview_pages(kind, preview_pages.as_deref());
++        run_checker(kind, bytes, timeout, mode, preview_max_bytes, pages)
+     })
+     .await
+ }
+@@ -473,7 +512,7 @@ sys.stdout.buffer.write(data)
+             return Err(format!("checker exited with {}", output.status));
+         }
+         let rendered = if mode == Mode::Render {
+-            collect_render(root, DEFAULT_PREVIEW_MAX_BYTES)
++            collect_render(root, DEFAULT_PREVIEW_MAX_BYTES, DEFAULT_PREVIEW_PAGES)
+         } else {
+             RenderedFiles::default()
+         };
+@@ -689,6 +728,7 @@ sys.stdout.buffer.write(data)
+             Duration::from_millis(1),
+             Mode::Structural,
+             DEFAULT_PREVIEW_MAX_BYTES,
++            DEFAULT_PREVIEW_PAGES,
+         )
+         .await;
+         assert_eq!(count(), before, "no verifier workspace is left behind");
+@@ -793,6 +833,7 @@ sys.stdout.buffer.write(data)
+             Duration::from_secs(60),
+             Mode::Render,
+             DEFAULT_PREVIEW_MAX_BYTES,
++            DEFAULT_PREVIEW_PAGES,
+         )
+         .await
+         .expect("the sandboxed render runs");
+@@ -845,8 +886,8 @@ sys.stdout.buffer.write(data)
+         );
+     }
+ 
+-    /// A preview over its cap is dropped whole; the cap is checked per part, so a
+-    /// large thumbnail does not take the small ones with it.
++    /// A preview over its cap is dropped whole, not cut short. A thumbnail over its
++    /// cap is the same: page 1 has none, so no later picture may move up onto it.
+     #[test]
+     fn preview_over_cap_is_dropped_not_truncated() {
+         let workspace = Workspace::create("office-verify-render", "preview").expect("workspace");
+@@ -859,17 +900,70 @@ sys.stdout.buffer.write(data)
+         )
+         .expect("large thumbnail");
+         std::fs::write(render.join("thumb-2.png"), vec![2u8; 1024]).expect("small thumbnail");
+-        let small = collect_render(workspace.path(), 2000);
++        let small = collect_render(workspace.path(), 2000, DEFAULT_PREVIEW_PAGES);
+         assert!(small.pdf.is_none(), "a PDF over its cap is dropped");
+-        assert_eq!(
+-            small.thumbs,
+-            vec![vec![2u8; 1024]],
+-            "only the thumbnail under its cap is kept"
++        assert!(
++            small.thumbs.is_empty(),
++            "page 1 has no thumbnail, so page 2's must not move up onto it"
+         );
+-        let large = collect_render(workspace.path(), 4000);
++        let large = collect_render(workspace.path(), 4000, DEFAULT_PREVIEW_PAGES);
+         assert_eq!(large.pdf.map(|bytes| bytes.len()), Some(3000));
+     }
+ 
++    /// The pages before a missing thumbnail are kept; the pages after it are not,
++    /// since they would sit one page early.
++    #[test]
++    fn a_missing_thumbnail_keeps_only_the_pages_before_it() {
++        let workspace = Workspace::create("office-verify-render", "gap").expect("workspace");
++        let render = workspace.path().join(RENDER_DIR);
++        std::fs::create_dir_all(&render).expect("render dir");
++        std::fs::write(render.join("thumb-1.png"), vec![1u8; 1024]).expect("first thumbnail");
++        std::fs::write(render.join("thumb-3.png"), vec![3u8; 1024]).expect("third thumbnail");
++        let rendered = collect_render(workspace.path(), u64::MAX, DEFAULT_PREVIEW_PAGES);
++        assert_eq!(rendered.thumbs, vec![vec![1u8; 1024]]);
++    }
++
++    /// A deck's thumbnails can add up to more than the frame may carry. Past the
++    /// byte budget they are dropped as a set, and the PDF, which has its own cap,
++    /// is still returned.
++    #[test]
++    fn thumb_bytes_over_cap_drop_the_thumbs_not_the_pdf() {
++        let workspace = Workspace::create("office-verify-render", "budget").expect("workspace");
++        let render = workspace.path().join(RENDER_DIR);
++        std::fs::create_dir_all(&render).expect("render dir");
++        std::fs::write(render.join(PREVIEW_PDF), vec![7u8; 3000]).expect("pdf");
++        // Just under the per-thumbnail cap each: 24 of them are 3.5 MiB together,
++        // over the 3 MiB budget, and 20 of them are 2.9 MiB, under it.
++        let each = MAX_THUMB_BYTES as usize - 1;
++        for index in 1..=24 {
++            std::fs::write(render.join(format!("thumb-{index}.png")), vec![1u8; each])
++                .expect("thumbnail");
++        }
++        let over = collect_render(workspace.path(), u64::MAX, 24);
++        assert!(over.thumbs.is_empty(), "the set is dropped past the budget");
++        assert_eq!(over.pdf.map(|bytes| bytes.len()), Some(3000), "the PDF is kept");
++        let within = collect_render(workspace.path(), u64::MAX, 20);
++        assert_eq!(within.thumbs.len(), 20, "the set is kept whole under the budget");
++    }
++
++    /// Only a deck asks for more than three pages, and the env value is read
++    /// strictly: unset, unknown and zero mean the default, and the cap is 40.
++    #[test]
++    fn pptx_preview_pages_follow_the_env_cap() {
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, None), DEFAULT_PREVIEW_PAGES);
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, Some("12")), 12);
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, Some(" 40 ")), MAX_PREVIEW_PAGES);
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, Some("41")), MAX_PREVIEW_PAGES);
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, Some("0")), DEFAULT_PREVIEW_PAGES);
++        assert_eq!(parse_preview_pages(OfficeKind::Pptx, Some("true")), DEFAULT_PREVIEW_PAGES);
++        assert_eq!(
++            parse_preview_pages(OfficeKind::Docx, Some("12")),
++            DEFAULT_PREVIEW_PAGES,
++            "only a deck has one thumbnail per slide"
++        );
++        assert_eq!(parse_preview_pages(OfficeKind::Xlsx, Some("40")), DEFAULT_PREVIEW_PAGES);
++    }
++
+     /// The program under check can leave a link in its render directory. The host
+     /// must not follow it to a file outside the workspace.
+     #[cfg(unix)]
+@@ -882,6 +976,6 @@ sys.stdout.buffer.write(data)
+         let render = inside.path().join(RENDER_DIR);
+         std::fs::create_dir_all(&render).expect("render dir");
+         std::os::unix::fs::symlink(&secret, render.join(PREVIEW_PDF)).expect("symlink");
+-        assert!(collect_render(inside.path(), u64::MAX).pdf.is_none());
++        assert!(collect_render(inside.path(), u64::MAX, DEFAULT_PREVIEW_PAGES).pdf.is_none());
+     }
+ }
+diff --git a/apps/Model Plane/rust/services/execution-core/src/office_verify/check.py b/apps/Model Plane/rust/services/execution-core/src/office_verify/check.py
+index 3d902093c..5eb3e605d 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/office_verify/check.py	
++++ b/apps/Model Plane/rust/services/execution-core/src/office_verify/check.py	
+@@ -8,8 +8,10 @@ fails is probably broken, which is why the caller reports the result as advisory
+ 
+ With a second argument of `render` it also converts the file with LibreOffice
+ into `render/` (a PDF, up to three PNG pages, and for xlsx a recalculated copy
+-that is only read, never shipped). Every render failure is a warning: a missing
+-or slow converter must not turn a clean file into a failed one.
++that is only read, never shipped). A third argument asks for that many PNG pages
++of a deck, one per slide, at most 40 (`OFFICE_PREVIEW_PAGES`, EP-5 S9). Every
++render failure is a warning: a missing or slow converter must not turn a clean
++file into a failed one.
+ 
+ Exit status is 0 whenever a report was printed, including for a broken file. A
+ non-zero exit means the checker itself could not run, and the caller reports
+@@ -252,8 +254,14 @@ RENDER_BUDGET_SECS = 50
+ POPPLER_TIMEOUT_SECS = 20
+ RENDER_DIR = "render"
+ PREVIEW_PDF = os.path.join(RENDER_DIR, "preview.pdf")
++# The pages a preview draws, unless the caller asks for more of a deck, up to
++# PREVIEW_PAGES_MAX (the deck slide cap, EP-5 D11).
+ PREVIEW_PAGES = 3
++PREVIEW_PAGES_MAX = 40
+ PREVIEW_DPI = 60
++# A deck with more thumbnails than PREVIEW_PAGES is drawn smaller, so the set
++# stays under the verifier's byte budget. The default keeps the old size.
++DECK_PREVIEW_DPI = 48
+ # Built into the image by the Dockerfile. Copied per check, so a run never
+ # changes the profile the next run starts from.
+ PREWARMED_PROFILE = "/opt/verevon/lo-profile"
+@@ -442,7 +450,14 @@ def font_rendered(family, rendered):
+     return any(name.startswith(want) for name in rendered for want in wanted)
+ 
+ 
+-def render_pdf_facts(pdf, declared, report):
++def page_number(path):
++    # pdftoppm pads a page number to a width of its own choosing, so the names
++    # sort as text only while every page has the same number of digits.
++    match = re.search(r"(\d+)\.png$", path)
++    return int(match.group(1)) if match else 0
++
++
++def render_pdf_facts(pdf, declared, preview_pages, dpi, report):
+     info = poppler(["pdfinfo", pdf], report)
+     pages = None
+     if info is not None:
+@@ -481,17 +496,17 @@ def render_pdf_facts(pdf, declared, report):
+                     % ", ".join(missing[:3]),
+                 )
+ 
+-    if poppler(["pdftoppm", "-r", str(PREVIEW_DPI), "-png", "-f", "1", "-l", str(PREVIEW_PAGES), pdf,
++    if poppler(["pdftoppm", "-r", str(dpi), "-png", "-f", "1", "-l", str(preview_pages), pdf,
+                 os.path.join(RENDER_DIR, "page")], report) is not None:
+-        pages_png = sorted(glob.glob(os.path.join(RENDER_DIR, "page-*.png")))
++        pages_png = sorted(glob.glob(os.path.join(RENDER_DIR, "page-*.png")), key=page_number)
+         for index, path in enumerate(pages_png, 1):
+             os.replace(path, os.path.join(RENDER_DIR, "thumb-%d.png" % index))
+ 
+-    text = poppler(["pdftotext", "-layout", "-f", "1", "-l", str(PREVIEW_PAGES), pdf, "-"], report)
++    text = poppler(["pdftotext", "-layout", "-f", "1", "-l", str(preview_pages), pdf, "-"], report)
+     if text is not None:
+         # pdftotext ends every page with a form feed, so the last piece is not a page.
+         page_texts = text.split("\f")[:-1]
+-        blank = [str(index) for index, page in enumerate(page_texts[:PREVIEW_PAGES], 1) if not page.strip()]
++        blank = [str(index) for index, page in enumerate(page_texts[:preview_pages], 1) if not page.strip()]
+         if blank:
+             report.warn("blank_pages", "page %s has no text; check that it is not blank" % ", ".join(blank))
+ 
+@@ -528,7 +543,7 @@ def recalc_errors(original, recalculated, report):
+         )
+ 
+ 
+-def render_check(subject, kind, report):
++def render_check(subject, kind, pages, report):
+     soffice = shutil.which("soffice")
+     if soffice is None:
+         report.warn("render", "LibreOffice is not installed in this image, so the render checks were skipped")
+@@ -544,7 +559,8 @@ def render_check(subject, kind, report):
+         if produced is None:
+             return
+         os.replace(produced, PREVIEW_PDF)
+-    render_pdf_facts(PREVIEW_PDF, declared_fonts(subject, kind), report)
++    dpi = DECK_PREVIEW_DPI if kind == "pptx" and pages > PREVIEW_PAGES else PREVIEW_DPI
++    render_pdf_facts(PREVIEW_PDF, declared_fonts(subject, kind), pages, dpi, report)
+     if kind == "xlsx":
+         recalculated = soffice_convert(
+             soffice, profile, subject, os.path.join(RENDER_DIR, "recalc"),
+@@ -554,9 +570,19 @@ def render_check(subject, kind, report):
+             recalc_errors(subject, recalculated, report)
+ 
+ 
++def preview_pages_arg(raw):
++    # The caller clamps OFFICE_PREVIEW_PAGES, so a value it could not have sent is
++    # refused here, which the caller reports as a skipped check, not rendered.
++    if not (raw.isascii() and raw.isdigit()) or not 1 <= int(raw) <= PREVIEW_PAGES_MAX:
++        sys.exit(2)
++    return int(raw)
++
++
+ def main():
+-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "render"):
++    # The arguments are the file, then `render`, then for a deck the pages to draw.
++    if len(sys.argv) not in (2, 3, 4) or (len(sys.argv) > 2 and sys.argv[2] != "render"):
+         sys.exit(2)
++    pages = preview_pages_arg(sys.argv[3]) if len(sys.argv) == 4 else PREVIEW_PAGES
+     subject = sys.argv[1]
+     extension = subject.rsplit(".", 1)[-1].lower() if "." in subject else ""
+     if extension not in ("docx", "xlsx", "pptx", "pdf"):
+@@ -570,9 +596,9 @@ def main():
+     except Exception as error:  # noqa: BLE001 - any parse failure is a finding about the file
+         report.fail("structure", "the file structure could not be read (%s)" % type(error).__name__)
+     # A file that already failed the structure check is not worth the render time.
+-    if len(sys.argv) == 3 and report.level() != "failed":
++    if len(sys.argv) > 2 and report.level() != "failed":
+         try:
+-            render_check(subject, extension, report)
++            render_check(subject, extension, pages, report)
+         except Exception as error:  # noqa: BLE001 - a render fault is advisory, never a file fault
+             report.warn("render", "the render checks could not run (%s)" % type(error).__name__)
+     report.emit()
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/state.rs b/apps/Model Plane/rust/services/model-gateway/src/state.rs
+index a4b70c537..cf1ddcdb3 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/state.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/state.rs	
+@@ -454,6 +454,12 @@ fn lazy_static_channel(uri: &'static str) -> Channel {
+         .connect_lazy()
+ }
+ 
++/// The largest `ExecuteStep` response the gateway decodes. tonic's default is 4 MiB, which a `code_interpreter`
++/// result exceeds within its own caps: up to 16 MiB of delivered files, a preview PDF (8 MiB at most when
++/// configured) and up to 3 MiB of thumbnails, each carried as base64 (a third larger) in the one frame. 40 MiB holds
++/// the largest such frame with headroom for the JSON around it (EP-5 S9).
++const EXECUTE_STEP_DECODE_LIMIT_BYTES: usize = 40 * 1024 * 1024;
++
+ impl AppState {
+     /// Create a new `AppState` with an in-memory publisher.
+     #[must_use]
+@@ -511,7 +517,8 @@ impl AppState {
+             run_client: RunServiceClient::new(run_channel),
+             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
+             consume_client: OrchestrationCoreServiceClient::new(consume_channel),
+-            execution_client: ExecutionCoreClient::new(execution_channel),
++            execution_client: ExecutionCoreClient::new(execution_channel)
++                .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES),
+             sandbox_client: SandboxManagerClient::new(sandbox_channel),
+             browser_client: BrowserBrokerClient::new(browser_channel),
+             memory_client: MemoryServiceClient::new(memory_channel),
+@@ -765,7 +772,8 @@ impl AppState {
+             "EXECUTION_CORE_URL",
+             "EXECUTION_CORE_ADDR",
+             "http://localhost:9093",
+-        )?);
++        )?)
++        .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES);
+         let sandbox_client = SandboxManagerClient::new(Self::lazy_channel(
+             "SANDBOX_MANAGER_URL",
+             "SANDBOX_MANAGER_ADDR",
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 87cd5c5fc..c3f9071f0 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -605,6 +605,9 @@ fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification>
+ const PREVIEW_PDF_MAX_BASE64: usize = 2_796_204;
+ /// The thumbnails a preview carries, the same cap the verifier applies.
+ const PREVIEW_MAX_THUMBS: usize = 3;
++/// The thumbnails a deck's preview carries: one per slide, up to the verifier's page cap (EP-5 S9). The verifier keeps
++/// them in page order and never moves one onto another page, so index `i` is always slide `i + 1`.
++const PREVIEW_MAX_DECK_THUMBS: usize = 40;
+ 
+ /// The render the verifier made of the delivered file `name`, when it made one. The PDF and the thumbnails are the
+ /// verifier's copies; the download stays the sandbox's bytes. A preview with no report has no page count or font
+@@ -620,13 +623,17 @@ fn office_preview_for(payload: &Value, name: &str) -> Option<AttachmentPreview>
+         return None;
+     }
+     let report = office_report_for(payload, name)?;
++    let cap = match OfficeKind::from_file_name(name) {
++        Some(OfficeKind::Pptx) => PREVIEW_MAX_DECK_THUMBS,
++        _ => PREVIEW_MAX_THUMBS,
++    };
+     let thumbs = element
+         .get("thumbs_b64")
+         .and_then(Value::as_array)
+         .into_iter()
+         .flatten()
+         .filter_map(Value::as_str)
+-        .take(PREVIEW_MAX_THUMBS)
++        .take(cap)
+         .map(|thumb| format!("data:image/png;base64,{thumb}"))
+         .collect();
+     Some(AttachmentPreview {
+@@ -14296,6 +14303,33 @@ mod tests {
+         assert!(office_preview_for(&over_cap, "budget.xlsx").is_none());
+     }
+ 
++    /// A deck's preview keeps one thumbnail per slide up to the page cap, in page order, so a deck arrives with
++    /// its pictures in slide order. Any other kind keeps three, however many the verifier sent.
++    #[test]
++    fn deck_thumbs_cap() {
++        let thumbs: Vec<String> = (1..=45).map(|index| format!("thumb{index}")).collect();
++        let preview_of = |name: &str, kind: &str| {
++            let payload = serde_json::json!({
++                "verification": [{
++                    "name": name,
++                    "kind": kind,
++                    "level": "passed",
++                    "checks": [],
++                    "stats": { "render_pages": 45 },
++                }],
++                "previews": [{ "name": name, "pdf_b64": "JVBERi0=", "thumbs_b64": thumbs }],
++            });
++            office_preview_for(&payload, name).expect("a preview with a report")
++        };
++        let deck = preview_of("kvartal.pptx", "pptx");
++        assert_eq!(deck.thumbs.len(), PREVIEW_MAX_DECK_THUMBS);
++        assert_eq!(deck.thumbs.first().map(String::as_str), Some("data:image/png;base64,thumb1"));
++        assert_eq!(deck.thumbs.last().map(String::as_str), Some("data:image/png;base64,thumb40"));
++        assert_eq!(deck.url, "data:application/pdf;base64,JVBERi0=");
++        let sheet = preview_of("budget.xlsx", "xlsx");
++        assert_eq!(sheet.thumbs.len(), PREVIEW_MAX_THUMBS);
++    }
++
+     /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.
+     fn one_office_file(name: &str, level: &str, checks: Value) -> String {
+         serde_json::json!({

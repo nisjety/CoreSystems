@@ -1,0 +1,336 @@
+{
+ "batchId": "W2-09",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS15-S2",
+   "outcome": "needs-attention",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/lifecycle_events.rs (new)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib sse (first run, before the reviewer fix compiled)",
+     "outcome": "Compiled after the reviewer fix. 289 passed, 1 failed: sse::lifecycle_tests::history_shed_emits_a_context_change_with_the_dropped_count panicked at sse.rs:19932 'the shed is announced once' (emit_lifecycle is gated on the unset env switch, so nothing was emitted in the test)."
+    },
+    {
+     "command": "same, after changing that one test to call emit_and_buffer (the ungated path) instead of emit_lifecycle",
+     "outcome": "PASS: 290 passed, 0 failed, exit 0. All five lifecycle tests ok: history_shed_emits_a_context_change_with_the_dropped_count, a_reused_summary_reports_reused_not_summarized, summarizer_outage_reports_truncated, skill_truncation_reports_counts_only, flag_off_stream_is_byte_identical."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --test overflow_contract --test skill_budget_contract --test context_recovery_contract",
+     "outcome": "PASS: overflow_contract 3/3, skill_budget_contract 2/2, context_recovery_contract 3/3, exit 0."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the two files (lifecycle_events.rs new, sse.rs modified). Both are LF.",
+    "Optional shared-edit lib.rs: add `pub mod lifecycle_events;` and remove the #[path] line from sse.rs if preferred. Not required for the tests to pass.",
+    "Check the sse.rs size ratchet (WS12 S11) for the roughly 210-line growth."
+   ],
+   "deviations": [
+    "Second edit beyond the reviewer's list, forced by the test run: history_shed_emits_a_context_change_with_the_dropped_count in sse.rs now calls emit_and_buffer directly instead of emit_lifecycle. emit_lifecycle is gated on the env switch, which is unset in tests, so the test could never see a frame. The env gate stays covered by flag_off_stream_is_byte_identical. Comment added in the test explaining this.",
+    "Module declaration still via #[path] inside sse.rs (carried over from the previous round, not changed)."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Re-run `cargo test -p model-gateway --lib sse` (and the three tests/*_contract.rs suites) to a real pass. The result is not in yet: the background run on the HEAD-plus-slice snapshot (scratchpad ws15s2_head_lib.txt) was still compiling when this was requested, so no test outcome has been confirmed. Reason for the fix: the in-tree run fails to compile because another session has an uncommitted sessions.proto change (client_message_id, deduplicated, message_id) that session_flow.rs, browser_run.rs and grpc.rs do not yet match. That is not a WS15-S2 defect, but it blocks the test command in this worktree until that change lands."
+    ],
+    "dod_gaps": [
+     "No docker or live proof was run, by instruction. The plan's evidence for S2 (seed an over-context thread so context_change shows before the first chunk; stop inference-core briefly so compaction reports truncated; one Do run clearing tool results) is still owed by the lead.",
+     "MODEL_GATEWAY_LIFECYCLE_EVENTS compose wiring is still absent from the Model Plane deploy compose file (depth register D2-165/D2-170). The code default is off, so this does not block S2, but the switch is not visible to operators.",
+     "Ratchet check for sse.rs (WS12 S11) was not located in the scripts folder and was not run; the implementer reports about 210 added lines in that file."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No flag-on stream test: the switch-on path is tested only through emit_and_buffer and the payload builders, not through invoke_stream_sse or agentic_run_stream."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "sse.rs grows by about 210 lines and is the size-ratcheted file (WS12 S11); a ratchet check may need an update."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "emit_lifecycle reads the env switch on every frame via mp_contracts::lifecycle_notice::enabled(); a cached read at startup would be cheaper on the hot path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "C:/dev/mp-target-w2 was locked by another cargo for about 10 minutes during this batch; the lead may want per-batch target dirs enforced."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "history_shed_emits_a_context_change_with_the_dropped_count calls emit_and_buffer, not emit_lifecycle, so the env gate at the real history_shed emission site (sse.rs ~3109) has no test; only flag_off_stream_is_byte_identical exercises the gate, and only as a unit proxy, not through invoke_stream_sse."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Do-run tool_results_cleared frame (sse.rs ~10825) is sent directly on tx with no test, so the one path that bypasses emit_and_buffer and seq has no coverage."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "emit_lifecycle calls mp_contracts::lifecycle_notice::enabled(), which reads the env var on every frame; a startup-cached read would be cheaper on the hot path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "sse.rs grows by about 210 lines (WS12 S11 size-ratcheted file); the ratchet was not found or checked."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The shared worktree has an uncommitted sessions.proto change (client_message_id) that breaks the model-gateway lib test build for every slice in this tree until the matching session_flow.rs, browser_run.rs and grpc.rs updates land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The #[path] module declaration inside sse.rs follows the existing cache_telemetry pattern; moving it to lib.rs is optional cleanup."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Reviewer fix 1 applied exactly as asked: load_frames is compaction-only; skills_frame = lifecycle_events::skills_truncated(skills_truncated, skills_dropped) is bound right after the SkillContext destructure; the post-connected loop is now `for event in load_frames.into_iter().chain(skills_frame)`, so order stays compaction then skills and frames stay counts-only. sse.rs is LF (20028 LF, 0 CRLF) and was kept LF. Lib run ended at 290 tests, so the pre-existing failing sets did not apply here. Build was slow: a second cargo held the mp-target-w2 lock for several minutes; I did not touch the other session's processes. No docker, no DB harness, no commit, no git write."
+  },
+  {
+   "id": "WS25-S5",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/result_query.rs (new: pure query half moved from the gateway, plus 8 unit tests)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs (moved functions re-exported from mp_contracts::result_query; store unchanged)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/result_handles.rs (new: per-run store, 1 MiB handle / 4 MiB run caps, TTL, ZDR and waived runs get no store, result_query execution and tool definition; 14 unit tests; fix 3 adds pure handles_apply plus a zdr/waived test)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (module declaration; result_query arm after the gates; park in the output tail; execute_step_with_result_handles wrapper; execute_step_with_subagent keeps its signature)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (LoopContext.result_store; result_query offered on fresh runs when the store exists; child shares the store; dispatch calls execute_step_with_result_handles; store released after finalize; fix 1 adds message_id and deduplicated to the AppendMessageResponse test stub; fix 2 builds the store only when resumed is None)",
+    "apps/Model Plane/go/services/capability-core/migrations/0020_result_query_capability.up.sql (new: cap.result.query row, read class, no floor, starts unavailable; capability_tools seed row)",
+    "apps/Model Plane/go/services/capability-core/migrations/0020_result_query_capability.down.sql (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib result_handles",
+     "outcome": "pass: 14 passed, 0 failed (was 13 before; the new zdr/waived test is the extra one). Before fix 1 this could not compile, so the earlier 13-pass run is superseded."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+     "outcome": "1309 passed, 1 failed: provenance::tests::connector_result_is_framed_untrusted_and_screened (provenance.rs:396, read_provider_action expected ConnectorContent). Same single failure as the previous report. provenance.rs is not touched by this slice; not verified against HEAD (no HEAD copy built, per batch rules)."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib result_query",
+     "outcome": "pass: 8 passed, 0 failed"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib tool_result_handles",
+     "outcome": "NOT RUN: not re-attempted this round. The gateway lib tests did not compile earlier because of services/model-gateway/src/sse.rs:1692 (skills_truncated / skills_dropped out of scope), a file this slice does not own."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit services/execution-core/src/capability_policy.rs: in trusted_capability_id add an arm `\"result_query\" => \"cap.result.query\",` next to the `\"knowledge_search\" => \"cap.retrieval.query\",` arm (about line 1512). Without it a result_query call fails closed at GrpcCapabilityPolicy.",
+    "shared-edit services/execution-core/tests/tool_class_registry_parity.rs AND go/services/capability-core/internal/registry/capability_tools_seed_test.go: both read the capability_tools seed only from 0016. Once the arm above lands, requirement 1 of the parity test fails for result_query unless both readers also parse migration 0020's seed row (the one-line `('global', 'cap.result.query', 'result_query', 'read', 'none', NULL, 'seed')` format is matched by the existing regex).",
+    "owner decision + shared-edit go/services/capability-core/internal/api/availability.go: cap.result.query starts unavailable (health_not_attested). Adding it to genericGlobalHealthCapabilityIDs (and the reporter in execution-core health_attest.rs) is a widening decision the file's own comment says must be taken on purpose. Until then the gate denies.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml, execution-core block: optional passthrough of EXECUTION_RESULT_HANDLES. Default off without it.",
+    "shared-edit fix owner for services/model-gateway/src/sse.rs:1692 (skills_truncated and skills_dropped out of scope). The gateway's --lib tests cannot compile until this is fixed, so the gateway side of tool_result_handles is unverified.",
+    "Lead runs, not done here: apply migration 0020 on a capability-core rebuild and check cap.result.query and capability_tools rows; rebuild execution-core; live proof per the plan (a large read through the slices with the flag on, envelope and slice log lines captured)."
+   ],
+   "deviations": [
+    "The park happens in execute_step_inner's output tail in runtime_loop/mod.rs, not in agent.rs park_oversized: that is where the provenance label is known exactly. The row's agent.rs park_oversized is not implemented as named.",
+    "A new wrapper execute_step_with_result_handles carries the store; execute_step_with_subagent keeps its signature because resume.rs (not owned) calls it in a test.",
+    "The result_query arm sits after the capability, hook and permission gates and before tool_bridge, and reads the store passed in as a parameter.",
+    "Read-class is decided by the name classifier (!is_risky_call with empty args and !is_restricted_context_write), not by the declared class in capability_tools. The declared class gate is WS05-S3/S4's job.",
+    "Storage is text only. The row-level operations (select, where, aggregate) that mp-contracts supports are not exposed to execution-core's result_query.",
+    "Waived runs get no store (conservative), not only zero-retention runs.",
+    "The tool is offered only on fresh runs; a continuation keeps the snapshot's tools (now enforced by making the store None on continuations, fix 2)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs (add the result_query arm, shared edit 1)",
+    "apps/Model Plane/rust/services/execution-core/tests/tool_class_registry_parity.rs (read 0020's seed row, shared edit 2)",
+    "apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_seed_test.go (read 0020's seed row, shared edit 2)",
+    "apps/Model Plane/go/services/capability-core/internal/api/availability.go (owner decision on attesting cap.result.query)",
+    "apps/Model Plane/rust/services/execution-core/src/health_attest.rs (reporter, only if the owner decides to attest)",
+    "apps/Model Plane/deploy/docker-compose.yml (optional EXECUTION_RESULT_HANDLES passthrough, shared edit 4)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (compile break at line 1692, not owned)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/result_handles.rs: parse_enabled must accept the documented value `on` as well as `true` (trim, ASCII case-insensitive), and keep every other value off. The row and the batch flag spec are `EXECUTION_RESULT_HANDLES=on/off`, and plan S12 flips it with `=on`; today `Some(\"on\")` keeps handles silently off. Update the test only_the_literal_true_enables_handles, which asserts that `on` stays off, so it asserts that `on` and `true` enable and that `1`, `yes` and empty stay off."
+    ],
+    "dod_gaps": [
+     "Live proof (lead, docker): a Do run with EXECUTION_RESULT_HANDLES on and a read over 8000 chars, read back through three result_query slices, with envelope, slice and run-end release log lines captured; none of these log lines exist in the code yet.",
+     "Lead shared edits from the slice's lead_todo are still open: capability_policy.rs trusted_capability_id arm for result_query (until then the call fails closed); tool_class_registry_parity.rs and capability_tools_seed_test.go read only migration 0016; deploy/docker-compose.yml EXECUTION_RESULT_HANDLES passthrough; the owner's attestation decision for cap.result.query.",
+     "Migration 0020 is not applied or checked here (no Postgres or docker run): lead must rebuild capability-core, confirm the cap.result.query row and the capability_tools seed row, and check availability reads unavailable.",
+     "Loop-level ZDR proof (zdr and waived runs get no store through the real loop) and the named ZDR guard tests are not written."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "knowledge_search_found_grounding (runtime_loop/agent.rs, near the grounded flag) reads outcome.output, which is the handle envelope once a result is parked, so grounding is lost for parked knowledge results; fix before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A result_query step's audit data_category is public_non_personal (data_category by name), whatever the parked result was, so the GDPR classification of the step is wrong; the handle must carry the category of the tool that parked it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The read classification is by name (is_risky_call, is_restricted_context_write), not by the declared class in capability_tools; under TOOL_CLASS_GATE=enforce the declared class decides, so WS05-S3/S4 must confirm read parity for every parkable tool."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Fix 3 proves the pure decision (handles_apply) but not that for_run itself calls it with the real environment switch on a zdr or waived run through the loop; a loop-level test would still be needed to close the plan's ZDR guard fully."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No dispatch-level test drives execute_step_inner with a store: one that parks an oversized read-class output into a handle envelope, and one that answers result_query through the gates."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test yet proves that a continuation (resumed Some) gets no store and keeps its snapshot tools; fix 2 is by inspection and the existing suite passes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway's tool_result_handles tests and their moved-function tests are unverified because model-gateway's lib tests do not compile (sse.rs:1692, not owned)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Handles live in process memory, so a run resumed in another process (WS03 park or continuation) loses every held result; the fold should replace handle envelopes with an expiry note as the plan says, which is not implemented here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Row operations (select, where, aggregate) on JSON results are supported by mp-contracts but not exposed through execution-core's result_query, which is text windows only; decide whether the Do run needs them before the switch is on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The gateway keeps its own copies of the pure tests that now also live in mp_contracts::result_query; move the duplicates when the gateway compiles again."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner must decide whether cap.result.query is attested by execution-core (widening genericGlobalHealthCapabilityIDs); until then the row is unavailable and the feature is inert even with the switch on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The plan's evidence (a proof-stack Do run with a large read, envelope, slices and a run-end release log) has not been run; it needs the lead's rebuild and deploy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Pre-existing, not from this slice: provenance::tests::connector_result_is_framed_untrusted_and_screened still fails in the full execution-core lib run (provenance.rs:396); provenance.rs is untouched by this slice, so it was not checked against HEAD."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With EXECUTION_RESULT_HANDLES on and cap.result.query unattested (row starts unavailable) and the trusted_capability_id arm not yet landed, a parked result leaves the model only a 200-char head and every result_query call is refused, so content the inline truncation showed (8000 chars) is lost; park only when result_query is usable, or land the capability arm and attestation with the flag."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "data_category (runtime_loop/agent.rs:316-331) maps result_query to public_non_personal, so a parked customer_private (knowledge_search), personal (provider reads) or unclassified (mcp__) result is re-read under a public category in the step audit; the handle must carry the category of the tool that parked it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "knowledge_search_found_grounding (agent.rs:5452, used at 3960) parses outcome.output for status ok, and a parked knowledge_search result's output is the handle envelope with no status key, so grounding is lost for parked knowledge results; fix before the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "is_parkable_tool uses !is_risky_call by name, and permission::is_risky_tool returns true for every mcp__ name, so no MCP read is ever parked; the row's own evidence (a 60k-char MCP/knowledge read through three slices) cannot be produced. Use the declared class (ToolClassView, WS05-S1 built) with the name classifier as fallback, and say so in the ledger."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No dispatch-level test drives execute_step_inner with a store to prove a parked oversized read becomes an envelope and that result_query is answered through the gates; the named ZDR guards external_tool_result_not_parked_under_zdr and do_run_result_not_parked_under_zdr are absent, and only the pure handles_apply decision is tested."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No continuation test proves that a resumed segment gets no store and keeps its snapshot tools; fix 2 is by inspection only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No capability-core Go test pins migration 0020 (starts unavailable, read class, none floor, seed row), although migration_security_test.go pins each earlier capability migration this way."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "result_handles.rs has no tracing calls, park refusal reasons are discarded by .ok() at the call site, and no slice-read or run-end release log exists, so the plan's live evidence (envelope, slices, release log) cannot be captured as the code stands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "result_query returns the body in a text field with the source label (NOTE and SCREENING lines) only in a sibling source field, not prefixed to the slice as the row says; verdict replay holds but the framing is weaker than inline output, and the result_query arm sits outside provenance::render."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A resumed continuation has no store, so handle envelopes from the first segment stop resolving, the expiry note the plan requires for the WS03 fold is not implemented, and a result_query call in the snapshot tools falls through to the tool bridge with an unknown-tool error instead of a clear expiry message."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The park threshold compares the body alone (8000 chars), but format_tool_context cuts the label-prefixed rendered text, so a body near the cap plus its label is truncated inline with no handle."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "parse_enabled re-implements a strict switch instead of the existing convention mp_contracts::loop_fold::switch_from; align it when fixing the on value."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Formatting: a stray blank line follows the opening parenthesis of execute_step_with_result_handles in runtime_loop/mod.rs, and the AppendMessageResponse test stub in agent.rs is over-long; cargo fmt --check at S12 will flag both."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan's `cargo test -p execution-core tool_context` matches zero tests, so the command is vacuous; the agent.rs assertions it was meant to protect need a named test or the full lib run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Pre-existing, not this slice: provenance::tests::connector_result_is_framed_untrusted_and_screened fails in the full execution-core lib run; provenance.rs and mp-content-safety are byte-identical to the worktree HEAD, so committed code fails it (read_provider_action is not classed ConnectorContent). Lead should route it to the WS23/WS26 owner."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner must decide whether execution-core attests cap.result.query (genericGlobalHealthCapabilityIDs in availability.go, reporter in health_attest.rs); until then the feature is inert, and with the switch on it is the harmful state described in the first P1 finding."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The worktree carries uncommitted edits outside this slice's files_changed (model-gateway sse.rs, http_routes.rs, queued_input.rs, session_flow.rs, session-core grpc.rs and migration 0052, sessions.proto and generated Go, FE chat files); attribution is not verifiable here. The shared target C:/dev/mp-target-w2 gave stale-artifact errors for the gateway test build that a clean target did not, so verify slices in per-slice target dirs."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Required fixes 1-3 are applied. Fix 1: the AppendMessageResponse stub in agent.rs now sets message_id and deduplicated, so the execution-core lib test target compiles. Fix 2: run_agent_with_route_parkable builds the result store only when resumed is None, so continuations never park and never get a handle envelope pointing at result_query; the \"offer result_query\" check is now result_store.is_some(). A continuation keeps its snapshot's tools exactly as before. Fix 3: for_run now delegates to a pure handles_apply(enabled, zdr, waived) function; a test asserts zdr and waived each yield no store and enabled alone yields one; the test does not touch the environment variable. The fix-1 stub line is a single line longer than rustfmt would wrap it; the file is CRLF, so no fmt run was done. Still partial, as before: the end-to-end path needs the shared edits in lead_todo (result_query fails closed at the capability gate until shared edit 1 lands, and the row stays unavailable until shared edit 3). No docker, DB harness or live proof was run. db_tests_written is empty."
+  }
+ ]
+}

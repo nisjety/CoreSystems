@@ -1,0 +1,719 @@
+{
+ "outcomes": [
+  {
+   "unit": "s6-hardening",
+   "impl": {
+    "summary": "All 8 items done, test-first, no docker, no DB tests. Final: mp-contracts lib 113 and golden 10 to 11; execution-core --lib 968 to 985; all integration suites pass (durable_loop_contract 14, loop_fold_zdr_matrix 7, scrub_checkpoint_test 8, compaction_parity_contract 11); `cargo check --workspace --all-targets --keep-going` clean (only 5 pre-existing warnings, none in my files). Red run first: 8 of the new or changed agent tests failed for the right reasons before any production edit.\n\n1. attempted_retrievals: `run_rounds` clones the set before the pre-pass (only when the writer is engaged), and the pre_effect and pause folds snapshot that clone. The end-of-round fold keeps the final set. Goldens, fold test data and scrub test data now use the real `hybrid|5|find the contract`. New tests: agent-level (the real `retrieval_signature` gate over the open round of a pre_effect fold and of a pause fold, with a control that the round-end fold holds the signature) and a golden test in mp-contracts. Contract doc added to `attempted_retrievals`.\n2. classify_status: new `SaveError::Refused(RefusedBy)` with causes not_found, denied (PermissionDenied and Unauthenticated), unimplemented, key_unavailable. The writer becomes Failed at once, logs one warn with `cause`, makes no repeated RPC, and holds effects. A Failed writer uses `held_for_good_text`: it names only the tool and never says \"try again\". ResourceExhausted is now transient Unavailable. InvalidArgument and OutOfRange stay content refusals. `session_core_refusals_are_classified` was extended, not removed. Agent test: each of 5 refusals makes exactly 1 save attempt per run and holds both effects.\n3. Withheld content: `scrub::scrub_fold` now returns `FoldScrub`. `fit` returns ContentRefused{credential} if any non-argument text field was withheld, so the writer saves a tombstone (reason credential). Withheld call arguments stay as designed: empty arguments, fold still resumable. Tests at fold level and agent level cover a goal containing \"Authorization: bearer\" (tombstone, the effect still runs) and a secret in call arguments (resumable, arguments empty). No seeded secret is in any saved bytes either way.\n4. Stage-1 leftovers: after the consume is won and before the segment's first effect, `close_continued_pause` closes the fold the pause saved with reason `continued_at_stage_1`. It is best effort, bounded to 2 s per RPC, logs closed tokens and ignores failures. It runs only when the checkpoint switch and the ledger are on and the run is persistent. No new session-core token was needed (the close reason is free text there). See deviation 1 for how it learns the seq.\n5. Seeding: `SeqTracker::seeded`, `FoldWriter::seeded`, a `segment` field with getter `FoldWriter::segment()`, and the three Snapshot sites now read it. Unit-tested. Agent-level tests still see segment 1 (nothing seeds a writer yet).\n6. Test gaps: all closed at agent level (secret in pre_effect arguments; NotPersistent, Closed and run_ended; gated call held on a failed pre_effect save; tombstone save failure holds; Stale, Closed and StoreOff on the pause save; delegated test now asserts attempts). Mutation proof for the delegated and resumed gates done; see commands.\n7. Matrix-driven test: the paste-ready hunk compiled unchanged against the tree and passed (3 open, 4 zdr-off, 2 waived-off rows). It is red when WriterGate stops reading waived.\n8. docker-compose comment corrected: stage 1 continue is built, the switch stays default off until the live proof. No value changed.\n\nNot run: no DB-backed test was written or changed, and no docker. LNK1104 link collisions with the other units hit two mutation runs; I moved the mutation builds to a private target dir (since deleted).",
+    "files_changed": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+     "apps/Model Plane/rust/services/execution-core/src/scrub.rs",
+     "apps/Model Plane/rust/services/execution-core/tests/scrub_checkpoint_test.rs",
+     "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+     "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs",
+     "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/loop-fold-v1-writer-round.json",
+     "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/loop-fold-v1-writer-pre-effect.json",
+     "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/loop-fold-v1-writer-pause.json",
+     "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "tests_added": [
+     "execution-core agent: loop_fold_open_round_folds_snapshot_the_retrievals_of_the_round_start",
+     "execution-core agent: loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect",
+     "execution-core agent: loop_fold_a_stage_one_continuation_makes_no_fold_call_when_no_fold_can_exist",
+     "execution-core agent: loop_fold_a_failed_claim_or_close_does_not_stop_the_stage_one_segment",
+     "execution-core agent: loop_fold_a_withheld_message_degrades_the_fold_to_a_tombstone",
+     "execution-core agent: loop_fold_a_secret_in_call_arguments_keeps_the_fold_resumable_with_empty_arguments",
+     "execution-core agent: loop_fold_a_store_that_refuses_the_run_is_asked_once_and_holds_every_effect",
+     "execution-core agent: loop_fold_not_persistent_degrades_while_closed_and_ended_answers_hold_every_effect",
+     "execution-core agent: loop_fold_the_approval_gated_call_is_held_when_its_pre_effect_save_fails",
+     "execution-core agent: loop_fold_a_tombstone_that_cannot_be_saved_holds_the_effect",
+     "execution-core agent: loop_fold_a_stale_closed_or_disabled_answer_to_the_pause_save_still_raises_the_approval",
+     "execution-core agent (changed): loop_fold_saved_bytes_contain_no_seeded_secret now expects a tombstone for the withheld sentence",
+     "execution-core agent (changed): loop_fold_a_delegated_loop_never_saves now asserts attempts equal accepted saves",
+     "execution-core fold: a_credential_shaped_message_refuses_the_fold_instead_of_stubbing_it (replaces a_credential_shaped_field_is_withheld_so_the_fold_still_fits)",
+     "execution-core fold: a_secret_in_call_arguments_is_withheld_and_the_fold_stays_resumable",
+     "execution-core fold: the_text_for_a_failed_writer_names_only_the_tool_and_never_invites_a_retry",
+     "execution-core fold: a_refusal_that_will_not_change_fails_the_writer_at_once",
+     "execution-core fold: a_seeded_tracker_expects_the_claimed_seq_and_has_nothing_to_probe",
+     "execution-core fold: a_seeded_writer_expects_the_claimed_seq_and_writes_under_its_segment",
+     "execution-core fold: the_writer_gate_and_the_pause_mint_follow_the_posture_matrix_row_by_row",
+     "execution-core fold (changed): session_core_refusals_are_classified, extended with the Refused table and ResourceExhausted",
+     "mp-contracts golden: the_open_round_folds_carry_the_retrievals_of_the_round_start_only",
+     "execution-core scrub_checkpoint_test (changed): assertions on the FoldScrub report"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -p mp-contracts (baseline)",
+      "outcome": "lib 113, loop_fold_golden 10, other suites 1+3+5+1+5+2, all pass"
+     },
+     {
+      "command": "cargo test -p execution-core --lib (baseline)",
+      "outcome": "968 passed"
+     },
+     {
+      "command": "cargo test -p execution-core --tests (baseline)",
+      "outcome": "all pass; durable_loop_contract 14, loop_fold_zdr_matrix 7, scrub_checkpoint_test 8, compaction_parity_contract 11, runtime_loop_test 9, autonomy_ladder_contract 4, cross_service_loop_contract 3, zdr_refusal_inventory 2, subscription_refusal_contract 4, slo 4, browser_agent_e2e 11 (2 ignored)"
+     },
+     {
+      "command": "cargo test -p execution-core --lib -- loop_fold (new tests, production unchanged)",
+      "outcome": "RED for the right reasons: 8 failed, 23 passed (claim and close never called; withheld goal still resumable; open-round fold held the round's own search; stale or refused store asked 5 times instead of once; held text said Try again; seeded-secret test saw a stub, not a tombstone)"
+     },
+     {
+      "command": "cargo test -p execution-core --lib -- runtime_loop::fold loop_fold (after implementation)",
+      "outcome": "52 passed"
+     },
+     {
+      "command": "MUTATION waived branch of WriterGate::decide removed",
+      "outcome": "RED: loop_fold_a_waived_run_never_saves, the posture-matrix test, the_writer_is_off_unless_switch_ledger_and_a_persistent_root_run_allow_it"
+     },
+     {
+      "command": "MUTATION depth branch of WriterGate::decide removed",
+      "outcome": "RED: loop_fold_a_delegated_loop_never_saves, the_writer_is_off_unless_switch_ledger_and_a_persistent_root_run_allow_it"
+     },
+     {
+      "command": "MUTATION resumed branch of WriterGate::decide removed",
+      "outcome": "RED: loop_fold_zdr_space_and_resumed_runs_never_save, loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect, the_writer_is_off_unless_switch_ledger_and_a_persistent_root_run_allow_it"
+     },
+     {
+      "command": "MUTATION classify_status NotFound arm turned back into Unavailable",
+      "outcome": "RED: session_core_refusals_are_classified, loop_fold_a_store_that_refuses_the_run_is_asked_once_and_holds_every_effect"
+     },
+     {
+      "command": "MUTATION fit ignores conversation_withheld",
+      "outcome": "RED: loop_fold_a_withheld_message_degrades_the_fold_to_a_tombstone, a_credential_shaped_message_refuses_the_fold_instead_of_stubbing_it, loop_fold_saved_bytes_contain_no_seeded_secret"
+     },
+     {
+      "command": "MUTATION pause_ref of the stage-1 claim built from the claim token",
+      "outcome": "RED: loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect"
+     },
+     {
+      "command": "MUTATION close_continued_pause gate removed",
+      "outcome": "RED: loop_fold_a_stage_one_continuation_makes_no_fold_call_when_no_fold_can_exist"
+     },
+     {
+      "command": "MUTATION held-for-good flag forced false",
+      "outcome": "RED: loop_fold_a_store_that_refuses_the_run_is_asked_once_and_holds_every_effect, loop_fold_not_persistent_degrades_while_closed_and_ended_answers_hold_every_effect"
+     },
+     {
+      "command": "MUTATION round-start retrieval snapshot removed (agent.rs)",
+      "outcome": "RED: loop_fold_open_round_folds_snapshot_the_retrievals_of_the_round_start. All mutations restored byte for byte (cmp verified by the script); builds ran in a private target dir to avoid link collisions and shorten the window in which the shared tree was mutated"
+     },
+     {
+      "command": "cargo test -p execution-core --test '*' (first run after implementation)",
+      "outcome": "3 durable_loop_contract guard tests FAILED: a second WriterGate literal in agent.rs, and a .segment_no read (my getter name). Fixed by moving the gate construction into fold.rs and renaming the getter to segment()"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "lib 113, loop_fold_golden 11, others unchanged; all pass"
+     },
+     {
+      "command": "cargo test -p execution-core --lib (final)",
+      "outcome": "985 passed"
+     },
+     {
+      "command": "cargo test -p execution-core --test '*' (final)",
+      "outcome": "all pass, counts equal to baseline (durable_loop_contract 14, loop_fold_zdr_matrix 7, scrub_checkpoint_test 8, compaction_parity_contract 11)"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Finished, no errors; only the 5 pre-existing warnings in session-core and execution-core files I did not touch"
+     },
+     {
+      "command": "rustfmt --check --edition 2021 fold.rs and scrub.rs",
+      "outcome": "clean after hand-wrapping (agent.rs and the mp-contracts files already had rustfmt diffs, not checked)"
+     }
+    ],
+    "deviations": [
+     "Item 4: CloseLoopCheckpointRequest has no pause_ref, only (run_id, seq, reason), and a continuation does not know the fold's seq. So `fold::close_continued_pause` first calls ClaimLoopCheckpoint with pause_ref `{run_id}:{paused step}` and the request's claim_token, which answers the seq (the claimed fold's bytes are dropped unread), then closes at that seq. The claim also moves the fold off `paused`, so nobody else can claim it. Side effect for the lead: session-core records a CHECKPOINT_RESTORED event for that claim although nothing was restored. If that audit event is unwanted, the clean fix is a session-core close by pause_ref, which touches session-core grpc.rs (s7a-hardening's file), so I did not do it. The close reason `continued_at_stage_1` needed no session-core change.",
+     "Item 4 timeouts: the stage-1 claim and close use ROUND_SAVE_TIMEOUT (2 s each), not the 10 s gated timeout, so a hung session-core delays a stage-1 continue by at most 4 s. close_rpc gained a timeout parameter; its other caller passes GATED_SAVE_TIMEOUT.",
+     "Item 4 gate: the WriterGate for the stage-1 close is built inside fold.rs (close_continued_pause takes zdr, waived and space), not in agent.rs. tests/durable_loop_contract.rs (static proof, not owned by this round) requires exactly one WriterGate literal in agent.rs. I did not edit that file.",
+     "Item 5: the getter is `FoldWriter::segment()`, not `segment_no()`: the same contract test forbids `.segment_no` anywhere in agent.rs production code (it is the client-supplied resume field).",
+     "Item 3: scrub::scrub_fold now returns `#[must_use] FoldScrub` instead of (); the only production caller is fit. 'Message field' is read as every conversation text field (messages, the open round's assistant text, call ids and names, completed output, error and call_id). Withheld retrieval signatures and call arguments are not counted: a stub in a signature only affects the duplicate-search gate. The existing test loop_fold_saved_bytes_contain_no_seeded_secret was changed: its credential-shaped assistant sentence now yields a tombstone instead of a stub.",
+     "Item 2: the log token for a refusal is outcome=refused plus a `cause` field (not_found, denied, unimplemented, key_unavailable) on the save line and on one warn when the writer fails. The held text for a failed writer (Stale and Closed too, not only Refused) is the new no-retry wording; it still contains 'was not run' and 'held back', so the existing stale-writer test is unchanged.",
+     "The existing test the_credential_shaped_field_is_withheld_so_the_fold_still_fits (fold.rs) was replaced and session_core_refusals_are_classified was edited, both because the spec changes the behaviour they pinned. Four test-only fields were added to the agent.rs Recorder (claim_calls, claim_seq, claim_failure, close_failure, stage_marks) and the mock's claim and close handlers now record; the mock list_tool_actions stub (s7a's hunk) was not touched.",
+     "Mutation checks 2 to 7 were built in a private CARGO_TARGET_DIR (deleted afterwards) because the shared target dir hit LNK1104 link collisions with the other units; the shared source tree was mutated only for the duration of each compile and restored byte for byte.",
+     "CRLF: every edit was made with the Edit tool; all touched files are still 100% CRLF. rustfmt was only run with --check."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "execution-core runtime_loop/fold.rs: SaveError::Refused(RefusedBy) with RefusedBy::{NotFound, Denied, Unimplemented, KeyUnavailable}; SaveError::cause(); FoldWriter::is_failed(); held_for_good_text(tool); FoldWriter::seeded(channel, bearer, run_id, expected_seq, segment_no) and SeqTracker::seeded(expected) (Active whenever there is a bearer, no gate: the S7b caller has decided); FoldWriter::segment(); close_continued_pause(channel, bearer, run_id, paused_step_id, claim_token, zdr, waived, space); STAGE_ONE_CLOSE_REASON = \"continued_at_stage_1\"; close_rpc now takes a timeout.",
+     "execution-core scrub.rs: scrub_fold returns FoldScrub { withheld_conversation, withheld_retrievals, withheld_arguments } with conversation_withheld().",
+     "S7b must NOT blindly reuse the stage-1 close: if S7b has already claimed the pause fold in place and then falls back to stage 1, close_continued_pause would find it 'resuming' under the same token (claim_held, ignored, nothing closed). S7 spec says the fallback does not close the fold; S7b must skip or replace this call when it holds the claim (ResumedSegment.paused_step_id is the pause's step).",
+     "Open-round folds (pre_effect, pause) carry attempted_retrievals as of the START of the round: a resume may send the open round through the pre-pass without a self-duplicate. Only the round fold carries the final set.",
+     "A fold is a tombstone with reason credential whenever any conversation field was withheld; a resumable fold may still have call arguments_json == \"\" (withheld). agent.rs test helpers: stage_one_continue, search_call, run_open_round_through_the_retrieval_gate; Recorder claim and close hooks."
+    ],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md",
+      "content": "Append to the 2026-10-18 S6 writer-rules entry (hardening round after adversarial review):\n\n- Open-round folds snapshot `attempted_retrievals` at the START of the round. The phase-1 pre-pass inserts the round's own knowledge_search signatures, so a pre_effect or pause fold that carried the set after it would make an in-place resume that re-runs the pre-pass over the open round reject its own search as a duplicate of itself. The end-of-round fold keeps the final set. Goldens use the real `route|top_k|normalised query` signature.\n- Deterministic refusals fail the writer at once. NotFound (run not found), PermissionDenied and Unauthenticated, Unimplemented (a session-core that predates SaveLoopCheckpoint) and FailedPrecondition 'loop checkpoint key unavailable' are `SaveError::Refused` with closed causes not_found, denied, unimplemented and key_unavailable. The writer becomes Failed (fail closed, effects held for the rest of the run, one RPC per run, one content-free warn naming the cause), and the held-back text for a Failed writer says the step could not be started safely in this run and never invites a retry. Reason: retrying a deterministic refusal each round held every effect and told the model 'Try again.' until max_rounds. ResourceExhausted is transient (Unavailable), not a content refusal; InvalidArgument and OutOfRange stay malformed-content refusals.\n- A withheld conversation field degrades the fold to a tombstone (reason credential, never resumable). A message, the open round's text, a call's id or name, or a completed outcome that is still credential-shaped after scrubbing used to be replaced by a fixed stub inside a fold that stayed resumable, so a resume would continue on a damaged conversation (the goal, a tool result or a system message replaced) with nothing to say so. Call arguments are still withheld (empty, never rewritten) and keep the fold resumable, because an empty-argument call is never redispatched.\n- A stage-1 continuation closes the pause fold it consumed. Right after the approval's consume is won and before the segment dispatches anything, the fold saved under pause_ref `{run_id}:{paused step}` is claimed (to learn its seq; CloseLoopCheckpoint is by seq) and closed with reason `continued_at_stage_1`. Attempted only with the checkpoint switch and effect ledger on and a persistent run; best effort, content-free log tokens, a failure or a disabled store is ignored and never stops the segment. Reason: the paused fold stayed claimable (state paused) while stage 1 ran effects it knew nothing about. Known side effect: the claim records a CHECKPOINT_RESTORED event in session-core although nothing was restored; a close-by-pause_ref in session-core would avoid that.\n- Seeding for S7b: FoldWriter::seeded(channel, bearer, run_id, expected_seq, segment_no) and SeqTracker::seeded(expected); every Snapshot reads the writer's segment number (1 for a run's first loop).\n\nS7b obligations created by this round (binding):\n(a) An in-place resume must cross-check the effect ledger against the fold and refuse (fall back to stage 1) when the ledger holds actions the fold does not account for. A writer that went Off (StoreOff or NotPersistent) after an earlier successful save leaves a stale resumable fold behind an effect that ran.\n(b) An empty step_id call is never dispatched by a resume, whatever the completed list says. A withheld-arguments call (arguments_json empty) is likewise never redispatched.\n(c) A fold left active behind a pending approval is not resumable by crash recovery: S8 must require the pause_ref match for approval pauses and must never crash-park a run that has an unconsumed loop approval.\n(d) If S7b claims the pause fold in place and then falls back to stage 1, it must not run the stage-1 close (the fold is 'resuming' under its claim); the S7 spec's rule that the fallback does not close the fold stands."
+     },
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+      "content": "Build ledger amendment to the WS03 S6 entry (hardening round, unit s6-hardening). Done, test-first, no docker, no DB tests: (1) open-round folds snapshot attempted_retrievals at the round start (agent.rs retrievals_at_round_start; goldens now use the real signature hybrid|5|find the contract; new agent tests run the open round through the real retrieval gate for a pre_effect and a pause fold; new golden test in mp-contracts); (2) SaveError::Refused(RefusedBy) for NotFound, PermissionDenied/Unauthenticated, Unimplemented and 'key unavailable': writer Failed at once, one RPC per run, held_for_good_text without 'try again', ResourceExhausted now transient; (3) a withheld conversation field makes the fold a tombstone (reason credential), withheld call arguments stay resumable with empty arguments (scrub_fold returns FoldScrub); (4) a stage-1 continuation claims by pause_ref then closes the pause fold it consumed (reason continued_at_stage_1) before its first effect, best effort, only with switch, ledger and a persistent run, three tests; (5) FoldWriter::seeded, SeqTracker::seeded, Snapshot reads FoldWriter::segment(); (6) agent-level tests for a secret in pre_effect arguments, NotPersistent/Closed/run_ended, the gated call held on a failed pre_effect save, a tombstone save failure, Stale/Closed/StoreOff on the pause save, and mutation proofs for the depth, resumed and waived gates; (7) the posture-matrix test over WriterGate::decide and run_pause_mode is in fold.rs; (8) docker-compose comment corrected, no value changed. Counts: mp-contracts lib 113, golden 10 to 11; execution-core lib 968 to 985; all integration suites unchanged and green. S7b obligations: see the ledger entry (a) ledger cross-check before an in-place resume, (b) empty step_id and empty-argument calls are never dispatched, (c) S8 requires the pause_ref match and never crash-parks a run with an unconsumed loop approval, (d) no stage-1 close after an in-place claim. Still uncommitted at hand-off."
+     }
+    ],
+    "tests_written_not_run": []
+   },
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+       "issue": "Items 3 and 4 together leave a resumable fold behind effects that ran. The unit says that when a message field is withheld, \"the fold saved is a tombstone\". That holds for round and pre_effect folds but not for the pause fold. PauseFold::save maps every error, ContentRefused included, to `Err(_) => PauseSaved::NotSaved` and saves no tombstone. Item 3 makes that refusal much more frequent: it used to be a stub inside a fold that still saved as `paused`. When the pause fold is refused, the stored row stays the earlier ACTIVE, resumable pre_effect fold. The new stage-1 close cannot reach that row: it claims by pause_ref, and claim only matches state paused or parked with that pause_ref, so it answers not_claimable and closes nothing. The stage-1 segment then dispatches effects while a resumable pre_effect fold remains for S8 crash-park to find. Before this round the same path left a stub-damaged `paused` fold, which the new close would have closed.",
+       "evidence": "fold.rs PauseFold::save: `Err(_) => PauseSaved::NotSaved` (about line 1247). session-core loop_checkpoint.rs claim: `WHERE run_id = $1 AND pause_ref = $4 AND (state IN ('paused','parked') OR ...)`. agent.rs pause site: `completed` = fold_completed(..outcomes..), so a sibling read-only call's credential-shaped output (for example a page containing 'Authorization:') reaches the pause fold, `fit` returns ContentRefused{credential}, and the pre_effect fold saved earlier that round stays active. No test covers a clean pre_effect followed by a content-refused pause.",
+       "suggested_fix": "In PauseFold::save, handle `SaveError::ContentRefused` like save_round and save_pre_effect do: save a tombstone, best effort, kind round, while the writer is active. Only ContentRefused, so the reconcile ruling that dropped tombstone-on-failed-pause for store failures still holds. Add an agent test: a clean pre_effect fold, then a sibling call whose output is credential-shaped, then the pause. Assert the last stored fold is not resumable. If the lead keeps the reconcile drop for content refusals too, record it explicitly as part of S7b/S8 obligation (c)."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+       "issue": "close_continued_pause misuses ClaimLoopCheckpoint to learn the seq. The claim has side effects beyond moving the fold off `paused`: (1) session-core decrypts the fold and records a CHECKPOINT_RESTORED event in the run's event log for a restore that never happened, a false audit fact in the run timeline; (2) it leases the fold in state `resuming` under the client-authored claim_token from the /continue body. If the close then fails or times out (both are swallowed), the fold stays `resuming`, becomes claimable again by anyone once the lease lapses, and was decrypted and shipped to execution-core for nothing. So in the failure path the leftover the item set out to remove is still there, and an audit lie has been added.",
+       "evidence": "loop_checkpoint.rs claim(): `record_event(&mut tx, ..., \"CHECKPOINT_RESTORED\", ...)` and `SET state = 'resuming', claim_token_hash = $2, claim_expires_at = now() + ...`; the comment there says \"Once the lease lapses the pause is claimable again, by anyone\". model-gateway sse.rs ContinueRunRequest { approval_id, claim_token } is client-supplied and is passed through as req.resume.claim_token. fold.rs close_continued_pause: a close failure only logs inside close_rpc. The implementer's own deviation 1 acknowledges the event.",
+       "suggested_fix": "Add a session-core close by (run_id, pause_ref) that touches only a `paused` row with that pause_ref, records no restore event and never decrypts. This needs s7a-hardening's grpc.rs and comment-only proto changes, so the lead should schedule it. Until then, at least record the audit side effect and the failure-path lease in the ledger, and consider skipping the stage-1 close entirely rather than emitting a false CHECKPOINT_RESTORED."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+       "issue": "FoldWriter::seeded is a fail-open constructor. It makes an Active writer from nothing but a bearer and skips WriterGate entirely: switch, ledger, zdr, waived, space, depth. Nothing in the type system stops S7b, or anyone else, from building it for a waived or ZDR run. The unit spec mandated this signature, but it is the one writer path the posture-matrix and gate mutation tests do not cover.",
+       "evidence": "`pub(crate) fn seeded(channel, bearer, run_id, expected_seq, segment_no) -> Self { ... state: if bearer.is_none() { Off(NoBearer) } else { Active } }` with the comment 'The caller (the resume) has already decided that this run may write, so there is no gate'.",
+       "suggested_fix": "Have seeded take the WriterGate (with resumed=false allowed only for this constructor) or a typed proof issued by the claim, and apply `gate.decide()`. At minimum add an S7b obligation that the seeded writer is built only behind loop_mode_for_persistent and WriterGate, with a mutation test."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+       "issue": "The new deterministic Refused class trusts tonic's HTTP-status mapping. A proxy or load balancer answering HTTP 404 during a rollout becomes Code::Unimplemented, and 401/403 become Unauthenticated/PermissionDenied. One such transient answer now fails the writer for the whole run and holds every effectful call until max_rounds, telling the model the step 'will not be run here'. This fails closed, so it is safe, but it is a broad availability cliff with no recovery.",
+       "evidence": "classify_status: `(Code::NotFound, _) => Refused(NotFound)`, `(Code::PermissionDenied | Code::Unauthenticated, _) => Refused(Denied)`, `(Code::Unimplemented, _) => Refused(Unimplemented)`. Messages are ignored for all three.",
+       "suggested_fix": "Match the session-core messages where they are fixed ('run not found'), or allow one retry before failing for good for Unimplemented and Denied. Record the choice in the ledger text."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+       "issue": "Doc comments in a file this unit owns now contradict the new behaviour. The contains_credential_shape doc says withholding the field 'keeps the fold saveable', and the test comment says 'a writer withholds the one field instead of losing the whole fold'. Since item 3, a withheld conversation field turns the whole fold into a tombstone.",
+       "evidence": "loop_fold.rs about lines 493-496 ('withholding just that field when this returns `true` keeps the fold saveable') and about lines 884-885 in contains_credential_shape_agrees_with_assert_no_credentials.",
+       "suggested_fix": "Reword both: a withheld call argument keeps the fold resumable; a withheld conversation field makes the writer save a tombstone (reason credential)."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+       "issue": "Test gaps around the stage-1 close. (1) The posture-matrix test's pause-site assertion is tautological: it feeds run_pause_mode its own `!zdr && !waived` and does not exercise the expression agent.rs actually passes. (2) No test pins that the claim and close never fire when the consume loses. That ordering is structural today, since resumed is Some only after prepare_resume returns Ok, but nothing goes red if it changes. (3) A hung claim or close is not tested, so the 2 s bound per RPC is unverified.",
+       "evidence": "fold.rs the_writer_gate_and_the_pause_mint_follow_the_posture_matrix_row_by_row calls `run_pause_mode(!zdr && !waived, ...)`. The agent.rs stage_one_continue tests always consume successfully.",
+       "suggested_fix": "Add an agent test where ConsumeApproval fails and assert claim_calls is empty, plus a test with a never-answering claim mock that asserts the segment still finishes. Rely on durable_loop_contract's static pin for the agent.rs expression, or say in the test that it is a proxy."
+      }
+     ],
+     "checked": [
+      "git diff of all 10 unit-owned files; no untracked files belong to this unit",
+      "classify_status new Refused class: session-core strings match exactly ('run not found', 'loop checkpoint key unavailable'); ResourceExhausted now transient; InvalidArgument and OutOfRange still content refusals",
+      "FoldWriter::apply: Refused leads to Failed with a content-free warn (cause token only); save_pre_effect returns Hold for Refused; a Failed writer returns Hold at once with no further RPC; save_round and pause_fold are skipped once not active",
+      "held_for_good_text is chosen only when held && is_failed(); held_back_text 'Try again.' stays for transient holds",
+      "retrievals_at_round_start is cloned at agent.rs about line 1684, before the only attempted_retrievals.insert (about line 1930); pre_effect and pause Snapshots use it, the round fold uses the final set; the clone is taken only when the writer is engaged",
+      "fit: scrub_fold report leads to ContentRefused{credential} for conversation stubs; call arguments stay exempt; retrieval stubs not counted",
+      "close_continued_pause: gated on checkpoint switch + ledger + not zdr/waived/space (no RPC with any switch off); called only for a resumed segment (after prepare_resume consumes) and before tools and dispatch; claim/close logs are content-free; read against session-core claim/close SQL semantics",
+      "the claim_token is client-authored (model-gateway ContinueRunRequest)",
+      "switch-off byte identity: every new path is under folds.engaged()/fold_authority or resumed+gate; with the checkpoint switch off, close_continued_pause returns before any RPC or log",
+      "segment_no read through folds.segment() at all three Snapshot sites; seeded constructors are dead code outside tests",
+      "docker-compose: comment only, value unchanged, the same switch name exists on both services",
+      "Ran: cargo test -p execution-core --lib -- runtime_loop::fold loop_fold (52 pass); --test durable_loop_contract (14), loop_fold_zdr_matrix (7), scrub_checkpoint_test (8); cargo test -p mp-contracts --test loop_fold_golden (11). No docker, no DB-backed tests run, no files edited"
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (close_continued_pause, ~line 788) and agent.rs tests loop_fold_a_stage_one_continuation_*",
+       "issue": "The zero-retention, waived and Space gate of the stage-1 close is not covered by any test, so removing it would pass every suite. Requirement 4 says the close is attempted ONLY for a persistent run.",
+       "evidence": "close_continued_pause builds its own WriterGate from zdr, waived and space (plus switch and ledger) and agent.rs passes req.zdr, route.is_waived() and !req.space_id.is_empty(). The only negative test, loop_fold_a_stage_one_continuation_makes_no_fold_call_when_no_fold_can_exist, loops over (checkpoint, ledger) = (false,true),(true,false),(false,false). stage_one_continue/continue_request never set zdr, waived or space_id, and no mutation of those arguments appears in s6h-mut-*.log. The fold.rs posture-matrix test builds WriterGate literals itself and never calls close_continued_pause. The no_reference path (no bearer, empty paused step, empty claim token) is also untested. Without the gate, a ZDR/waived/Space continuation would send ClaimLoopCheckpoint and CloseLoopCheckpoint RPCs.",
+       "suggested_fix": "Add agent-level cases to the no-call test where req.zdr = true, where the route is waived (the waiver-bound route the matrix tests use), and where space_id is non-empty, each asserting claim_calls and close_calls are empty while the released call still runs. Add one case for a missing bearer or empty claim token. Then mutate each gate argument and show it goes red."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (close_continued_pause)",
+       "issue": "Closing the pause fold goes through ClaimLoopCheckpoint, which makes every stage-1 continuation (with the switch on and a loop fold) write a false CHECKPOINT_RESTORED audit event. If the close then fails, the fold is left 'resuming' on a lease instead of closed.",
+       "evidence": "session-core loop_checkpoint::claim sets state='resuming', stores the claim token hash and lease, and calls record_event(... \"CHECKPOINT_RESTORED\" ...) before commit. docs/CONTRACTS.md defines CHECKPOINT_RESTORED (111) as 'Run restored from checkpoint'. Nothing is restored here. CloseLoopCheckpointRequest has only (run_id, seq, reason), so the implementer worked around it and disclosed the side effect under deviations. Failure window: claim succeeds, close times out at 2 s or fails. The fold stays 'resuming' and becomes claimable again when the lease lapses (claim allows resuming with expired lease), which is the stale-resumable-fold-behind-effects state this item was meant to remove. The claim and close each take up to 2 s, so the continuation's first event is delayed by up to 4 s.",
+       "suggested_fix": "Lead decision: either (a) add a close-by-pause_ref to session-core (a new RPC field or a distinct close path that does not record CHECKPOINT_RESTORED), or (b) record the false-audit-event cost in the ledger and have the lead accept it explicitly. In either case state in the ledger that a failed close leaves a claimable-after-lease fold, so S7b/S8 do not trust 'closed' after a stage-1 continue."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (FoldWriter::seeded, line ~918)",
+       "issue": "FoldWriter::seeded builds an Active writer from nothing but a bearer. It bypasses WriterGate (switch, ledger, zdr, waived, space, depth), so a caller that forgets to gate it would write folds for a ZDR, waived or delegated run.",
+       "evidence": "The constructor sets state to Active whenever bearer is Some and takes no gate. The source contract allows exactly one WriterGate literal in agent.rs and passes (14/14), so it cannot see a seeded writer built outside the gate. The new test only checks that the seeded writer is active.",
+       "suggested_fix": "Make seeded take a WriterGate (or the Option<OffReason> from decide()) and start Off(reason) unless decide() is None, keeping resumed allowed for S7b, or document the precondition and add a durable_loop_contract guard that every FoldWriter::seeded call site is preceded by a decide()."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (close_continued_pause) and tests/durable_loop_contract.rs",
+       "issue": "A second WriterGate literal now lives in fold.rs, built by hand with depth 0 and resumed false, to satisfy the static guard that allows one literal in agent.rs. The comment 'the loop keeps one place that builds a writer's gate' is no longer true. The function also has 8 parameters and no #[allow(clippy::too_many_arguments)].",
+       "evidence": "cargo clippy -p execution-core --lib reports 'this function has too many arguments (8/7)' at fold.rs:788. save_rpc, the neighbouring function with 9 parameters, carries the allow. The implementer's own deviation note says it avoided editing durable_loop_contract.rs.",
+       "suggested_fix": "Add the allow, fix the comment, and have the lead extend the contract test to cover the second gate literal, or make close_continued_pause take a WriterGate built in agent.rs through the same constructor path."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs and agent.rs run_open_round_through_the_retrieval_gate",
+       "issue": "The no-self-duplicate checks re-implement the gate instead of exercising production code. The golden test hard-codes the format!(\"hybrid|5|{query}\") signature. The agent helper replays a BTreeSet insert beside the real retrieval_signature rather than running the phase-1 pre-pass.",
+       "evidence": "The pre-pass dedupe is inline in run_rounds (attempted_retrievals.insert at agent.rs ~1930), so a change to it would not break the helper. Mitigation: the agent test asserts retrieval_signature(\"knowledge_search\", ..) equals \"hybrid|5|find the contract\", which pins the format, and the snapshot mutation goes red. The requirement is met in substance.",
+       "suggested_fix": "Optional. Extract the pre-pass dedupe step into a small function the test calls, or add an agent test that resumes-through the real pre-pass. Not blocking."
+      }
+     ],
+     "checked": [
+      "Ran cargo test -p mp-contracts: lib 113, loop_fold_golden 11, other suites pass.",
+      "Ran cargo test -p execution-core --lib: 985 passed, 0 failed (300 s, dominated by the pre-existing slow executor::a_hung_child test).",
+      "Ran execution-core integration suites durable_loop_contract (14), loop_fold_zdr_matrix (7), scrub_checkpoint_test (8) and compaction_parity_contract (11): all pass.",
+      "Ran cargo check --workspace --all-targets --keep-going: exit 0, no errors, only pre-existing warnings. cargo clippy on execution-core lib shows 127 warnings, mostly pre-existing, one new too_many_arguments on close_continued_pause.",
+      "Struct-literal and trait-double breakage: grepped every close_rpc caller, Snapshot literal and SaveError use outside fold.rs, and every claim_loop_checkpoint/close_loop_checkpoint implementer (execution-core agent mock, model-gateway grpc and e2e doubles, session-core). The workspace check confirms nothing broke. Only the agent.rs mock was changed. scrub_fold has one production caller (fit) plus tests.",
+      "Read the whole diff of fold.rs, agent.rs, scrub.rs, scrub_checkpoint_test.rs, loop_fold.rs, loop_fold_golden.rs, the three goldens and docker-compose.yml. Confirmed no existing test was deleted: the only replaced or edited ones were a_credential_shaped_field_is_withheld, session_core_refusals_are_classified and loop_fold_saved_bytes_contain_no_seeded_secret. All three are spec-driven, and the last two were extended, not weakened. The delegated test was strengthened.",
+      "Checked the unit stayed within owned files: git status shows only the owned files for this unit (session-core loop_checkpoint.rs untouched), and CRLF is preserved (every touched file has CRLF on every line).",
+      "Checked session-core claim and close semantics (loop_checkpoint.rs, grpc.rs). The claim needs state paused/parked, is by pause_ref, records CHECKPOINT_RESTORED, and sets a lease. Close is by seq with a free-text reason, so no closed-token change was needed.",
+      "Checked classify_status against real session-core statuses and tonic 0.12.3. Size overruns are out_of_range, not ResourceExhausted, so moving ResourceExhausted to transient does not strand oversize folds. ZDR-catalogue trailers still map to NotPersistent before the new arms. Real messages 'run not found' and 'loop checkpoint key unavailable' match.",
+      "Checked that the retrievals snapshot is taken before the pre-pass insert (agent.rs 1684 vs 1930), at all three Snapshot sites, and that the round-end fold keeps the final set. attempted_retrievals has no other mutation site.",
+      "Checked the held_for_good plumbing: the only held_back_text call site was updated, and for_good = held && folds.is_failed(). The fail-closed and one-RPC-per-run behaviour is shown by the agent test over five refusals.",
+      "Checked mutation evidence in scratchpad s6h-mut-*.log: waived, depth, resumed, notfound, fitcheck, forgood, pauseref, closegate and snapshot each go red. There is none for the stage-1 close's zdr/waived/space arguments (finding 1).",
+      "Compose diff: comment only, no value changed; the claim that the switch is flipped on both services matches the gateway block at line ~249.",
+      "Checked every deferred S7b obligation (a)-(d) is recorded in the implementer's ledger text."
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test --no-fail-fast -p mp-contracts (run from apps/Model Plane/rust; --no-fail-fast added so every test binary runs; CARGO_TERM_COLOR=never)",
+      "outcome": "EXIT 0. Binaries: lib 113 ok; grounding_replay 1; loop_fold_golden 11; proto_wire_parity 3; proto_wire_parity_execution 5; run_context_posture 1; zdr_retention_matrix 5; doc-tests 2. No FAILED lines, no panics, no ignored. The previous round record said 140; the +1 is the test the_open_round_folds_carry_the_retrievals_of_the_round_start_only in tests/loop_fold_golden.rs, which is new in the working tree versus HEAD (golden file went 10 to 11 tests). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s6v-1-mp-contracts.log",
+      "passed": "141 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test --no-fail-fast -p execution-core --lib",
+      "outcome": "EXIT 0, finished in 300.14s. The previous round record said 962; the +23 matches the test attributes added in the working tree versus HEAD: runtime_loop/agent.rs 11 and runtime_loop/fold.rs 6 (s6 files), runtime_loop/effect.rs 6 (s7a file). Nearly all of the 300 s is executor::tests::a_hung_child_is_killed_at_the_timeout (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/executor.rs, line 474; executor.rs is not modified in this tree). That test passes its own 10 s elapsed assertion, so the remaining time appears to fall after the test body, probably runtime teardown around an orphaned sleep 300 child on Windows. Not investigated. The previous round recorded the same ~300 s. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s6v-2-execution-core-lib.log",
+      "passed": "985 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test --no-fail-fast -p execution-core --tests",
+      "outcome": "EXIT 0. Lib 985 ok (same 300 s executor test); bin main.rs 0 tests; integration: autonomy_ladder_contract 4; browser_agent_e2e 11 ok and 2 ignored; compaction_parity_contract 11; cross_service_loop_contract 3; durable_loop_contract 14; loop_fold_zdr_matrix 7; runtime_loop_test 9; scrub_checkpoint_test 8; slo 4; subscription_refusal_contract 4; zdr_refusal_inventory 2 (77 integration, same as the previous record). Previous round total was 1039 (962 + 77); now 1062 (985 + 77). The 2 ignored tests are browser_agent_e2e.rs browser_agent_drives_real_quarry_loop and planner_on_terra_returns_valid_action_json, which need a live Quarry and inference-core stack, not a database. I did not run them. No database-backed test is ignored in these targets. No target failed on this Windows host, so the Model Plane memory index note about two Windows-only target failures was not reproduced in this run. I wrote or changed no tests. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s6v-3-execution-core-tests.log",
+      "passed": "1062 passed, 0 failed, 2 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "EXIT 0, Finished dev profile in 18.97 s, zero errors. Five warnings (execution-core lib 3, session-core bin 2), all dead-code or unreachable-else, under C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/: execution-core/src/capability_policy.rs:181 (unreachable else; TokenSource unchanged), execution-core/src/approval_delivery_worker.rs:744 (verification_result_for), execution-core/src/runtime_loop/resume.rs:407 (decision_closer), session-core/src/auth.rs:73 (ZdrWaiver::provider), session-core/src/terminalization.rs:691 (start_managed_run_inner). None of these files is modified by this round. The three unused functions have only #[cfg(test)] callers, and git grep shows the same caller count at HEAD (grpc.rs callers only moved line numbers), so none is introduced by this round. Whole-run scope: no files edited, no docker, no git write operations (read-only status, diff, grep and show only). No lock-wait lines, no LNK1104 and no mid-edit failures occurred, so no retries were needed. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s6v-4-workspace-check.log"
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s7a-hardening",
+   "impl": {
+    "summary": "All six S7a hardening items are done and tested, but the DB-backed tests are written and NOT run, so the SQL changes (revocation, retention predicate, ordering, org join) are unproven until you run them. Test-first: the effect.rs tests failed to compile before the change, the session-core ones failed on the missing 4th argument, then both went green.\n\nItem 1 (revocation, done): list_tool_actions_inner now authorises through run_service_grpc::authorize_run_owner, the same helper GetRun uses, which refuses a run whose owner has a space_membership_revocations row. I only made that helper pub(crate). grpc.rs's own authorize_run_owner is untouched, so reserve, finalize and the checkpoint RPCs behave as before.\n\nItem 2 (switch and persistent-only, done):\n- list_tool_actions_inner takes a `store_enabled: bool`, and the trait method passes loop_checkpoint::enabled(). Passing the switch in avoids racing the existing tests that set the env var.\n- Order is session:read, ZDR-human refusal, switch, request shape, owner check (with revocation), persistent check, read.\n- With the switch off the answer is exactly loop_checkpoint::disabled() (\"loop_checkpoint_disabled\") and no table is touched, even for a malformed request.\n- tool_ledger::require_persistent_run refuses a run that is not persistent with the claim path's Refusal::DURABLE_MUTATION_FORBIDDEN (FailedPrecondition). It runs after the owner check, so a caller who cannot read the run learns nothing about its retention.\n- list_actions also gained `AND r.retention_class = 'persistent'` as a second line of defence.\n\nItem 3 (absence is not proof, done):\n- The S7b rule is written into the sessions.proto comments (rpc, action_ids, response; comments only, CRLF kept, no field, message or RPC change, so no regeneration), into the tool_ledger::list_actions doc and into the effect.rs list_actions doc.\n- It states that an absent id is UNKNOWN, and only a not_run row (or a completed row with its output) licenses re-dispatch.\n- Unit test an_absent_id_stays_absent_and_is_never_reported_as_a_row pins it in effect.rs.\n\nItem 4 (DB tests that can fail, done, not run):\n- The `list` helper no longer re-sorts.\n- New rows_come_back_in_reservation_order_with_ties_by_action_id uses reserved_at values that run opposite to both insertion order and id order, plus a tie broken by action id.\n- New every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged covers completed, failed, not_run, unknown_outcome by executor, one closed_by sweep via sweep_once, and the read class on the wire.\n- New the_query_itself_is_scoped_to_the_org_and_the_run calls list_actions directly with another org and another run and expects empty.\n- Also added a_member_removed_from_the_runs_space_cannot_read_its_ledger (owner and service refused, rejoin restores) and a_run_that_does_not_persist_keeps_no_readable_ledger (zdr and zdr_waived).\n\nItem 5 (client testable, done): effect::list_actions is now a thin wrapper over list_actions_with(bearer, run_id, ids, call), where `call` is a closure taking the finished request. The public signature is unchanged. I also made it drop repeated ids before chunking, so two chunks can never answer one id (stricter than before, not yet called by anything). New tests cover:\n- the Authorization header and run id are forwarded;\n- 130 ids go out as 64, 64 and 2, with every chunk asked, in order;\n- the per-chunk asked-only check holds across chunks;\n- an unknown status, class or digest is an Err;\n- a duplicate answer is an Err;\n- an empty list makes no call;\n- no bearer makes no call;\n- the server's refusal text is returned;\n- a refused chunk stops the read.\n\nItem 6 (trait wiring, done, one part by source pin): new module list_tool_actions_wiring_tests in grpc.rs calls the trait method itself. It checks Unauthenticated without an identity, the metric counter and histogram keys via a local recorder, the scope refusal and the ZDR-human refusal. The switch refusal is covered at list_tool_actions_inner, and the trait method's use of loop_checkpoint::enabled() is pinned by a source-text test. I did not call the trait method with the switch off because that needs the process env var, which races the loop_checkpoint test that sets it.\n\nCounts (before then after):\n- session-core --bins: 484 passed / 119 ignored, then 488 passed / 124 ignored (+4 unit tests, +5 ignored DB tests).\n- execution-core --lib effect: 28, then 39. The baseline already included the other units' agent.rs tests.\n- mp-contracts: all green (113 lib, 1, 11, 3, 5, 1, 5, 2 doc).\n- model-gateway --lib: 1817 passed / 4 ignored, then 1818 passed / 4 ignored (unchanged by me).\n- cargo check --workspace --all-targets --keep-going: 0 errors, and no warning in any file I touched (the warnings are in auth.rs, terminalization.rs, capability_policy.rs, fold.rs:794, approval_delivery_worker.rs and resume.rs).\n\nMutation checks, all restored byte for byte (cmp):\n- effect.rs: chunk size 64 to 1000, repeat ids not dropped, run id blanked, the asked-only check removed, an invented NotRun row for absent ids. Each turned a specific new test red.\n- grpc.rs: switch check removed, switch check moved after validation, trait passing `true` instead of the accessor. Each turned a test red.\n- DB-only properties (the retention predicate, the revocation check, ORDER BY) could not be mutation-checked because I cannot run those tests.",
+    "files_changed": [
+     "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+     "apps/Model Plane/rust/services/session-core/src/tool_ledger.rs",
+     "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs"
+    ],
+    "tests_added": [
+     "session-core tool_ledger::tests::with_the_store_off_the_read_answers_the_closed_disabled_refusal_and_touches_no_table",
+     "session-core grpc::list_tool_actions_wiring_tests::the_method_needs_a_verified_identity_and_counts_the_refusal",
+     "session-core grpc::list_tool_actions_wiring_tests::the_method_applies_the_callers_own_refusals_before_any_lookup",
+     "session-core grpc::list_tool_actions_wiring_tests::the_method_reads_the_store_switch_through_the_accessor_the_checkpoint_rpcs_use",
+     "execution-core runtime_loop::effect::tests::the_bearer_and_the_run_are_forwarded_and_ids_go_in_chunks_of_sixty_four",
+     "execution-core runtime_loop::effect::tests::an_absent_id_stays_absent_and_is_never_reported_as_a_row",
+     "execution-core runtime_loop::effect::tests::a_row_for_an_id_asked_in_another_chunk_is_not_the_answer_to_this_chunk",
+     "execution-core runtime_loop::effect::tests::an_unknown_status_or_class_and_a_duplicate_answer_are_errors",
+     "execution-core runtime_loop::effect::tests::an_id_named_twice_is_asked_once_so_two_chunks_cannot_answer_it_twice",
+     "execution-core runtime_loop::effect::tests::a_refused_call_is_the_servers_reason_and_an_empty_list_asks_nothing"
+    ],
+    "tests_written_not_run": [
+     "session-core tool_ledger::tests::db::rows_come_back_in_reservation_order_with_ties_by_action_id (#[ignore], needs DATABASE_URL)",
+     "session-core tool_ledger::tests::db::every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged (#[ignore])",
+     "session-core tool_ledger::tests::db::the_query_itself_is_scoped_to_the_org_and_the_run (#[ignore])",
+     "session-core tool_ledger::tests::db::a_member_removed_from_the_runs_space_cannot_read_its_ledger (#[ignore])",
+     "session-core tool_ledger::tests::db::a_run_that_does_not_persist_keeps_no_readable_ledger (#[ignore])",
+     "CHANGED, not run: tool_ledger::tests::db::list_tool_actions_returns_status_and_digest_only_and_hides_zdr_rows (now sorts locally, expects the same rows) and list_tool_actions_is_scoped_to_the_callers_org_and_run (the helper no longer sorts and now passes the switch as true). Run the whole DB module with filter list_tool_actions plus the 5 new names, and expect 3 existing list tests + 5 new = 8 passes."
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -p session-core --bins (baseline)",
+      "outcome": "484 passed, 119 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --lib effect (baseline)",
+      "outcome": "28 passed"
+     },
+     {
+      "command": "cargo test -p execution-core --lib effect (after writing the tests, before implementing)",
+      "outcome": "compile error E0425, list_actions_with not found: the expected failure"
+     },
+     {
+      "command": "cargo test -p session-core --bins tool_ledger (after the tests, before implementing)",
+      "outcome": "compile error E0061, list_tool_actions_inner takes 3 arguments but 4 supplied: the expected failure"
+     },
+     {
+      "command": "mutation runs of effect.rs (chunk, dedupe, runid, asked, invent) and grpc.rs (switch, trait, order), each restored and checked with cmp",
+      "outcome": "every mutation turned the expected new test red (the switch mutation was first run with a filter that missed the test, then rerun with a correct filter and went red)"
+     },
+     {
+      "command": "cargo test -p session-core --bins",
+      "outcome": "488 passed, 0 failed, 124 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --lib effect",
+      "outcome": "39 passed"
+     },
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "984 passed, 1 FAILED: runtime_loop::agent::tests::loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect (agent.rs, s6-hardening's file and test, not touched by me; one earlier run hit three compile errors in fold.rs/agent.rs while s6 was mid-edit)"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "all green, 0 failed"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "outcome": "1818 passed, 0 failed, 4 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "0 errors, no warnings in files I touched"
+     }
+    ],
+    "deviations": [
+     "Edited run_service_grpc.rs, which no unit owns: the single change is `async fn authorize_run_owner` to `pub(crate) async fn authorize_run_owner`, so grpc.rs can reuse the Space-revocation-aware check. Its behaviour is unchanged.",
+     "list_tool_actions_inner gained a 4th parameter, `store_enabled: bool`, instead of reading the env var inside, to avoid racing the tests that set the variable. The trait method passes loop_checkpoint::enabled(). Anything that calls the inner function elsewhere must pass the switch.",
+     "The trait-level test does not exercise the switch refusal through the trait method (env var race). The refusal is tested at the inner function and the trait method's use of the accessor is pinned by an include_str source-text test, which is brittle to a rename of the accessor or method.",
+     "The persistent-run refusal runs after the owner check as a separate `SELECT retention_class` query (one extra read), and list_actions also has the retention predicate. Because the handler refuses such runs, list_actions' predicate only matters to a direct caller and to the DB test.",
+     "list_actions_with drops repeated action ids before chunking. This is stricter than what S7a first built and no code calls it yet.",
+     "A ZDR service credential with session:read still passes refuse_zdr_continuation (services are exempt, as with the claim path). It is now stopped by the switch and, for any non-persistent run, by the persistent check, and zdr rows are still filtered. This matches the earlier round's recorded deviation.",
+     "The Go and other generated bindings were not regenerated: comments in sessions.proto changed, so the generated files' doc comments are stale. Regenerating them is a lead step with no functional effect. buf was not run.",
+     "Compile contention: one run hit LNK1104 (another unit's test exe) and a retry loop absorbed it. One compile attempt failed inside execution-core fold.rs/agent.rs, files I did not touch, and a later attempt compiled."
+    ],
+    "blockers": [
+     "The 5 new and 2 changed DB tests have not been run. Rerun them through the disposable-Postgres harness (session-core-db-tests.sh): filter list_tool_actions plus rows_come_back_in_reservation_order_with_ties_by_action_id, every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged, the_query_itself_is_scoped_to_the_org_and_the_run, a_member_removed_from_the_runs_space_cannot_read_its_ledger and a_run_that_does_not_persist_keeps_no_readable_ledger. I checked the SQL and column names by reading the migrations (0013, 0023, 0024, 0032, 0044, 0048), but no query was executed.",
+     "The execution-core lib test loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect failed in the full-lib run. It is in agent.rs, owned by s6-hardening, so my verify cannot be all green until that unit settles. The effect:: tests (39) pass."
+    ],
+    "deferred_files": [
+     {
+      "path": "ledger-entry-s7a-hardening.md",
+      "content": "### WS03 S7a hardening: ListToolActions (2026-10-18)\n\nStatus: implemented, DB tests written but awaiting the disposable-Postgres run.\n\n- Authorisation: ListToolActions reads through run_service_grpc::authorize_run_owner, the same helper as GetRun, so a user removed from a run's Space (space_membership_revocations) cannot read that run's ledger. grpc.rs's own authorize_run_owner (no revocation check) was deliberately left alone, so no other RPC changes behaviour.\n- Always-on surface closed: the RPC answers the closed `loop_checkpoint_disabled` refusal while SESSION_CORE_LOOP_CHECKPOINT_ENABLED is off, decided after the scope and ZDR-human refusals and before any validation or table access. A run whose retention_class is not `persistent` (zdr or zdr_waived) gets the claim path's durable-mutation refusal (FailedPrecondition), because it never keeps a fold. The query also requires retention_class = 'persistent'.\n- BINDING S7b RULE: absence is not proof. An action id missing from a ListToolActions answer is UNKNOWN. It may never have been reserved, may be reserved by a concurrent writer that has not committed (one autocommit read, with nothing that fences a live executor), or may be a hidden (zdr) row. An effectful call absent from the read is closed as unknown_outcome and never re-dispatched as `not run, safe to dispatch`; only a row with status not_run (or a completed row with its output) licenses a re-dispatch decision. Written into sessions.proto (comments only), tool_ledger::list_actions and effect::list_actions.\n- Client: execution-core effect::list_actions is a thin wrapper over list_actions_with(bearer, run_id, ids, call), which is tested with a closure standing in for the RPC: bearer and run id forwarded, chunks of 64 with every chunk asked, the asked-only check per chunk, unknown status/class/digest is an error, a duplicate answer is an error, an empty list makes no call. Repeated ids are dropped before chunking.\n- Not changed: no proto field, message or RPC; the Go bindings need no functional regeneration (only the doc comments of generated files are stale).\n- Residual: args_digest is an unkeyed blake3 of canonical arguments, so a reader with session:read in the org could confirm a guess at low-entropy arguments. Accepted as the spec's design; the read is now off by default and refused for non-persistent runs."
+     }
+    ]
+   },
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/tool_ledger.rs",
+       "issue": "The SQL-level safeguards of this unit are unproven: the Space-revocation refusal, the retention_class predicate and the persistent-run refusal, the ORDER BY reserved_at/action_id, the org join, and the closed_by/status mapping. Their only tests are #[ignore] DB tests that nobody has run. This rules out nothing, but I cannot establish that these requirements are met.",
+       "evidence": "13 DB tests are ignored (cargo test -p session-core --bins -- tool_ledger shows 'ignored, requires DATABASE_URL'). I read migrations 0023/0024/0032/0044/0048 and the seed helpers: the column names, the CHECK constraints (space context, waiver columns) and the revocation PK (space_ref, subject_id) match what the new tests insert, and the reasoning for expected row order (z,m,a,t1,t2 differs from both insertion order and id order) is sound. But no query was executed.",
+       "suggested_fix": "Do not commit as 'verified' until the lead reruns the 5 new and 2 changed tests plus the existing list_tool_actions tests through the disposable-Postgres harness (expect 3 existing list tests + 5 new pass). Only then mark the item 1/2/4 requirements met."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+       "issue": "The switch refusal through the trait method is guarded only by an include_str source-text pin, which is a guard that can be defeated without changing behaviour of the check.",
+       "evidence": "the_method_reads_the_store_switch_through_the_accessor_the_checkpoint_rpcs_use only asserts the trait method body contains the text 'loop_checkpoint::enabled()'. A body such as `let _ = loop_checkpoint::enabled(); list_tool_actions_inner(..., true)` passes the pin while making the RPC always-on. The mutation that passes `true` literally does turn it red, but this variant would not.",
+       "suggested_fix": "Extract a tiny pure fn (e.g. `fn store_switch() -> bool`) or give SessionService a store_enabled override used by tests, so the trait method's switch-off refusal can be asserted by calling the method, or at minimum strengthen the pin to match the exact argument expression inside the list_tool_actions_inner( call."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/tool_ledger.rs",
+       "issue": "The new every_status_and_closer test can flake on a long-lived scratch DB because sweep_once is global, ordered by reserved_at and capped at BATCH=100.",
+       "evidence": "sweep_once(&pool, 0.0) sweeps all runs; BATCH=100; a_young_reservation_is_left_alone_even_when_its_run_has_ended leaves a reserved row on a failed run permanently, and it is always older than the new test's row. After about 100 such leftovers the test's 'tl-a-5-swept' row is not reached and closed_by='sweep' fails. The assert `>= 1` would not catch it. Not an issue with a fresh disposable DB.",
+       "suggested_fix": "Accept for the disposable harness, or loop sweep_once until it returns 0 / until this run's row is closed, or flip the swept row's closure with a run-scoped query."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+       "issue": "The shared authorize_run_owner keeps GetRun's rules, so a system-owned run is org-readable by any session:read caller, including Space-scoped scheduled runs, and its revocation join (rev.subject_id = r.user_id) never matches a system principal. ListToolActions now exposes the same ledger digests to such callers.",
+       "evidence": "auth.rs authorize_owner_row: is_system_run_owner(user_id) + OwnerIntent::Read returns Ok for any caller in the org. This is identical to GetRun, so it is not a regression introduced here, and the data is status/class/unkeyed digest only.",
+       "suggested_fix": "No change needed for this unit. Note for the S7b/Space follow-up: if system-owned Space runs should be reader-restricted like threads (authorize_thread_owner_row), apply it to both GetRun and this RPC together."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+       "issue": "The fold-bearing RPCs (claim/save/close in loop_checkpoint.rs run_owner_tx) still have no Space-revocation check, so a removed member's run fold is claimable while its ledger is no longer readable. Out of this unit's scope but the asymmetry is now visible.",
+       "evidence": "run_owner_tx selects org_id,user_id,retention_class,status with no space_membership_revocations join; only list_tool_actions_inner now routes through run_service_grpc::authorize_run_owner.",
+       "suggested_fix": "Record as a follow-up for the S7b/S8 unit; do not widen this unit."
+      }
+     ],
+     "checked": [
+      "git diff of sessions.proto: comments only, no field, message, RPC or number change (grep for rpc/message/= N changes returned 0)",
+      "grpc.rs list_tool_actions_inner order: session:read, ZDR-human refusal, switch (loop_checkpoint::disabled(), before validation and any table), request shape, run_service_grpc::authorize_run_owner (with revocation), require_persistent_run, list_actions; checkpoint RPCs use the same enabled()/disabled() pair",
+      "run_service_grpc::authorize_run_owner visibility change only (pub(crate)); grpc.rs's own authorize_run_owner untouched, so reserve/finalize/checkpoint RPCs behave as before",
+      "require_persistent_run runs after the owner check (no retention disclosure to an unauthorised caller); a waived run (zdr_waived) is refused with DURABLE_MUTATION_FORBIDDEN, same as loop_checkpoint::run_owner_tx; query also has retention_class='persistent' AND NOT i.zdr; retention is immutable by trigger (0044), so no TOCTOU",
+      "org scoping: query joins runs on org_id and run_id; authorize_owner_row checks caller org first; row output is status/class/digest/closed_by only, no arguments, output or receipt; no new logging in the handler",
+      "switch-off behaviour: the RPC is new in Build 2 and now answers only the closed refusal without touching a table; no existing RPC's behaviour changed",
+      "effect.rs list_actions_with: bearer/run id forwarded, dedupe before chunking prevents the same id being answered by two chunks, per-chunk asked-only check via rows_from_states, duplicate answer and unknown status/class/digest are Err, empty list and missing bearer make no call, a refused chunk stops the read with no partial map; absent ids are never invented",
+      "ran cargo test -p session-core --bins -- list_tool_actions tool_ledger wiring: 8 passed, 13 ignored (DB); cargo test -p execution-core --lib runtime_loop::effect::tests: 20 passed. The broader 'effect' filter showed 2 failures in agent.rs loop_fold_* tests, which belong to s6-hardening's file and are mid-edit, not this unit",
+      "DB test SQL against migrations 0023/0024/0032/0044/0048: column names, CHECK constraints (space context complete, waiver columns, status/closed_by enums), revocation PK and finalize/sweep semantics (closed_by executor/sweep) are consistent with what the tests insert and expect; tests not executed",
+      "redteam-checklist INV-06 (waived never keeps/continues: ledger read now refused for non-persistent), INV-10 (ledger read RPC exists), INV-17 (digest-only, zdr rows hidden)"
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+       "issue": "The revocation rule now covers ListToolActions only. The RPCs S7b pairs it with (SaveLoopCheckpoint, ClaimLoopCheckpoint, CloseLoopCheckpoint) still authorise through grpc.rs's own authorize_run_owner, which has no revocation check. Take a run whose owner was removed from its Space: the executor's service credential can claim the parked fold (which takes the 120 s lease) and is then refused the ledger read with PermissionDenied 'Space membership required for this run'. The proto comment says the read follows 'the same rule as GetRun', but the checkpoint lane does not. Neither the ledger entry nor the S7b rule says what a resume does when the claim succeeds and the read is refused.",
+       "evidence": "grpc.rs list_tool_actions_inner now calls crate::run_service_grpc::authorize_run_owner (revocation-aware). grpc.rs save_loop_checkpoint and claim_loop_checkpoint (around lines 5218-5278) still call the local `authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate)` (grpc.rs:566, which reads only `SELECT org_id, user_id FROM runs`). The deferred ledger text says the local helper 'was deliberately left alone, so no other RPC changes behaviour', and that is all it says about this.",
+       "suggested_fix": "Add to the deferred ledger entry, and to the S7b rule in sessions.proto and effect.rs, that a ListToolActions refusal after a successful claim (PermissionDenied or any Err) means every effectful dangling call stays UNKNOWN: hold it or close it as unknown_outcome, never dispatch it. File a follow-up to apply the same revocation check to the three loop-checkpoint RPCs (owned outside this unit), so the read and the claim stop disagreeing."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/tool_ledger.rs",
+       "issue": "Every property items 1, 2 and 4 add at the SQL level (the revocation refusal, the retention predicate, ORDER BY reserved_at, action_id, the org and run predicates, the status and closed_by mapping) is proven only by #[ignore] DB tests that have never run. No test that runs would go red if list_tool_actions_inner were switched back to grpc.rs's authorize_run_owner, if require_persistent_run were removed, or if `AND r.retention_class = 'persistent'` were dropped. The unit test 'a valid request reaches the run-owner lookup' gets Internal from either helper. So the requirements cannot be called met until the harness runs these tests.",
+       "evidence": "cargo test -p session-core --bins -- tool_ledger list_tool_actions: 8 passed, 13 ignored, including all 5 new DB tests and the 2 changed ones. The implementer's blockers say the same. I read the SQL against migrations 0013, 0023, 0024, 0032, 0044 and 0048 and found no column, constraint or trigger problem: the waiver CHECK is satisfied by seed_run_retained, the Space-context and audience CHECKs are satisfied by put_run_in_space, ON CONFLICT (space_ref, subject_id) matches the PK, and reserved_at has no immutability trigger.",
+       "suggested_fix": "Lead: run the DB module through the disposable-Postgres harness with --test-threads=1 (filter tool_ledger). Then mutation-check the three DB-only guards (helper swap, require_persistent_run removed, retention predicate removed) and confirm that a_member_removed_from_the_runs_space_cannot_read_its_ledger and a_run_that_does_not_persist_keeps_no_readable_ledger go red."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs",
+       "issue": "In an_unknown_status_or_class_and_a_duplicate_answer_are_errors, the unknown status, unknown class and malformed digest cases only check `result.is_err()`. Any error passes, for example one raised before the row is parsed, so the test does not show that each value is refused for its own reason.",
+       "evidence": "`let (result, _) = list_through(Some(\"tok-1\"), &ids, |_| Ok(vec![bad.clone()])).await; assert!(result.is_err(), \"{why}\");` The duplicate case does check its exact message.",
+       "suggested_fix": "Assert the exact message for each case: 'the ledger returned an unknown status', 'the ledger returned an unknown effect class', 'the ledger returned a malformed args digest'."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+       "issue": "The trait-level switch wiring is pinned by a source-text test. It checks that `loop_checkpoint::enabled()` appears somewhere between `async fn list_tool_actions(` and `async fn save_checkpoint(`. It passes if the accessor is called but its result is ignored (for example `let _ = loop_checkpoint::enabled(); list_tool_actions_inner(.., true)`), and it breaks on a reorder or rename. It asserts the implementation text, not the requirement that the RPC refuses while the switch is off.",
+       "evidence": "the_method_reads_the_store_switch_through_the_accessor_the_checkpoint_rpcs_use uses include_str!(\"grpc.rs\") plus `body[..end].contains(concat!(\"loop_checkpoint::\", \"enabled()\"))`.",
+       "suggested_fix": "Acceptable for now. A better test would make the switch injectable on SessionService, or serialise the env-var tests with a shared mutex, so the trait method can be called with the switch off and checked for exactly loop_checkpoint_disabled."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+       "issue": "The reused helper checks revocation before the org. A caller in another org who asks ListToolActions about a revoked owner's run now gets PermissionDenied 'Space membership required for this run' instead of the authorize_org refusal. That confirms the run exists, is in a Space and has a revoked owner. GetRun already behaves this way and run ids are ULIDs, so the exposure is small, but the read surface now inherits it.",
+       "evidence": "authorize_run_owner (run_service_grpc.rs:46) returns the revocation PermissionDenied before calling authorize_owner_row, whose first step is caller.authorize_org(org_id).",
+       "suggested_fix": "Record it as inherited behaviour. If it is fixed later, check the org first (in the SELECT, or by comparing org_id before the revocation flag) in the shared helper, so both RPCs gain the fix."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/tool_ledger.rs",
+       "issue": "every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged relies on one sweep_once pass, which is capped by LIMIT BATCH and ordered by reserved_at across the whole scratch database. If older rows on terminal runs fill the batch, the swept row is not closed and the test fails for a reason unrelated to the mapping. The disposable database makes this unlikely. The comment in the ordering test also gives the reservation order as (a, m, z, t1, t2), but the loop reserves a, m, z, t2, t1.",
+       "evidence": "`assert!(sweep_once(&pool, 0.0).await.expect(\"sweep\") >= 1);` and the sweep SQL `ORDER BY i.reserved_at LIMIT $2`. The ordering loop is `for id in [\"tl-a-a\", \"tl-a-m\", \"tl-a-z\", \"tl-a-t2\", \"tl-a-t1\"]`.",
+       "suggested_fix": "Loop sweep_once until it returns 0 before asserting, and correct the comment."
+      }
+     ],
+     "checked": [
+      "git diff of the 5 unit files: the proto change is comments only; the CRLF counts match HEAD in every file (no mixed line endings)",
+      "list_tool_actions_inner refusal order (scope, ZDR human, switch, validate, owner, persistent) matches SaveLoopCheckpoint and ClaimLoopCheckpoint, and the switch-off answer is exactly loop_checkpoint::disabled()",
+      "run_service_grpc::authorize_run_owner and grpc.rs authorize_run_owner differ only by the revocation flag; both end in authorize_owner_row, so system-owned and service semantics are unchanged",
+      "require_persistent_run gives the same Refusal::DURABLE_MUTATION_FORBIDDEN/FailedPrecondition as loop_checkpoint::run_owner_tx for a run that is not persistent",
+      "Every caller of list_tool_actions_inner updated to the 4-arg form; no other crate calls it; no trait or struct-literal breakage (the SessionService literal in the wiring test compiles)",
+      "effect.rs list_actions keeps its public signature; existing tests are kept; the per-chunk asked-only check (rows_from_states) still runs per chunk; dedupe happens before chunking",
+      "The DB test SQL checked against migrations 0013, 0023, 0024, 0032, 0044 and 0048: waiver CHECK, Space-context and audience CHECKs, the revocations PK, the retention-receipt trigger (rows are inserted under their class, never updated), the 0048 status CHECK, the sweep predicate and closed_by='sweep'",
+      "The existing DB tests are not weakened: the content test now sorts locally, and the scoped test's assertions are unchanged",
+      "Ran cargo test -p session-core --bins: 488 passed, 0 failed, 124 ignored",
+      "Ran cargo test -p session-core --bins -- tool_ledger list_tool_actions: 8 passed, 13 ignored (DB)",
+      "Ran cargo test -p execution-core --lib effect: 39 passed",
+      "Not run: any DB-backed test (no docker, per the rules)"
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p session-core --bins (cwd apps/Model Plane/rust)",
+      "passed": "488 passed, 0 failed, 124 ignored",
+      "outcome": "Exit 0. The test binary was already current (Finished in 1.81s, no recompile); the run took 11.96s. The 124 ignored tests are DB-backed and were not run by me. Eight of them exercise the ListToolActions read path and must be run through the disposable-Postgres harness: tool_ledger::tests::db::list_tool_actions_returns_status_and_digest_only_and_hides_zdr_rows, a_run_with_no_ledger_rows_lists_an_empty_answer_not_an_error, list_tool_actions_is_scoped_to_the_callers_org_and_run, rows_come_back_in_reservation_order_with_ties_by_action_id, every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged, the_query_itself_is_scoped_to_the_org_and_the_run, a_member_removed_from_the_runs_space_cannot_read_its_ledger, a_run_that_does_not_persist_keeps_no_readable_ledger. The non-DB ListToolActions tests ran and passed, including the 3 grpc::list_tool_actions_wiring_tests and tool_ledger::tests::a_list_request_takes_at_most_sixty_four_well_formed_ids. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s7a-verify-1-session-core.log"
+     },
+     {
+      "command": "cargo test -p execution-core --lib effect",
+      "passed": "39 passed, 0 failed, 0 ignored (946 filtered out)",
+      "outcome": "Exit 0. Finished in 1.58s (no recompile); the run took 5.00s. The filter matches test names, so the 39 include the effect.rs ListToolActions reader tests (for example the_bearer_and_the_run_are_forwarded_and_ids_go_in_chunks_of_sixty_four, an_id_named_twice_is_asked_once_so_two_chunks_cannot_answer_it_twice, a_row_for_an_id_asked_in_another_chunk_is_not_the_answer_to_this_chunk, an_absent_id_stays_absent_and_is_never_reported_as_a_row, an_unknown_status_or_class_and_a_duplicate_answer_are_errors) plus some agent, closers, fold and retry tests whose names contain 'effect'. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s7a-verify-2-execution-core-effect.log"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "passed": "141 passed, 0 failed, 0 ignored",
+      "outcome": "Exit 0; build 21.35s. Per target: lib 113; tests/grounding_replay 1; tests/loop_fold_golden 11; tests/proto_wire_parity 3; tests/proto_wire_parity_execution 5; tests/run_context_posture 1; tests/zdr_retention_matrix 5; doc-tests mp_contracts 2. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s7a-verify-3-mp-contracts.log"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "passed": "1818 passed, 0 failed, 4 ignored",
+      "outcome": "Exit 0; run 21.91s. The 4 ignored tests are unrelated to ListToolActions: three Redis-gated tests in src/stream_buffer.rs and one env-gated helper in src/source_validation.rs. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s7a-verify-4-model-gateway-lib.log"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "passed": "Exit 0, no errors; 5 warnings (session-core 2, execution-core lib 3)",
+      "outcome": "Finished dev profile in 1m 04s, so every target type-checks, including the ListToolActions stubs in the execution-core MockSession and in model-gateway src/grpc.rs and tests/e2e_invoke_chain_test.rs. The five warnings are all pre-existing: session-core src/auth.rs:73 ZdrWaiver::provider never used; session-core src/terminalization.rs:691 start_managed_run_inner never used; execution-core src/runtime_loop/capability_policy.rs:181 unreachable else clause (file is services/execution-core/src/capability_policy.rs); execution-core src/approval_delivery_worker.rs:744 verification_result_for never used; execution-core src/runtime_loop/resume.rs:407 decision_closer never used. None sits in an s7a-owned file, none of those five files differs from HEAD, and the usages of these names are the same at HEAD and in the working tree. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s7a-verify-5-check-workspace.log"
+     },
+     {
+      "command": "Read-only checks: git status, show, diff and grep; python3 read of .plan-work/ws03-specs/reconcile.json and s7-in-place-resume.json; reads of the s7a code in grpc.rs, tool_ledger.rs and effect.rs",
+      "passed": "n/a",
+      "outcome": "No file edited, no commit, stash, reset, checkout or clean, no docker, no rustfmt. I wrote or changed no tests in this round, so the only unrun tests are the ignored DB-backed ones listed above. The tree is changing under the other units (agent.rs, fold.rs, scrub.rs, sse.rs and the s7a files all differ from HEAD), so each count describes the sources as of that build. No build failed, so no retries were needed and no LNK1104 link failure occurred. Code read: list_tool_actions_inner runs authorize_operation session:read, refuse_zdr_continuation, the store switch, validate_list_request, run_service_grpc::authorize_run_owner(Read) and require_persistent_run before tool_ledger::list_actions, whose SQL joins runs for org and persistent retention and filters NOT zdr; this matches the spec. Line endings: the diffstat for the four s7a files is identical with and without --ignore-cr-at-eol, so the EOL mix does not inflate the commit diff (tool_ledger.rs and effect.rs are LF in the working copy, grpc.rs and sessions.proto CRLF). A file named s7a-verify-5-workspace-check.log in the scratchpad (dated 11:56) predates this run and was not used."
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s9-hunks",
+   "impl": {
+    "summary": "Appended the deferred S9 test hunk to mod continue_run_tests in model-gateway src/sse.rs as sse::continue_run_tests::every_enforcement_row_of_the_matrix_is_continued_only_for_a_persistent_bearer. The insertion is 74 lines (one blank line plus the 73-line test), placed before the module's closing brace, rustfmt-clean, LF. It compiled against the tree with no name drift. Results: model-gateway --lib went from 1817 passed before the edit to 1818 passed, 0 failed, 4 ignored after (the +1 is the new test); continue_run_tests has 14 passing (13 existing plus the new one); the integration binary tests/zdr_posture_matrix (the one other test that reads sse.rs as text) has 6 passing. Mutation checks, each restored byte for byte from a pre-mutation copy and verified with cmp and sha256 (a114790a816d19627849f0e0d65836a6fd1f11b40abcbb2b6899207dd6897c34): (1) continue_turn_is_persistent accepts a waived token: the new test fails at its first assertion on e_waiver_on_bound_route (left true, right false). (2) continue_persistent_gate ignores persistence: the new test fails on the early-gate assertion for e_zdr_default_route. (3) continue_preflight ignores persistence: the new test fails on the preflight assertion for e_zdr_default_route. (4) continue_run drops its continue_persistent_gate call: the new test stays GREEN because it never calls continue_run; three existing source-contract tests go red instead. Steps 1 to 7 of UNIT s9-hunks are done; nothing deferred or disputed. No docker, no git commit, stash, reset, checkout or clean; nothing committed.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+    ],
+    "tests_added": [
+     "sse::continue_run_tests::every_enforcement_row_of_the_matrix_is_continued_only_for_a_persistent_bearer (model-gateway lib; not DB-backed; passes). Drives the real private continue_turn_is_persistent, continue_persistent_gate and continue_preflight over all 33 bearers of the 27 enforcement rows in tests/fixtures/zdr-posture-matrix.json: 7 persistent bearers served, 15 waived non-ZDR bearers refused, 6 single-bearer rows cross-checked against the matrix decision."
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -p model-gateway --lib (baseline, before the edit)",
+      "outcome": "1817 passed, 0 failed, 4 ignored; exit 0; no compiler warnings"
+     },
+     {
+      "command": "python3 reads of zdr-posture-matrix.json, reconcile.json and the deferred .txt hunk; rustfmt run only on scratch copies in the scratchpad (never on sse.rs)",
+      "outcome": "reconcile.json binding items read (amendments[6], shared_interfaces[8], conflicts_resolved[9]); hunk reformatted in scratch to rustfmt-canonical form; rustfmt --check of the wrapped scratch copy is clean"
+     },
+     {
+      "command": "Edit: appended the formatted hunk before the final brace of mod continue_run_tests (anchored on the last three lines of the module)",
+      "outcome": "applied; git diff -U0 shows one hunk @@ -14044,0 +14045,74 @@; sse.rs has 0 CRLF; the inserted bytes equal the scratch hunk byte for byte"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib continue_run_tests",
+      "outcome": "14 passed (13 existing and the new test), 0 failed, no warnings"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib (after the edit)",
+      "outcome": "1818 passed, 0 failed, 4 ignored; exit 0; no warnings"
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_posture_matrix (after the edit; no pre-edit run was taken)",
+      "outcome": "6 passed, 0 failed"
+     },
+     {
+      "command": "rustfmt --edition 2021 --check on the worktree sse.rs and on a git-show HEAD copy in scratch (both read-only)",
+      "outcome": "114 diff hunks in each; none at or after line 14045, so the new lines are rustfmt-clean; the two pre-existing long asserts at sse.rs:14038 and :14043 are in the previous tests and were not touched"
+     },
+     {
+      "command": "Mutation 1: temporary early return true for a waived token in continue_turn_is_persistent; cargo test -p model-gateway --lib continue_run_tests",
+      "outcome": "the new test FAILED on e_waiver_on_bound_route (left true, right false); also FAILED a_non_persistent_turn_is_refused_at_the_handler_boundary and only_a_persistent_credential_is_a_persistent_continue_turn; restored from the copy, cmp OK"
+     },
+     {
+      "command": "Mutation 2: temporary continue_turn_gate(true, true) in continue_persistent_gate; continue_run_tests",
+      "outcome": "the new test FAILED on the early-gate assertion for e_zdr_default_route; a_non_persistent_turn_is_refused_at_the_handler_boundary also FAILED; restored, cmp OK"
+     },
+     {
+      "command": "Mutation 3: temporary continue_turn_gate(enabled, true) in continue_preflight; continue_run_tests",
+      "outcome": "the new test FAILED on the preflight assertion for e_zdr_default_route; a_non_persistent_turn_is_refused_before_any_work also FAILED; restored, cmp OK"
+     },
+     {
+      "command": "Mutation 4: temporary removal of the continue_persistent_gate call from continue_run; cargo test -p model-gateway --lib and --test zdr_posture_matrix",
+      "outcome": "the new test PASSED (it never calls continue_run); FAILED: sse continue_run_calls_the_persistent_gate_before_it_reads_anything, zdr_posture::tests::every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs, and the integration test the_continue_handler_decides_its_turn_with_the_plain_route_and_serves_persistent_only; restored, cmp OK"
+     },
+     {
+      "command": "Final verification after the restore: cargo test -p model-gateway --lib and --test zdr_posture_matrix; sha256sum and cmp against the pre-mutation copy; grep for MUTATION markers; git diff --stat",
+      "outcome": "1818 passed, 0 failed, 4 ignored; 6 passed; sha256 a114790a816d19627849f0e0d65836a6fd1f11b40abcbb2b6899207dd6897c34 equals the pre-mutation copy; 0 MUTATION markers; sse.rs shows 74 insertions and 0 deletions"
+     },
+     {
+      "command": "Not run, by rule or by choice: docker (forbidden); git commit, stash, reset, checkout, clean (forbidden); cargo clippy (the Model Plane CI does not gate on it); the other model-gateway integration binaries (e2e and orchestration); DB-backed tests (none in this hunk)",
+      "outcome": "not run"
+     }
+    ],
+    "deviations": [
+     "Line 1 of the deferred .txt (the '// intended path' note) was not inserted; it is metadata, not code.",
+     "Formatting: the hunk was made rustfmt-canonical by running rustfmt on a scratch copy wrapped in mod continue_run_tests, never on sse.rs. The doc paragraph was rewrapped to 100 columns (the words were checked to be identical). The preflight assertion now binds let turn = continue_turn_is_persistent(&claims) and passes turn to preflight, which is the same pure call and the same assertion. No assertion was weakened.",
+     "Line endings: the deferred file is CRLF, but sse.rs is LF throughout (0 CRLF before and after), so the inserted text is LF. git prints a 'LF will be replaced by CRLF' working-copy warning for sse.rs on git diff; the file was already LF before this edit and I left it LF.",
+     "Mutation 1 is an early 'if claims.zdr_waiver.is_some() && !claims.zdr { return true; }' in continue_turn_is_persistent, not an extra TurnPosture::Waived arm. With Route::plain(false) the resolver refuses every waived token (route_allowed_under_waiver needs the waiver's provider and connection to match the route), so a Waived arm could never be reached and such a mutation would test nothing.",
+     "Mutation 4 (the lead's second option) is not caught by the new test, by design: it never calls continue_run. The handler call site is guarded only by the source-contract tests named above. This is a scope limit of the hunk, not a defect; I did not add a test for it because the lead said to touch nothing else.",
+     "After my own temporary restore, the Edit tool reported that sse.rs had been modified on disk since my last read. git diff shows exactly one hunk, @@ -14044,0 +14045,74 @@, and the sha256 equals the pre-mutation copy, so nothing else touched the file. The other units' in-progress edits were present in the tree during my runs (git status: apps/Model Plane/deploy/docker-compose.yml, execution-core runtime_loop/effect.rs, session-core src/grpc.rs, session-core src/run_service_grpc.rs, session-core src/tool_ledger.rs); model-gateway compiled and passed with them present.",
+     "Observed, not changed: sse.rs already had 114 rustfmt diff hunks at HEAD and still has 114 in the worktree, so the insertion adds none. The Model Plane CI runs 'cargo fmt --all -- --check' (.github/workflows/model-plane-rust-ci.yml:99), so that step cannot pass for this file until the whole file is formatted. That is pre-existing and outside this unit; I did not format it.",
+     "Observed: tests/zdr_posture_matrix.rs::a_continue_is_served_to_a_persistent_bearer_on_every_row_and_to_nothing_else drives the public decide_for over the same matrix, modelling the handler's decision. The new test is the only one that reaches the private continue_turn_is_persistent, continue_persistent_gate and continue_preflight. Both are kept.",
+     "Not run: clippy (the Model Plane CI does not gate on it), and the other model-gateway integration binaries. The new test is not DB-backed, so nothing from this unit needs the disposable-Postgres harness."
+    ],
+    "blockers": [],
+    "tests_written_not_run": [],
+    "names_for_later_units": [
+     "Test name: sse::continue_run_tests::every_enforcement_row_of_the_matrix_is_continued_only_for_a_persistent_bearer (model-gateway lib).",
+     "Private functions it depends on: continue_turn_is_persistent(claims: &Claims) -> bool; continue_persistent_gate(switch_on: bool, claims: &Claims); continue_preflight with 7 parameters (enabled, run_status, approval_matches_run, approval_granted, continuation_mode, approval_consumed, persistent).",
+     "Local test helpers it calls, in mod continue_run_tests: token(zdr: bool, org_zdr: Option<bool>, waiver: Option<Value>) -> Claims and preflight(...) with the same 7 parameters. If s3-corrections, s7c or s8 change continue_preflight's arity, update the preflight helper; do not weaken the assertions.",
+     "Matrix input: apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json. Fields used: enforcement_rows[].id, inputs.bearers[].zdr, org_zdr, waiver; inputs.route.explicit_zdr; expect.decision. Counts today: 27 rows, 33 bearers, 7 served, 15 waived non-ZDR refused.",
+     "Final sse.rs sha256 after this unit: a114790a816d19627849f0e0d65836a6fd1f11b40abcbb2b6899207dd6897c34 (the file is 74 lines longer than HEAD, LF). Later units editing sse.rs should expect this as their starting point."
+    ]
+   },
+   "reviews": [
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "The new test's anti-vacuity floor is loose. It requires served >= 3 and waived_refused >= 2, but the matrix gives 7 served and 15 waived non-ZDR bearers refused (33 bearers, 27 rows). A fixture edit that dropped most waived bearers would still pass.",
+       "evidence": "The final assert in the new test reads `served >= 3 && waived_refused >= 2`. A python count of zdr-posture-matrix.json enforcement_rows gives 7 persistent bearers (6 with org_zdr false, 1 with org_zdr absent) and 15 waived bearers with zdr=false.",
+       "suggested_fix": "Not blocking. Optionally raise the floors to the real counts (7 and 15), or assert that the number of rows with a waived bearer is at least some value, so a shrinking fixture is noticed."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "The hunk cannot catch removal of the continue_persistent_gate call from continue_run, because it drives the private helpers and not the handler. Only the source-contract tests cover that. The implementer disclosed this.",
+       "evidence": "The new test calls only continue_turn_is_persistent, continue_persistent_gate and continue_preflight. The call-site guards are continue_run_calls_the_persistent_gate_before_it_reads_anything (sse.rs ~13866) and zdr_posture.rs:~868. Both pass, and both extract the body with split(\"\\n#[cfg(test)]\"), so the appended test text cannot satisfy them by accident.",
+       "suggested_fix": "None needed for this unit. The guard exists elsewhere and the new text is outside the scanned body."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "Three coverage gaps remain, none of them a defect. (1) The matrix is driven only with switch_on=true. The switch-off path (continue_persistent_gate(false, ..) is Ok) is covered only by the existing test near line 13857. (2) Rows whose expected decision is 'refuse' (18 rows) are not cross-checked against the matrix decision. Only single-bearer rows with decision persistent, zdr or waived are. (3) token() always builds a user principal, and the matrix has no bearer with a principal_type.",
+       "evidence": "In the hunk, the `_ => {}` arm skips the refuse decisions, and token() hard-codes principal_type user. The matrix Counter shows no bearer with a principal_type.",
+       "suggested_fix": "Optional. No change is required to accept the unit."
+      }
+     ],
+     "checked": [
+      "git diff of sse.rs: one hunk of 74 pure insertions inside #[cfg(test)] mod continue_run_tests (module starts at line 13673 after the cfg(test) attribute). No production code changed, so behaviour with the switches off is byte-identical; no other unit's file was touched by this diff.",
+      "The test drives the real private continue_turn_is_persistent, continue_persistent_gate and continue_preflight. Its persistence oracle (zdr false, org_zdr not true, no waiver) is computed independently from the fixture JSON, so it is not a tautology against the code under test. It would fail if a waived bearer, whose zdr claim is false, were served.",
+      "Matrix coverage recounted with python: 27 enforcement rows, 33 bearers, 7 persistent (6 org_zdr false, 1 org_zdr absent), and many waived bearers (13 with org_zdr true, 2 with org_zdr false or absent). The test's counts of 7 served and 15 waived refused are consistent, and a malformed waiver would panic via expect and not be skipped.",
+      "Ran cargo test -p model-gateway --lib continue_run_tests: 14 passed, including the new test. Ran cargo test -p model-gateway --lib: 1818 passed, 0 failed, 4 ignored. Ran --test zdr_posture_matrix: 6 passed.",
+      "The source-contract tests (continue_run_calls_the_persistent_gate_before_it_reads_anything, continue_run_builds_its_request_the_way_the_tests_see_it, zdr_posture.rs function_body check) extract continue_run's body up to the next #[cfg(test)], so the appended test text cannot make them vacuously pass.",
+      "include_str!(\"../tests/fixtures/zdr-posture-matrix.json\") sits inside a cfg(test) module only and resolves to services/model-gateway/tests/fixtures/zdr-posture-matrix.json, so release and Docker builds are unaffected.",
+      "Formatting: rustfmt --check on a scratch copy reports 114 diff hunks, all at line 14043 or earlier, which is the pre-existing count. The inserted lines (14045 onward) are rustfmt-clean and have no line over 100 columns. sse.rs is LF throughout, with 0 CRLF both at HEAD and now.",
+      "No credentials, JWTs or logging in the hunk: the token is a synthetic test Claims, and there is no I/O and no docker.",
+      "Mutation checks not re-run, because the review forbids editing files. The implementer's mutations 1 to 3 are sound by inspection: the first assertion compares continue_turn_is_persistent to the independent oracle, and the gate and preflight assertions follow. Mutation 4 is covered by the source-contract tests, as disclosed."
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --lib continue_run_tests (run from apps/Model Plane/rust in the worktree)",
+      "outcome": "Exit 0. test result: ok. 14 passed; 0 failed; 0 ignored; 1808 filtered out; finished in 0.02s. All 14 are sse::continue_run_tests::* in binary model_gateway-eaaf9bf37eaf8d2c. Each run waited once on the shared build lock, which is normal; no retries were needed. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s9-verify-1-continue_run_tests.log",
+      "passed": "14 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "outcome": "Exit 0. test result: ok. 1818 passed; 0 failed; 4 ignored; finished in 14.05s. That is 1822 total from the same binary, so it includes the 14 above. The 4 ignored tests were not run and are environment-gated, not DB-backed: source_validation::tests::list_how_the_finer_rule_changes_saved_cases (needs VEREVON_AB_CASES) and stream_buffer::tests redis_append_latency_probe, redis_resume_survives_store_restart_and_preserves_identity_scope, redis_stalled_server_does_not_stall_appends (need REDIS_URL and probe env vars). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s9-verify-2-lib.log",
+      "passed": "1818 passed, 0 failed, 4 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_posture_matrix",
+      "outcome": "Exit 0. test result: ok. 6 passed; 0 failed; 0 ignored; finished in 0.02s. Tests: the_vendored_matrix_has_the_rows_this_test_was_written_for; a_continue_is_served_to_a_persistent_bearer_on_every_row_and_to_nothing_else; the_safety_tagged_rows_are_present_and_decided_as_tagged; the_usage_frame_states_the_decided_class_and_nothing_for_a_persistent_turn; every_enforcement_row_is_decided_and_normalised_as_the_matrix_says; the_continue_handler_decides_its_turn_with_the_plain_route_and_serves_persistent_only. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s9-verify-3-zdr_posture_matrix.log",
+      "passed": "6 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Exit 0. Finished dev profile in 1m 13s. No errors and nothing skipped. Recompiled mp-contracts and checked model-gateway, execution-core, inference-core, mp-orchestration and session-core. There are 5 warnings and none is in model-gateway: execution-core capability_policy.rs:181 (unreachable else clause); session-core auth.rs:73 (ZdrWaiver::provider never used); session-core terminalization.rs:691 (start_managed_run_inner never used); execution-core approval_delivery_worker.rs:744 (verification_result_for never used); execution-core runtime_loop/resume.rs:407 (decision_closer never used). They look pre-existing, not from this round. capability_policy.rs, auth.rs, terminalization.rs, approval_delivery_worker.rs and resume.rs have no diff against HEAD, and the dead-code functions' only callers are in test code. grpc.rs, which is changed, keeps the same five start_managed_run_inner call sites at HEAD and now. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s9-verify-4-check.log",
+      "passed": "exit 0, 0 errors, 5 warnings (all look pre-existing)"
+     },
+     {
+      "command": "Read-only state checks: git status --short, git diff --stat, git ls-files --eol, file mtimes (no edits, no git writes)",
+      "outcome": "The tree was not clean at my first status, although the brief says it was clean at round start. 16 files were modified and .plan-work/ is untracked. Those are the other units' files plus services/model-gateway/src/sse.rs (+74/-0), the S9 continue_run_tests module, at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs. Mtimes: sse.rs was last written 12:48:27; mp-contracts loop_fold.rs 12:55:17; the model_gateway lib test binary 12:56:09 and the zdr_posture_matrix binary 12:58:24. Both verified binaries therefore postdate the last edits to sse.rs and to the mp-contracts dependency. The other units were still writing during the run, so the results describe the tree at these times. sse.rs is LF in both index and working tree (i/lf w/lf), so committing it adds no line-ending churn. I wrote, changed and mutation-tested nothing. The integration targets other than zdr_posture_matrix (for example zdr_feature_table and zdr_refusal_inventory) were not in the command list and were not run. No DB-backed tests were run or written by me.",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  }
+ ],
+ "failedUnits": []
+}

@@ -1,0 +1,19 @@
+            t            | count 
+-------------------------+-------
+ runs                    |     0
+ memory_index            |     0
+ plans                   |     0
+ todos                   |     0
+ scheduled_step_receipts |     0
+(5 rows)
+
+BEGIN
+DELETE 401
+DELETE 401
+DELETE 2
+COMMIT
+ threads_left | messages_left | dream_rows_left 
+--------------+---------------+-----------------
+            0 |             0 |               0
+(1 row)
+

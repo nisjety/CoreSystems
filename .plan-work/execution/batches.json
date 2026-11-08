@@ -1,0 +1,1325 @@
+{
+ "generated": "2026-10-21",
+ "method": "Greedy over a value-first priority list: each batch holds up to five slices whose dependencies are done, partial-but-usable (WS01-S1 lead-only, WS03-S8 S8-A, WS03-S9, WS12-S1) or in an earlier batch, and whose files[] are pairwise disjoint (hot files sse.rs, agent.rs, http_routes.rs, chat-client.ts, DashboardComposer.tsx, mod.rs, mp-contracts lib.rs and every .proto included). Append-only shared docs and compose switch lines (lead_shared_files) are applied by the lead after each batch, so they do not break disjointness.",
+ "model_map": {
+  "opus": "opus 5.5",
+  "sonnet": "sonnet 5.5 (high)",
+  "haiku": "haiku 5.5 (max)"
+ },
+ "batches": [
+  {
+   "batch": 1,
+   "goal": "Land the Z-41b ZDR closure first in sse.rs (it heads the sse.rs edit order), the prompt-tier contract the run-context composer needs, the effort-ladder module, the named language-leak fixes, and the chat performance baseline that decides which WS09 conditional slices get built.",
+   "slices": [
+    {
+     "id": "WS01-S6",
+     "title": "Z-41b closure",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS02-S5",
+     "title": "Prompt tier contract and CI order check",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS12-S3",
+     "title": "Fix named language leaks",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 5,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS11-S1.code",
+     "title": "Ladder module, legacy mapping, cache key (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS09-S1",
+     "title": "Measure first: render, churn and cold-open budgets",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 7,
+     "proto_change": false,
+     "migration": false,
+     "flag": "PERF_ENFORCE"
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS01-S6",
+     "rebuild": [
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS02-S5",
+     "rebuild": [
+      "execution-core",
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS12-S3",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S1.code",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS11-S1"
+    },
+    {
+     "id": "WS09-S1",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/docs/ZDR.md": [
+     "WS01-S6"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS11-S1.code"
+    ]
+   },
+   "disjoint_files_checked": true,
+   "lead_only": [
+    {
+     "id": "WS01-S1",
+     "work": "Delivery proof only (no code left): the lead rebuilds the Control Plane Prometheus with the committed audit alert rules, triggers one synthetic audit-path failure and records the firing alert as evidence. Routing stays \"visible, not paged\" (Q-7a2-07 default)."
+    }
+   ]
+  },
+  {
+   "batch": 2,
+   "goal": "Wire the gateway run-context composer into Do runs (the biggest Do-run quality gain), pin today's name-based tool classification as the WS05 oracle, add the dark ask_user question store, and close the CI trigger remnant and the taxonomy gate.",
+   "slices": [
+    {
+     "id": "WS02-S6",
+     "title": "Gateway run-context composer and agentic wiring",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 8,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_RUN_CONTEXT=off|instructions|full (default off, read once); MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS (default 8000, clamp 1000-40000)"
+    },
+    {
+     "id": "WS05-S0",
+     "title": "Characterise, fix drift, record decisions",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 3,
+     "proto_change": true,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS14-S3",
+     "title": "Question store, API, contract (dark)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 16,
+     "proto_change": true,
+     "migration": true,
+     "flag": ""
+    },
+    {
+     "id": "WS12-S1",
+     "title": "Make CI run where work lands",
+     "status": "partial",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS12-S6",
+     "title": "Taxonomy gate covers second emitter family",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS02-S6",
+     "rebuild": [
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS14-S3",
+     "rebuild": [
+      "model-gateway",
+      "session-core",
+      "verevonv3 SPA (second dev server on :5174)",
+      "verevonv3 gateway (BFF)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS02-S6"
+    ],
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS05-S0"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS02-S6",
+     "WS05-S0"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 3,
+   "goal": "Seed execution-core Do runs from the run context with a stable prefix, add the run-control bus seam (dark), the OpenAI/Azure and Anthropic effort wire classes, and the UI copy gate with its baseline.",
+   "slices": [
+    {
+     "id": "WS02-S7",
+     "title": "execution-core seeding and Do prefix stability",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 2,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS04-S1",
+     "title": "Run-control bus seam, ACL, two-replica profile (dark)",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 10,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_RUN_CONTROL_BUS (off by default; on enables the bus; a boot self-test that finds a permission violation degrades to off); MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS (default 750, clamped 100-5000); MODEL_PLANE_REPLICAS (compose.sh, default 1)"
+    },
+    {
+     "id": "WS11-S2.code",
+     "title": "OpenAI/Azure reasoning_effort (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 1,
+     "proto_change": false,
+     "migration": false,
+     "flag": "INFERENCE_CORE_OPENAI_REASONING_EFFORT"
+    },
+    {
+     "id": "WS11-S3.code",
+     "title": "Anthropic wire classes (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 1,
+     "proto_change": false,
+     "migration": false,
+     "flag": "INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING"
+    },
+    {
+     "id": "WS12-S4",
+     "title": "UI copy and raw-colour gate with baseline",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 8,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS02-S7",
+     "rebuild": [
+      "execution-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS04-S1",
+     "rebuild": [
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S2.code",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS11-S2"
+    },
+    {
+     "id": "WS11-S3.code",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS11-S3"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS04-S1",
+     "WS11-S2.code"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS04-S1"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 4,
+   "goal": "Land the tool class vocabulary and registry, shared stream cancel across replicas, Codex through the ladder, incremental Markdown parsing, and the approvals characterisation pins that WS13-S1 builds on.",
+   "slices": [
+    {
+     "id": "WS05-S1",
+     "title": "Class vocabulary, registry model, seed, read surface",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 16,
+     "proto_change": true,
+     "migration": true,
+     "flag": ""
+    },
+    {
+     "id": "WS04-S2",
+     "title": "Shared stream cancel and durable-cancel fan-out",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 5,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_RUN_CONTROL_BUS (same switch as S1; off means no listener and no bus traffic)"
+    },
+    {
+     "id": "WS11-S4.code",
+     "title": "Codex via ladder (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 1,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS09-S2",
+     "title": "Incremental Markdown parse and keyed node list",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 6,
+     "proto_change": false,
+     "migration": false,
+     "flag": "VITE_CHAT_RENDER_LEGACY"
+    },
+    {
+     "id": "WS13-S0",
+     "title": "Land-first, characterise, record decisions",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 2,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS05-S1",
+     "rebuild": [
+      "capability-core",
+      "execution-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS04-S2",
+     "rebuild": [
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S4.code",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS11-S4"
+    },
+    {
+     "id": "WS09-S2",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS13-S0"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS13-S0"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 5,
+   "goal": "Add typed approval cause codes, MCP observation with digest pinning, the effort proto field with one gateway derivation, throttled snapshot writes, and the WS03 live-proof runner.",
+   "slices": [
+    {
+     "id": "WS13-S1",
+     "title": "Typed cause codes + carrier",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 11,
+     "proto_change": true,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS05-S2",
+     "title": "MCP observation, derivation, digest pin, drift",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 13,
+     "proto_change": true,
+     "migration": false,
+     "flag": "MCP_TOOL_OBSERVATION_ENABLED (model-gateway; default on after S2 proves; kill switch); MCP_TOOL_OBSERVATION_TTL (capability-core, 1 h observation window)"
+    },
+    {
+     "id": "WS11-S5.code",
+     "title": "Proto level, catalogue field, single gateway derivation (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 7,
+     "proto_change": true,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_EFFORT_LADDER"
+    },
+    {
+     "id": "WS09-S3",
+     "title": "Throttle snapshot writes and remove per-token churn",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": "VITE_CHAT_SNAPSHOT_THROTTLE_MS"
+    },
+    {
+     "id": "WS03-S9",
+     "title": "Proof scripts, matrix test, contract tests",
+     "status": "partial",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS13-S1",
+     "rebuild": [
+      "execution-core",
+      "model-gateway",
+      "session-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS05-S2",
+     "rebuild": [
+      "capability-core",
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S5.code",
+     "rebuild": [
+      "inference-core",
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS11-S5"
+    },
+    {
+     "id": "WS09-S3",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS11-S5.code"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 6,
+   "goal": "Show the localised cause on every approval surface, ship signed decision v2 with registry-owned binding, put Do-round usage on the ledger behind its flag, land the run-cost ADR, and add the English-locale leak smoke.",
+   "slices": [
+    {
+     "id": "WS13-S2",
+     "title": "Project cause, localised reason everywhere",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 15,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS05-S3",
+     "title": "Signed decision v2 and registry-owned binding",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 10,
+     "proto_change": true,
+     "migration": false,
+     "flag": "TOOL_CLASS_GATE (off, shadow, enforce; capability-core always emits v2; code default off; compose shadow after S3 proves; an unknown value is treated as off)"
+    },
+    {
+     "id": "WS02-S3",
+     "title": "Do-round usage reaches the ledger",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 6,
+     "proto_change": true,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE (default off)"
+    },
+    {
+     "id": "WS27-S0",
+     "title": "Land ADR, characterise the run-cost meter",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 1,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS12-S5",
+     "title": "English-locale leak smoke and state checklist",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS13-S2",
+     "rebuild": [
+      "model-gateway",
+      "verevonv3 SPA (second dev server on :5174)",
+      "verevonv3 gateway (BFF)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS05-S3",
+     "rebuild": [
+      "capability-core",
+      "execution-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS02-S3",
+     "rebuild": [
+      "execution-core",
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS05-S3",
+     "WS02-S3"
+    ],
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS27-S0"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS27-S0"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 7,
+   "goal": "Dock the composer trays, make the permission engine read classes (MCP reads in Do runs), add the durable plan grant, drive the composer effort levels from the catalogue, and add honest pricing primitives.",
+   "slices": [
+    {
+     "id": "WS14-S1",
+     "title": "Docked trays",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 11,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS05-S4",
+     "title": "Permission engine reads the class; MCP in Do runs",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 7,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MCP_DO_TOOLS (off, read, all; code default off; compose read on the proof stack first; all blocked); MCP_DO_TOOL_CAP (default 40); TOOL_CLASS_GATE is inherited from S3"
+    },
+    {
+     "id": "WS04-S4",
+     "title": "Durable plan grant",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 14,
+     "proto_change": true,
+     "migration": true,
+     "flag": "MODEL_GATEWAY_DURABLE_PLAN_GRANT (default off; off keeps the in-memory grants of WS14 S2a)"
+    },
+    {
+     "id": "WS11-S6",
+     "title": "Composer levels from catalogue",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 6,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS27-S1",
+     "title": "Honest pricing primitives and pure UsageMeter",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS14-S1",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS05-S4",
+     "rebuild": [
+      "execution-core",
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS04-S4",
+     "rebuild": [
+      "model-gateway",
+      "session-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S6",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS05-S4"
+    ],
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS04-S4"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS04-S4"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 8,
+   "goal": "Ship ask_user end to end behind its switch, the effort budget-clamp seam, the audit publisher fix with migration 0043, the auth-core membership audit outbox, and nats-provisioner in the signed artifact.",
+   "slices": [
+    {
+     "id": "WS14-S4",
+     "title": "ask_user tool, user_question event, card",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 25,
+     "proto_change": true,
+     "migration": false,
+     "flag": "AGENT_ASK_USER_ENABLED"
+    },
+    {
+     "id": "WS11-S7",
+     "title": "Policy seams (gated on Q8)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": "INFERENCE_CORE_EFFORT_BUDGET_CLAMP"
+    },
+    {
+     "id": "WS01-S2",
+     "title": "Deploy publisher fix and migration 0043; canary replay and proof",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS01-S3",
+     "title": "auth-core membership audit outbox (row 269)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 2,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS01-S8",
+     "title": "nats-provisioner in the signed artifact",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS14-S4",
+     "rebuild": [
+      "execution-core",
+      "model-gateway",
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS11-S7",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS01-S2",
+     "rebuild": [
+      "no service image (docs, tests or CI only)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS01-S3",
+     "rebuild": [
+      "Control Plane auth-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS11-S7"
+    ],
+    "docs/compliance/evidence/live-reads-audit-delivery-<date>.txt": [
+     "WS01-S2"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 9,
+   "goal": "Approve-then-execute on the durable grant (WS14-S2b), the Rust-generated SSE payload golden, the migration expand/contract policy, the entitlements ADR, and the log-content gate.",
+   "slices": [
+    {
+     "id": "WS12-S7.code",
+     "title": "Rust-generated SSE payload golden (code half)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 9,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS14-S2",
+     "title": "Plan approve-then-execute",
+     "status": "partial",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 13,
+     "proto_change": true,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE"
+    },
+    {
+     "id": "WS01-S9",
+     "title": "Migration expand/contract policy",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": true,
+     "flag": "SESSION_CORE_MIGRATION_IGNORE_MISSING (default false; set true only by the rollback overlay used in S10 and S12; flip the default only after S12 evidence)"
+    },
+    {
+     "id": "WS10-S0",
+     "title": "ADR, matrix and ledger",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS12-S10",
+     "title": "Log-content gate",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 4,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS12-S7.code",
+     "rebuild": [
+      "model-gateway",
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS12-S7"
+    },
+    {
+     "id": "WS14-S2",
+     "rebuild": [
+      "model-gateway",
+      "session-core",
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS14-S2",
+     "WS01-S9"
+    ],
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS14-S2",
+     "WS10-S0"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS14-S2",
+     "WS10-S0"
+    ],
+    "apps/master-ownership-matrix.md": [
+     "WS10-S0"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 10,
+   "goal": "Shared queued input and cross-replica liveness, the SPA read checker on generated types, the Application Plane audit stream, the ZDR attestation lifecycle, and the org-core model-access store.",
+   "slices": [
+    {
+     "id": "WS04-S3",
+     "title": "Shared queued input and cross-replica liveness",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 7,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_RUN_CONTROL_BUS (same switch as S1; queue and probe ops ride it)"
+    },
+    {
+     "id": "WS12-S8",
+     "title": "SPA read checker and generated types",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 5,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS01-S4",
+     "title": "Application Plane audit stream (row 268)",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 3,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS01-S5",
+     "title": "ZDR attestation lifecycle and gate alignment",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 9,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS10-S2",
+     "title": "org-core store, resolve, explain, admin and machine API",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 21,
+     "proto_change": false,
+     "migration": true,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS04-S3",
+     "rebuild": [
+      "model-gateway"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS12-S8",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS01-S4",
+     "rebuild": [
+      "Application Plane scripts"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS01-S5",
+     "rebuild": [
+      "inference-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS10-S2",
+     "rebuild": [
+      "Control Plane org-core",
+      "Control Plane scripts"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Control Plane/docker-compose.yml": [
+     "WS01-S4",
+     "WS10-S2"
+    ],
+    "apps/Model Plane/docs/ZDR.md": [
+     "WS01-S5"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 11,
+   "goal": "Typed refusal for today's model gate and catalogue, cursor paging with by-id reads, the rollback rehearsal, the file-size ratchet, and the WS25 decision records.",
+   "slices": [
+    {
+     "id": "WS10-S1",
+     "title": "Typed refusal for today's gate and catalogue",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 16,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS17-S1",
+     "title": "Cursor paging + by-id read",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 13,
+     "proto_change": true,
+     "migration": true,
+     "flag": ""
+    },
+    {
+     "id": "WS01-S10",
+     "title": "Rollback rehearsal",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 2,
+     "proto_change": false,
+     "migration": false,
+     "flag": "SESSION_CORE_MIGRATION_IGNORE_MISSING=true in the rollback overlay only"
+    },
+    {
+     "id": "WS12-S11",
+     "title": "File size ratchet",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 5,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS25-S0",
+     "title": "Land, characterise, record decisions",
+     "status": "todo",
+     "importance": "haiku",
+     "model": "haiku 5.5 (max)",
+     "files_count": 2,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS10-S1",
+     "rebuild": [
+      "model-gateway",
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS17-S1",
+     "rebuild": [
+      "model-gateway",
+      "session-core",
+      "verevonv3 SPA (second dev server on :5174)",
+      "verevonv3 gateway (BFF)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/docs/capability-ownership-matrix.md": [
+     "WS25-S0"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS25-S0"
+    ],
+    "apps/master-ownership-matrix.md": [
+     "WS25-S0"
+    ],
+    "docs/compliance/evidence/rollback-rehearsal-<date>.txt": [
+     "WS01-S10"
+    ]
+   },
+   "disjoint_files_checked": true
+  },
+  {
+   "batch": 12,
+   "goal": "Same-run resume after an ask_user answer, the status-cue vocabulary and taxonomy gate, the shared content-safety scanner crate, the signed-manifest gate and CI wiring, and safe links on screen.",
+   "slices": [
+    {
+     "id": "WS14-S5",
+     "title": "Same-run resume delivery",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 12,
+     "proto_change": true,
+     "migration": true,
+     "flag": "AGENT_ASK_USER_RESUME_ENABLED"
+    },
+    {
+     "id": "WS15-S1",
+     "title": "Vocabulary, variants, taxonomy gate",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 8,
+     "proto_change": false,
+     "migration": false,
+     "flag": "MODEL_GATEWAY_LIFECYCLE_EVENTS"
+    },
+    {
+     "id": "WS26-S2.code",
+     "title": "shared crate: normaliser, scanner, trust table (code half)",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 18,
+     "proto_change": false,
+     "migration": false,
+     "flag": "CONTENT_SAFETY_NORMALIZE"
+    },
+    {
+     "id": "WS01-S11",
+     "title": "Thresholds, signed-manifest gate and CI wiring",
+     "status": "todo",
+     "importance": "opus",
+     "model": "opus 5.5",
+     "files_count": 6,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    },
+    {
+     "id": "WS26-S3",
+     "title": "safe links on screen",
+     "status": "todo",
+     "importance": "sonnet",
+     "model": "sonnet 5.5 (high)",
+     "files_count": 8,
+     "proto_change": false,
+     "migration": false,
+     "flag": ""
+    }
+   ],
+   "lead_docker_after": [
+    {
+     "id": "WS14-S5",
+     "rebuild": [
+      "execution-core",
+      "model-gateway",
+      "session-core",
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS15-S1",
+     "rebuild": [
+      "model-gateway",
+      "verevonv3 SPA (second dev server on :5174)",
+      "verevonv3 gateway (BFF)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    },
+    {
+     "id": "WS26-S2.code",
+     "rebuild": [
+      "execution-core",
+      "model-gateway",
+      "session-core"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only; the external half stays with WS26-S2"
+    },
+    {
+     "id": "WS26-S3",
+     "rebuild": [
+      "verevonv3 SPA (second dev server on :5174)"
+     ],
+     "evidence": "rebuilt-image run of the slice DoD on the dev stack; any new switch is turned on in the proof stack only"
+    }
+   ],
+   "lead_shared_edits": {
+    "apps/Model Plane/deploy/docker-compose.yml": [
+     "WS26-S2.code"
+    ],
+    "apps/Model Plane/docs/ZDR.md": [
+     "WS26-S2.code"
+    ],
+    "apps/Model Plane/docs/decisions/ledger.md": [
+     "WS15-S1",
+     "WS26-S2.code"
+    ]
+   },
+   "disjoint_files_checked": true
+  }
+ ],
+ "later_batches_preview": [
+  {
+   "batch": 13,
+   "slices": [
+    "WS04-S6",
+    "WS15-S2",
+    "WS25-S4",
+    "WS18-S0",
+    "WS19-S0"
+   ]
+  },
+  {
+   "batch": 14,
+   "slices": [
+    "WS27-S2",
+    "WS15-S4",
+    "WS10-S3",
+    "WS20-S0",
+    "WS21-S0"
+   ]
+  },
+  {
+   "batch": 15,
+   "slices": [
+    "WS04-S5",
+    "WS09-S5",
+    "WS22-S0",
+    "WS23-S0",
+    "WS20-S1"
+   ]
+  },
+  {
+   "batch": 16,
+   "slices": [
+    "WS04-S7",
+    "WS12-S12",
+    "WS17-S2",
+    "WS23-S1.code",
+    "WS18-S1"
+   ]
+  },
+  {
+   "batch": 17,
+   "slices": [
+    "WS27-S3",
+    "WS05-S5",
+    "WS23-S2",
+    "WS06-S7",
+    "WS22-S1"
+   ]
+  },
+  {
+   "batch": 18,
+   "slices": [
+    "WS27-S4",
+    "WS15-S3",
+    "WS17-S3",
+    "WS10-S5",
+    "WS25-S7"
+   ]
+  },
+  {
+   "batch": 19,
+   "slices": [
+    "WS27-S6",
+    "WS17-S7",
+    "WS25-S5",
+    "WS06-S0",
+    "WS06-S1"
+   ]
+  },
+  {
+   "batch": 20,
+   "slices": [
+    "WS10-S4",
+    "WS15-S5",
+    "WS05-S6.code",
+    "WS20-S2",
+    "WS06-S2"
+   ]
+  }
+ ]
+}

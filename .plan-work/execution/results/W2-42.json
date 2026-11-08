@@ -1,0 +1,537 @@
+{
+ "batchId": "W2-42",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS14-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/ask.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/sse-event-taxonomy.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.question.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/components/use-chat-controller.question.test.ts --pool=forks (in apps/Frontend Plane/verevonv3)",
+     "outcome": "4 passed, 0 failed: the 2 existing cases and the 2 new ones (thread switch with a refused answer; new chat)"
+    },
+    {
+     "command": "same command with the two clear blocks temporarily removed (red check), then restored",
+     "outcome": "both new cases failed with the card still set (AssertionError: expected { questionId: 'q_1', ... } to be null); the blocks are restored at use-chat-controller.ts lines 1328-1329 (loadThread) and 2241-2242 (resetChatState), confirmed by grep, LF endings kept"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat src/shared/chat-nodes src/shared/api/chat-client.test.ts --pool=forks (in apps/Frontend Plane/verevonv3)",
+     "outcome": "exit 0; 126 files, 1851 tests passed, 0 unhandled errors (round 1 was 1849; the 2 new cases account for the difference)"
+    },
+    {
+     "command": "./node_modules/.bin/tsc6 -p tsconfig.app.json --noEmit (in apps/Frontend Plane/verevonv3)",
+     "outcome": "22 errors, same as round 1 and all pre-existing: 21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts; none in this slice's files"
+    },
+    {
+     "command": "./node_modules/.bin/eslint on use-chat-controller.ts and use-chat-controller.question.test.ts",
+     "outcome": "0 errors, 14 warnings (solid/reactivity); none on the lines changed this round"
+    },
+    {
+     "command": "round 1, carried and not re-run (no Rust or Python changed this round): cargo test -p execution-core --lib; cross_service_loop_contract; tool_class_registry_parity; cargo test -p model-gateway --lib; gen-sse-event-taxonomy.py --check",
+     "outcome": "execution-core --lib 1650 passed; cross_service_loop_contract 12 passed; tool_class_registry_parity 1 red (ask_user has no seed row, lead_todo 1); model-gateway --lib 2641 passed with 1 red golden (sse_event_payload_golden, lead_todo 5); taxonomy --check up to date"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/migrations/0029_ask_user_tool_class.up.sql and its .down.sql (new; number per DEC-39): insert ('global', 'cap.memory.index', 'ask_user', 'context_write', 'none', NULL, 'seed'), shaped like plan.propose's row in 0016_capability_tool_classes.up.sql (line 139). Required before TOOL_CLASS_GATE=enforce is enabled anywhere.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/tests/tool_class_registry_parity.rs: add the new migration's file name to the later-migrations list in seeded_rows(). This turns the one red parity test green.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core and model-gateway service blocks add AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}. The code already defaults to off when unset.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (ComposerTrays mount, around lines 919-943): question={controller.pendingQuestion() ?? undefined}, questionPending={controller.questionPending()}, questionError={controller.questionError()}, onAnswerQuestion={controller.answerPendingQuestion}, onSkipQuestion={controller.skipPendingQuestion}. Confirmed: the hook returns these as accessors (use-chat-controller.ts return block, lines 4774-4778). Until this lands the card is not visible.",
+    "Regenerate the SSE payload golden: from apps/Model Plane/rust run MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0). Then refresh its .sha256, the SPA's vendored copy, and the digest pinned in scripts/tests/zdr-contract-sync.test.sh.",
+    "Regenerate the Go bindings for apps/Model Plane/proto/model_plane/v1/execution.proto (RunAgentRequest.max_questions = 22) with buf, as WS14-S3 did for orchestration.proto.",
+    "The ZDR golden ask_user_zdr_not_offered is NOT added: scripts/tests/zdr-contract-schema.mjs validates matrix enforcement rows against a bearer and route shape, so that schema must admit tool-offer rows first (not owned). Then add the row, refresh zdr-posture-matrix.json.sha256 and the digest pinned in zdr-contract-sync.test.sh, and re-vendor the fixture copies.",
+    "Live proof (lead, side stack with rebuilt execution-core, model-gateway and BFF): set AGENT_ASK_USER_ENABLED=true and check an ambiguous Do prompt: the user_question SSE frame, psql run_questions requested then answered, and the follow-up run seeing the answer. Not done.",
+    "Not written: apps/Frontend Plane/verevonv3/tests/e2e/ask-user.spec.ts (owned; needs the ChatPage mount first). The transcript question node (chat-nodes types, derive, registry, derive.test) is also not built and needs a ChatTurn field in chat-types.ts, which WS25-S11 is editing in this worktree.",
+    "Commit: stage only the 18 paths in files_changed (the round-1 note said 17, but the list has 18). Leave out the WS25-S11 changes in this worktree (ChatbotStudioCards.tsx, chat-types.ts, DashboardComposer.tsx, customize/, their tests and customize-hub.spec.ts)."
+   ],
+   "deviations": [
+    "Round 2: the clear in loadThread follows the isStartingThread guard rather than preceding it, so a conversation being started keeps its card; resetChatState clears after setGeneratedTitle(null).",
+    "Round 2: the question test file mocks getChatThread (null), which keeps the thread switch off the network; two cases were added, not one (thread switch with a refused answer, and new chat).",
+    "Offered to Do runs only: plan runs and continuation segments get max_questions zero from the gateway, and budget_when refuses them too.",
+    "WS05's vocabulary has no interaction class, so ask_user binds to the seeded cap.memory.index (context_write, floor none), the id plan.propose uses; the plan's class interaction stub was not used.",
+    "RunAgentRequest.max_questions (tag 22) is set in spawn_run_dispatch beside org_policy, not inside build_run_agent_request, so the pure builder's output is unchanged.",
+    "InvokeRequest was not extended: normalize.rs and zdr_features.rs destructure it and are outside ownership. The answer is recorded through S3's POST /v1/orchestration/questions/:id/answer before the turn is sent, and answered_message_id stays empty.",
+    "The ask module is declared with #[path = \"../ask.rs\"] in runtime_loop/mod.rs (the crate-root convention owner_reads uses) instead of in lib.rs.",
+    "The ZDR posture matrix and its digest are unchanged, because its enforcement rows follow a bearer and route schema that a tool-offer golden does not fit; ZDR refusals are unit-tested in execution-core and the gateway instead."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/migrations/0029_ask_user_tool_class.up.sql and .down.sql (new seed migration; integrator number)",
+    "apps/Model Plane/rust/services/execution-core/tests/tool_class_registry_parity.rs (seeded_rows migration list)",
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs (optional: pub(crate) mod ask, dropping the #[path] in runtime_loop/mod.rs)",
+    "apps/Model Plane/deploy/docker-compose.yml (AGENT_ASK_USER_ENABLED defaults in two service blocks)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (ComposerTrays props)",
+    "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts, derive.ts, derive.test.ts, registry.ts (transcript question node) and apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts (ChatTurn field; WS25-S11 is editing it)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256, the SPA vendored copy, and the pin in scripts/tests/zdr-contract-sync.test.sh",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json (ask_user row; scripts/tests/zdr-contract-schema.mjs must admit it first)",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs (only if answered_message_id is to be linked)",
+    "apps/Model Plane/go/pkg or gen execution.pb.go (buf regeneration for max_questions)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Two tests are red, and both need shared files the slice may not edit. (1) tool_class_registry_parity: every_trusted_capability_arm_has_a_seeded_tool_on_the_same_capability fails at tool_class_registry_parity.rs:218 because ask_user has no capability_tools seed row. The lead adds capability-core migration 0029_ask_user_tool_class (up and down) and lists it in seeded_rows(). (2) model-gateway sse_event_payload_golden fails at sse_events.rs:3920. The lead regenerates it with MP_UPDATE_GOLDEN=1, then refreshes the .sha256, the SPA vendored copy and the zdr-contract-sync.test.sh pin.",
+     "ChatPage.tsx does not yet pass question, questionPending, questionError, onAnswerQuestion or onSkipQuestion to ComposerTrays (shared file), so the card cannot be seen in the app yet.",
+     "AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false} is not yet in the execution-core and model-gateway compose blocks (shared). The code already defaults to off.",
+     "The Go bindings for execution.proto RunAgentRequest.max_questions=22 are not regenerated (buf, integrator).",
+     "The ZDR golden ask_user_zdr_not_offered is missing. zdr-contract-schema.mjs must admit tool-offer rows first; after that the matrix, its sha256 and the sync pin are refreshed.",
+     "No live proof yet. Needed: rebuilt session-core, execution-core, model-gateway and BFF with the switch on; an ambiguous Do prompt producing a user_question SSE frame; psql showing run_questions requested and then answered; a follow-up run that sees the answer; a reload that restores the card; a tray screenshot; an older client showing the prose fallback; a ZDR-org attempt.",
+     "The e2e spec tests/e2e/ask-user.spec.ts is not written. It is owned by the slice but needs the ChatPage mount first."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "answerPendingQuestion and skipPendingQuestion write after their await with no thread check. If the person opens another thread while the request is in flight, the settle clears that thread's restored card, and answerPendingQuestion's sendContent can post the summary into the newly opened thread. Suggested guard: read state.threadId before the request, and after it return when the thread has changed, before setPendingQuestion(null) and sendContent. Not implemented, because it is outside the required fix."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The answer route records the answer before the turn is appended, so if the turn append fails the question stays answered with no turn carrying it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "answered_message_id is never set: the link needs the appended turn's id, which session_flow.rs does not return to the invoke stream and which is not owned here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under TOOL_CLASS_GATE=enforce an unseeded ask_user is classed unclassified with an approval floor, so the capability-core seed must land before the switch is enabled anywhere."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof yet: rebuilt execution-core, model-gateway and BFF with AGENT_ASK_USER_ENABLED=true have not shown create, list, answer and the follow-up run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The controller calls listRunQuestions on every thread load that has a run id, so reload restore adds a request per load even with the switch off; gate it once the BFF reports the feature."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Subagent refusal is unit-tested through admit only; no loop-level test shows a delegated child's ask_user call is refused."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An approval continuation can carry ask_user in its pause snapshot while max_questions is zero, so the model sees a tool that refuses every call; filter the snapshot in resume."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The transcript question node (chat-nodes types, derive, registry, derive.test) is not built, so the transcript shows only the prose after a question."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The S3 answer-route integration target (orchestration_http_test), the e2e_invoke_chain target and mp-contracts wire parity were not re-run after the http_routes.rs visibility change."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Confirm reusing the seeded cap.memory.index for ask_user (the plan.propose precedent) and record it in docs/decisions/ledger.md, since WS05 has no interaction class."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A question appears only after its run completes, so there is no live waiting state during the run; the turn ends with the prose in any case."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The skip failure copy is one generic sentence; the typed codes from the answer route are not shown separately."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ESLint reports 14 solid/reactivity warnings in use-chat-controller.ts, none on the lines changed this round. The .then callback in hydrateRunQuestions (about line 960) is new in this slice and follows the same pattern as hydrateRunApprovals."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In use-chat-controller.ts, answerPendingQuestion and skipPendingQuestion change state after their await without checking that the thread is the same. If the person switches threads while the request is in flight, the code can clear the new thread's card, and sendContent can post the answer summary into the wrong thread."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The answer is recorded through POST /questions/:id/answer before sendContent. If the send fails, the question stays answered with no turn carrying it, and nothing offers a retry."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row's InvokeRequest.answers_question_id and answered_message_id link was not built: the answer goes through S3's answer route and answered_message_id stays empty. Record this as a deviation, or schedule the link before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ask_user is bound to cap.memory.index with no seed row. Under TOOL_CLASS_GATE=enforce it would be treated as unclassified until migration 0029 lands. Record the reuse of plan.propose's capability id in docs/decisions/ledger.md."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Subagent refusal is tested only through ask::admit(depth=1). No loop-level test shows that a delegated child's ask_user call is refused."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The transcript question node (chat-nodes types.ts, derive.ts, registry.ts, derive.test.ts) is owned by the slice but not built, so a resolved question shows only as prose plus the user's answer turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "offered_tools now drops any caller- or MCP-supplied tool named ask_user, even with the switch off. A pre-existing external tool with that name would silently disappear, which is a small behaviour change while the switch is off."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "hydrateRunQuestions calls listRunQuestions on every thread load that has a run id, even with the switch off, which adds a request per load."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A continuation's pause snapshot may still offer ask_user while budget is zero, so every call is refused. Filter the tool out of the snapshot on resume."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "After run_question_value was made pub(crate) in http_routes.rs, orchestration_http_test, e2e_invoke_chain and mp-contracts wire parity were not re-run."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In use-chat-controller.ts, hydrateRunQuestions was inserted between hydrateRunApprovals and its JSDoc, and the question signals between planApprovalPending and its JSDoc. Both doc comments now sit above the wrong declaration."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The question card appears only after the run completes, so there is no live waiting state while the run is going."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --test cross_service_loop_contract (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "python gen-sse-event-taxonomy.py --check",
+      "outcome": "sse taxonomy up to date (31 events)",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p execution-core -p model-gateway --all-targets",
+      "outcome": "Finished, no errors (only warnings)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "1650 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test tool_class_registry_parity",
+      "outcome": "5 passed, 1 failed: every_trusted_capability_arm_has_a_seeded_tool_on_the_same_capability panicked at tool_class_registry_parity.rs:218: `ask_user` is bound by `trusted_capability_id` but has no capability_tools seed row",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "outcome": "2641 passed, 1 failed, 4 ignored: sse_events::payload_contract::sse_event_payload_golden (sse_events.rs:3920) - committed SSE payload golden differs from ChatEvent::payload output (golden for the new user_question event not regenerated; shared file)",
+      "passed": false
+     },
+     {
+      "command": "vitest run src/features/chat src/shared/chat-nodes src/shared/api/chat-client.test.ts --pool=forks (verevonv3)",
+      "outcome": "126 files, 1851 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+      "outcome": "22 errors, all pre-existing in quarry-client.ts and schedule-contract.test.ts; none in slice files",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr"
+   ],
+   "notes": "Round 2 (reviewer fix): loadThread now clears pendingQuestion and questionError right after its isStartingThread guard, and resetChatState clears both after setGeneratedTitle(null). The clear sits after the guard on purpose: the guard returns early for a conversation still being started, and that conversation's card must survive its own handoff. The question signals are declared later in the hook (about line 2510). That forward reference is safe: Solid 2's createEffect enqueues user effects, so initializeChat and therefore loadThread cannot run before the hook body finishes, and the hook body has no flush() call. The test file gained two cases and a getChatThread mock returning null, so the switch never reaches the network. Not fixed, because it is outside the required list: answerPendingQuestion and skipPendingQuestion write after an await with no thread check (see the first depth finding). files_changed has 18 paths; the round-1 lead note said 17, but the list has always been 18. Nothing committed, and no git write operation was run. The WS25-S11 changes in this worktree are not part of this slice."
+  },
+  {
+   "id": "WS25-S11",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudioCards.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudioCards.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.agent-mode.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/customize-hub.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/customize src/features/agents/components/ChatbotStudioCards.test.tsx src/features/dashboard/home/DashboardComposer.agent-mode.test.tsx (run from apps/Frontend Plane/verevonv3)",
+     "outcome": "5 files, 27 tests passed (final run after the last export change; the later SendOptions edit is type-only and was covered by the typecheck and lint below)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/dashboard src/features/agents/components src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/ComposerTrays.test.tsx src/features/settings/components/OrgModelAccessSection.test.tsx",
+     "outcome": "68 files, 839 tests passed (run before the final HooksSection empty-state tweak and export narrowing; those files were re-run in the first command)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/lib src/shared/i18n src/features/settings/components/in-product-trust-copy.test.ts src/features/dashboard/home/DashboardOverview.tabs.test.tsx src/features/chat/components/use-chat-controller.send-receipts.test.ts src/features/chat/components/mid-run-input.test.ts src/features/chat/components/ChatPage.voice-first-turn.test.tsx src/shared/chat src/shared/api/chat-event-contract.test.ts src/shared/actions",
+     "outcome": "81 files, 1188 tests passed (source-scanning and i18n tests included)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run (whole frontend suite)",
+     "outcome": "579 files: 575 passed, 4 failed; 6342 tests: 6337 passed, 5 failed. None of the failures is in a WS25-S11 file: quarry-client.test.ts fails to load (@quarry/client missing in this worktree, pre-existing); chat-event-contract.test.ts 3 cases fail with \"case 'user_question' is neither a golden event nor a transport event\" (WS14-S4 in flight); orchestration-client.test.ts 'has no caller yet' fails because WS14-S4 added a caller; QuestionCard.test.tsx 1 case (WS14-S4 new file). The run started before the last type-only SendOptions edit."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (pnpm exec is blocked by the dependency check on the Quarry SDK path, so the binary is run directly)",
+     "outcome": "exit 2; no errors in any touched or new file. Pre-existing: quarry-client.ts (21) and schedule-contract.test.ts (1). Concurrent WS14-S4 at the last run: ComposerTrays.tsx (2 unused declarations), QuestionCard.tsx (2), QuestionCard.test.tsx (10)."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on every touched and new source and test file, including tests/e2e/customize-hub.spec.ts",
+     "outcome": "0 errors. One solid/reactivity warning at DashboardComposer.tsx:1072 that is also present at HEAD (reload-guard line, not mine)."
+    },
+    {
+     "command": "UI copy and colour gate, new-file mode (same selectors as scripts/ui-gates-new-files.mjs, run by a node script) on AgentModesSection.tsx, HooksSection.tsx, CustomizeHub.tsx",
+     "outcome": "0 findings"
+    },
+    {
+     "command": "playwright tests/e2e/customize-hub.spec.ts",
+     "outcome": "not run: needs a second dev server, and the route and ChatPage wiring from lead_todo"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/app/App.tsx: add `const CustomizeHubPage = lazy(() => import('@/features/customize/CustomizeHub'))` with the other lazy page imports, and in the RequireAuth children add `{ path: '/agents/customize', component: CustomizeHubPage },` after the `/agents/quality` route.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts: in the agents-core group, after the `agents-quality` item, add `{ id: 'agents-customize', label: 'Tilpass', href: '/agents/customize', icon: SlidersHorizontal, description: 'Agentmodus, hooks, MCP-servere, ferdigheter, instrukser og plugins.' }` and add SlidersHorizontal to the '@/shared/icons' import. Then run src/features/core/lib, which pins the nav shape.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: import loadEffectiveAgentModeCap from '@/features/customize/AgentModesSection'; beside projectContext (about line 168) add `const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())`; on the DashboardComposer element (about line 363) add `agentModeCap={agentModeCap()}` beside `planMode={planMode()}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: (a) in the request build (about line 3155) add `agentMode: options.agentMode,` after `connectorScope: options.connectorScope,`; (b) in the sendContent options object for the composer payload (about line 3521) add `agentMode: payload.agentMode,` after `connectorScope: payload.connectorScope,`. SendOptions already declares agentMode. WS14-S4 edits this file in the same batch, so merge the hunks.",
+    "Live proof, not run here: on a second dev server (not :5173), run `pnpm exec playwright test --project=chat tests/e2e/customize-hub.spec.ts` after the shared edits. pnpm exec fails its dependency check in this worktree, so run it from a checkout where the Quarry SDK path exists.",
+    "Live proof, not run here: on a stack with ORG_AGENT_POLICY_API=true, an admin sets a read_only cap and a member's composer picker shows only lockdown and read_only. Capture admin and member screenshots, and the hub's off state when the switch is false. S9 enforcement is not built, so this shows the write and the picker, not a server refusal.",
+    "Commit (the lead commits): stage the 12 files in files_changed plus the 4 shared-edit files once applied. Suggested message: `feat(verevonv3): customize hub, agent modes and hooks, and the mode picker (WS25-S11)`, ending with the Co-Authored-By trailer from the system reminder. Do not commit the WS14-S4 files in this worktree."
+   ],
+   "deviations": [
+    "Retire (DELETE) is in the hook table beyond add and edit, because the BFF exposes DELETE and retiring is reversible.",
+    "The policy client and the mode vocabulary (agentModesWithinCap, agentModeLabel) live in AgentModesSection.tsx, because the slice names no client module. The composer imports the two helpers from it.",
+    "The picker tests are in the new DashboardComposer.agent-mode.test.tsx, not in ChatPanels.test.tsx, because ChatPanels has no picker. ChatPanels.test.tsx is unchanged.",
+    "The hub is gated by a cached probe of GET /api/v1/org/agent-policy, not by a build flag. While the probe reports off, the Chatbot Studio Customize button stays the disabled placeholder.",
+    "Capability agent_modes is not consumed: no server advertisement exists (the S6 deviation). The picker is gated by the policy probe plus the effective mode_cap.",
+    "The agent mode travels as payload.agentMode (DashboardComposerSubmitPayload) and SendOptions.agentMode in chat-types.ts. Forwarding into the chat request is a shared edit in use-chat-controller.ts.",
+    "Two test files were added beside changed files (DashboardComposer.agent-mode.test.tsx and ChatbotStudioCards.test.tsx). Both are allowed as test files beside what changed.",
+    "Owned-file ruling: the route, the nav entry and the ChatPage cap wiring sit in four files outside ownership (listed in needs_other_files), so the slice is inert until they are applied."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/app/App.tsx (route /agents/customize)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts (nav entry)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (effective mode cap passed to the composer)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (agentMode forwarded into the chat request)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the four shared edits from the implementer's lead_todo: the App.tsx route /agents/customize (no /agents/:param route ahead of it, so the order is safe), the sidebar-navigation entry (SlidersHorizontal exists in @/shared/icons), ChatPage agentModeCap={agentModeCap()}, and use-chat-controller agentMode forwarding at the connectorScope anchors (lines 3256 and 3627 today). Until then the hub has no route and the picker never shows in the chat page.",
+     "After those edits, run src/features/core/lib, which pins the nav shape.",
+     "Run the Playwright tests/e2e/customize-hub.spec.ts on a second dev server (not :5173). It is written but has not been run.",
+     "Live proof: on a stack with ORG_AGENT_POLICY_API=true, an admin sets a read_only cap and the member's picker shows only lockdown and read_only. Capture admin and member screenshots plus the hub's off state.",
+     "Commit: the lead stages the slice files only, not the concurrent WS14-S4 files (ComposerTrays, use-chat-controller question test, chat-client, QuestionCard) or the Model Plane files in this worktree."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The composer shows the org mode cap before WS25-S9 enforces it, so with ORG_AGENT_POLICY_API on and S9 unbuilt a member's picker is limited in the UI only, while the server still applies the platform posture. Keep the switch off for members, or hide the picker, until S9 lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The TypeScript tool-name grammar and server-id pattern repeat execution-core tool_matches (hook/mod.rs) and capability-core mcpIdentifier with no shared golden of vectors; add vectors that both the Rust and Go sides and the SPA run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "tests/e2e/customize-hub.spec.ts is written and lint-clean but unrun; its composer case depends on the ChatPage wiring in lead_todo."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner call: should the Customize entry show in the nav while ORG_AGENT_POLICY_API is off? The plan has it visible, and the hub says it is not switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The lockdown copy says agent runs stop and plain chat is unaffected. That is true only once S9 admits Do runs through mode_lockdown; recheck the copy when S9 lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The hook reason cap (500 characters) and the int32 priority range mirror the BFF zod schema; the Go limit maxOrgHookReasonRunes is not confirmed equal."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Capability agent_modes is not consumed, because no server advertisement exists (the S6 deviation). The picker is gated on the policy probe and the effective mode_cap instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The policy PUT replaces the whole document and the UI sends the five keys it knows. A key added to the schema later would be silently defaulted unless the UI sends it; pin the key list against org-agent-policy-schema.json."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Norwegian copy in the new sections was written in this slice and needs native review, since both locales ship."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The picker uses an inline style because the composer stylesheet is outside this slice's ownership; add class rules when that file is in scope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The Chatbot Studio Customize link is a plain anchor, so it reloads the page. Check whether the app's convention is SPA navigation and switch to the router link if so."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The policy client and mode vocabulary live in AgentModesSection.tsx because no client module was named. Move them to a features/customize client module with its own test when a new file is allowed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The picker tests live in the new DashboardComposer.agent-mode.test.tsx, not ChatPanels.test.tsx, because ChatPanels has no picker. ChatPanels.test.tsx is unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "After a save the UI refetches, so a second save sent before the refetch lands carries the old revision and gets the changed-policy message. This is a minor race."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The hook test-match is a client re-implementation of strictest-wins and does not call the engine, so any S3 evaluator change needs this file updated in step."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The composer limits the picker to the org mode_cap before WS25-S9 enforces it on the server, so with ORG_AGENT_POLICY_API on and S9 unbuilt the cap holds in the UI only; keep the policy switch off for real orgs until S9 lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "AgentModesSection.save sends only the five keys it knows rather than spreading the stored doc.settings, so any key the schema adds later (or a reserved key that becomes writable) is silently reset to its default by the full-document PUT."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The picker reads only effective mode_cap. When lockdown=true but mode_cap is looser, the picker still offers looser modes; the server decides, but the UI shows choices that will be refused."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Admin gating in the Modes and Hooks sections uses hasWorkspaceAdminAccess, while the BFF gates on has_authorized_org_role. If the two differ, a workspace admin who is not an org admin is shown editors that the server refuses with 403 (no authority hole, since the server enforces)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The TypeScript matcher grammar, server-id pattern, 500-character reason cap and int32 priority repeat the action-registry zod schema, execution-core hook/mod.rs and the capability-core limits, with no shared vector golden."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The picker cases sit in the new DashboardComposer.agent-mode.test.tsx, not in ChatPanels.test.tsx as the row names. No test covers the ChatPage→composer cap wiring, because that wiring is a shared edit still pending."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Capability agent_modes is not consumed, because no server advertisement exists (the S6 deviation). The hub and the Chatbot Studio button are gated by a cached probe of GET /api/v1/org/agent-policy, where 404 means off."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The lockdown copy says plain chat is not affected, and the Norwegian copy in the new sections needs native review. Recheck both when S9 lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The policy client and the mode vocabulary (agentModesWithinCap, agentModeLabel, loadEffectiveAgentModeCap) live in AgentModesSection.tsx, and DashboardComposer imports from a feature page component. Move them to a customize client module later."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The picker uses an inline style instead of composer stylesheet classes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "In the full-suite run, anbud/lib/workspace-sync.test.ts failed once and passed in isolation. It looks flaky under parallel load and is not slice-related."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm lint && pnpm typecheck && pnpm test (as written in the plan)",
+      "outcome": "Could not run: pnpm aborts in its dependency-status check, which tries pnpm install and fails (exit 4294963238). The binaries were run directly instead, see the next rows.",
+      "passed": false
+     },
+     {
+      "command": "node node_modules/eslint/bin/eslint.js on src/features/customize, ChatbotStudioCards.tsx and its test, DashboardComposer.tsx and DashboardComposer.agent-mode.test.tsx, chat-types.ts, tests/e2e/customize-hub.spec.ts",
+      "outcome": "0 errors, 1 warning. The warning is solid/reactivity at DashboardComposer.tsx:1072 and, per the implementer, is also present at HEAD (I did not check HEAD).",
+      "passed": true
+     },
+     {
+      "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "22 errors, all in files the slice did not touch: 21 in src/shared/api/quarry-client.ts and 1 in src/shared/api/schedule-contract.test.ts. quarry-client.ts fails because @quarry/client is missing in this worktree. No errors in any WS25-S11 file or in the WS14 files. I did not run tsc at HEAD, so I could not confirm these 22 were already failing.",
+      "passed": true
+     },
+     {
+      "command": "node node_modules/vitest/vitest.mjs run --pool=threads (whole frontend suite)",
+      "outcome": "3 test files failed (577 passed of 580); 4 tests failed, 6339 passed of 6343. All customize, ChatbotStudioCards and DashboardComposer.agent-mode tests passed. The failures: quarry-client.test.ts cannot load (@quarry/client unresolved). chat-event-contract.test.ts has 3 failures with AssertionErrors about the golden event keys. orchestration-client.test.ts fails on 'has no caller yet'. None of these files belongs to the slice.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built: the Customize hub (CustomizeHub.tsx) composes the agent-mode and hook sections with the existing MCP, skills, org-instructions and plugin sections, and sits behind a cached probe of GET /api/v1/org/agent-policy (404 means ORG_AGENT_POLICY_API is off, and the hub then says it is not switched on). AgentModesSection edits the org cap, rung cap, lockdown, the MCP allow-list and the tool approval, saves the whole document at the revision it read, shows members a read-only view with a locked badge, and has an explain panel of effective values. HooksSection lists rules, lets an admin add, edit or retire them, and has a test-match panel that applies deny over ask over allow; a post-tool rule may only deny. ChatbotStudioCards replaces the disabled Customize placeholder with a link to /agents/customize once the API is on. DashboardComposer adds a mode picker beside the Ask/Do controls, limited to the cap and the modes stricter than it. It sends agentMode only when the person picks one, drops a choice the cap no longer admits, and is not offered in conversation-only turns. No switch was added (the row has none); the hub is gated by the policy API. Status is partial because the code and unit tests are complete, but the route, nav entry and chat wiring are shared files that the lead must apply, and the e2e and live proof have not been run. The chat-client.ts, ComposerTrays.tsx and QuestionCard files in the worktree belong to the concurrent WS14-S4 slice; I did not touch them."
+  }
+ ]
+}

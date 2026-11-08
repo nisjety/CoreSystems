@@ -1,0 +1,166 @@
+{
+ "batchId": "W1-09",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS06-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/audit-core/internal/api/api.go",
+    "apps/Control Plane/audit-core/internal/api/api_test.go",
+    "apps/Control Plane/audit-core/internal/api/service_auth.go",
+    "apps/Control Plane/audit-core/internal/api/service_auth_test.go",
+    "apps/Control Plane/audit-core/internal/api/compliance.go",
+    "apps/Control Plane/audit-core/internal/api/compliance_test.go",
+    "apps/Control Plane/audit-core/internal/api/roles.go",
+    "apps/Control Plane/audit-core/internal/store/store.go",
+    "apps/Control Plane/audit-core/internal/store/compliance.go",
+    "apps/Control Plane/audit-core/internal/store/compliance_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Control Plane/audit-core && go vet ./...",
+     "outcome": "clean"
+    },
+    {
+     "command": "cd apps/Control Plane/audit-core && go test ./...",
+     "outcome": "all packages ok; 14 new api tests and 5 new non-DB store tests pass; the 6 new Postgres tests compile and SKIP (TEST_DATABASE_URL not set, no docker per rules)"
+    }
+   ],
+   "db_tests_written": [
+    "TestComplianceEventsPagesAreContiguousAndRecomputeToTheirHashes",
+    "TestComplianceEventsCursorIsStableUnderConcurrentInserts",
+    "TestComplianceEventsWindowResolvesToOneContiguousSeqRange",
+    "TestComplianceEventsFiltersThinTheRangeAndNeverCrossOrgs",
+    "TestComplianceManifestDescribesTheRangeAndIsSigned",
+    "TestComplianceKeysListActiveAndRetiredAndFlagUnavailable"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/audit-core/internal/chain/sign.go: add `func (k *KeyRing) SignPayload(payload []byte) (string, []byte, error) { return k.sign(payload) }` and `func (k *KeyRing) VerifyPayload(keyID string, payload, signature []byte) error { return k.verify(keyID, payload, signature) }` (KeyRing.sign already returns ErrNoSigningKey when it cannot sign, which store.SignManifest treats as 'serve unsigned'). No other change is needed: store.payloadSigner picks the key ring up by interface assertion. Then the manifest on a signing deployment is signed with magic VAM1.",
+    "shared-edit docker-compose.yml: in the audit-core AUDIT_CORE_SERVICE_CREDENTIALS block add scope \"audit:compliance:read:self\" to the verevon-gateway principal only (never another principal: the parser now rejects it). Deploy order: audit-core image first, compose after (an old image rejects the unknown scope and will not boot); roll via scripts/run-control-plane.sh, never bare docker compose build. Update run-control-plane.sh / validate-release-credentials.sh / compose-contract tests if they pin that scope list.",
+    "Run the 6 new Postgres tests through the DB harness: docker run --rm -d --name ac-pg -p 55432:5432 -e POSTGRES_PASSWORD=t postgres:16 then in apps/Control Plane/audit-core: TEST_DATABASE_URL=postgres://postgres:t@localhost:55432/postgres?sslmode=disable go vet ./... && go test ./internal/store/ -run 'TestCompliance' -v (SQL for range resolution, keyset paging, manifest and keys is written but unexecuted).",
+    "Evidence for the DoD (lead-run): curl through the gateway (S6, not built yet) as owner/admin/member (200/403), save pages + manifest, run cmd/audit-verify over them for a full-range export."
+   ],
+   "deviations": [
+    "Added files beside what changed that the row did not list: internal/store/compliance_test.go, four stub methods in internal/api/api_test.go (the eventStore interface grew), one field in internal/store/store.go.",
+    "Manifest signing uses a store.PayloadSigner seam instead of calling the key ring directly, because internal/chain is not owned by this slice.",
+    "Routes mount at /v1/compliance/audit inside the existing /v1 auth group."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/audit-core/internal/chain/sign.go (add SignPayload and VerifyPayload on KeyRing so the manifest can be signed and verified with the existing key ring and key id)",
+    "apps/Control Plane/audit-core/cmd/audit-verify/main.go (optional: verify the manifest signature using store.ManifestPayload semantics, and a range mode for sub-range exports)",
+    "apps/Control Plane/docker-compose.yml, scripts/run-control-plane.sh, scripts/validate-release-credentials.sh (grant audit:compliance:read:self to the verevon-gateway entry in AUDIT_CORE_SERVICE_CREDENTIALS)",
+    "apps/Control Plane/audit-core/cmd/server/main_test.go (compose-contract text tests, if they pin the gateway scope list)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The 6 new Postgres tests (contiguous pages recompute to their hashes, cursor stable under concurrent inserts, window resolves to one seq range, filters never cross orgs, manifest ends and signature, keys active/retired/unavailable) have never executed. Run the S2 harness: docker run ac-pg postgres:16, then TEST_DATABASE_URL=... go vet ./... && go test ./internal/store/ -run TestCompliance -v.",
+     "Production manifest is unsigned until the lead adds KeyRing.SignPayload and VerifyPayload in internal/chain/sign.go (exact lines in the implementer's lead_todo). Until then 'manifest signature verifies with /keys' holds only with a fake signer in tests.",
+     "Nothing grants audit:compliance:read:self yet: docker-compose.yml, run-control-plane.sh, validate-release-credentials.sh and any compose-contract text tests need the scope on the verevon-gateway principal only. Deploy order is audit-core image first, then compose (an old image rejects the unknown scope and will not boot); use scripts/run-control-plane.sh.",
+     "Live evidence (curl via gateway as owner/admin/member 200/403, saved pages plus manifest, cmd/audit-verify over a full-range export) needs S6 gateway routes and a running stack; lead only."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Manifest signing needs chain.KeyRing.SignPayload/VerifyPayload (chain/sign.go, not owned here); until the lead adds them the production manifest is unsigned, so the plan's 'manifest signature verifies with /keys' only holds in tests with a fake signer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Deploy ordering and grant: nothing grants audit:compliance:read:self yet (compose and run-control-plane.sh are shared files), so the API is unreachable until the lead edits the credential block, and the audit-core image must be live before that block ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "cmd/audit-verify cannot verify a sub-range export: it treats manifest last_seq as the head and reports truncated_below_attestation when the range stops before the newest attestation; it needs a range mode and it does not check the manifest signature yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every compliance read appends a self-audit row to the org's chain (head lock, one more row per page), so heavy paging grows the chain and lengthens the head lock of a busy org; consider batching or a separate sink if export volume is high."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Denied attempts (member or viewer 403) are not self-audited; a denied-access row would help detection but opens a write-amplification path for any gateway user."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The six store tests that exercise the new SQL (range resolution by ingested_at, keyset paging, manifest ends, key listing) have not been executed: they skip without TEST_DATABASE_URL and docker is not allowed here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Range resolution by ingested_at uses MIN/MAX(chain_seq) over audit_events filtered by ingested_at; on very large orgs this depends on idx_audit_events_org_ingested and has not been EXPLAINed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "/keys lists only the active key and the keys of the newest checkpoint and attestation because KeyRing cannot enumerate retired keys; a KeyRing.KeyIDs() would let it list the whole ring."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "ValidateRequiredServiceCredentialRegistry does not require the compliance scope on the gateway (no API flag by design); if the owner wants a boot failure when the scope is missing it must be added there."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "internal/store/store.go is outside the slice's owned file list and gains one field (manifestSigner PayloadSigner) plus its comment; it is only 2 added lines, needed for the signer seam, and the diff is otherwise clean, but the lead should explicitly accept it as a shared edit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Needed before switching on: add KeyRing.SignPayload(payload) and VerifyPayload(keyID, payload, sig) in internal/chain/sign.go (nil-safe through CanSign, so a typed-nil ring yields ErrNoSigningKey and an unsigned manifest) and add the compliance scope to the gateway credential block; otherwise the API is unreachable and unsigned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "cmd/audit-verify treats manifest last_seq as the head and does not verify the manifest signature or support a sub-range export, so only a full-range export currently verifies offline; add a range mode before relying on sub-range exports as evidence."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The SQL in internal/store/compliance.go (MIN/MAX(chain_seq) by ingested_at range resolution, keyset paging with chain_seq > $2, thinning filters with ($n = '' OR col = $n), manifest ends, key listing) is unexecuted; it mirrors the verify.go query pattern (chainRowColumns + scanChainRow) and reads correctly, but must be proven on the DB harness before enabling."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every compliance read appends a self-audit row to the org's chain (per-org head lock, one row per page), so heavy export paging grows the chain and lengthens head-lock contention for a busy org; fail-closed 500 on audit-write failure is correct but means a chain/DB outage also blocks reads."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Denied attempts (member or viewer 403) write no self-audit row; deliberately avoided to prevent write amplification by any gateway user, but a rate-limited denial audit would help detection."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Range resolution by ingested_at relies on idx_audit_events_org_ingested and has not been EXPLAINed on a large org; ingested_at is not commit-ordered so MIN/MAX over the window is a superset range, which is the intended contiguity trade-off."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "/keys lists only the active key and the keys of the org's newest checkpoint and attestation because KeyRing has no enumeration; a KeyRing.KeyIDs() would let it list retired keys of older anchors."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "ValidateRequiredServiceCredentialRegistry does not require the compliance scope on the gateway (no API flag by design); add it there only if the owner wants a boot failure when the scope is missing."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "audit",
+    "policy"
+   ],
+   "notes": "Built the compliance read API under /v1/compliance/audit: GET /events, GET /manifest, POST /verify, GET /keys, GET /export-status (empty, exporter_enabled=false). New scope audit:compliance:read:self is accepted by the registry parser only for principal verevon-gateway; requiredAuditScope maps the five routes to it (a gateway with only audit:read:self gets 403, and the compliance scope does not unlock GET /v1/audit). requireComplianceRole(w, r) in roles.go returns the authorization only for owner/admin from the signed delegation, else 403 compliance_role_required; it is generic so F-t1-031 can import it. Events: limit default 200, cap 1000, opaque keyset cursor on chain_seq bound to the org, strict query allow-list, strict RFC3339 since/until that resolve to one contiguous chain_seq range (so an unfiltered range verifies offline), envelope {data, meta:{count,next_cursor,limit,head_seq}, error:null}; rows carry every preimage field plus prev_hash/row_hash/chain_version in the shape cmd/audit-verify reads. Every read writes a self-audit row (compliance_audit_read or compliance_audit_verify, plane control, producer audit-core) through InsertAuditFromSource and FAILS CLOSED: if the row cannot be written the response is 500 and no data is returned. Manifest JSON is a superset of the audit-verify manifest (org_id, last_seq, last_row_hash, checkpoint, attestation, legacy_unchained_rows plus first_seq, count, first_prev_hash, head_seq/head_hash, key_id, signature). Status is partial ONLY because the manifest signature cannot be produced by the production key ring yet: chain.KeyRing has no generic sign method and chain/ is not owned by this slice. The code signs through a store.PayloadSigner seam (payload ManifestPayload, magic VAM1, in store/compliance.go) and serves the manifest unsigned (still carrying the signed checkpoint and attestation) until the lead adds the two methods below. Also: KeyRing exposes no key listing, so /keys lists the active key plus the keys that signed the org's newest checkpoint and attestation (status active/retired/unavailable, public key base64url like AUDIT_CHAIN_PUBLIC_KEY_BASE64), which is what offline verification needs."
+  }
+ ]
+}

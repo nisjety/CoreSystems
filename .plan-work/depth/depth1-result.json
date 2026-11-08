@@ -1,0 +1,304 @@
+[
+ {
+  "key": "zdr-log",
+  "title": "Turn text in model-gateway info! logs (D1-093, D1-094, D1-095, P0)",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib tool_loop",
+    "outcome": "209 passed, 0 failed, 0 ignored (2115 filtered out). This includes the new test tracing_counts_the_question_and_query_text_and_never_formats_it.",
+    "passed": true
+   },
+   {
+    "command": "cargo check -q -p model-gateway --all-targets",
+    "outcome": "Exit 101. 3 errors E0609 (no field learning_client on AppState) at http_routes.rs lines 10536, 10597 and 10640, reported for both the lib and the lib test target. None are in tool_loop.rs. http_routes.rs has an uncommitted diff of +240 lines that is not part of this task and appeared after the test run, since the lib test compiled earlier.",
+    "passed": false
+   },
+   {
+    "command": "git diff --stat -- tool_loop.rs",
+    "outcome": "tool_loop.rs: 52 insertions, 6 deletions. Other files are also modified in the worktree, including model-gateway/src/http_routes.rs (+240) and the verevonv3 gateway files. These come from other work, not this task's tool_loop.rs change.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The guard checks field names only (question, turn_question, query). If someone later adds turn text under a different name, such as `q = %question`, `user_text = %text` or `prompt = ?x`, the guard does not catch it. The value side is not checked.",
+   "The entity -> entity_chars change at the two instant-answer sites goes beyond the three named rows. It is correct, because the entity is a term taken from the question, but the new test does not guard `entity`. If the lead keeps the change, consider adding `entity` to the scanned names.",
+   "fact_label, fact_value, fact_period and source still log page-derived text at INFO. This is third-party content, not turn text, so it is outside D1-093/094/095. It is a ZDR question for later if page content counts as retained content.",
+   "`cargo check -p model-gateway --all-targets` currently fails (E0609 learning_client on AppState in http_routes.rs). The cause is unrelated uncommitted work in the shared worktree. The tool_loop.rs change compiled and passed 209/209 lib tool_loop tests, including the new guard. Re-run the all-targets check once that work lands, before relying on it."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "Nothing committed, pushed or deployed; the lead commits. Before committing, read w2_status.txt and both output files in the scratchpad folder and confirm exit=0 for both commands. If the new guard test fails, the assertion message names the offending production line. The entity_chars change at lines 6610 and 7785 is a deliberate widening beyond the three named sites; revert those two field pairs if the register row should cover only the question and query fields.",
+  "summary": "Replaced the turn-text log fields in tool_loop.rs with content-free counts. At the web_search instant answer (line 6611) question = %question became question_chars = question.chars().count(). At the web_search relevance gate debug (line 6626) query = %question became query_chars = question.chars().count(). At the get_statistics instant answer (line 7786) question = %turn_question became question_chars = turn_question.chars().count(). The entity field at lines 6610 and 7785 was also user text (a question term produced by grounding::named_entities), so it is now entity_chars = answer.entity.chars().count(); this goes beyond the three named sites and is a judgment call the lead can revert. The comment above the web_search info! was reworded to say the question and the tying term are counted, never printed, whatever the ZDR posture. Added test tracing_counts_the_question_and_query_text_and_never_formats_it in the test module (about lines 9705-9747). It slices the production part at the first occurrence of mod tests, skips // lines, and asserts that no line formats question, turn_question or query with name = %/? or the %name / ?name shorthand. A self-check asserts the scanner flags the forbidden shapes before the scan runs, so the scan cannot pass vacuously. Checked the rest of model-gateway src: no other %- or ?-formatted question, query, prompt, message, text or entity fields. Fields left as they are because they carry no turn text: error values, the SSB attribution, page fact label/value/period, the source URL, and the tool name. Line endings: the file is CRLF throughout and stays so (14122 of 14122 lines). Other contract tests that read tool_loop.rs (execution-core agent.rs forbidden tokens, durable_loop_contract FORBIDDEN_IN_THE_INLINE_LOOP list, cross_service, compaction_parity, and model-gateway tests tool_retry and context_recovery) were checked by reading their assertions. None of the tokens they forbid appear in the new text, and none of the function bodies they inspect were changed. Cargo results are NOT yet observed: both commands run in one background job (btopgi7y1), so do not treat the build as verified until the status file shows the exit codes."
+ },
+ {
+  "key": "exit-plan",
+  "title": "gRPC ExitPlanMode plants a grant on another thread with the switch off (D1-025, P0)",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\grpc.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib exit_plan",
+    "outcome": "Did not run any tests. The lib test target fails to compile with 3 x E0609 (no field `learning_client` on `state::AppState`) at services/model-gateway/src/http_routes.rs lines 10536, 10597, 10640.",
+    "passed": false
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib plan_mode",
+    "outcome": "Not run separately. It builds the same lib test target, which fails with the same 3 E0609 errors in http_routes.rs.",
+    "passed": false
+   },
+   {
+    "command": "cargo check -q -p model-gateway --all-targets",
+    "outcome": "Failed. The `model-gateway` lib target and the lib test target both fail with the same 3 E0609 `learning_client` errors, all in http_routes.rs. There were no errors from grpc.rs.",
+    "passed": false
+   },
+   {
+    "command": "git diff --stat (task files)",
+    "outcome": "grpc.rs shows +119/-15. The tree also holds many uncommitted changes in other files that this task did not make, which means 'no other file changed' cannot be confirmed. They include http_routes.rs (+237), session-core/src/orchestration_store.rs (+237), tool_loop.rs, capability-core registry_apis.go, codexsubscription, and frontend files.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "NOT VERIFIED BY ANY TEST RUN. The model-gateway lib and lib-test targets don't compile because of an unrelated uncommitted edit: http_routes.rs lines 10536, 10597 and 10640 use `state.learning_client`, and that field doesn't exist on AppState in state.rs. Once that is fixed elsewhere, the lead must run `cargo test -q -p model-gateway --lib exit_plan`, `cargo test -q -p model-gateway --lib plan_mode` and `cargo check -q -p model-gateway --all-targets` (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0) before committing. The tester saw no errors from grpc.rs, which suggests grpc.rs type-checks, but its tests have not run.",
+   "I read the code and it looks right. read_run_detail now runs whatever the switch says. A session_id that differs from detail.thread_id gets PermissionDenied, the same as the switch-on path. The in-memory handler gets req.session_id set to detail.thread_id. coordinator::exit_plan_mode keys record_grant on req.session_id, so the grant can only land on the run's own thread. The switch-on path is unchanged: when the run is unreadable and session_id is empty, it still falls through to None.",
+   "On the old code, the regression test exit_plan_mode_with_the_switch_off_refuses_another_thread_and_plants_no_grant would have received Ok and planted a DangerFullAccess grant on victim-thread. So it fails on the old code and passes on the new code.",
+   "Deliberate deviation, and it fails closed: with the switch off, an unreadable run (Session Core GetRun down, or no session credential) now gets Unavailable even when session_id is empty. Before, the switch-off ExitPlanMode did not depend on Session Core GetRun. When Session Core is unhealthy, plan exits on switch-off replicas now fail where they used to succeed. I accept this because the alternative is a grant keyed on an empty or unchecked id.",
+   "With the switch off, the handler's RUN_PLAN_MODE_EXITED event payload now carries the run's thread_id as session_id, including when the caller sent an empty id. Downstream consumers that saw an empty session_id before will now see the thread.",
+   "Test-mock change: MockRunService.get_run now answers for run-owned with mode execute and thread session-test. Only the existing switch-off test durable_run_owner_can_mutate_and_publish_plan_and_trajectory_state depends on it, and it has to be re-run.",
+   "Small doc edit: the read_run_detail doc comment dropped the words 'the durable grant switch'. It is accurate now that both paths use the function."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "The three cargo results are still pending. The lead should read scratchpad\\status.log, which gets exit_plan=, plan_mode= and check= lines plus done when finished, and then the t1/t2/t3 logs in the same folder. Expected new tests: exit_plan_mode_with_the_switch_off_refuses_another_thread_and_plants_no_grant, exit_plan_mode_with_the_switch_off_grants_on_the_runs_own_thread, exit_plan_mode_with_the_switch_off_refuses_an_unreadable_run_and_plants_no_grant. Existing switch-off test durable_run_owner_can_mutate_and_publish_plan_and_trajectory_state depends on the run-owned mock change and should still pass. Nothing was committed; the lead commits. Observation only, not changed: the HTTP plan_approval route in http_routes.rs passes a server-resolved thread_id, so it is not affected by D1-025.",
+  "summary": "D1-025 fix in grpc.rs exit_plan_mode, edit complete but cargo verification NOT finished. The handler now calls read_run_detail regardless of MODEL_GATEWAY_DURABLE_PLAN_GRANT. With the switch off: a session_id that differs from the run's thread_id is refused with permission_denied; an unreadable run is refused with unavailable when the switch is off or session_id is non-empty (switch-on path unchanged); on success the handler receives req.session_id set to detail.thread_id, so the in-memory grant is keyed on the run's own thread and an empty id is keyed there too. Switch-on behaviour is unchanged. One deviation from the brief: with the switch off an unreadable run is refused even when session_id is empty, because the in-memory grant has no other key and would otherwise be planted under \"\". Test support: MockRunService.get_run now answers run-owned (mode execute, thread session-test), and ResolveRunOwner authorizes a new run-unreadable that get_run cannot read. Three new switch-off tests added after without_the_durable_switch_the_exit_follows_this_replicas_flag_alone: exit_plan_mode_with_the_switch_off_refuses_another_thread_and_plants_no_grant, exit_plan_mode_with_the_switch_off_grants_on_the_runs_own_thread, exit_plan_mode_with_the_switch_off_refuses_an_unreadable_run_and_plants_no_grant. Line endings verified CRLF throughout (5298 CR = 5298 lines). File was already 22 rustfmt hunks before the edit; the new test code adds hunks in the same chained-call style as the surrounding tests."
+ },
+ {
+  "key": "skills-owner",
+  "title": "Skill PATCH and DELETE ignore the owner (D1-615, P0)",
+  "files": [
+   "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/skills_owner_scope_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet ./internal/api/",
+    "outcome": "exit 0, no output",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/api/",
+    "outcome": "ok, package passed in 243s, exit 0 (no per-test counts printed without -v)",
+    "passed": true
+   },
+   {
+    "command": "git diff --stat (task files) + git status on capability-core",
+    "outcome": "registry_apis.go modified (+52/-2); skills_owner_scope_test.go is new/untracked (so absent from diff --stat). No other file in capability-core changed.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Refusal answers 403, not 404. This follows the task's rule because the update handler's sharing branch already answers 403 ('only the skill owner may change sharing') to the same caller about the same skill. A member who holds a foreign skill id can still tell that the skill exists, which was already true through the sharing branch.",
+   "Behaviour change: a service principal without admin can no longer PATCH or DELETE a user-scoped skill. The coder reports that model-gateway forwards the user's bearer token, but no other plane's caller was checked against this.",
+   "A legacy row with scope 'user' and an empty owner_user_id can now be changed only by an admin. This is intended under the rule, but such rows are effectively admin-only.",
+   "The same class of bug is still open on MCP servers: registry_apis.go MCP PATCH and DELETE are scoped only by id and org. Other skill mutation endpoints (review-state, promote, revisions restore, if any) were not re-audited here. Log them as a separate depth row; this change does not cover them.",
+   "Tests run against the recordingDatabase fake, so the FOR UPDATE lock and the real Postgres row semantics are not exercised. The test only asserts the shape of the SQL query and its arguments.",
+   "registry_apis.go is CRLF in the working tree while the HEAD blob is LF (an autocrlf checkout). The diff is +52/-2 with no line-ending churn, so this is fine. The new test file is also CRLF, unlike skills_revision_test.go, which is LF. This is harmless under autocrlf."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "No Docker, no commit. Re-run `go vet ./internal/api/` and `go test -count=1 ./internal/api/` in apps/Model Plane/go/services/capability-core to confirm the final state (the background run was still in progress). Behaviour change for service principals: a service caller without the admin scope can no longer change or delete a user-scoped skill. Model-gateway forwards the user's capability bearer, so user flows are unaffected. Same bug class but out of scope and not changed: MCP PATCH (registry_apis.go, the patch handler, UPDATE mcp_servers WHERE id/org only; owner checked only on the sharing branch) and MCP DELETE (the delete handler, id/org only) let a caller with write scope disable, quarantine or delete another user's user-scoped MCP server.",
+  "summary": "D1-615 fixed: PATCH and DELETE on /api/v1/skills/{id} now refuse a user-scoped skill unless the caller is its owner or an org admin. Org-scoped skills keep today's rule. The check (ensureSkillCallerMayChange) runs inside the mutation transaction and takes FOR UPDATE on the row before the UPDATE/DELETE. The statements themselves are unchanged because skills_ownership_test.go:203 requires the UPDATE to keep exactly 7 args. A refused member gets 403 with the same message the sharing check already uses for this case, and no write or commit happens. A missing skill still gets 404. Enabling someone else's proposal gets 403, not 409, so the reply does not reveal the proposal. Test skills_owner_scope_test.go covers member refused, owner allowed, admin allowed, org scope unchanged, and missing gives 404. go vet and the targeted skill tests passed on the fixed code (run before the last test-file nil-guard edit). The mutation check with an overlay that restores the pre-change registry_apis.go fails the member and proposal cases (200/204/409 instead of 403) and the owner case (no lock read), and passes admin, org-scope and missing. The final go vet and full go test ./internal/api/ on the final files were still running when this was written; their result is in the scratchpad file final_checks.txt."
+ },
+ {
+  "key": "citation-href",
+  "title": "Citation links render javascript: URLs as anchors (D2-010, D2-011, P0)",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.citation-href.test.tsx"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "pnpm exec vitest run --pool=threads src/features/chat/components/chat-media-markdown.citation-href.test.tsx src/features/chat/lib/safe-href.test.ts",
+    "outcome": "2 test files passed, 14 tests passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "pnpm exec eslint src/features/chat/components/chat-media-markdown.tsx src/features/chat/components/chat-media-markdown.citation-href.test.tsx",
+    "outcome": "exit 0, 0 errors, 4 warnings (solid/reactivity and solid/components-return-once at lines 1219-1221 of chat-media-markdown.tsx, in the citations component before the edited hunk at 1236-1267)",
+    "passed": true
+   },
+   {
+    "command": "git diff --stat for the two task files from repo root",
+    "outcome": "Tracked chat-media-markdown.tsx: 32 insertions, 14 deletions, matching the coder's report. The test file chat-media-markdown.citation-href.test.tsx is untracked (new), so it does not appear in the diff stat. No other file in the task's scope changed. git status shows other chat files modified or untracked (ChatMessages.tsx, ChatPage.tsx, use-chat-controller.ts, ChatMessages.queue-controls.test.tsx, transcript-window.ts and its test), which belong to other work already in the worktree.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The new test goes through ChatMarkdown in ChatMessages.tsx, which another task is editing at the same time. Re-run chat-media-markdown.citation-href.test.tsx after that work lands.",
+   "Blocked chip rows keep the class verevon-chat-citation-chip__source, so they still get its :hover highlight and look interactive. A CSS rule for .verevon-chat-link-blocked would be a follow-up outside this finding.",
+   "The inline marker (the <details>/<summary> part) never had an href; it shows only hostname(url) as text. Only the chip row was an anchor, and it is now guarded. The bare-URL autolink at line 1381 only matches https?:// and the markdown link at line 1388 was already guarded, so no other href in the file carries a citation URL.",
+   "The vitest worker-start timeouts on this machine are unexplained. Treat a failure to start a worker as an infrastructure problem, not a test failure."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "Nothing was committed or staged, and no git state changed; only read-only git commands were run (show, diff, status). The worktree has concurrent edits from other tasks (ChatMessages.tsx, use-chat-controller.ts, global.css, gateway files). The new test imports ChatMarkdown from ChatMessages.tsx, which another task is editing, so re-run it after that lands. Blocked chip rows keep the .verevon-chat-citation-chip__source :hover highlight, because no CSS rule exists for .verevon-chat-link-blocked; the source card behaves the same way. A global.css rule would be a follow-up outside this brief. A stdin lint of the HEAD copy reports 12 no-restricted-syntax errors (lines 346-355, 649, 657) that the on-disk lint run does not show; this hunk does not touch those lines, so the on-disk run is the gate. If the vitest worker-start timeout appears again, rerun the same command.",
+  "summary": "Guarded the only citation-fed href in chat-media-markdown.tsx. The chip link in InlineCitationMarker (line 1248) now renders as an anchor only when isSafeLinkHref(entry.citation.url) is true. An unsafe URL renders as a span with the same index, title and snippet body, the chip classes plus verevon-chat-link-blocked, the file's existing blocked-link title, and no href. Other href sites in the file: the markdown-link anchor (line 1388) was already guarded; the bare-URL autolink (line 1381) is fed by message text, not a citation or search result, and its regex only matches https?:// so it was left unchanged. The new test renders a citation through ChatMarkdown. It checks six unsafe URLs (javascript:, JaVaScRiPt:, a tab inside javascript:, vbscript:, data:, file:) produce no anchor and no href, that the inert row's text equals the linked row's text, and that an https citation keeps href, target and rel. The edited file differs from HEAD by this one hunk (32 insertions, 14 deletions, lines 1236-1267)."
+ },
+ {
+  "key": "broker-db",
+  "title": "browser-broker reads its grants from the Ingestion Plane database (D1-210, D1-211, P0)",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\deploy\\docker-compose.yml"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "python -c \"import yaml; yaml.safe_load(open('apps/Model Plane/deploy/docker-compose.yml'))\"",
+    "outcome": "Could not run: ModuleNotFoundError, PyYAML is not installed. Checked the edited block by eye in git diff instead. Indentation and structure look valid: DATABASE_URL under environment, depends_on at service level with postgres service_healthy, the networks list no longer has browser-broker-db, and the top-level networks block ends cleanly after inter-plane-bus. Ruby is also missing, so YAML parsing was not machine-verified.",
+    "passed": false
+   },
+   {
+    "command": "grep -n \"ingestion-postgres\" 'apps/Model Plane/deploy/docker-compose.yml'",
+    "outcome": "No output (exit 1). No ingestion-postgres reference remains. 'browser-broker-db' and 'BROWSER_BROKER_PG_PASSWORD' also have zero matches. The only remaining hit for 'ingestion' is an unrelated comment at line 1446. The browser-broker DATABASE_URL is now postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?...}@postgres:5432/session_core, the same form as the 7 other DB consumers. The postgres service defines a healthcheck (line 40), so the depends_on condition service_healthy is valid.",
+    "passed": true
+   },
+   {
+    "command": "git diff --stat -- 'apps/Model Plane/deploy/docker-compose.yml'",
+    "outcome": "1 file changed, 14 insertions(+), 17 deletions(-). The compose file is the only file for this task. The status also shows apps/Model Plane/go/services/capability-core/internal/api/registry_apps.go modified (52 insertions, 2 deletions). It was not in the initial git status snapshot and is not part of this task. It is most likely another concurrent task's change, so the lead must not commit it with this one.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Least privilege is weaker than before. browser-broker now connects as the postgres superuser on session_core, the same way the plane's six other DB consumers do (docker-compose.yml lines 809, 1292, 1542, 1620, 1931, 2072). The old design used a dedicated browser_broker role and database. Fixing this needs an initdb path for the plane, which is a follow-up and out of scope here.",
+   "Grants already persisted in browser_broker on ingestion-postgres are not migrated, so they are dropped. TTL is clamped to 3600 s, so the impact is limited to live sessions that have to re-acquire their grants after the deploy.",
+   "No automated regression test was added. The plane-boundary gate (scripts/gates/plane-boundary.py, rule R1) flags ingestion-postgres in this file. The coder reports 1 hit on the old file and 0 on the new one, and that is the effective guard. Neither agent machine-parsed the YAML because PyYAML is not installed. I checked by reading the block: indentation is valid, postgres sits on the default network that browser-broker shares, and postgres has the healthcheck that depends_on service_healthy needs.",
+   "Stale references remain in files outside this task (needs_other_files, for the lead). apps/Model Plane/go/services/browser-broker/migrations/0001_browser_grants.up.sql lines 13-16 still describe ingestion-postgres and the missing bootstrap_broker_db.sh. apps/Model Plane/scripts/release-artifact.sh line 58 still lists BROWSER_BROKER_PG_PASSWORD. apps/Model Plane/docs/decisions/ledger.md around line 5162 still records the dedicated browser_broker database on Quarry's Postgres, so it needs a superseding entry.",
+   "Deploy notes. No new variable is needed: MODEL_POSTGRES_PASSWORD is already required, and it must be URL-safe because it sits inside DATABASE_URL. No database or role needs creating, because the entrypoint migrations create browser_grants in session_core on start. BROWSER_BROKER_PG_PASSWORD can be dropped from the operator env. The external browser-broker-db network and the browser_broker DB on ingestion-postgres can be retired on the Ingestion side, but only through that plane's own change."
+  ],
+  "needs_other_files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\browser-broker\\migrations\\0001_browser_grants.up.sql lines 13-16: the comment says the table sits on the shared ingestion-postgres server and cites apps/Ingestion Plane/scripts/bootstrap_broker_db.sh, which is absent here. Reword it to say the table lives in session_core on this plane's postgres, is used only by browser-broker's code, and that the postgres superuser role the other services use can also access it. Not edited: outside the named file.",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md lines 5161-5162 and 5181: the WS1.C restart-semantics entry says browser_grants is on the dedicated browser_broker database of Quarry's Postgres, and its psql recipe targets browser_broker. Per the Model Plane CLAUDE.md, record the move as a new dated ledger entry rather than silently rewriting the old one.",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\release-artifact.sh line 58 (optional cleanup): BROWSER_BROKER_PG_PASSWORD on RUNTIME_SECRET_KEYS is now unused. Removing it is safe because is_audited_runtime_secret_key only classifies candidate keys (line 725); leaving it is harmless.",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\docs\\plans\\model-plane-depth-register.md lines 303-304 (D1-210, D1-211): set the status after review. The line numbers cited in the row (1829, 1819, 1839) are stale; the live lines are 1880-1890 and 1900. Not edited.",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.plan-work\\designs\\WS12-frontend-ci-gates.md line 73: the register says its design section 2.3 wrongly claims every plane uses only plane-local hosts. My grep matched that wording at line 73; I did not open the file. Correct the claim there. Not edited."
+  ],
+  "deploy_notes": "Create nothing on the Model Plane postgres. The session_core database and the postgres superuser already exist, because the other services use them. browser_grants and its budget columns are created on browser-broker's first start by the entrypoint migrations. No new environment variable is needed: MODEL_POSTGRES_PASSWORD is already required and already on the audited list. BROWSER_BROKER_PG_PASSWORD is no longer read by the Model Plane compose, so it can be dropped from the Model Plane env chain, keeping it wherever the Ingestion Plane still needs it. Recreate browser-broker through apps/Frontend Plane/verevonv3/build-verevon-services.sh --from model, as the compose header requires, not a bare docker compose up. Cutover effect: the new table starts empty and grants in the old ingestion-postgres browser_broker database are not copied. Grants minted before the switch stop validating (Quarry reports them inactive). Their TTL is at most 3600 s (default 900 s), so cut over when no browser run is in flight, or accept that runs in flight fail once. Cleanup for a separate Ingestion Plane change, not done here: drop the now unused browser_broker database and role on ingestion-postgres, and remove the browser-broker-db Docker network if one exists on a host, since no repo file creates it. Disclosure: running plane-boundary.py made it read tracked .env.example files, because it scans them by design; its output showed only host names from them, not credential values. I also listed the deploy directory's file names and sizes without reading any .env contents.",
+  "summary": "Moved browser-broker off ingestion-postgres onto the Model Plane's own postgres, following the plane's existing pattern. Investigation: (1) every other Model Plane service with a database (session-core, execution-core, orchestrator-core, capability-core, letta-bridge, cost-core) connects as the postgres superuser to database session_core with ${MODEL_POSTGRES_PASSWORD:?...}; (2) the plane has no per-service database or role init (the postgres service sets only POSTGRES_DB=session_core and mounts no initdb directory), so there was nothing to add; (3) browser-broker applies its migrations in its container entrypoint with psql on every start, not at Go boot. Its statements are all IF NOT EXISTS and it keeps no schema_migrations table, so sharing session_core cannot collide with other services. Edits in the compose file: DATABASE_URL is now postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core; added depends_on postgres with condition service_healthy, as the other DB consumers do; removed the browser-broker-db network from the service and from the top-level networks; rewrote the comments that claimed the cross-plane link was intended. The committed link could not have worked from this repo: the Ingestion compose attaches postgres only to ingestion-net, no repo file creates browser-broker-db, init-databases.sql never creates browser_broker, and apps/Ingestion Plane/scripts/bootstrap_broker_db.sh does not exist in this worktree. Trade-off flagged, not fixed: the broker now runs as the shared superuser on session_core, the same as the plane's other services, which is not least privilege. A dedicated role would need an init path the plane lacks, and on the existing mp-postgres-data volume a manual CREATE ROLE and CREATE DATABASE as well."
+ },
+ {
+  "key": "broker-ttl-test",
+  "title": "Regression test: a sensitive approval keeps the configured TTL (D0-012)",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/server/approval_ttl_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet ./internal/server/",
+    "outcome": "Exit 0, no diagnostics.",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/server/",
+    "outcome": "ok in 50 to 86 s over repeated runs. Verbose run: 69 top-level tests PASS, 0 FAIL, 0 SKIP. The three new tests all pass: TestSensitiveApprovalIgnoresTheRequestedTTL, TestSensitiveApprovalIsNotRefusedForASubMinimumTTL, TestRunGrantHonoursAValidRequestedTTL.",
+    "passed": true
+   },
+   {
+    "command": "git status/diff --stat limited to browser-broker",
+    "outcome": "The only change is the untracked new file internal/server/approval_ttl_test.go. No tracked file was modified, so git diff --stat is empty. No other file changed for this task.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Lifetime assertions use a 5 s tolerance because the memory repository clock is unexported. The coder saw 0.4 to 5.5 s of host stall between grant calls on this Windows machine. `before` is read after the parent grant, so that stall is mostly excluded, but a stall of more than 5 s inside the child acquire could still make the test flake on a slow host. The 2 min vs 30 min and 2 min vs 10 min gaps leave room to widen the slack (for example to 30 s) without weakening what the test proves.",
+   "Tests 1 and 2 pin the approval TTL only through AcquireGrant with the memory repository. The durable repository's CreateScopedSensitiveApproval TTL handling is not covered here. That is out of scope for D0-012, which concerns the server choosing the TTL."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "Nothing committed or staged; the lead commits. git status under browser-broker shows only approval_ttl_test.go as untracked, and server.go has no diff. No docker, no .env reads, and no edits outside the named test file. The mutated server.go copies, overlay JSON files and the two output logs are in the scratchpad only. The package's go test time on this host varies a lot run to run (10.5s to 59s for the same package); the new tests' own assertions are milliseconds.",
+  "summary": "Added approval_ttl_test.go (new file, CRLF like its siblings, package server) that pins D0-012 in AcquireGrant with three tests. (1) A sensitive approval sent ttl_seconds=1800 lives the configured 2 minutes. (2) A sensitive approval sent ttl_seconds=10 is not refused and also lives the configured 2 minutes. (3) An ordinary grant with no allowed_actions honours ttl_seconds=600 (10 minutes). The file reuses grant.NewMemoryRepository, acquire, userPrincipal and NewServerWithConfig, adds two constants and two small helpers, and changes no production code. The existing fakes were enough. The one limit is that the memory repository's clock is unexported, so lifetimes are checked within a 5 second tolerance rather than exactly. Mutation check via go test -overlay with mutated copies in scratch (worktree untouched): restoring the pre-fix sensitive branch fails tests 1 and 2 and passes test 3; making ordinary grants ignore ttl_seconds fails test 3 only."
+ },
+ {
+  "key": "heartbeat-test",
+  "title": "Regression test: the scheduled step heartbeat stays inside its timeout",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/orchestrator-core/cmd/activities/heartbeat_interval_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet ./cmd/activities/",
+    "outcome": "exit 0, no diagnostics",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./cmd/activities/ -run Heartbeat",
+    "outcome": "1 test run, 1 passed, 0 failed (TestScheduledStepHeartbeatStaysInsideAgentLaneTimeout PASS); package ok in 23.3s",
+    "passed": true
+   },
+   {
+    "command": "git status/diff --stat under apps/Model Plane/go/services/orchestrator-core",
+    "outcome": "Only untracked file: cmd/activities/heartbeat_interval_test.go. git diff --stat empty, so no tracked file changed (activities.go and step_loop.go untouched).",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The coder's background mutant run (21 s, time.Minute * 2, 2 * time.Minute, 30 * time.Second, unnamed variable) was never confirmed by either report. Reading the code, they should come out as expected: 3*21s > 60s fails, the trailing [,}] rejects 'time.Minute * 2', and '2 * time.Minute' and '30 * time.Second' parse correctly. The lead may still want to read the job output before committing.",
+   "The test reads step_loop.go as source text, so it depends on gofmt layout: the function body is taken to end at the first '\\n}', which also works on CRLF files. A timeout written as '2 * time.Minute + 30 * time.Second' or as a named constant fails loudly with a message to re-point the test, which is what the task asked for.",
+   "The test pins only the agent-lane HeartbeatTimeout in executeScheduledAgentStep (step_loop.go:125, time.Minute). Any other activity options that reuse scheduledStepHeartbeatEvery are not covered.",
+   "go vet passes, but gofmt -l lists the new file. The coder says this is because the file is CRLF, the same as the existing activities.go."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "The lead should commit heartbeat_interval_test.go only after the background mutant results in job brqiues7h are read. The output file is under C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/tasks/brqiues7h.output, and the scratch mutant files are in the scratchpad hbmut folder. go env reports a go.work at apps/Model Plane/go/go.work, which the go commands used without error.",
+  "summary": "Added cmd/activities/heartbeat_interval_test.go (package activities, CRLF to match its siblings). TestScheduledStepHeartbeatStaysInsideAgentLaneTimeout pins scheduledStepHeartbeatEvery (activities.go, 20 s) to at most a third of the agent-lane HeartbeatTimeout. The timeout is read as source text from ../workflows/step_loop.go, searched only inside func executeScheduledAgentStep, and parsed as time.Minute or N * time.Second followed by , or }. Any other form fails with a message to re-point the test. It also fails on a non-positive timeout or interval. The check compares 3*interval against the timeout, so there is no integer-division rounding. activities.go and step_loop.go are untouched; under the service directory git status shows only the new file. Verified: go vet is clean and the Heartbeat test passes. An overlay mutant with the heartbeat at 60 s (the original bug) fails with the expected message. Still running in background job brqiues7h (output file under C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/tasks/brqiues7h.output): the 21 s mutant and four timeout-form variants (time.Minute * 2 must fail, 2 * time.Minute must pass, 30 * time.Second must fail, an unnamed variable must fail). Those five results are not yet confirmed. Nothing is committed. This covers only the heartbeat subtask, not the wider wave-1 blockers in the request."
+ },
+ {
+  "key": "go-gen-drift",
+  "title": "Guard: the checked-in Go bindings match the protos",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/go-gen-drift.sh"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "bash \"apps/Model Plane/scripts/tests/go-gen-drift.sh\"",
+    "outcome": "Exit 0. Output: 'go-gen-drift: 32 generated Go files match go/gen/model_plane'.",
+    "passed": true
+   },
+   {
+    "command": "git status --short / git diff --stat for the task's files",
+    "outcome": "The task file apps/Model Plane/scripts/tests/go-gen-drift.sh is untracked (new). Tracked modifications are 5 files, all from other work: chat-media-markdown.tsx, global.test.js, docker-compose.yml, grpc.rs and tool_loop.rs. This task changed none of them. go/gen/go.sum shows only a line-ending warning, and it is not listed in the diff stat.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The guard is not wired into CI or any pre-commit hook. It only catches drift when someone runs it, so the finding (nothing checks the bindings) is closed only in part until a runner calls it.",
+   "The guard pins the toolchain implicitly: it passes only with buf 1.72.0, protoc-gen-go v1.36.12 and protoc-gen-go-grpc 1.6.2. A plugin upgrade will report every file as DRIFT and look like stale bindings. The script could print the installed plugin versions on failure to make this easier to diagnose.",
+   "proto/buf.gen.go-only.yaml uses remote plugins while the guard uses local ones. If the two ever produce different output, the guard and the regeneration recipe will disagree.",
+   "The DRIFT and exit 1/exit 2 paths were checked only by the coder, against a copy in the scratchpad. The tester and I ran only the clean case (exit 0, 32 files, go/gen untouched).",
+   "Two behaviours go beyond the spec but are reasonable: a checked-in *.pb.go with no generated counterpart is reported as DRIFT, and setup failures exit 2.",
+   "The script has the exec bit on disk only (core.filemode=false). The lead may want git update-index --chmod=+x."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "core.filemode is false in this checkout, so git add will not record the exec bit set on disk. Run git update-index --chmod=+x on the script if you want mode 100755. The other scripts in the folder are mixed 100644 and 100755, so this is optional. .gitattributes already forces LF for *.sh. The guard passes only while buf 1.72.0, protoc-gen-go v1.36.12 and protoc-gen-go-grpc 1.6.2 are installed. A plugin upgrade will flag every file, which is the signal to regenerate and commit. The go/gen/go.sum modification was already in the tree before this task and was not touched.",
+  "summary": "Added the Go bindings drift guard at apps/Model Plane/scripts/tests/go-gen-drift.sh (new, untracked, LF line endings, executable on disk, not committed). It regenerates the model_plane protos into a mktemp directory with buf 1.72.0 and the local protoc-gen-go v1.36.12 and protoc-gen-go-grpc 1.6.2, using a template that mirrors proto/buf.gen.go-only.yaml (managed mode, paths=source_relative). It then compares each of the 32 generated *.go files with go/gen/model_plane, ignoring CR characters. Current tree: all 32 match, exit 0. The plugin versions equal the headers in all 18 *.pb.go files (v1.36.12) and all 14 *_grpc.pb.go files (v1.6.2). Two additions beyond the literal spec: (1) a checked-in *.pb.go with no generated counterpart is also reported as DRIFT, so a removed proto cannot leave stale bindings behind; the three hand-written *_test.go files in that directory are excluded. (2) Exit 2 marks setup failures (missing buf or plugin, buf failing, no output), so exit 1 means drift only. Drop (1) if the literal spec is wanted. The script never writes into go/gen and removes its temp dir on exit. Scope is Go only: the Python and TypeScript outputs in proto/buf.gen.yaml are not checked."
+ }
+]

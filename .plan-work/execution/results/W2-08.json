@@ -1,0 +1,325 @@
+{
+ "batchId": "W2-08",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS17-S2",
+   "outcome": "needs-attention",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/scripts/tests/history-foundation-proof.sh",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts (new)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts (new)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx",
+    "apps/Frontend Plane/verevonv3/tests/e2e/chat-history.spec.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core (run from apps/Model Plane/rust, after the fix)",
+     "outcome": "560 passed, 0 failed, 189 ignored (was 188 ignored before; the new re_archive_after_restore_writes_a_second_archived_event is the extra ignored test, compiled but not run because it needs DATABASE_URL)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 services/session-core/src/grpc.rs, filtered to the edited hunks (archive_thread around line 6950-6970 and the new test around line 16400-16470)",
+     "outcome": "no diffs in the edited hunks; the whole file has pre-existing rustfmt diffs elsewhere, so no formatting was applied"
+    },
+    {
+     "command": "Earlier slice runs, unchanged this round: cargo test -q --manifest-path apps/gateway/Cargo.toml --bin verevon-gateway-rs thread_paging_tests (5 passed); pnpm vitest run chat-history.test.ts + ChatSidebarOrganizer.test.tsx (10 passed); go test ./... in go/gen (ok); model-gateway lib compiled only",
+     "outcome": "reported by the previous run; not re-run this round because this round touched only grpc.rs (session-core)"
+    }
+   ],
+   "db_tests_written": [
+    "unarchive_restores_thread_in_list (apps/Model Plane/rust/services/session-core/src/grpc.rs, ignored; run with --ignored --test-threads=1 against a disposable DATABASE_URL)",
+    "re_archive_after_restore_writes_a_second_archived_event (apps/Model Plane/rust/services/session-core/src/grpc.rs, ignored; archive, restore, archive again, asserts two THREAD_ARCHIVED events)"
+   ],
+   "lead_todo": [
+    "Run the new ignored test and the existing one against a disposable Postgres: DATABASE_URL=<disposable> CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core re_archive_after_restore -- --ignored --test-threads=1, then the same with unarchive_restores_thread_in_list (run from apps/Model Plane/rust).",
+    "Decide whether archive_threads (grpc.rs, the format!(\"{thread_id}:archived\") key) gets the same per-archive key fix before the slice merges; it was out of the named scope.",
+    "Rebuild session-core, model-gateway and the BFF gateway images (lead only): bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build session-core model-gateway; docker compose -f \"apps/Frontend Plane/verevonv3/docker-compose.yml\" up -d --no-deps --build gateway.",
+    "Run the operator proof on the rebuilt stack with PROOF_DATABASE_URL, PROOF_BFF_URL, PROOF_COOKIE_JAR, PROOF_ORG_ID, PROOF_USER_ID set: bash \"apps/Model Plane/scripts/tests/history-foundation-proof.sh\"; it archives and restores thread 120.",
+    "Run the Playwright spec: cd \"apps/Frontend Plane/verevonv3\" && pnpm test:e2e -- chat-history (needs the dev server on a second port, since :5173 is the main checkout).",
+    "Add the ZDR golden row (archive allowed, title and preview refused) to zdr_posture_matrix.rs and the zdr-contract-sync test, which are live-only files.",
+    "Buf checks: buf lint \"apps/Model Plane/proto\" with the ratchet, and the tag-diff evidence in place of buf breaking (baseline.binpb is 0 bytes).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/chat-sidebar-organizer.css: add a style for .chat-organizer__load-more (the button renders unstyled without it).",
+    "shared-edit the sidebar stylesheet that styles .core-chat-sidebar__clear: add styles for .core-chat-sidebar__archive-toggle and .core-chat-sidebar__load-more (the buttons render unstyled without it).",
+    "Run rustfmt --check only on the changed hunks of grpc.rs and http_routes.rs (whole-file cargo fmt is not safe on these CRLF or mixed files; grpc.rs already has pre-existing rustfmt diffs elsewhere)."
+   ],
+   "deviations": [],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/chat-sidebar-organizer.css (style .chat-organizer__load-more)",
+    "The sidebar stylesheet that styles .core-chat-sidebar__clear (styles for .core-chat-sidebar__archive-toggle and .core-chat-sidebar__load-more)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Frontend Plane/verevonv3/tests/e2e/chat-history.spec.ts: the THREADS route pattern '**/api/v1/chat/threads' is end-anchored by Playwright (globToRegexPattern appends '$'), so the archived-listing request '/api/v1/chat/threads?archived=archived' is never intercepted and the 'Show archived' step fails. Change the page.route(THREADS, ...) registration to a pattern that accepts a query string, for example the RegExp /\\/api\\/v1\\/chat\\/threads(\\?.*)?$/, so the spec's own handler, which reads the archived query parameter, receives the archived listing."
+    ],
+    "dod_gaps": [
+     "Run unarchive_restores_thread_in_list and re_archive_after_restore_writes_a_second_archived_event against a disposable Postgres: DATABASE_URL=<disposable> CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core <name> -- --ignored --test-threads=1, run from apps/Model Plane/rust.",
+     "Add the ZDR golden row (archive allowed; title and preview refused) to zdr_posture_matrix.rs and the zdr-contract-sync test. Both are live-only files outside this slice's ownership.",
+     "model-gateway does not compile in this worktree right now: cargo check -p model-gateway --all-targets fails with two E0425 errors at services/model-gateway/src/sse.rs:1692 (skills_truncated and skills_dropped are not in scope; lifecycle_events::skills_truncated is referenced). That is a sibling slice's in-flight edit to sse.rs and the untracked lifecycle_events.rs, not S2. The S2 MG change (one Option<bool> field on UpdateThreadPresentationBody and one initializer) is type-consistent with the generated archived field, but cargo test -p model-gateway has not been run for S2 and must run once that slice lands.",
+     "Playwright run after the required fix: cd \"apps/Frontend Plane/verevonv3\" && pnpm test:e2e -- chat-history, on a second dev server because :5173 is the main checkout and needs a restart after host edits.",
+     "Rebuilt images and the operator proof (lead only, docker): bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build session-core model-gateway; docker compose -f \"apps/Frontend Plane/verevonv3/docker-compose.yml\" up -d --no-deps --build gateway; then bash \"apps/Model Plane/scripts/tests/history-foundation-proof.sh\" with PROOF_DATABASE_URL, PROOF_BFF_URL, PROOF_COOKIE_JAR, PROOF_ORG_ID and PROOF_USER_ID set. It archives and restores thread 120.",
+     "Stylesheet rules for the three new control classes (see the P2 cleanup finding); these files are outside the ownership set, so the lead must place them.",
+     "rustfmt --check on the edited grpc.rs and http_routes.rs hunks was not re-run here; the implementer reports no diffs in the edited hunks."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "archive_threads (grpc.rs, bulk archive for a user, around line 7048) builds its THREAD_ARCHIVED idempotency key as format!(\"{thread_id}:archived\"). After a restore that thread can be archived again through this path too, so the INSERT hits idx_events_idempotency_key and the whole bulk transaction rolls back. Same root cause as the fixed archive_thread bug; fix it the same way (key per archive instance, for example the archived_at value per row) in a follow-up or with the lead's approval."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Real-PG tests not run: unarchive_restores_thread_in_list and re_archive_after_restore_writes_a_second_archived_event need DATABASE_URL to a disposable Postgres and --ignored --test-threads=1."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The sidebar still loads the full active listing through listChatThreads and widens a display window with Load more, not server pages, because its local-cache reconcile and migration need a complete listing; a true server-paged sidebar needs that reconcile moved first."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No ZDR golden row covers presentation archived=false or the BFF archive/unarchive routes under a ZDR credential; the row asks that archive is allowed and title/preview refused, and zdr_posture_matrix.rs is live-only so the lead must add it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Playwright spec tests/e2e/chat-history.spec.ts mocks the BFF with page.route and has not been run; its {data} envelope and the sidebar button names are unverified against the rebuilt BFF."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No HTTP-level BFF test exercises change_archive_state (owner check, 404 for non-chat threads, error relay); only the pure archive_state_call URL and body are unit-tested."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The model-gateway lib tests were compiled but not run after the archived field was added to UpdateThreadPresentationBody, and there is no unit test that the body accepts archived with deny_unknown_fields."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Session Core presentation updates to an archived thread pass the WHERE clause only when archived=false is set, so a combined title or pin plus archived=false request restores and applies the other fields in one statement; intended but not yet pinned by a test."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Python stub was regenerated with local protoc 35.1 rather than the buf remote plugin, so its serialized descriptor escapes differ from buf output even though the runtime header matches; regenerate with buf remote if CI checks drift."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "go/gen browser.pb.go differs from a fresh local regeneration (pre-existing drift, not from this slice); the repo's CRLF attributes also warn about sessions.pb.go."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat-history.ts declares fork, star, mark_unread, search, switch_version and rewind schemas that no code calls yet; they are contract-only until their slices wire them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "archive_threads (bulk ArchiveThreads, session-core grpc.rs around line 7050) still keys THREAD_ARCHIVED as `{thread_id}:archived`; after a restore that thread can collide with an earlier bulk archive, so the whole bulk transaction rolls back with Status::internal. No caller of POST /v1/threads/archive exists in the repo, so it is latent; fix it with the same per-archive key as archive_thread, or in a follow-up with the lead's approval."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The two real-PG tests (unarchive_restores_thread_in_list and re_archive_after_restore_writes_a_second_archived_event) are #[ignore] and were not run; they need DATABASE_URL to a disposable Postgres with --ignored --test-threads=1."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No ZDR golden row covers presentation archived=false or the BFF archive/unarchive routes under a ZDR credential. The code path is correct (title and preview refused, archive and restore allowed under authorize_owner_housekeeping), but the row lives in the live-only zdr_posture_matrix.rs and the lead must add it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The sidebar still loads the whole active listing through listChatThreads and widens a display window with Load more instead of server pages, because the local-cache reconcile needs a complete listing; only the archived view is server-paged."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "ChatSidebarOrganizer.test.tsx covers only Load more; archived filtering and archive/unarchive interactions are tested only by the Playwright spec, which the glob defect above would block."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No HTTP-level BFF test exercises change_archive_state (owner check, 404 for a non-chat thread, error relay); only the pure archive_state_call URL and body helpers are unit-tested."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The new controls have no CSS: .chat-organizer__load-more, .core-chat-sidebar__archive-toggle and .core-chat-sidebar__load-more have no rule anywhere in src (global.css holds .core-chat-sidebar__clear at line 2768). The buttons render as browser defaults until the shared stylesheets get rules; this needs edits outside the ownership set."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Playwright spec has not been run. Its selectors were checked statically against CoreSidebar.tsx ('More options for <title>', the 'Archive' menuitem, 'Show archived', 'Restore <title>', and span.verevon-sidebar-row-strong), and they exist; the only defect found is the route glob."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A presentation UPDATE with archived=false combined with title, pin or persona writes all of them in one statement against a thread that the restore un-archives. This is intended, but no test pins it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-history.ts says every action changes server state, but thread.search is read-only; the fork, star, mark_unread, search, switch_version and rewind schemas are declared but no code calls them yet."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CoreSidebar.tsx declares SIDEBAR_PAGE_SIZE between import statements; lint passes, but the constant should move below the imports."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "sessions_pb2.py was regenerated with a local protoc (runtime header 7.35.1, same as HEAD), not the buf remote plugin. The buf remote python output carries a different descriptor (7.36.2, json_name included), so the file is not a byte match of buf output. The offsets are consistent with one added field: messages before UpdateThreadPresentationRequest are unchanged and later ones shift by 36 bytes. Regenerate with a matching protoc if CI checks drift."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "sessions.pb.go, sessions_pb2.py and the other touched generated and .proto files are CRLF in the worktree while the HEAD blob for sessions.pb.go is LF. The git diff stat stays small (24 lines in sessions.pb.go), so there is no whole-file rewrite, but confirm line endings before commit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The buf lint ratchet fails both at HEAD and in the worktree: the committed baseline records 1013 findings and buf lint emits 1585 at both HEAD and this worktree. S2 adds no finding (count identical, and the new field has a doc comment), so this is pre-existing."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Required fix 1 applied in apps/Model Plane/rust/services/session-core/src/grpc.rs. archive_thread now builds its THREAD_ARCHIVED idempotency key as format!(\"{}:archived:{}\", req.thread_id, archived_at.to_rfc3339()), where archived_at is the value the UPDATE stored for this archive instance (the UPDATE only runs when archived_at IS NULL, so a restored thread gets a new value on each archive). A two-line why-comment sits above the key-building insert. Added the ignored real-PG test re_archive_after_restore_writes_a_second_archived_event: seed an active thread, archive, restore via update_thread_presentation(archived=Some(false)), archive again; asserts all three calls succeed, two THREAD_ARCHIVED events exist for resource thread:<id>, and the thread is archived. The test was not run (no DB here). Nothing else in the slice changed; the file stays all-CRLF (16544 CRLF of 16544 LF). Not touched: archive_threads (the bulk user-level archive, around line 7048) still builds the key as format!(\"{thread_id}:archived\"). It has the same collision after a restore, so an archive-all after a restore of one of its threads would fail with Status::internal. The reviewer named only archive_thread, so I did not widen the change; see depth_findings P1."
+  },
+  {
+   "id": "WS19-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\office_verify\\check.py",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\office_verify.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\health_attest.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\Dockerfile",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\verify-sandbox-isolation.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- office_verify office_probe",
+     "outcome": "17 passed, 0 failed. The new a_missing_font_is_listed_as_substituted is cfg(target_os = linux) so it is not compiled on this Windows host and is not counted here."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 office_verify.rs (after joining the parsed-let line)",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "python3 -m py_compile check.py",
+     "outcome": "compiles (the bytecode it wrote was removed)"
+    },
+    {
+     "command": "python3 -I probe of check.declared_fonts / font_rendered / render_pdf_facts in scratch dir, poppler stubbed",
+     "outcome": "declared 'Verevon Missing Font' from a docx run; theme minorHAnsi resolved to Calibri; Calibri matched Carlito and Times New Roman matched Liberation Serif; missing family flagged with fonts warning and fonts_substituted=1; Carlito-rendered case gave no warning and fonts_substituted=0; pdf kind declares nothing"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib (full lib)",
+     "outcome": "started in background, result NOT seen at report time. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\font_probe\\lib_test.txt. The previous round recorded 1295 passed and 1 pre-existing failure (provenance); verify from that log before committing."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Read the full lib run log (path in notes) and confirm 1295 passed plus the pre-existing provenance failure only; the Windows run does not include the linux-gated test.",
+    "Run a rust:1 container cargo test -q -p execution-core --lib with soffice and openpyxl present, so a_missing_font_is_listed_as_substituted and the other soffice tests execute rather than skip. This is the first compile of the cfg(linux) test.",
+    "Keep the earlier lead_todo items: shared edit to code_interpreter.rs for previews, image rebuild and apt names, verify-office-render.sh cold/RSS gate, verify-sandbox-isolation.sh, live H5 proof on a dev stack."
+   ],
+   "deviations": [
+    "Font check runs against declared families from all rFonts in document.xml and styles.xml, so docDefaults theme fonts can add a warning for a family a file names but never shows. Advisory, and the warning text says exactly that.",
+    "Mapping keeps the five pairs from the fix list; Calibri Light is not mapped."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Re-run `cargo test -q -p execution-core --lib -- office_verify office_probe` and the full `cargo test -q -p execution-core --lib` to completion and record the outcome. My filtered run (log: .../scratchpad/verify_s4/filtered.txt) had not finished when I stopped, and the implementer's full-lib log (lib_test.txt) is 0 bytes, so the 17-passed and 1295-passed claims are unverified here."
+    ],
+    "dod_gaps": [
+     "Run the cfg(target_os = linux) tests (a_missing_font_is_listed_as_substituted, libreoffice_converts..., recalc_reports_div0...) in a rust:1 container with soffice, poppler-utils and openpyxl present; they are unexecuted on Windows.",
+     "Shared edit to code_interpreter.rs (line ~614 uses office.reports only): wire Verification.previews into CodeResult so the preview and thumbnail frames reach the S5 consumer.",
+     "Docker image build: confirm the apt package names and that soffice is on PATH in debian:bookworm-slim; record image size delta.",
+     "Run scripts/verify-office-render.sh (needs docker) and the live H5 prompts (corrupt xlsx/docx) with CODE_INTERPRETER_OFFICE_VERIFY=render.",
+     "verify-sandbox-isolation.sh adds only a generic profile-write probe under bwrap, not an actual soffice run; a live bwrap run on Linux is needed for the LibreOffice case."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "check.py render_check: the 50 s soffice budget excludes the four poppler calls (20 s each), so with render on a slow file the total can exceed the caller's 60 s OFFICE_VERIFY_TIMEOUT_SECS and the whole structural report is lost as skipped, contrary to the code comment; fold poppler time into the budget before enabling render."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "declared_fonts scans all of styles.xml and theme fonts, and Calibri Light is not in METRIC_COMPATIBLE, so any document whose styles mention the heading font gets a 'fonts' warning even when no text uses it; add the mapping or restrict to fonts used in body text before switching render on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan-named tests soffice_timeout_is_killed_and_reports_unavailable, render_argv_has_unshare_net_and_no_extra_binds and shipped_xlsx_bytes_are_not_the_recalculated_copy are absent; the timeout and shipped-bytes behaviour is implemented but unguarded."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Verification.previews is written by collect_render and never read (code_interpreter.rs uses only office.reports), so under render mode the previews are base64-encoded and then dropped; wire them or skip the work until S5."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan names a render{status, pages, fonts_substituted, preview_pdf_b64, thumbs_b64} object and the evidence cites verification[].render; the implementation emits check ids plus stats (render_pages, fonts_substituted, recalc_errors) and no render object, so S3/S5 consumers need the agreed shape."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row names a tool_loop.rs ~4307 sentence; no change is in tool_loop.rs and the implementer did not mention it. Any model-facing sentence must be conditional on the switch so the off path stays byte-identical."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "health_attest::probe() runs office_render_ready (synchronous soffice --version, up to 30 s) from spawn_heartbeat at boot only when render is requested; it only logs and exposes no readiness signal, which is weaker than the plan's separate office_render_ready."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "subprocess.run timeout in soffice_convert kills only the direct child, so a soffice.bin left behind would survive until the sandbox tears down; confirm on Linux with a hung-converter test."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Dockerfile omits the Noto subset the plan lists (fonts-noto-core or equivalent); acceptable only if S0 verified the list."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The fonts check treats every family named anywhere in document.xml and styles.xml as declared (the implementer's stated deviation); this is advisory but widens the warning surface."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "data-loss",
+    "zdr"
+   ],
+   "notes": "Required fixes applied. (1) check.py: render_pdf_facts now takes the declared families. declared_fonts(path, kind) reads docx (word/document.xml, word/styles.xml), xlsx (xl/styles.xml font names) and pptx (ppt/slides) explicit families, resolves theme references through the theme part (docx theme1, pptx theme1), and skips +theme refs it cannot resolve. font_rendered strips the subset prefix and matches the family or its metric-compatible stand-in (Calibri->Carlito, Cambria->Caladea, Arial->Liberation Sans, Times New Roman->Liberation Serif, Courier New->Liberation Mono). A declared family the render does not show gives one 'fonts' warning and stats fonts_substituted. It runs only when pdffonts returned rows. (2) office_verify.rs: fixture docx-missing-font and test a_missing_font_is_listed_as_substituted (cfg linux, skips without python or soffice); it parses stats.fonts_substituted and asserts a 'fonts' warning. The file is CRLF throughout (888/888) and was edited by byte-level script. Soffice is absent on this host, so the test is unexecuted here. The earlier Dockerfile, health_attest, verify-sandbox-isolation and shared code_interpreter.rs items from the previous report still stand. Calibri Light is not in the metric map (the row lists five pairs), so a default-theme pptx/docx using Calibri Light may warn; flagged below."
+  }
+ ]
+}

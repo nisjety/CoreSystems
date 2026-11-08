@@ -1,0 +1,867 @@
+{
+ "batchId": "W3-05",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.role-routing.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/router-policy/lib/router-policy-model.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/router-policy/components/RouterPolicyPage.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/router-policy/components/RouterPolicyPage.test.tsx (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/router-policy (final edits)",
+     "outcome": "8 of 8 pass: save_round_trips_tool_fallback_ladder, save_round_trips_roles, does not save before load, invalid_role_table_error_marks_the_row, read-only with ikke aktivert, add only chat models and reorder, remove last candidate drops the purpose, no add control at four candidates."
+    },
+    {
+     "command": "pnpm exec vitest run src/features/router-policy src/shared/actions src/shared/api/chat-client src/shared/api/router-policy-client.test.ts src/shared/i18n/error-catch-sites.test.ts (final)",
+     "outcome": "426 of 429 pass. Three fail and none is in the router-policy code: (a) admission-contract golden test, expected until regenerated; the only changed row is router_policy.update schemaHash (see lead_todo); (b) action-registry P-SPA1 ordering test, pre-existing at HEAD (space.files.attach is defined in domains/spaces/ws14.ts); (c) catch-site ratchet over-counts SpaceFilesPanel.tsx and SpaceRoomComposer.tsx, pre-existing and untouched. The new action-registry test, the chat-client role-routing test, router-policy-client.test.ts and the RouterPolicyPage ratchet entry all pass."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (final)",
+     "outcome": "One error only: src/shared/api/schedule-contract.test.ts(28,16) TS2352, pre-existing at HEAD in an untouched file. No error in any touched file, including the two new test files."
+    },
+    {
+     "command": "pnpm lint (full, final)",
+     "outcome": "364 problems (51 errors, 313 warnings), exit 1. None is in the seven touched files. Pre-existing elsewhere."
+    },
+    {
+     "command": "pnpm exec eslint on the seven touched files",
+     "outcome": "0 errors, 0 warnings after one solid/reactivity warning was fixed (copy accessor read inside JSX)."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/http.ts: in extractError, the details guard currently reads `e.details && typeof e.details === 'object' && !Array.isArray(e.details) ? (e.details as Record<string, unknown>) : null`. Change it to `e.details && typeof e.details === 'object' ? (e.details as Record<string, unknown>) : null` so the invalid_role_table issues array reaches ApiError.details. Then check any http test that pins the array-drop rule and any consumer that reads ApiError.details as a record, and run tsc6. Until this lands, per-row role errors never show in production; the generic banner still shows.",
+    "regenerate agent-action-admission.json: from C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3 run `VEREVON_UPDATE_GOLDEN=1 pnpm exec vitest run src/shared/actions/admission-contract.test.ts`, which writes src/shared/api/contracts/agent-action-admission.json. Row count is 259 (249 registry plus 10 surface), unchanged. The only changed row is router_policy.update: schemaHash sha256:508d301a4a2e8c137e76c8ff093cb9b313b9b4ea2028e05ea08cbecea6d9ae74 becomes sha256:ba1aa503fd2b11f865a96bd9b9c54e244bad822cb4b01cabb167d5ff8f474af9 (verified from the single-hunk diff). Then refresh the sha256 pin for the apps/Model Plane/api/contracts/agent-action-admission.json entry in scripts/tests/zdr-contract-sync.test.sh and re-vendor the copies that script names (capability-core testdata, execution-core fixtures, model-gateway fixtures).",
+    "After items 1 and 2, rerun pnpm exec vitest run src/features/router-policy src/shared/actions src/shared/api and tsc6 -p tsconfig.app.json. Expected remaining failures are only the pre-existing P-SPA1 ordering test, the catch-site ratchet over-count in SpaceFilesPanel.tsx and SpaceRoomComposer.tsx, and the schedule-contract.test.ts TS2352 error. Also replace the array-cast refusal helper in RouterPolicyPage.test.tsx with a fetch-level test once item 1 lands."
+   ],
+   "deviations": [
+    "The role-table and document types live in router-policy-model.ts, which is owned, instead of router-policy-client.ts, which is not. The client is unchanged.",
+    "The action schema also lists complexity.tool_use_floors_complex as a required boolean. The design named only the ladder and roles. The server always serialises this flag and defaults it to true when absent, so the action would otherwise reset it.",
+    "The page renders no form until a document has loaded for the current organisation. Before, a failed load showed an empty draft whose Save would PUT zeros. This is a behaviour change.",
+    "The ladder is preserved on save but has no editor. The design's live step says edit the ladder, which conflicts with its own goal; I followed the goal.",
+    "roleRouting is read from /api/v1/models through listModelCatalogue(). The field is present only when the gateway sends true, so existing callers see no change.",
+    "Section copy is bilingual through i18n.tr, Norwegian first, as the design names the Norwegian title and note. The rest of the page stays English, as before.",
+    "The per-row error test injects the refusal at the client boundary because ApiError drops array details; see the P1 depth finding and lead_todo item 1."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/http.ts (shared edit, lead_todo 1: keep array details in extractError)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerate, not edited; lead_todo 2)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (sha256 pin refresh and re-vendor list, not edited; lead_todo 2)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Regenerate src/shared/api/contracts/agent-action-admission.json (VEREVON_UPDATE_GOLDEN=1 pnpm exec vitest run src/shared/actions/admission-contract.test.ts). Then refresh the sha256 pin in scripts/tests/zdr-contract-sync.test.sh and re-vendor the copies that script names. The admission golden test stays red until then. This slice caused that failure (router_policy.update schemaHash), and the slice does not own the golden file.",
+     "Apply the http.ts shared edit: extractError must keep array details. Until it lands, per-row invalid_role_table errors never reach RouterPolicyPage in production and only the generic banner shows. After it lands, replace the client-boundary refusal helper in RouterPolicyPage.test.tsx with a fetch-level test.",
+     "Live proof (wave mode, not run): on a second Vite server, edit a role and save, reload, then confirm the ladder, the roles and tool_use_floors_complex persist via GET /api/v1/router-policy. Also confirm that a 400 invalid_role_table body survives the verevonv3 gateway proxy_json path and marks the row. Screenshots at 1280 and 375 px."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Per-row invalid_role_table errors never reach the page in production: http.ts extractError keeps only object details, so ApiError.details is null for the role-issue array and only the generic banner shows. The page test injects the refusal at the client boundary to cover the mapping."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Once the http.ts shared edit lands, replace the array-cast refusal helper in RouterPolicyPage.test.tsx with a fetch-level test that a 400 invalid_role_table body marks the named row."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The live proof was not run (wave mode): second Vite server, edit the ladder and a role, save, reload and confirm both persist via GET /api/v1/router-policy, screenshots at 1280 and 375 px."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The design's live step says edit the ladder, but its goal makes the ladder a field the page keeps and does not show. The owner should say whether a ladder editor is wanted; none is built."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The role table is read-only while role routing is off (the design's rule, implemented). The owner should confirm admins may not prepare the table before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The action schema now requires tool_fallback_ladder and complexity.tool_use_floors_complex, so a future caller that sends a partial router_policy.update document is refused. No FE caller exists today (grep), so only future clients are affected."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Not covered: the add select clearing after a pick, the move-down button disabled on the last candidate, and the move-up button disabled on the first."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The design says any page save resets the ladder. That holds only on the action path (zod strips unlisted keys before executeAction sends the input) and when a save follows a failed load. The page's own PUT already round-trips the ladder, so the design text should be corrected."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Duplicate candidates are blocked in the editor but accepted by the action schema and by inference-core validate_roles. The duplicate rule belongs in validate_roles."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "invalid_role_table has no entry in shared/i18n/errors.ts, so the banner shows the caller's generic sentence. A copy entry would be clearer; that file is not owned by this slice."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Pre-existing, outside this slice: P-SPA1 fails on space.files.attach (domains/spaces/ws14.ts), the catch-site ratchet over-counts SpaceFilesPanel.tsx and SpaceRoomComposer.tsx, schedule-contract.test.ts has a TS2352 error, and full pnpm lint reports 364 problems (51 errors), none in the touched files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "http.ts extractError drops array details (line 64-65), so roleIssuesFrom(reason.details) always returns [] in production and per-row invalid_role_table errors never show until the lead's shared edit lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not verified: that the verevonv3 gateway router_policy.rs proxy_json passes inference-core's 400 invalid_role_table body, with its details array, through to the SPA unchanged."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The per-row error test injects an ApiError at the client mock, so no test drives a real 400 response body through requestJson."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The action schema caps tool_fallback_ladder at 8 entries, but inference-core RoutingPolicy has no such limit. A stored ladder longer than 8 is readable through the page but is refused through router_policy.update."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "router_policy.update now requires tool_fallback_ladder and complexity.tool_use_floors_complex, so any future partial-document caller is refused (no FE caller exists today)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "No ladder editor is built: the ladder is preserved but not editable. The owner should confirm this matches the design intent, since the design's live step mentions editing the ladder."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The role table is read-only while /v1/models role_routing is off, so admins cannot stage a table before the switch flips. The owner should confirm this."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The editor blocks duplicate candidates, but the action schema and inference-core validate_roles accept them. The rule belongs in validate_roles."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "invalid_role_table has no entry in shared/i18n/errors.ts, so the banner falls back to the generic 'Could not save router policy' sentence."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Pre-existing and unrelated to this slice: the P-SPA1 spaces.* ordering test fails in action-registry.test.ts, and schedule-contract.test.ts(28,16) has a TS2352 error under tsc6."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm exec vitest run src/features/router-policy src/shared/actions --pool=threads",
+      "outcome": "18 of 20 files pass; 196 of 198 tests pass; 2 fail. (1) admission-contract.test.ts golden: router_policy.update schemaHash is sha256:ba1aa503... in the file but the code now produces sha256:508d301a...; this is the expected golden drift the implementer reported, and it needs regeneration by the lead (VEREVON_UPDATE_GOLDEN=1). (2) action-registry.test.ts P-SPA1 spaces.* ordering test fails; the implementer says it is pre-existing at HEAD (space.files.attach), and I did not check that against HEAD. All 8 RouterPolicyPage tests and the new action-registry test pass.",
+      "passed": false
+     },
+     {
+      "command": "pnpm lint",
+      "outcome": "Exit 1: 364 problems (51 errors, 313 warnings). No hits in router-policy, action-registry or chat-client files. Matches the implementer's count; the problems come from other files.",
+      "passed": false
+     },
+     {
+      "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "One error only: src/shared/api/schedule-contract.test.ts(28,16) TS2352, in a file this slice did not touch (the implementer says it is pre-existing). No errors in any touched file.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built in the frontend only, in owned files; no proto, migration, switch or FE flag, no commits, no docker, cargo or DB harness, live tree untouched. (1) action-registry: router_policy.update input now lists tool_fallback_ladder (required array, max 8), roles (optional partial record of the four purposes, one to four candidates, optional effort) and complexity.tool_use_floors_complex (required boolean). Before this, zod stripped the ladder, roles and flag, and executeAction sends validation.data, so an action save reset them. (2) router-policy-model.ts: role types and helpers (withRoleCandidates keeps effort and drops empty purposes and an empty table, moveCandidate, roleIssuesFrom). (3) RouterPolicyPage: saves only a document loaded for the current org, sends back every field, and renders no form when the load failed (before, Save PUT the empty draft's zeros after a failed load). Adds the 'Modeller for hjelpeoppgaver' section: chips from the chat catalogue with context and price, add/move/remove only while role routing is on, read-only with the 'ikke aktivert' note otherwise, and per-row invalid_role_table issues. (4) chat-client: listModelCatalogue exposes roleRouting only when the gateway declares true; /v1/models already sends role_routing (S4), so model-gateway is unchanged. WHY PARTIAL: per-row role errors reach the page only if http.ts extractError keeps array details, which it currently drops (see lead_todo 1). The page test injects the refusal at the client boundary, so the mapping is tested but the production path is not. Everything else is complete and passing in the owned files."
+  },
+  {
+   "id": "EP-13-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/gemini_schema.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/gemini.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/effort.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/tests/fixtures/builtin-tool-schemas.json"
+   ],
+   "tests_run": [
+    {
+     "command": "Standalone rustc --test of the real gemini_schema.rs via a #[path] harness (stub metrics crate; read-only warm serde_json rlib from C:/dev/mp-target-w2/debug/deps). Not a cargo run; scratch artifacts only in the scratchpad.",
+     "outcome": "18 passed, 0 failed. Covers inlines_local_ref, drops_additional_properties, const_becomes_single_enum, nullable_from_type_union, refusal cases, sanitiser_is_idempotent, only_the_free_form_builtin_tools_are_left_out."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib gemini (run three times across the batch)",
+     "outcome": "Did not compile: error[E0063] missing field expected_version in SetRoutingPolicyRequest at src/provider/policy_client.rs:200. That file is not owned by this slice; the cause is EP-14-S10's uncommitted change to routing_policy.proto (int64 expected_version = 3). gemini.rs and effort.rs tests have not run."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib effort",
+     "outcome": "Not run; same compile blocker."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "BLOCKER: apps/Model Plane/rust/services/inference-core/src/provider/policy_client.rs:200 must set expected_version on SetRoutingPolicyRequest. routing_policy.proto now has an uncommitted int64 expected_version = 3 from EP-14-S10, and the crate does not compile until that call site is updated. Coordinate with EP-14-S10; I did not edit that file.",
+    "After the blocker clears, run: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib gemini, then the same with --lib effort. Expect 18 gemini_schema tests plus the gemini.rs and effort.rs tests, all green. Any failure is in S7 code and should come back to this slice.",
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/metrics.rs: after the TOKENS_TOTAL describe_counter! block (around lines 121-124), add describe_counter!(\"inference_gemini_tool_dropped_total\", \"Gemini tool declarations left out of a request because their schema cannot be expressed for Vertex, by refusal reason.\"); Optional for merge; the metric works without it.",
+    "No ledger line is required for S7; the Gemini ledger entry is S8. No compose change for S7; S8 adds the switch, off.",
+    "The live proof belongs to S8: a two-round tool turn (D5), a deep-effort turn, the thinkingConfig spelling and the 2.5 budget versus level split, and one send of each built-in declaration to Vertex."
+   ],
+   "deviations": [
+    "thinkingConfig is rendered in gemini.rs as well as declared in effort.rs; without it the advertised levels would be dishonest. The design named only effort.rs.",
+    "supports_thinking follows INFERENCE_GEMINI_EFFORT_ENABLED. The design said unconditional true; with the switch off the adapter cannot honour a thinking request.",
+    "The golden test is renamed only_the_free_form_builtin_tools_are_left_out. It asserts exactly five built-in refusals (3 open_object, 2 untyped) rather than that every built-in sanitises, because five built-in schemas cannot be expressed for Gemini.",
+    "A new test fixture was created: tests/fixtures/builtin-tool-schemas.json, holding 56 production raw-string schemas from execution-core and model-gateway. The design named a registry fixture; none existed in the repository. The fixture file is not in the owned list.",
+    "unexpressible_schema_drops_only_that_tool is in gemini.rs because it tests the declaration list, not the sanitiser alone.",
+    "Refusals not in the design: streamed requests with tools (streamed_tools) and structured output combined with tools (structured_output_with_tools). Both are conservative.",
+    "maxOutputTokens is raised by the level allowance only when thinking is rendered, as the other adapters raise theirs.",
+    "The S6 tests that pinned refusals (structured_output_refused_until_sanitiser, tools_are_refused_until_the_tool_wire_lands) now assert the S7 behaviour. build_request_body returns Result."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/inference-core/src/metrics.rs (optional describe line for inference_gemini_tool_dropped_total)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/policy_client.rs (blocker: SetRoutingPolicyRequest needs expected_version at line 200; owned by EP-14-S10 work, not this slice)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof belongs to S8: a two-round Gemini tool turn (D5, thought signatures ignored), a deep-effort turn, the thinkingConfig spelling (thinkingBudget vs thinkingLevel, case), and one send of every built-in declaration to Vertex to confirm the schema subset.",
+     "Optional shared edit for the lead: describe_counter!(\"inference_gemini_tool_dropped_total\", ...) in apps/Model Plane/rust/services/inference-core/src/metrics.rs.",
+     "Owner decision before S8 enablement: the five built-in tools that cannot be expressed for Gemini (3 open_object, 2 untyped) are dropped per request; give them closed schemas at source or accept the drop."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Five built-in tool schemas cannot be offered to Gemini: three take a free-form object argument (customs; media items; operation params and body) and two take an untyped where.value property. They are dropped per request and counted under inference_gemini_tool_dropped_total{reason=open_object|untyped}. The owner must give them closed schemas at source or accept the drop before S8 enablement."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The thinkingConfig wire is unverified for generateContent. The adapter sends thinkingBudget for the 2.5 generation and uppercase thinkingLevel LOW or HIGH for 3.x. The fetched Google thinking page (Interactions API docs) documents thinking_level in lowercase, lists low, medium and high for the 2.5 models, and documents no thinkingBudget field. Probe both the spelling and the generation split live in S8."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The Vertex schema subset (keyword allowlist, uppercase type names, title and format handling, ARRAY items required, non-empty OBJECT properties, nullable) comes from memory, not a live call. The golden test proves translation only. S8 should send each built-in declaration once to confirm Vertex accepts it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gemini-3 effort row has no sourced record in model_record.rs, which has only 2.5 rows, so /v1/models advertises effort levels for gemini-3 models with no context or output limits. Source a 3-series record row before enablement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Function-call names: Vertex's allowed name alphabet is unverified. A name outside it fails the whole request with a 400."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A malformed function call is expected to arrive as a finishReason (MALFORMED_FUNCTION_CALL, inferred). It would surface as stop_reason malformed_function_call with no tool_calls, which the tool loop reads as a plain answer. Map it to a typed refusal before S8."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "supports_thinking follows INFERENCE_GEMINI_EFFORT_ENABLED. The design said unconditional true. The owner may prefer that, at the cost of advertising a reasoning feature the adapter cannot drive while the switch is off."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Structured output combined with tools is refused as a pair (structured_output_with_tools). This is a believed Vertex restriction and is unverified; decide after the live probe."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Streamed requests that carry tools are refused (streamed_tools) because InferChunk cannot carry a function call. Confirm no gateway path streams a tool-bearing request to Gemini; otherwise those turns walk to another provider."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "inference_gemini_tool_dropped_total is never asserted, because unit tests have no metrics recorder. Add a recorder-backed test, or rely on the describe-line check at merge."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The golden covers only the 56 raw-literal schemas in execution-core and model-gateway. Schemas built with json! or format! are not covered. The fixture is a snapshot with no regeneration guard; regenerate it when tool schemas change, since no registry fixture existed before."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "MAX_REF_DEPTH (8) and MAX_ENUM_VALUES (100) are chosen limits, not Vertex limits."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Synthesised function-call ids (gemini-call-N) are not yet checked against how the tool loops key tool results."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Thought tokens count toward maxOutputTokens, so the raised ceiling may be consumed by thinking. Unverified; see D3-074."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "D5 (thought signatures ignored, no native function-call replay) is unit-tested only. Prove it with a two-round tool turn in S8."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Add the describe line for the new counter in metrics.rs (see lead_todo)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "function_calls in gemini.rs numbers ids gemini-call-0.. from zero on every response, so a multi-round tool conversation repeats the same ids across rounds; if the transcript is later replayed to a provider that requires unique tool-use ids (for example a fallback to Anthropic mid-loop) or a loop keys results by id, the rounds collide."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "stop_reason maps any finishReason other than STOP/MAX_TOKENS to its lowercase name, so MALFORMED_FUNCTION_CALL yields a response with no tool_calls that execution-core (which branches on tool_calls.is_empty()) reads as a final answer; map it to a typed refusal before S8."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "thinkingConfig wire (thinkingBudget for gemini-2.5, uppercase thinkingLevel LOW/HIGH for gemini-3) and the Vertex schema keyword subset are unverified against Vertex; prove in S8."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "gemini-3 models get advertised effort levels with the switch on but have no sourced model_record row (no context or output limits); add one before enablement."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "supports_tools flips to true unconditionally for the Gemini provider (no separate switch, per design); with VERTEX_GEMINI_ENABLED on, tool-bearing requests now reach Vertex instead of being refused, and if every offered tool is dropped with tool_choice auto the request proceeds silently with no tools."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "supports_thinking follows INFERENCE_GEMINI_EFFORT_ENABLED rather than the design's unconditional true; structured output with tools and streamed requests with tools are refused (new reasons structured_output_with_tools, streamed_tools)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "New fixture tests/fixtures/builtin-tool-schemas.json is outside the owned list; it is a test fixture for gemini_schema.rs (acceptable as a test file) but is a hand snapshot with no regeneration guard, so it will drift from the real execution-core/model-gateway schemas."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "inference_gemini_tool_dropped_total is never asserted (no metrics recorder in unit tests), and the gemini-3 thinkingLevel rendering and raised maxOutputTokens path in build_request_body have no direct unit test because the switch is a process OnceLock."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p inference-core --lib gemini (first attempt)",
+      "outcome": "Failed to compile: E0063 missing field expected_version in SetRoutingPolicyRequest at provider/policy_client.rs:200. Cause is EP-14-S10's routing_policy.proto change, not S7. This was the same blocker the implementer reported.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib effort",
+      "outcome": "Compiled and ran: 54 passed, 0 failed, 603 filtered out.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib gemini (re-run)",
+      "outcome": "39 passed, 0 failed, 618 filtered out. The crate's lib tests compile now.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the Gemini tool-schema sanitiser (new gemini_schema.rs: allowlist translation to Vertex functionDeclarations and responseSchema; local $ref inlining with a depth bound; refusals with bounded reasons; counter inference_gemini_tool_dropped_total{reason} via the metrics macro, label on the reviewed list). gemini.rs now sends declared tools, maps tool_choice (auto/none/required to AUTO/NONE/ANY; a named tool to ANY with allowedFunctionNames, refused when not offered), maps functionCall parts to tool_calls with ids gemini-call-N, ignores thought signatures, sends structured output through the sanitiser, and renders thinkingConfig from the effort ladder. Streamed requests with tools are refused before any call. effort.rs gains Wire::GeminiThinkingBudget and GeminiThinkingLevel, a Gemini support function, and INFERENCE_GEMINI_EFFORT_ENABLED (literal true only, default off). With the switch off no thinkingConfig is sent, levels are not advertised, and supports_thinking is false; with VERTEX_GEMINI_ENABLED off nothing changes because the provider is not registered. No proto, migration, compose or ledger change. Only gemini_schema.rs was compiled and tested, and only standalone. gemini.rs and effort.rs were reviewed by reading, not compiled. Tools need no separate switch, as the design says."
+  },
+  {
+   "id": "EP-14-S10",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\routing_policy.proto",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\migrations\\0104_routing_policy_candidates.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\migrations\\revert\\0104_routing_policy_candidates.down.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\routing_policy_grpc.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\routing_diff.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\tests\\fixtures\\routing-corpus-v1.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\intent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\http_health.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\eval-routing-candidate.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "buf lint apps/Model Plane/proto (repo root), compared routing_policy.proto findings to buf-lint-baseline.json by key (paths normalised)",
+     "outcome": "11 routing_policy findings before and after, 0 new keys. The full ratchet script cannot pass on this Windows host because its keys use backslash paths; that is an environment artefact, not a finding."
+    },
+    {
+     "command": "buf breaking . --against baseline.binpb --path model_plane/v1/routing_policy.proto",
+     "outcome": "exit 0 (additive change)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core --no-run (attempt 1)",
+     "outcome": "failed with E0618: my test helper service() was shadowed by local bindings named service. Fixed in source by renaming the helper to open_service; attempt 2 was started in the background and its result is NOT confirmed at report time."
+    },
+    {
+     "command": "bash -n apps/Model Plane/scripts/eval-routing-candidate.sh",
+     "outcome": "syntax ok; the script was never executed (no live stack, no grpcurl)"
+    },
+    {
+     "command": "git ls-tree migrations for main, space-w2, mp-w2w3, w23/integ, model-plane",
+     "outcome": "no migration numbered 0100-0109 on any of them, so 0104 is free"
+    },
+    {
+     "command": "rustfmt --edition 2021 on routing_policy_grpc.rs (scratch copy, then CRLF install)",
+     "outcome": "applied; routing_diff.rs, http_health.rs and intent.rs edits are NOT rustfmt-checked"
+    },
+    {
+     "command": "cargo test / cargo check -p inference-core",
+     "outcome": "NOT RUN. The crate cannot compile until policy_client.rs:200 gets expected_version: 0 (see needs_other_files), so no inference-core unit test was executed. Nothing is claimed as passing."
+    },
+    {
+     "command": "session-core ignored DB tests",
+     "outcome": "NOT RUN (DB harness is the lead's; they need DATABASE_URL)"
+    }
+   ],
+   "db_tests_written": [
+    "routing_policy_grpc::db_tests::set_policy_expected_version_conflict",
+    "routing_policy_grpc::db_tests::promote_requires_evaluation",
+    "routing_policy_grpc::db_tests::promote_with_waiver_reason",
+    "routing_policy_grpc::db_tests::promote_supersedes_on_newer_live_version",
+    "routing_policy_grpc::db_tests::candidate_rpcs_need_admin_scope",
+    "routing_policy_grpc::db_tests::promote_keeps_a_candidate_role_table"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/provider/policy_client.rs:200: in the SetRoutingPolicyRequest literal add a line `expected_version: 0,` after `updated_by`. Required before inference-core compiles (E0063 otherwise); 0 keeps today's unchecked write.",
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/provider/mod.rs: add `pub mod routing_diff;` before `pub mod routing_policy;` (EP-13 S7 owns this file in the same batch, so I did not touch it). Then delete the `// The offline routing diff ...` comment block and the `#[path = \"routing_diff.rs\"] pub mod routing_diff;` lines at the top of provider/intent.rs (after its `use super::{ChatMessage, ToolDefinition};` line).",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: RoutingPolicy row: policy and candidate store owned by session-core (routing_policy, routing_policy_candidates); offline diff owned by inference-core provider/routing_diff.rs; live evaluation by scripts/eval-routing-candidate.sh.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (newest first): '## 2026-11-03 - RoutingPolicy changes go through a candidate with a recorded evaluation (EP-14 S10, D9, D10)'. Status: built in wave mode behind SESSION_CORE_ROUTING_CANDIDATES_ENABLED and ROUTING_POLICY_PROMOTION_REQUIRED (both default off). The direct PUT is unchanged until D9 is decided. The candidate store keeps config as opaque JSON, so EP-13 roles ride unchanged.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: session-core environment add `SESSION_CORE_ROUTING_CANDIDATES_ENABLED: ${SESSION_CORE_ROUTING_CANDIDATES_ENABLED:-false}`; inference-core environment add `ROUTING_POLICY_PROMOTION_REQUIRED: ${ROUTING_POLICY_PROMOTION_REQUIRED:-false}`.",
+    "shared-edit apps/Model Plane/deploy/.env.example: add `SESSION_CORE_ROUTING_CANDIDATES_ENABLED=false` and `ROUTING_POLICY_PROMOTION_REQUIRED=false`.",
+    "buf generate for the Go bindings, limited to the changed file: `cd \"apps/Model Plane/proto\" && buf generate --path model_plane/v1/routing_policy.proto` (per buf.gen.yaml). Then go vet in any Go module that imports the generated model_plane/v1 package. Hand-editing generated Go is not allowed.",
+    "Container builds: mp-contracts build.rs notes that a proto change may not reach a Docker build through the shared cache mount. If the new RPCs are missing in a container, bust the mp-contracts fingerprint by editing that build.rs comment, as its own comment instructs.",
+    "After items 1 and 2: run `cargo test -q -p inference-core --lib routing_diff`, `cargo test -q -p inference-core --lib put_with_switch` (the switch test is named promotion_switch_reads_only_the_literal_true and put_with_switch_off_unchanged; run filters `promotion_switch` and `put_with_switch`), and `cargo test -q -p inference-core --lib a_candidate_with_roles`. Use CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0.",
+    "session-core DB tests, via the harness with DATABASE_URL: `cargo test -p session-core --bin session-core set_policy_expected_version_conflict -- --ignored --test-threads=1`, `cargo test -p session-core --bin session-core promote_ -- --ignored --test-threads=1`, `cargo test -p session-core --bin session-core candidate_rpcs_need_admin_scope -- --ignored --test-threads=1`.",
+    "Confirm the session-core non-ignored unit tests pass: `cargo test -q -p session-core --bin session-core routing_policy_grpc` (the second build bzdrsxulc is the one to read first).",
+    "Mark scripts/eval-routing-candidate.sh executable in git (mode 100755); .gitattributes already forces LF.",
+    "Ratchet note for CI on Linux: run the buf lint ratchet from the repo root on Linux, where the baseline keys match; the routing_policy findings are verified equal to the baseline on this host.",
+    "No prompt or tool-definition change, so no prompt-tool manifest regeneration and no admission golden regeneration are needed."
+   ],
+   "deviations": [
+    "Candidate RPC responses are per-RPC wrapper messages (ProposeCandidateResponse, RecordCandidateEvaluationResponse, PromoteCandidateResponse) instead of the bare PolicyCandidate or RoutingPolicyMessage the design lists, to keep buf lint findings at the committed baseline.",
+    "routing_policy gained a candidate_id column, and the migration therefore alters an existing table; the design's file list named only the candidate table. The column backs RoutingPolicyMessage.candidate_id.",
+    "set_policy now runs in a transaction and also marks pending candidates superseded; externally identical when no candidate exists.",
+    "promote_candidate locks the live row before the candidate (the set_policy order) to avoid a deadlock, and answers ABORTED for a superseded candidate, FAILED_PRECONDITION for an unevaluated or unwaived one.",
+    "RecordCandidateEvaluation is accepted only from state proposed; the design does not say whether re-review is allowed.",
+    "The routing_diff module is mounted with #[path] inside intent.rs, not declared in provider/mod.rs, because EP-13 S7 owns mod.rs in this batch.",
+    "The switched-on PUT is a fail-closed 503 gate, not the 202 candidate flow, because the candidate client lives in policy_client.rs, which I did not edit."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/policy_client.rs (line 200 struct literal needs expected_version: 0; later, candidate client methods for the 202 path and the promote route)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs (pub mod routing_diff; belongs here, currently mounted with #[path] in intent.rs as a temporary workaround because EP-13 S7 owns mod.rs in this batch)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/deploy/.env.example"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "MANDATORY before merge: as the tree stands, inference-core does not compile (E0063 at provider/policy_client.rs:200, missing expected_version). The lead must make the shared edit: add `expected_version: 0,` after `updated_by: updated_by.to_owned(),`. I verified the fix in a scratch copy of the workspace. With it applied, every slice test passes: routing_diff, promotion_switch, put_with_switch and a_candidate_with_roles (10/10), and the full inference-core lib run has only 1 failure, the status-contract golden, which fails because the scratch copy lacks a file outside rust/.",
+     "Lead shared edits from the implementer's lead_todo: move `pub mod routing_diff;` into provider/mod.rs and delete the #[path] shim in intent.rs; add the ownership-matrix row and the ledger entry (D9, D10); add both switches to docker-compose.yml and .env.example as default false; regenerate the Go bindings with buf generate; set the script's git mode to 100755.",
+     "The 6 session-core DB tests (set_policy_expected_version_conflict, promote_requires_evaluation, promote_with_waiver_reason, promote_supersedes_on_newer_live_version, candidate_rpcs_need_admin_scope, promote_keeps_a_candidate_role_table) were not run because there is no DATABASE_URL. They need the lead's DB harness.",
+     "Live proof from the design DoD is not done: with both switches on, PUT answers 202 with a diff, promote is refused before evaluation, the script runs on the non-ZDR test org, the promoted version is visible within one refresh interval, and of two concurrent promotes one answers ABORTED. It cannot be done until the 202 PUT path and the promote route exist."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The switched-on PUT answers 503 candidate_store_unwired instead of 202 with a candidate, because inference-core cannot reach the candidate RPCs until policy_client.rs gains propose, record, promote and list methods. Do not flip ROUTING_POLICY_PROMOTION_REQUIRED before that lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No POST /internal/v1/router-policy/candidates/:id/promote route exists in inference-core; it depends on the same missing client methods."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "routing_diff takes its price and ZDR-attestation facts as injected RouteFacts, and inference-core has no production source for either; the diff is therefore not reachable at runtime yet, and the unpriced-model and ZDR-change flags are untested against real price rows."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No route can load an unpromoted candidate's config into a non-ZDR test inference-core, so the live leg in eval-routing-candidate.sh cannot run end to end; the script was never executed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The two concurrent promotes (one must answer ABORTED) and the set_policy versus promote lock order have no test; they need the DB harness plus a concurrency test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "candidate_rpcs_need_admin_scope covers propose and list only; the admin guard on record_candidate_evaluation and promote_candidate is not asserted individually."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Candidate rows store proposed_by and decided_by identities with no GDPR treatment; routing_policy.updated_by has the same gap. Owner or CNS to decide whether the platform singleton and its candidate audit trail are exempt from user erasure."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The unpriced-model check treats the tool fallback ladder and side-task role candidates as routed models, not only the mode table and cheap fallback; the owner should confirm that reading."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The corpus is 14 hand-written synthetic cases and has no EP-13 role rows; role-dimension coverage in routing_diff is still to be added when EP-13 role routing is live."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "D9 (owner) still decides whether the direct PUT is replaced by the candidate flow; the switch must not flip before that decision."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The #[path] mount of routing_diff inside intent.rs is a temporary workaround; the lead must move it to provider/mod.rs and delete it (see lead_todo)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The row's switched-on behaviour is missing from inference-core: with ROUTING_POLICY_PROMOTION_REQUIRED=true the PUT answers 503 candidate_store_unwired instead of 202 {candidate_id, diff}, and POST /internal/v1/router-policy/candidates/:id/promote does not exist; both need candidate client methods in policy_client.rs, which this slice does not own. The gate fails closed and the switch defaults off, so this is safe; do not flip the switch before this lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "routing_diff is reachable only from tests: nothing at runtime calls diff(), and inference-core has no production source for RouteFacts (price rows, ZDR attestation), so the unpriced-model and ZDR-route flags have no real data behind them yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Audit trail: promote_candidate writes decided_by = the promoter over the reviewer's decided_by set in record_candidate_evaluation. The candidate row then loses who accepted the diff and the waiver, which is the record S10 exists to keep. A separate reviewed_by/promoted_by column, or not overwriting the field, would keep both."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "proposed_by, decided_by and updated_by are taken from the request body, not from the verified caller identity, so an admin or service caller can record any name in the audit trail. updated_by already worked this way before this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ProposeCandidate and PromoteCandidate store and promote config_json after a JSON-parse check only. A direct gRPC caller with admin scope can therefore make a config live that inference-core's serde or role validation would refuse; SetPolicy has the same gap today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "eval-routing-candidate.sh requires ROUTING_EVAL_ORG_ID but never passes it to the eval-lab run. The ZDR refusal checks only a `zdr` claim in the bearer, so nothing ties the live leg to the named non-ZDR test org."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers two concurrent promotes, or a promote racing set_policy. By reading the code, promoting the same candidate twice makes the second call answer FAILED_PRECONDITION ('candidate is promoted'), not the ABORTED that the DoD expects."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "candidate_rpcs_need_admin_scope asserts the member denial for propose and list only. The admin check on record_candidate_evaluation and promote_candidate is not tested individually."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The corpus has 14 hand-written synthetic cases and no role-dimension rows. routing_diff does not diff role routing; it only lists role candidates in unknown_models."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No GDPR treatment for the identities stored in routing_policy_candidates (proposed_by, decided_by); routing_policy.updated_by has the same gap. The owner should decide whether this audit trail is exempt from erasure."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "D9 is still open with the owner. ROUTING_POLICY_PROMOTION_REQUIRED must stay off until it is decided, and the EP-13 role editor must move to propose/promote in the same change (round A C3)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "routing_diff is mounted with #[path] inside intent.rs as a temporary shim, so its path is provider::intent::routing_diff. Move the declaration to provider/mod.rs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The migration is 0104 rather than the 0076 named in the row. This follows round B C-B2, and I confirmed 0104 is not used in this worktree; the slice's file list should be updated to say 0104."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p inference-core --lib routing_diff",
+      "outcome": "COMPILE FAIL E0063: missing field expected_version in SetRoutingPolicyRequest at provider/policy_client.rs:200. That is the shared edit the implementer put in lead_todo, not yet applied. No routing_diff test ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib put_with_switch",
+      "outcome": "Same E0063 compile failure. No test ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core set_policy_expected_version_conflict / promote_ / candidate_rpcs_need_admin_scope -- --ignored",
+      "outcome": "Not run. These are DB tests and DATABASE_URL is not set. Compile check: cargo test -q -p session-core --bin session-core --no-run succeeded.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core routing_policy (non-ignored)",
+      "outcome": "11 passed, 0 failed, 6 ignored (the DB tests).",
+      "passed": true
+     },
+     {
+      "command": "buf lint (apps/Model Plane/proto)",
+      "outcome": "12 routing_policy findings in the raw output (implementer reported 11, so I did not verify the match). The findings are existing lint noise. I did not compare keys against buf-lint-baseline.json, so no new-finding check was done.",
+      "passed": false
+     },
+     {
+      "command": "buf breaking --against baseline.binpb (run from the proto dir)",
+      "outcome": "exit 0, no breaking changes. The plan's path proto/baseline.binpb does not exist relative to the proto dir.",
+      "passed": true
+     },
+     {
+      "command": "bash -n scripts/eval-routing-candidate.sh",
+      "outcome": "Syntax OK. Script not executed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "audit",
+    "policy"
+   ],
+   "notes": "Built dark, both switches default off. Done: proto additions (RoutingPolicyMessage.candidate_id=5, SetRoutingPolicyRequest.expected_version=3, ProposeCandidate, RecordCandidateEvaluation, PromoteCandidate, ListCandidates, PolicyCandidate and per-RPC response wrappers, all commented, additive); migration 0104 with revert (routing_policy_candidates table plus routing_policy.candidate_id); session-core: set_policy honours expected_version (ABORTED on mismatch, 0 = unchecked), candidate RPCs gated by SESSION_CORE_ROUTING_CANDIDATES_ENABLED (literal true, read at boot) and admin scope, promote locks the live row before the candidate, supersession on direct write and on stale base; inference-core: routing_diff.rs (pure diff over a corpus, unknown-model and ZDR-route flags), routing-corpus-v1.json (14 synthetic cases, all three tiers covered), http_health gate for ROUTING_POLICY_PROMOTION_REQUIRED (literal true; a switched-on PUT is refused with 503 candidate_store_unwired, never written live); eval-routing-candidate.sh (refuses ZDR bearers, counts only, records via RecordCandidateEvaluation, not run). NOT done: the switched-on PUT path answering 202 with a candidate, and the POST promote route, both need candidate client methods in policy_client.rs, which I may not edit. Shared directory note: tests/fixtures/builtin-tool-schemas.json was modified at 07:44 by another session; I did not touch it. Two background monitors (ba3qncu0x, bbi47wcd4) are armed and will report the session-core build result."
+  },
+  {
+   "id": "EP-6-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsList.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsList.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsHub.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/automations src/features/chat/components/ScheduledRunsPanel.test.tsx src/features/settings/components/CronSchedulesSection.test.tsx src/shared/actions (cwd apps/Frontend Plane/verevonv3, pnpm_config_verify_deps_before_run=false)",
+     "outcome": "Before any edit: 23 files, 233 passed, 1 failed (action-registry.test.ts P-SPA1). After the edits: 24 files, 239 passed (includes the 6 new AutomationsList tests), 1 failed: the same P-SPA1 failure, which is in the untouched tree."
+    },
+    {
+     "command": "pnpm exec vitest run src/features/settings/components/SettingsPages.test.tsx src/features/spaces/components/SpaceWorkPanel.test.tsx",
+     "outcome": "2 files, 38 passed."
+    },
+    {
+     "command": "pnpm exec vitest run (the slice paths plus src/shared/actions, SettingsPages and SpaceWorkPanel), run after the final edit",
+     "outcome": "26 files, 276 passed, 2 failed: action-registry.test.ts P-SPA1 (pre-existing) and admission-contract.test.ts. The admission failure is the golden row router_policy.update (committed schemaHash sha256:508d301a..., current registry sha256:ba1aa503...), caused by an uncommitted 13-line edit to action-registry.ts from a concurrent slice (EP-13-S5) in this worktree. This slice does not touch the registry or the golden; the same test passed in the earlier run in this worktree."
+    },
+    {
+     "command": "pnpm exec eslint on the five slice files",
+     "outcome": "exit 0, no findings."
+    },
+    {
+     "command": "pnpm lint (whole project)",
+     "outcome": "exit 1: 364 problems (51 errors, 313 warnings) in other files, for example tests/visual/space-ui-shots.mjs. None in the slice's files."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "exit 2 with one error: src/shared/api/schedule-contract.test.ts(28,16), a CronTaskTemplate vs Record<string, unknown> comparison in a file and cron-client types this slice did not touch. No errors in the slice's files."
+    },
+    {
+     "command": "NOT RUN: pnpm typecheck; docker; DB harness; live proof",
+     "outcome": "pnpm typecheck runs the quarry-client and remote-core builds, which write outside this slice; the batch names tsc6 for the frontend. Docker, the DB harness and live proofs are lead or depth work."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit only the five EP-6-S4 files: apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsList.tsx (new), AutomationsList.test.tsx (new), AutomationsHub.tsx, apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.tsx and apps/Frontend Plane/verevonv3/src/features/settings/components/CronSchedulesSection.tsx. Do not stage src/shared/actions/action-registry.ts or action-registry.test.ts: they hold an uncommitted EP-13-S5 edit in this worktree.",
+    "After the EP-13-S5 registry edit lands, regenerate apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json. Only router_policy.update's schemaHash differs (committed sha256:508d301a..., current registry sha256:ba1aa503...). This slice adds no registry row, so the row count does not change because of it.",
+    "Depth phase (not wave mode): the visual check at 375 px and 1280 px (depth finding 9) and the owner rulings behind depth findings 1, 6, 7 and 8."
+   ],
+   "deviations": [
+    "AutomationsList takes a revision prop in addition to scope, compact and limit: the Settings create form bumps it so the org list reads again.",
+    "The renew and copy dialogs (ScheduleDialog) are mounted by the list in every mount; ScheduledRunsPanel no longer imports the dialog itself.",
+    "ScheduleFires, formatWhen and the results flag moved from ScheduledRunsPanel.tsx into AutomationsList.tsx to avoid an import cycle; ScheduledRunsPanel.tsx no longer exports them and no other module imported them.",
+    "The hub is now a one-line mount of the list, so its filters and counts live in the list.",
+    "'See results' is disabled in the chat mount (the panel test pins that), hidden in the hub (the hub test pins that), and absent in Settings, so each surface keeps its previous behaviour.",
+    "Settings org rows offer admin pause/resume (no bare re-enable for a lapsed approval) and admin delete only. Renew, copy, change time and results are not offered there. The workflow type and last fire stay visible.",
+    "Chat rows show at most five entries and offer no change-time or duplicate action, as before.",
+    "Creator name in org scope is not built: CronSchedule carries only creator_subject_id and shared/api has no id-to-name lookup (see depth finding 2)."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Visual check of the chat popover and the Settings org list at 375 px and 1280 px, on a second dev server on this worktree (:5173 serves the main checkout).",
+     "Owner rulings: OD-7 (org list and goal text reach every Settings viewer), the 5-row cap in chat and ChatUtilityPage, and 'See results' behaving differently per mount.",
+     "The admission golden (agent-action-admission.json) stays red until the concurrent EP-13-S5 action-registry.ts edit lands and the golden is regenerated. The lead must commit only the five EP-6-S4 files."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Org scope still loads every org schedule with its task_template (goal text) into every Settings viewer's browser, admins and members alike (D2-121, OD-7, design risk 2). The list renders no goal, but the owner must rule whether the org view stays open to all Settings viewers or goes to admins only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The worktree is shared with a concurrent slice: action-registry.ts and action-registry.test.ts carry uncommitted EP-13-S5 edits (registry mtime 07:44:57, 13 insertions in the router_policy inputs). The commit must stage only the five EP-6-S4 files, and the admission golden stays red until that edit lands and the golden is regenerated."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The design-named test 'org scope shows creator name for admins' is not built: CronSchedule has only creator_subject_id and shared/api has no id-to-name lookup, so org rows show no creator. It needs a server display name (capability-core, not owned here) or a member-lookup decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "schedule.list's contract text says it lists the schedules the signed-in person created, but the Settings org scope lists every org schedule through the same call. Fix the wording with the OD-7 ruling, in the registry edit owner, not in this slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "action-registry.test.ts P-SPA1 ('keeps every action id unique and the spaces.* entries contiguous') fails on the untouched tree: it expects spaces.update_sidebar where the registry has space.files.attach. Not this slice's file."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'See results' differs per mount: disabled in the chat panel (ScheduledRunsPanel.test.tsx pins it), hidden in the hub (AutomationsHub.test.tsx pins it), absent in Settings. One rule needs one of those WS20 assertions rewritten, which the design forbids, so the owner decides."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The chat panel and the chat routines page (ChatUtilityPage) now show five rows and a 'See all automations' link instead of every schedule. Confirm this cap with the owner."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Settings org rows change: no bare resume for a lapsed approval (the server refuses it with 409 when CRON_CONTRACT_GUARDS_ENABLED is on), an enabled schedule with a lapsed approval shows 'Utløpt' instead of 'aktiv', presets show as cadence labels, and the delete copy is the hub's. Confirm with the owner."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Visual check at 375 px and 1280 px of the chat popover and the Settings org list, which now use the hub card classes. Depth phase, on a second dev server on this worktree (:5173 serves the main checkout)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The chat panel's state badge reads no pause reason (only the hub does), so a schedule paused by the failure guard shows 'Pauset' in chat. The fires list under See results still shows 'Pauset etter feil' when the flag is on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "global.css rules .verevon-scheduled-runs-panel__row, __row-meta and __actions (around lines 46256-46275) no longer render anything; remove them in a CSS-owning change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The default workflow 'InteractiveRunSupervision' is named twice: DEFAULT_WORKFLOW in CronSchedulesSection.tsx and DEFAULT_WORKFLOW_TYPE in AutomationsList.tsx. One constant should own it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Pre-existing tsc6 error in an untouched file: src/shared/api/schedule-contract.test.ts(28,16), a CronTaskTemplate vs Record<string, unknown> comparison. cron-client.ts is untouched by this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Org scope in Settings still loads every org schedule, with its task_template (goal text), into every Settings viewer's browser, admins and members alike (D2-121/OD-7). Behaviour is unchanged from HEAD, but OD-7 must rule on it before the org view is final."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The design test 'org scope shows creator name for admins' is not built, because CronSchedule carries only creator_subject_id. Org rows show no creator, so the design's S4 'org view for admins' is only partly met."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'See results' differs by mount: disabled in chat when the flag is off, hidden in the hub, absent in Settings (AutomationsList.tsx:525). The design's 'one list' still keeps per-mount differences; the owner should confirm this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Settings org rows change from HEAD. A lapsed approval no longer offers a bare resume, and an enabled schedule with a lapsed approval shows as expired. The cadence label replaces the raw cron, and the delete confirm copy changed. The WS20 tests pass, but the owner should confirm these changes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The compact chat mount reads no pause reason, so a schedule paused by the failure guard shows plain 'Pauset' in chat. Only the full hub shows the paused_failures reason."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In the org-scope empty state the copy says 'Legg til en nedenfor' ('add one below'), but the create form under the list renders only for admins. Members see an instruction they cannot follow (AutomationsList.tsx:403)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "'InteractiveRunSupervision' is defined twice, as DEFAULT_WORKFLOW in CronSchedulesSection.tsx and DEFAULT_WORKFLOW_TYPE in AutomationsList.tsx. global.css still holds .verevon-scheduled-runs-panel__row/__row-meta/__actions rules that nothing renders any more."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Pre-existing failures outside the slice: action-registry.test.ts P-SPA1 fails, and tsc6 reports TS2352 in the untouched src/shared/api/schedule-contract.test.ts(28,16)."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads src/features/automations src/features/chat/components/ScheduledRunsPanel.test.tsx src/features/settings/components/CronSchedulesSection.test.tsx src/shared/actions",
+      "outcome": "24 files, 239 passed, 2 failed. Failures: action-registry.test.ts P-SPA1 (spaces.* ordering; the implementer reports it failing before any edit) and admission-contract.test.ts golden (schemaHash for router_policy.update, committed sha256:508d301a vs current sha256:ba1aa503). The admission failure comes from the uncommitted action-registry.ts edit by the concurrent EP-13-S5 slice. All automations, ScheduledRunsPanel and CronSchedulesSection tests, including the 6 new AutomationsList tests, passed.",
+      "passed": false
+     },
+     {
+      "command": "pnpm exec eslint src/features/automations src/features/chat/components/ScheduledRunsPanel.tsx src/features/settings/components/CronSchedulesSection.tsx (a narrower check than the plan's whole-project pnpm lint, which was not run)",
+      "outcome": "exit 0, no findings",
+      "passed": true
+     },
+     {
+      "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (stand-in for pnpm typecheck, which was not run)",
+      "outcome": "1 error: src/shared/api/schedule-contract.test.ts(28,16) TS2352, CronTaskTemplate vs Record<string, unknown>. That file is not modified in git status and is not one of the slice's files. No errors in the slice's files.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the one schedule list. AutomationsList.tsx (new) now holds the rows, filters, WS20 guards and the fires panel that lived in ScheduledRunsPanel.tsx, with props scope mine|org, compact, limit and revision. The hub is a one-line full mount, the chat panel is a compact mine mount (5 rows) with a \"See all automations\" link, and Settings keeps its admin create form above the org-scope list. Every UI call to updateCronSchedule (toggle and retime) and deleteCronSchedule now lives in AutomationsList.tsx. The WS20 assertions in ScheduledRunsPanel.test.tsx, CronSchedulesSection.test.tsx and AutomationsHub.test.tsx are unchanged and pass through the mounts. No proto, migration, flag or docker work. No shared-edit lines: the slice names no shared file. Not built: the creator name in org scope (depth finding 2)."
+  }
+ ]
+}

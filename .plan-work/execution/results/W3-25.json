@@ -1,0 +1,623 @@
+{
+ "batchId": "W3-25",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-2-S7",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-1",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx"
+   ],
+   "notes": "Code and unit tests are written but nothing was run (code-first order). The patch is at .plan-work/execution/patches/W3-25/EP-2-S7.patch (85 KB). There are two switches, DEEP_RESEARCH_KNOWLEDGE_SOURCES and DEEP_RESEARCH_CONNECTOR_SOURCES. Both are read strictly (only the literal \"true\") and both default off. With both off, every run uses SourcePlan::WEB and behaves byte-identically to before.\n\ndeep_research.rs:\n- New `SourceOrigin` enum (Web | Knowledge{document_id, chunk_index, group} | Connector{provider}), held on a new `ResearchSource.origin` field.\n- New `SourcePlan::for_turn` decides which sources a run reads:\n  - `knowledge_only`: knowledge only, no web.\n  - `auto`: knowledge first, then the web.\n  - Connectors: only on `auto`, outside a Space, with a non-empty selection.\n  - A ZDR turn always gets WEB.\n- `run_deep_research` takes a new `&ResearchSources` parameter.\n- Phase 1b retrieves knowledge per sub-query through `crate::retrieval::retrieve`, with the viewer's Data Plane bearer, the turn's data_plane_mode, the sovereign flag and the Space decision. Connector reads run at the same time.\n- Internal sources are numbered first, [1..k]. Web pages are numbered after them, and the internal characters count against the shared corpus budget.\n- `read_order` leaves out non-web sources, so they are never fetched. The relevance gate only judges the web slice. A link in the question only matches a web source.\n- With the web off: no search, no read and no second pass, so no Quarry call is made. The sub-query rows show the knowledge results.\n- Citations carry origin knowledge/connector and kb:/connector: groups. With passages on, a knowledge citation carries the S4 locator. A connector citation never carries a quote, and its snippet is metadata only.\n- The provenance stamp gains optional origin/document_id fields. The receipt gains an `internal_sources` counts key only on runs that read internal sources.\n- `web_citations` now counts web-origin citations only.\n- Tests: new `deep_research::tests::sources` module.\n\nconnector_reads.rs:\n- New `research_reads`. It applies the same gates as the Ask-loop read (CONNECTOR_ASK_READS_ENABLED, no ZDR, no Space, a selection, and a read_policy that admits the Ask loop), then for each selected account:\n  1. a profile read to learn the provider,\n  2. one search with the question, at most 5 results (gmail.messages or mail.messages),\n  3. screening through `ToolProvenance::assess` as ConnectorContent.\n- Flagged or Degraded results are withheld and counted, never used as evidence.\n- `provider_label` is now pub. Tests: new `tests::research` module.\n\nsse.rs:\n- The knowledge_only + deep_research `source_scope_conflict` is lifted only when the knowledge switch is on.\n- The org_web_off refusal no longer applies to a knowledge-only run with the switch on.\n- The deep-research call site builds `ResearchSources`.\n\nzdr_features.rs: a unit test shows that knowledge_only + deep_research and connector_scope + deep_research are still refused with `deep_research` under ZDR. The refusal order is unchanged.\n\nFE:\n- ChatPanels shows the [n] on a numbered connector card.\n- A knowledge web-shaped card shows its group label instead of a hostname.\n- 3 vitest cases.\n\nNo proto change, no migration.",
+   "deviations": [
+    "The two golden cases e_zdr_token_knowledge_only_deep_research_refused and e_zdr_token_deep_research_connector_sources_refused were NOT added to zdr-posture-matrix.json. They are deep_research feature refusals with the same resolver inputs as existing rows, and the hard rule forbids feature-refusal rows there. They are covered in a zdr_features.rs unit test, and as a shared edit to tests/zdr_feature_table.rs (see lead_todo).",
+    "The connector half does one mail search per selected account, using the question as the query: a profile read picks gmail.messages or mail.messages. It is not one search per sub-query. This bounds cost to at most 8 accounts x 2 calls.",
+    "use-chat-controller.ts was not changed. The 'Dyp research disabled under Kun organisasjon' rule lives in DashboardComposer.tsx (not owned), and no server capability advertisement exists to read.",
+    "With knowledge sources on, an org with web access off may still run a knowledge-only deep research (no web is touched). This is a judgment call; see depth_findings."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx: the Dyp research button (around line 4111) is disabled for retrievalScope()==='knowledge_only'. Lifting that needs a server capability flag the composer can read; none exists today.",
+    "apps/Model Plane/docs/ZDR.md: a row for knowledge/connector sources in deep research (see lead_todo)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, right after the line `      DEEP_RESEARCH_SECOND_PASS: ${DEEP_RESEARCH_SECOND_PASS:-false}`, add:\n      # EP-2 S7: org knowledge per sub-query in deep research; knowledge_only research allowed. Only the literal true.\n      DEEP_RESEARCH_KNOWLEDGE_SOURCES: ${DEEP_RESEARCH_KNOWLEDGE_SOURCES:-false}\n      # EP-2 S7: selected connected accounts in deep research (also needs CONNECTOR_ASK_READS_ENABLED). Only the literal true.\n      DEEP_RESEARCH_CONNECTOR_SOURCES: ${DEEP_RESEARCH_CONNECTOR_SOURCES:-false}",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: in cases(), directly after the case (\"retrieval_scope\", with(\"retrieval_scope\", json!(\"auto\")), None,), insert:\n        // e_zdr_token_knowledge_only_deep_research_refused (EP-2 S7): refused for `deep_research`\n        // before any retrieval, whatever DEEP_RESEARCH_KNOWLEDGE_SOURCES says.\n        (\n            \"retrieval_scope\",\n            json!({\"content\": \"hello\", \"deep_research\": true, \"retrieval_scope\": \"knowledge_only\"}),\n            refused(\"deep_research\"),\n        ),\n        // e_zdr_token_deep_research_connector_sources_refused (EP-2 S7)\n        (\n            \"connector_scope\",\n            json!({\"content\": \"hello\", \"deep_research\": true, \"connector_scope\": [\"conn_1\"]}),\n            refused(\"deep_research\"),\n        ),",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add a newest-first entry '## 2026-11-05 - Deep research may run knowledge-only (EP-2 S7, D3)'. Content: behind DEEP_RESEARCH_KNOWLEDGE_SOURCES, knowledge_only means a KB retrieval per sub-query with the viewer bearer and no web phase; auto means KB first, then web; web_only is unchanged. KB sources take [1..k] and web pages are numbered after them. Connected accounts come in behind DEEP_RESEARCH_CONNECTOR_SOURCES: auto only, never in a Space, only the selected accounts, one mail search per account, screened as ConnectorContent, flagged items withheld, metadata-only citations. ZDR is still refused through deep_research. Supersedes nothing.",
+    "shared-edit apps/Model Plane/docs/ZDR.md: after the claim-ledger paragraph (EP-2-S6), add a paragraph: 'Knowledge and connector sources in deep research (EP-2-S7, behind DEEP_RESEARCH_KNOWLEDGE_SOURCES / DEEP_RESEARCH_CONNECTOR_SOURCES): a Data Plane retrieval per sub-query and, gated, one connected-app search per selected account; no new store. A ZDR turn is refused through deep_research before the scope or selection is read (knowledge_only included), and SourcePlan::for_turn returns web-only for any ZDR turn. Connector citations carry metadata only and never a quote; nothing new is persisted beyond the existing citations and report artifact.'",
+    "guard: compile and run cargo test -q -p model-gateway --lib deep_research::tests::sources connector_reads zdr_features, plus --test zdr_feature_table after the shared edit, and pnpm exec vitest run src/features/chat/components/ChatPanels.test.tsx. No proto, golden or manifest regeneration is needed."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Knowledge-only research on an org KB (expect zero Quarry calls in the edge log) and mixed auto research citing both KB and web are owed before DEEP_RESEARCH_KNOWLEDGE_SOURCES is switched on; the connector half also waits on the WS23 external mailbox proof and DEC-26."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The connector research search sends the whole question (cut to 200 chars) as the Gmail q / Graph search string; natural-language questions will likely return no_results, so the query shape needs live tuning before DEEP_RESEARCH_CONNECTOR_SOURCES is on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A knowledge-only deep research now runs even when the org has turned web access off (org_web_off), because it touches no web; confirm with the owner that EP-9 W2's web switch is meant to bind only web phases."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Deep-research numbers dr-1.. still overlap the turn grounding's KB citation numbers [1..k] (seed_recorded_citations), and a knowledge-only research turn now always runs both, so the same [n] can name two different sources in one turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Coverage.read and the evidence band count internal sources against the web page_target in auto mode, so 'set out to read N pages and holds the text of M' can overstate web reads when KB sources exist."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Confidence scoring counts only web_citations from research, so a knowledge-only research answer scores as if it had no citations (DeepResearchOutcome has no knowledge-citation count)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With DEEP_RESEARCH_SECOND_PASS also on, connector item text reaches the ledger inference on the plan-tier model (verevon-budget), not only the turn's model as in the Ask loop; min_privacy_tier still applies."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The composer (DashboardComposer.tsx ~4111) still disables Dyp research under Kun organisasjon, and the server has no capability advertisement for it, so the knowledge-only path cannot be reached from the UI until both exist."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S8",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-2",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/connector_suggest.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/connector_suggestion.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/docs/sse-event-taxonomy.md",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.connector-suggestion.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-25/EP-10-S8.patch (71783 bytes, LF only). Nothing was compiled or run.\n\nBuilt:\n- mp-contracts connector_suggest.rs: a closed list of providers (google, microsoft), TOOL_NAME/TOOL_DESCRIPTION, tool_parameters_json (its enum is built from the list), and parse_args with deny_unknown_fields and an exact provider match. The reason is scrubbed (one line, control and bidi/zero-width characters dropped, any word that is an address or link removed), then must be 1-200 characters. Tests are included.\n- model-gateway connector_suggestion.rs is a new module, declared from tool_loop.rs the same way connector_reads is. It holds the CONNECTOR_SUGGESTIONS_ENABLED switch (strict \"true\"); offered() = flag && !zdr && !space && turn.all_sources && selection empty; tools_for_turn (the client copy is dropped, the server def goes last); the dispatch arm outcome(); and SuggestionTurn::settle, which turns the first accepted call of the turn into ChatEvent::ConnectorSuggestion{suggestion_id \"sug_\"+ulid, provider, reason} and any later call into the tool error \"already suggested\". All the named tests are in it, plus connector_suggestion_absent_under_zdr as the ZDR golden.\n- tool_loop.rs changes: the offer sits next to tools_for_connector_scope, the dispatch arm sits after READ_TOOL_NAME, settle runs before the ToolResult push, the card is pushed after connector_reads::settle, suggest_connector was added to CONNECTOR_CLASS_TOOLS (so it is auto-scope only), and there is one scope test.\n- sse_events.rs: the ConnectorSuggestion variant is a control event (family None) like follow_ups and user_question, plus its name, payload, VARIANTS, covered, two samples and a payload test. I added the taxonomy doc row by hand.\n- SPA:\n  - chat-types: ChatConnectorSuggestion and CONNECTOR_SUGGESTION_PROVIDERS, plus a turn field.\n  - chat-normalizers: normalizeConnectorSuggestion and restoredConnectorSuggestion, carried through turnsToTranscript, transcriptTurnToChatTurn and the cache merge as a restored note.\n  - ConnectorSuggestionCard: Connect via startConnectSession + connectBundlesForSources + runDirectOauthWindow; Use via listConnectorPickerTabs filtered to the provider, then onUse(connectionId); Not now; hidden in Space and temporary chats; a restored card shows as a note with no actions.\n  - action contract chat.accept_connector_suggestion: a discriminatedUnion on path connect/use, with risk low, and it is not model-executable. The registry count goes 319->320.\n- Not added: no row in zdr-posture-matrix.json or zdr_posture_matrix.rs (the hard rule wins over the args file list), no proto, no migration.",
+   "deviations": [
+    "The ZDR golden is the model-gateway test connector_suggestion_absent_under_zdr (in connector_suggestion.rs), not a posture-matrix row. The design allows this, and the hard rule forbids feature rows. So zdr-posture-matrix.json and tests/zdr_posture_matrix.rs are untouched.",
+    "The 'system prompt snippet' is in the tool description (mp-contracts TOOL_DESCRIPTION), so it reaches the model only when the tool is offered. No prompt-builder file was edited and the cached prompt prefix is unchanged.",
+    "'No suggestable connector selected' is implemented as 'no connection selected at all'. The turn's selection holds connection ids, not providers, so any selection holds the card back. This is conservative.",
+    "The gateway logic lives in a new file model-gateway/src/connector_suggestion.rs (declared via #[path] from tool_loop.rs) so the edits to tool_loop.rs stay small.",
+    "ConnectorSuggestion is a control event (always emitted), like follow_ups and user_question, not a feature-gated 'content family'."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts: in `export type ChatThreadTranscriptTurn = {` add the field `  /** The connected-app suggestion card (EP-10 S8), read back as a restored note. */\n  connectorSuggestion?: unknown` (REQUIRED: chat-normalizers.ts now reads and writes turn.connectorSuggestion on the transcript type, so typecheck fails without it).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: in the handlers type, next to onUserQuestion, add `  /** The connected-app suggestion card (EP-10 S8). Ungated control event. */\n  onConnectorSuggestion?: (event: { suggestionId?: string; provider?: string; reason?: string; requestId?: string }) => void`; in dispatchEvent, after `case 'user_question': {...}`, add `    case 'connector_suggestion': {\n      handlers.onConnectorSuggestion?.({ suggestionId: str(payload.suggestion_id), provider: str(payload.provider), reason: str(payload.reason), requestId: str(payload.request_id) })\n      break\n    }`. This is REQUIRED for gen-sse-event-taxonomy.py --check (producer->consumer coverage).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/room_run.rs ROOM_EVENT_POLICY: after `(\"follow_ups\", Disposition::Drop),` add `    (\"connector_suggestion\", Disposition::Drop),` (the leak-guard test reads every name in the taxonomy doc).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/use-chat-controller.ts (or wherever onUserQuestion is wired): onConnectorSuggestion: (e) => { const s = normalizeConnectorSuggestion(e); if (s) set the streaming assistant turn's `connectorSuggestion = s` }; the card's onUse(connectionId) validates `chat.accept_connector_suggestion` {path:'use', suggestionId, provider, connectionId}, then sets the turn's connector scope to [connectionId] (chat.set_connector_scope) and re-sends the last user message once.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: under an assistant turn with `turn.connectorSuggestion`, render `<ConnectorSuggestionCard suggestion={turn.connectorSuggestion} orgId={orgId} spaceScoped={!!spaceId} temporary={zdr/temporary} onUse={...} />`.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml model-gateway environment block: `CONNECTOR_SUGGESTIONS_ENABLED: ${CONNECTOR_SUGGESTIONS_ENABLED:-false}`.",
+    "regenerate: `cd \"apps/Model Plane/rust\" && MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib payload_contract` to rewrite api/contracts/sse-event-payloads.json (new connector_suggestion event); then re-pin its .sha256, the digest in scripts/tests/zdr-contract-sync.test.sh (line ~203), and the SPA vendored copy src/shared/api/contracts/sse-event-payloads.json(+.sha256).",
+    "verify: `python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check` after the chat-client case lands (the doc row was added by hand, sorted between compaction and context_change).",
+    "regenerate the agent-action-admission golden if it lists action ids (new chat.accept_connector_suggestion)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The card's Use path leads straight to connector reads in the Ask loop, so CONNECTOR_SUGGESTIONS_ENABLED must stay off until register D2-172 (trust class) and D2-604 (Ask-loop taint) are closed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not yet shown live on a rebuilt model-gateway: one connector_suggestion frame per provider, connect-and-continue, the already-selected case (no card), and no card in a Space thread or a temporary chat."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "room_run.rs every_taxonomy_event_has_a_policy_row looks already failing: research_plan, goal_progress, sandbox_state, search_provenance and user_question-adjacent names in the taxonomy doc have no ROOM_EVENT_POLICY row."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The suggestion is offered only when the turn selected no connection at all, because ConnectorTurn.selection holds connection ids, not providers; a Slack-only selection therefore suppresses a Gmail suggestion."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The suggest_connector description is not pinned by prompt_tool_manifest.rs: neither connector_suggestion.rs::tool_definition nor mp-contracts TOOL_DESCRIPTION is in TOOL_BUILDERS (connector_reads' definition is not either)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "tools_for_turn always drops a client-supplied tool named suggest_connector, even with the switch off, following connector_reads' precedent; this is the only difference from before when the switch is off."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "docs/ZDR.md and the capability-ownership-matrix / ledger D6 lines for the suggestion are left to S10, as the design plans."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Model Plane/rust/services/model-gateway/src/room_run.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S9",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-3",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.test.ts"
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx"
+   ],
+   "notes": "Built the SPA core of EP-10-S9 with no switch, contract, proto or migration. connect-intent.ts holds the per-thread sessionStorage record (15 min TTL, one per thread, every access guarded), findNewConnection, waitForNewConnection (30 s, injectable clock), runConnectIntent (save before the popup, wait, resend once, clear on failed sign-in, keep on pending) and continueSavedConnectIntent (the Continue click, taken before the resend so a second click sends nothing). use-chat-controller.ts gains connectTurn, pendingConnectIntent (reactive to thread and version), resumeConnectIntent (appendUser false, connectorScope [connectionId], refuses other thread, streaming, empty question, temporary, Space, foreign origin, non-auto retrieval scope or conversation-only source) and dismissConnectIntent; the feedback notice gives the Continuing line. The card half is NOT in this patch: ConnectorSuggestionCard.tsx is EP-10-S8's new file and does not exist in this base, so its save/popup/poll/Finish state is in lead_todo as exact calls. Status partial for that reason. Worktree detached onto model-plane 6a6ebd023 as instructed (branch ref untouched); top-level path confirmed isolated. Nothing run: no test, build, lint or typecheck. Files are LF, matching the index (eol=lf). Changes are staged (git add -A), not committed. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-25/EP-10-S9.patch (26333 bytes; three files).",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: in the destructuring of useChatController() that ends at line 199 (`} = useChatController()`, with `loadEarlier,` at line 181), add `connectTurn,`, `pendingConnectIntent,`, `resumeConnectIntent,` and `dismissConnectIntent,`; pass them with the other chat accessors to the component that renders the connector_suggestion part (ChatMessages.tsx is the likely host; EP-10-S8's file list does not name it).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx (created by EP-10-S8; apply after S8 merges): (a) import { continueSavedConnectIntent, runConnectIntent, type ConnectionRef } from '@/shared/integrations/connect-intent'; keep S8's listConnections, startConnectSession, reserveDirectOauthWindow, runDirectOauthWindow and connectBundlesForSources (from '@/shared/integrations/connect-bundles'). (b) Connect click: first `const turn = props.connectTurn()` and return when it is null; then, synchronously in the click, `const reserved = reserveDirectOauthWindow()`; then `const outcome = await runConnectIntent({ ...turn, suggestionId: props.suggestion.suggestionId, provider, knownIds: new Set(connections.map((c) => c.id)), openConnect: async () => { const session = await startConnectSession(orgId, provider, { bundles: connectBundlesForSources(provider) }); await runDirectOauthWindow({ connectUrl: session.connectUrl || session.redirectUrl, sessionToken: session.sessionToken || session.id }, reserved) }, listConnections: () => listConnections(orgId), resume: (intent, connectionId) => props.resumeConnectIntent(intent, connectionId, providerLabel) })`. Wrap in try/catch: a rejected resume rethrows. (c) Outcomes: 'failed' shows outcome.error.message (the provider text, as InboxPage does); 'pending' shows 'Connected. Finish connecting when the chat is ready.'; 'resumed' needs no line. (d) Finish connecting: show when props.pendingConnectIntent()?.suggestionId === props.suggestion.suggestionId and this card is not running its own connect. Continue calls continueSavedConnectIntent({ threadId: intent.threadId, listConnections: () => listConnections(orgId), resume: (saved, id) => props.resumeConnectIntent(saved, id, providerLabel) }) inside try/catch (a failed list shows an error and changes nothing); 'not_connected' shows the Connect button; 'none' hides the state; 'pending' shows the (c) line; 'Not now' calls props.dismissConnectIntent(). (e) Render none of this where props.connectTurn() is null (temporary chat, Space thread, foreign thread, nothing asked yet).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx (created by EP-10-S8): add the S9 cases: a storage that throws still runs the connect; a successful connect resends once (resumeConnectIntent called once); a reload with a saved intent for this suggestion shows Continue and sends nothing on render; two quick Continue clicks send once; a 16 minute old intent shows no Finish state.",
+    "Verification by the guard, not run here: from apps/Frontend Plane/verevonv3 run `pnpm exec vitest run src/shared/integrations/connect-intent.test.ts` and `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit`, with pnpm_config_verify_deps_before_run=false. No migration, proto, zdr golden, action contract, prompt-tool manifest, SSE taxonomy or env change: nothing to regenerate for EP-10-S9."
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The card half of S9 (save before the popup, poll, resend, Finish connecting state and its card tests) is not in this patch because ConnectorSuggestionCard.tsx is EP-10-S8's new file and is absent from this base, so lead_todo carries the exact calls."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "A resumed turn is sent with appendUser false and no client_message_id, the same shape as continue generation, so the live stack must show the gateway does not store the saved question a second time as a user row [verify live]."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Finish connecting state reads the saved record, not the card's own in-flight connect, and runConnectIntent resumes after clearing rather than taking the record, so a Continue click in the same page while a popup is open could send the question twice; the card must show its in-flight state instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "resumeConnectIntent does not repeat the composer's connector gates (catalogue advertisement, zero retention, Space, filtered sources) and the chat client silently drops connector_scope on subscription-backed turns (chat-client.ts:2122), so the card must offer Connect only where the connected-apps chips are offered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When the composer is off its default scope or a run is streaming, resumeConnectIntent refuses and the saved connect stays, so the Finish connecting state can persist until the person changes the scope back or the 15 minute TTL passes; the card copy must say so."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller-level test covers connectTurn, pendingConnectIntent or resumeConnectIntent and their refusals (other thread, streaming, temporary, Space, foreign origin, non-auto scope) because the controller harness cannot be run in this batch."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The record holds only the question, so a resumed turn runs with the composer's current tools, attachments and source settings rather than the original turn's; the owner should decide whether the record carries the tool choices (design D7 says prompt only)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "After a resume the earlier answer that offered the connection stays above the new answer, because appendUser false only appends while regenerate truncates; the owner should choose the reader's view."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "An expired record of another thread is removed only when that thread is read again, so the question text can stay in sessionStorage until the tab closes; a sweep of expired keys inside saveIntent would bound it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The wait polls listConnections, whereas getConnectSessionStatus returns the connection id once the session completes and would identify the new connection exactly; the design names the list, so this is a later option."
+    }
+   ],
+   "deviations": [
+    "Orchestration (save before the popup, wait for the connection, resend once, Continue after a reload) lives in connect-intent.ts behind injected dependencies rather than in the card, because the card is EP-10-S8's file and is absent from this base; the card keeps the UI and the calls listed in lead_todo.",
+    "The connected app for the resumed turn travels as the per-turn connectorScope option of sendContent, not through a chat.set_connector_scope action call: the consent is per turn and no chip state is written, which is what that action contract requires.",
+    "resumeConnectIntent refuses on a non-auto retrieval scope or a conversation-only source, the offer rule S8 uses, which the design left implicit.",
+    "The Continuing status line uses the page's existing feedback notice (ChatPage.tsx:1471 renders it for six seconds) rather than a new message part."
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-E3",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-4",
+   "files_changed": [
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/egress_tier_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.up.sql",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.down.sql",
+    "apps/Model Plane/proto/model_plane/v1/sandboxes.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/egress_tiers.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+    "apps/Model Plane/rust/services/execution-core/src/egress_proxy.rs",
+    "apps/Model Plane/rust/services/execution-core/src/executor.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/zdr_refusal_inventory.rs",
+    "apps/Model Plane/rust/tools/mp-netbridge/Cargo.toml",
+    "apps/Model Plane/rust/tools/mp-netbridge/src/main.rs"
+   ],
+   "notes": "The slice code is written, but nothing has been compiled or run yet (code-first). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-25/EP-9-E3.patch (126 KB). It is marked partial because the code path from start to finish needs shared edits to files I do not own (see lead_todo). Until the guard applies them, the slice does not compile: `egress_proxy` is not declared in lib.rs, and sandbox-manager has no `authz.GrantEgressAtOff` field or `lease.EgressTierPermitted` field.\n\nAn earlier attempt had already done most of the work in this worktree. I kept what was right and finished it:\n- **Already there (reviewed and kept):**\n  - The per-call CONNECT proxy, accepting only `host:443` on a canonical host name. Its DNS guard refuses private, loopback, link-local and metadata addresses, and IPv4 addresses mapped into IPv6 or NAT64.\n  - The `mp-netbridge` binary (standard library only).\n  - `egress_tiers.rs`: closed enum, `min_tier`, strict switch parser, registry list.\n  - The bwrap argv: unshares the network, covers the socket root with a tmpfs, binds the call's own socket, and runs the program under the bridge.\n  - The executor: admits `AllowDomains` only behind a live per-call proxy in a wrapped process. The `HTTPS_PROXY` check is removed.\n  - In `code_interpreter`: the `run_with_egress` seam and the E1 report `network=<tier>, enforcement=full`, plus `egress` counts. The result bytes do not change at off.\n  - The capability claim is the switch tier only when bwrap and the bridge are both present; otherwise it stays the legacy word.\n  - sandbox-manager: the 0008 migration, `server.go` (D-E2 behind `SANDBOX_MANAGER_EGRESS_TIERS`), and its tests.\n- **Added by me:**\n  - A per-run registry in `egress_proxy.rs`. `run_egress()` holds `register`, `set_ceiling`, `record_lease` and `call_egress`; a run with no entry is off.\n  - `lease_tier`, which maps the proto enum to a tier.\n  - `run_ceiling(RunEgressFacts)`: off for ZDR, waived, plan-mode, tainted or read-only-rung runs.\n  - In `agent.rs`: the run registers only while the switch is on (guard dropped on any path). Before each `code_interpreter` dispatch, the ceiling is set from the run's current facts. Taint is `read_in_round || ctx.taint.is_marked()`.\n  - Tests for all of the above, and an inventory test that pins the ZDR/waived hold.",
+   "deviations": [
+    "Proto enum values renamed from the design's EGRESS_TIER_* to SANDBOX_EGRESS_TIER_* so buf STANDARD lint (ENUM_VALUE_PREFIX) passes. Field number 7 and enum name SandboxEgressTier are as reserved. Go names are now mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_*; prost variants are Off, Registries, Allowlist, All.",
+    "No zdr-posture-matrix rows and no zdr-refusals feature `sandbox_egress`. The owner's rule bans posture rows for feature refusals, and E3 has no explicit-request refusal site: the tier never comes from tool input and is held silently at off for ZDR and waived runs. The hold is pinned instead by a new test in tests/zdr_refusal_inventory.rs. zdr_posture_matrix.rs is unchanged.",
+    "--unshare-net is unconditional only for calls with an egress bridge (and for Disabled, as before), not for every local run. Making it unconditional would change AllowAll behaviour with the switch off.",
+    "The run ceiling is carried through a per-run registry in egress_proxy.rs instead of new parameters on three dispatch layers in runtime_loop/mod.rs, to keep the shared edits small. A missing entry means off.",
+    "The org mode cap (lockdown/read_only) is not visible in execution-core, so the ceiling uses the stated READ_ONLY autonomy rung as its stand-in (plan mode already maps to it). An unstated rung is not forced off, matching check_autonomy_rung."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: add `pub mod egress_proxy;` after `pub mod control_http_client;`",
+    "shared-edit apps/Model Plane/rust/Cargo.toml: in [workspace] members add `    \"tools/mp-netbridge\",` after `    \"services/execution-core\",` (Cargo.lock regenerates)",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: (1) fn execute_code_interpreter gains a last param `egress: &crate::egress_proxy::CallEgress`, and its body calls `crate::code_interpreter::run_with_egress(tool_input, run_id, step_id, workspace_root, ro_inputs, skills, lease_id, egress)` instead of run_with_skills. (2) In the CODE_INTERPRETER_TOOL else-branch (the Space/no-thread call, just before `let execution = execute_code_interpreter(`), add `let egress = crate::egress_proxy::run_egress().call_egress(org_id, run_id);` and pass `&egress` as the new last argument. (3) In execute_thread_code_interpreter, pass `&crate::egress_proxy::CallEgress::off()` (thread leases are not tiered until D2-145/147/149 close).",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs: in the Space acquire fn, right after the `.inspect_err(... \"sandbox-manager AcquireLease failed\")?;` and before `let lease = SandboxLease {`, insert:\n    // EP-9 E3: the tier sandbox-manager recorded and the Space list the decision was signed over, for\n    // this run's code_interpreter calls. Ignored unless the run registered for egress (switch on).\n    crate::egress_proxy::run_egress().record_lease(\n        org_id,\n        run_id,\n        crate::egress_proxy::lease_tier(response.egress_tier),\n        &claims.egress_allowlist,\n    );",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/capability_client.rs: in `pub struct SpaceCapabilityClaims`, after `pub credential_mode: String,`, add:\n    /// The Space egress allow-list Control signed over (EP-9 E2), present only at the `allowlist` tier;\n    /// carried through unchanged so sandbox-manager's digest check sees the list Control bound.\n    #[serde(default, skip_serializing_if = \"Vec::is_empty\")]\n    pub egress_allowlist: Vec<String>,\nIn the test literal `SpaceCapabilityClaims {` (~line 367), add `egress_allowlist: Vec::new(),`.",
+    "shared-edit apps/Model Plane/go/services/sandbox-manager/internal/authz/capability_verifier.go: (1) In CapabilityExpectation, after `Now       time.Time`, add the field `GrantEgressAtOff bool` with the comment `// GrantEgressAtOff is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3, D-E2): an egress-capable claim the decision does not grant verifies at off instead of being refused, as an ungranted process claim does.` (2) In Verify, change the call to `verifiedEgressTier(decision, claims, expect.GrantEgressAtOff)`. (3) Change the signature to `func verifiedEgressTier(decision spaceCapabilityDecision, claims SpaceCapabilityClaims, grantAtOff bool) (string, error)`. (4) In the v1 branch, change the condition to `claims.Egress != egressDisabledByDefault && !hasPermission(decision.Permissions, \"space:egress\") && !grantAtOff`. (5) In the v2 tail, change it to `if claimRank > 0 && granted == EgressTierOff && !grantAtOff {`. (6) In the doc comment, replace the final sentence with `An egress-capable claim with no tier granted is refused outright, as in v1, unless grantAtOff (D-E2): then it verifies at off.` Add a capability_verifier_test.go case: a v2 'registries' claim with no tier permission errors with grantAtOff=false and returns off, nil with grantAtOff=true. Run gofmt.",
+    "shared-edit apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go: (1) Lease struct: after AudienceRevision add `EgressTierPermitted string` with the comment `// EgressTierPermitted is the egress tier this lease permits (migration 0008, EP-9 E3), decided once at AcquireLease. Set by Create; not read back by scanLease, so a lease read from the table carries \"\", which every reader treats as off.` (2) SpaceGrant: add `EgressTierPermitted string // empty is recorded as off`. (3) In Create, before building l: `egressTier := grant.EgressTierPermitted; if egressTier == \"\" { egressTier = \"off\" }`; set `EgressTierPermitted: egressTier,` in the Lease literal. Append `, egress_tier_permitted` to the INSERT column list after created_at, `, $14` to VALUES, and `l.EgressTierPermitted` as the last arg (positions 0-12 unchanged, so lease_test.go still holds; add one assertion that args[13] == \"off\" for SpaceGrant{}).",
+    "shared-edit apps/Model Plane/go/services/sandbox-manager/internal/server/memory_store.go: in MemoryLeaseStore.Create's lease.Lease literal, after `AudienceRevision:   grant.RecipientAudienceRevision,`, add `EgressTierPermitted: grant.EgressTierPermitted,` (gofmt).",
+    "shared-edit apps/Model Plane/go/services/sandbox-manager/cmd/main.go: after the `if capabilityVerifier != nil { ... }` block, add `// EP-9 E3 (D-E2): grant an egress-capable lease at off and record the tier instead of refusing it.` followed by `server = server.WithEgressTiers(egressTiersEnabled(os.Getenv(\"SANDBOX_MANAGER_EGRESS_TIERS\")))`. At the end of the file add `// egressTiersEnabled reads SANDBOX_MANAGER_EGRESS_TIERS strictly: only the literal \"true\" enables it.` and `func egressTiersEnabled(value string) bool { return value == \"true\" }` (gofmt).",
+    "shared-edit apps/Model Plane/rust/services/execution-core/Dockerfile: builder stage, change to `cargo build --release --bin execution-core --bin mp-netbridge` and append `&& cp target/release/mp-netbridge /usr/local/bin/mp-netbridge`. Runtime stage, after the execution-core COPY, add `COPY --from=builder /usr/local/bin/mp-netbridge /usr/local/bin/mp-netbridge` (egress_proxy::NETBRIDGE_BIN; without it the host claims off).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment, add `EXECUTION_SANDBOX_EGRESS: ${EXECUTION_SANDBOX_EGRESS:-off}`; in the sandbox-manager environment, add `SANDBOX_MANAGER_EGRESS_TIERS: ${SANDBOX_MANAGER_EGRESS_TIERS:-false}`. The owner adds both to .env.example.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): add the entry 'Sandbox egress: tier enum, lease granted at off, boundary is netns plus socket proxy' (D-E1 netns + Unix-socket CONNECT proxy + mp-netbridge; D-E2 grant at off and record, behind SANDBOX_MANAGER_EGRESS_TIERS, amends :4440-4450; D-E3 closed enum off|registries|allowlist|all, all not storable, unknown=off, off for ZDR/waived/plan/tainted/read-only runs).",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md §G1: AllowDomains is now enforced by execution-core's per-call proxy (egress_proxy.rs). The HTTPS_PROXY variable is no longer trusted.",
+    "shared-edit apps/Model Plane/ZDR.md: add a row: sandbox egress (EP-9 E3) is held at off for ZDR and waived runs (egress_proxy::run_ceiling). The proxy keeps host counts only, in the tool result. No refusal code.",
+    "regenerate: proto Go bindings for sandboxes.proto (go/gen/model_plane/v1). Run buf lint and buf breaking --against baseline.binpb (additive).",
+    "format: run rustfmt on the new files egress_proxy.rs, mp-contracts egress_tiers.rs and tools/mp-netbridge/src/main.rs (several lines are over 100 columns). Only hunk-format the edited existing files."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs",
+    "apps/Model Plane/rust/Cargo.toml",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs",
+    "apps/Model Plane/rust/services/execution-core/src/capability_client.rs",
+    "apps/Model Plane/go/services/sandbox-manager/internal/authz/capability_verifier.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/memory_store.go",
+    "apps/Model Plane/go/services/sandbox-manager/cmd/main.go",
+    "apps/Model Plane/rust/services/execution-core/Dockerfile"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Flipping EXECUTION_SANDBOX_EGRESS before SANDBOX_MANAGER_EGRESS_TIERS (and E2 in user-core) makes every Space claim 'registries'. sandbox-manager then refuses every Space lease, breaking code_interpreter, so the deploy order must be user-core E2, then sandbox-manager with its switch on, then execution-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The org mode cap (lockdown/read_only) never reaches execution-core. The ceiling holds only the stated READ_ONLY rung at off, so an explicit field (e.g. OrgPolicyContext) is needed before switch-on if a lockdown org must never get egress."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "mp-netbridge spawns a thread per connection inside the sandbox. A low WS06-S8 RLIMIT_NPROC could starve pip's parallel downloads, so check limits_for() against the bridge under the live proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The Linux-only tests (a_python_child_cannot_reach_an_unlisted_host, the proxy socket tests, the netbridge splice test) need the rust:1 CI container with bwrap and mp-netbridge installed. They return early when either is missing."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Design E3 live proof not run: personal Space at registries, pip install plus import succeeds, curl https://example.org fails, the tool result shows the counts, the lease row has egress_tier_permitted, and a ZDR-org run reports network off."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The run-egress registry is keyed by (org, run). Two concurrent loops of the same run id (a resume racing its original) share one entry, and the first guard drop clears it. This fails closed (off), not open."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Residual exfiltration risk: the CONNECT proxy sees only the host, so data can leave inside a request to an admitted registry. This is mitigated by holding ZDR/waived/plan/tainted runs at off and by the three-host REGISTRY_HOSTS list, which needs a security review before switch-on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Thread-scope code_interpreter calls stay at off (CallEgress::off()) until the WS22 thread-lease rows D2-145/147/149 close."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "No sandbox_egress ZDR feature key was added because no code path refuses an explicit egress request. Add one in zdr_refusal.rs FEATURES and zdr-refusals.json if a tool input ever asks for network."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S14",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-5",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/thread_shares.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0112_thread_share_snapshots.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0112_thread_share_snapshots.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/thread_shares.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+   ],
+   "notes": "An earlier attempt had already left the whole slice staged in this worktree, and HEAD already equalled model-plane, so no checkout was needed. I reviewed every file against the design (S14, D8, D10) and against the APIs it calls: export_thread, ERROR_REASON_TRAILER, metadata_json, the test identities, Refusal, switch_from, append_message_in_tx, record_metrics, to_proto_timestamp, and the gateway helpers that S10 also uses. Nothing needed changing. All files use LF line endings. Migration 0106 is free: it is reserved in the EP-12 design §8, and round B renumbered past it to 0107 and 0108. Nothing was compiled or run (code-first rule).\n\nWhat was built:\n- New table thread_share_snapshots. It cascades from threads, has the 8 MiB CHECK, and requires that a live row has both a body and a digest while a revoked row has neither. It ships with a revert file.\n- New thread_shares.proto with Create, List, Get and Revoke; every field is commented. It is added to build.rs.\n- session-core thread_shares.rs:\n  - Taking a snapshot reuses the S9 export with the REDACTED profile, so the export's refusals apply (Space thread, any non-persistent run). A ZDR or waived caller is refused first with feature conversation_share.\n  - Each thread holds at most 20 live snapshots, enforced under an advisory lock.\n  - The insert takes the owner from the thread row and re-checks it.\n  - Revoke deletes the body and digest in the same statement.\n  - Reads are owner-only. Nothing exists yet that would let session-core check a Control grant for conversation_snapshot, so the risk's fallback applies.\n  - The service is registered in grpc.rs, and delete_thread_rows deletes these rows too.\n  - The switch is SESSION_THREAD_SHARES_ENABLED. While it is off every RPC answers unavailable thread_shares_disabled.\n- model-gateway thread_share_routes.rs:\n  - Routes POST/GET /v1/threads/:id/snapshots and GET/DELETE /v1/snapshots/:id.\n  - Switch MODEL_GATEWAY_THREAD_SHARES; while it is off every route answers 404 thread_shares_disabled.\n  - A ZDR caller is refused at the gateway before taking a snapshot.\n  - Errors use the typed envelope with details always an object.\n  - A snapshot read is no-store.\n  - Unit tests show that an api_key principal is refused on all four routes.\n\nThe route file reads state.thread_share_client, which does not exist in state.rs yet. state.rs is not my file, so it is a shared edit in lead_todo, and the gateway will not compile without it.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (LF): (1) in the mp_contracts::model_plane::v1 import list, after the line `    thread_export_service_client::ThreadExportServiceClient,` add `    thread_share_service_client::ThreadShareServiceClient,`; (2) in struct AppState after `    pub thread_export_client: ThreadExportServiceClient<Channel>,` add `    /// Session Core's ThreadShareService on the session_client endpoint (EP-12 S14).` and `    pub thread_share_client: ThreadShareServiceClient<Channel>,`; (3) in the default constructor after `            thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),` add `            thread_share_client: ThreadShareServiceClient::new(session_channel.clone()),`; (4) in the env constructor after the `let thread_export_client = ThreadExportServiceClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);` block add the same block named `thread_share_client` using ThreadShareServiceClient; (5) in BOTH assignment lists (two occurrences of `            state.thread_export_client = thread_export_client;`) add `            state.thread_share_client = thread_share_client;` after it.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (LF): after `      MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}` add `      # EP-12 S14: the owner's share snapshot routes (/v1/threads/:id/snapshots, /v1/snapshots/:id). Needs SESSION_THREAD_SHARES_ENABLED. Only the literal true.` and `      MODEL_GATEWAY_THREAD_SHARES: ${MODEL_GATEWAY_THREAD_SHARES:-false}`; after `      SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}` add `      # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.` and `      SESSION_THREAD_SHARES_ENABLED: ${SESSION_THREAD_SHARES_ENABLED:-false}`.",
+    "shared-edit apps/Model Plane/docs/ZDR.md (LF): in the boundary table, after the row starting `| **Artifact revisions (`artifact_revisions`, session-core, EP-3 S2)** |` add: `| **Share snapshots (`thread_share_snapshots`, session-core, EP-12 S14)** | No snapshot of a ZDR or waived caller's thread, nor of any thread holding a non-persistent run | Built dark behind `SESSION_THREAD_SHARES_ENABLED` and `MODEL_GATEWAY_THREAD_SHARES` (both off; flip waits on the share-model ADR, OD-5). Taking one refuses a ZDR or waived caller with `zdr_feature_not_supported` (`conversation_share`) at the gateway and again in session-core, and refuses a Space thread or a thread with any non-persistent run (`thread_not_exportable`) inside the export transaction. Revoke deletes the body and digest; rows go with their thread (ON DELETE CASCADE and `delete_thread_rows`) and with the org purge. Owner-only reads. |`",
+    "No zdr-posture-matrix.json row: the refusals are feature refusals (conversation_share is already in zdr_refusal.rs from S3).",
+    "Guard: regenerate proto bindings (Rust via build.rs; Go gen/model_plane/v1/thread_shares*.pb.go) and run buf lint and buf breaking for the new thread_shares.proto; then cargo test -p session-core --lib thread_shares and -p model-gateway --lib thread_share_routes. The DB tests are #[ignore] and need DATABASE_URL."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Snapshot reads are owner-only: session-core cannot yet verify a Control grant decision on conversation_snapshot:<id> (no owner service is registered for the type and session-core holds no authz-facade credential), so D10's granted-member read still needs a Control grant-check path before switch-on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No code writes a Control grant for a snapshot (the owner plane proving ownership, then Control writing resource_grants); it needs building with the grant read before the share links reach anyone but the owner."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The ignored DB tests in thread_shares::tests (waived-thread refusal, revoke deletes the body, non-granted member gets not found, immutability after new turns, cascade on thread delete, per-thread cap, switch-off unavailable) and a 0106 up/down round trip have not run against a disposable Postgres."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No golden rows e_zdr_caller_share_refused, e_waived_thread_snapshot_refused or e_snapshot_erased_with_thread were added, because the posture matrix is keyed only on resolver inputs; the refusal is covered by unit tests in both services."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "api/openapi.yaml does not document the four snapshot routes yet (not in this slice's files)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S15",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_b5266c91-547-6",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/thread_export.proto",
+    "apps/Model Plane/rust/services/session-core/src/thread_import.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_export_routes.rs"
+   ],
+   "notes": "An earlier attempt had left the slice almost complete. I reviewed it against the design (S15, D11), the exporter's JSON key set and the session-core schema and helper APIs, and kept it. The one change: the switch-off test now uses a lazy pool that never connects, so it runs as a plain unit test instead of an ignored DB test. Nothing was compiled or run (code-first order). Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-25/EP-12-S15.patch (52,715 bytes). Fence check at slice start: no path that reads a thread into a model has a fence keyed on message metadata. So the D11 fallback applies: every kept turn is stored as role 'user', with a fixed UNTRUSTED header and every line quoted with '> '. Hidden characters and Unicode line separators are normalised first. Each row carries metadata.imported{digest, exported_at, source_org_match, original_role}. The new thread has memory_mode 'off', and the import writes only a THREAD_IMPORTED event, no MESSAGE_APPENDED, so Dreaming never reads imported text. ZDR and waived callers are refused with conversation_import in session-core (before the write gate) and in the gateway. Service principals are refused. The gateway route is POST /v1/threads/import with a 2 MiB DefaultBodyLimit, a typed 413 and 400 envelopes with object details, and 201 {data:{thread_id, imported_messages, dropped}}. It sits behind MODEL_GATEWAY_THREAD_EXPORT; session-core sits behind SESSION_THREAD_IMPORT_ENABLED (off answers unavailable, which the gateway maps to 404). The patch does not compile alone: the new rpc needs the trait method in thread_export.rs (lead_todo).",
+   "deviations": [
+    "The design suggested one user-role 'imported transcript' block for the downgrade. Instead each kept turn is its own user-role message: quoted under a fixed header, with original_role in its metadata. This keeps turn order and the per-message marker D11 asks for.",
+    "ImportThreadRequest takes the title from an optional ?title= query parameter at the gateway, because the request body is the raw export file.",
+    "No zdr-posture-matrix row (feature refusal, per batch rule); ZDR.md row is in lead_todo."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/thread_export.rs: inside `impl ThreadExportService for ThreadExportGrpc`, after the closing brace of `async fn export_thread(...)` and before the impl's closing brace, add (LF file):\n\n    async fn import_thread(\n        &self,\n        request: Request<pb::ImportThreadRequest>,\n    ) -> Result<Response<pb::ImportThreadResponse>, Status> {\n        crate::thread_import::serve(&self.pool, request).await\n    }\n(required to compile: the proto adds rpc ImportThread to ThreadExportService)",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in the feature table beside the Skill import row add: | **Conversation import (EP-12 S15)** | Refused for ZDR and waived callers | session-core ImportThread refuses a zero-retention or waived (DEC-32) caller with zdr_feature_not_supported, feature conversation_import, before any read or write; model-gateway POST /v1/threads/import refuses a ZDR token before reading the body (no posture-matrix row). Store: imported turns are new messages rows of a new caller-owned thread (memory off, user role, metadata.imported), erased with the thread and the org. Built dark behind SESSION_THREAD_IMPORT_ENABLED (off) and MODEL_GATEWAY_THREAD_EXPORT (off). |",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: session-core environment: `SESSION_THREAD_IMPORT_ENABLED: ${SESSION_THREAD_IMPORT_ENABLED:-false}`",
+    "Regenerate proto bindings (mp-contracts build picks up thread_export.proto) and run buf lint + buf breaking --against baseline.binpb (additive: 2 messages, 1 rpc).",
+    "Guard compile/test: cargo test -q -p session-core --lib thread_import; cargo test -q -p model-gateway --lib thread_export_routes."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "F4 is not live-proven: re-import an F3 export containing 'ignore previous instructions' and confirm the next answer treats it as quoted text, and that the DB test import_creates_a_new_owned_thread passes against migrations (sequence order, THREAD_IMPORTED event insert)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Imported turns render in the SPA as user bubbles showing the UNTRUSTED header and '> ' quoting; the SPA should read metadata.imported to show them as imported quotes before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An imported thread starts with many consecutive user-role messages; verify every provider adapter in inference-core accepts or merges consecutive user turns."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "POST /v1/threads/import has no per-user rate limit, so a person can create unbounded threads of up to 400 x 64 KiB rows each."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No cross-crate round-trip test proves that the gateway's render_json output is accepted by session-core plan_import (deny_unknown_fields); the importer's fixture mirrors the exporter's key set by hand."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "apps/Model Plane/api/openapi.yaml lacks a path block for POST /v1/threads/import."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-2-S7, EP-10-S8, EP-10-S9, EP-9-E3, EP-12-S14, EP-12-S15; then git reset -q; git diff --stat",
+    "outcome": "All 6 patches applied with no conflicts and no .rej files. Index unstaged; every slice's files show in diff/status",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml + copy differing model_plane files; bash scripts/tests/go-gen-drift.sh",
+    "outcome": "sandboxes.pb.go, thread_export.pb.go, thread_export_grpc.pb.go updated; thread_shares.pb.go and thread_shares_grpc.pb.go added; drift check: 56 generated Go files match",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml + copy differing files",
+    "outcome": "sandboxes_pb2.py and thread_export_pb2.py updated; thread_shares_pb2.py added. Four space_*_pb2.py files that were missing before this batch were removed again, because they are outside this batch",
+    "clean": true
+   },
+   {
+    "command": "buf lint (thread_shares.proto, new lines of sandboxes/thread_export) ; buf breaking --against baseline.binpb",
+    "outcome": "No lint finding on new content (sandboxes.proto has old lint debt). buf breaking exit 0, so the changes are additive",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "First run failed because model-access.ts had no row for chat.accept_connector_suggestion. After that row was added: 5 passed and the golden was written. Copied to 4 vendored copies; .sha256 and the zdr-contract-sync pin set to ef3287f1…",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 passed, manifest unchanged",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden",
+    "outcome": "1 passed. sse-event-payloads.json gained connector_suggestion (+32 lines); .sha256 and zdr-contract-sync pin set to 4aed0092…; SPA copy and .sha256 vendored; node scripts/gen-chat-event-types.mjs rewrote chat-event-payloads.generated.ts",
+    "clean": true
+   },
+   {
+    "command": "python apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+    "outcome": "sse taxonomy up to date (35 events)",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "No errors. Only old warnings (dead code, unused axum::Json) in files this batch did not touch",
+    "clean": true
+   },
+   {
+    "command": "rustfmt --edition 2021 egress_proxy.rs, mp-contracts egress_tiers.rs, tools/mp-netbridge/src/main.rs; then --check",
+    "outcome": "Formatted; check is clean",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (sandbox-manager); go build ./... (go/gen)",
+    "outcome": "Both clean; gofmt -l lists none of the edited Go files",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3, run again after the generated types)",
+    "outcome": "0 errors. The old schedule-contract.test.ts baseline error no longer appears; --listFilesOnly confirms the new files are checked",
+    "clean": true
+   },
+   {
+    "command": "verevonv3 gateway cargo check",
+    "outcome": "Not run: the batch did not touch apps/gateway",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "slice": "EP-10-S8",
+    "what": "Added 'chat.accept_connector_suggestion': exempt('agent_cannot_self_govern', 'context_write'). The admission-contract generator crashed without a model-access row for the new action id"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx",
+    "slice": "EP-10-S9",
+    "what": "Applied S9's card spec to the card S8 actually shipped. S8 reads accounts via listConnectorPickerTabs, not listConnections. New optional props: connectTurn, pendingConnectIntent, resumeConnectIntent, dismissConnectIntent. With a turn, Connect reserves the OAuth window synchronously and runs runConnectIntent (failed / pending / resumed handled; the pending line reads 'Connected. Finish connecting when the chat is ready.'). Without a turn, S8's old connect path is unchanged. A 'Finish connecting' block with Continue (guarded against double clicks) and Not now also shows on restored notes"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx",
+    "slice": "EP-10-S9",
+    "what": "Mocks now also cover listConnections and reserveDirectOauthWindow. Added the 5 S9 cases: storage throws but the connect still runs; a successful connect resends once; a reload shows Continue and sends nothing; two quick Continue clicks send once; a 16-minute-old intent shows no Finish state. Written but not run (no vitest allowed)"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "slice": "EP-10-S8",
+    "what": "onConnectorSuggestion handler: normalizeConnectorSuggestion, sets turn.connectorSuggestion, skipped on temporary threads. Added acceptConnectorSuggestion: validates chat.accept_connector_suggestion {path:'use'}, then calls sendContent(latest question, {appendUser:false, connectorScope:[id]}). Exported with S9's accessors"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx + ChatPage.tsx",
+    "slice": "EP-10-S8/S9",
+    "what": "New ConnectorSuggestionWiring prop on MessageBlock/AssistantMessage. The card renders under the answer content when turn.connectorSuggestion is set. ChatPage destructures connectTurn, pendingConnectIntent, resumeConnectIntent, dismissConnectIntent and acceptConnectorSuggestion and passes them with orgId"
+   },
+   {
+    "file": "apps/Model Plane/docs/ZDR.md",
+    "slice": "EP-9-E3",
+    "what": "The builder wrote 'apps/Model Plane/ZDR.md', which does not exist; the row went into docs/ZDR.md. It cites egress_proxy::run_ceiling, which is verified to exist"
+   }
+  ],
+  "still_broken": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:~4111 (EP-2-S7): the deep-research button stays disabled for knowledge_only. Enabling it needs a server capability flag the SPA can read; that is a design call, so it is left as is"
+  ],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/{sandboxes.pb.go,thread_export.pb.go,thread_export_grpc.pb.go} (changed), thread_shares.pb.go + thread_shares_grpc.pb.go (new)",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/{sandboxes_pb2.py,thread_export_pb2.py} (changed), thread_shares_pb2.py (new)",
+   "agent-action-admission.json: SPA src/shared/api/contracts, api/contracts (+ .sha256 = ef3287f1…), capability-core testdata, execution-core and model-gateway tests/fixtures; zdr-contract-sync.test.sh pin updated",
+   "sse-event-payloads.json (+ .sha256 = 4aed0092…) in api/contracts and the SPA vendored copy; zdr-contract-sync.test.sh line ~203 pin updated",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts (gen-chat-event-types.mjs)",
+   "Prompt tool manifest: regeneration ran, no change",
+   "Rust bindings come from mp-contracts build.rs (thread_shares.proto registered by S14)"
+  ],
+  "shared_edits_applied": [
+   "EP-2-S7 docker-compose.yml: DEEP_RESEARCH_KNOWLEDGE_SOURCES and DEEP_RESEARCH_CONNECTOR_SOURCES after DEEP_RESEARCH_SECOND_PASS",
+   "EP-2-S7 model-gateway/tests/zdr_feature_table.rs: the two deep_research refusal cases after the retrieval_scope auto case (file stays CRLF)",
+   "EP-2-S7 docs/ZDR.md: knowledge/connector sources paragraph after the claim-ledger paragraph",
+   "EP-10-S8 chat-thread-history.ts: connectorSuggestion?: unknown on ChatThreadTranscriptTurn",
+   "EP-10-S8 chat-client.ts: onConnectorSuggestion handler type + 'connector_suggestion' dispatch case",
+   "EP-10-S8 room_run.rs ROOM_EVENT_POLICY: (\"connector_suggestion\", Disposition::Drop)",
+   "EP-10-S8 use-chat-controller.ts wiring + ChatMessages.tsx card render (see fixes)",
+   "EP-10-S8 docker-compose.yml: CONNECTOR_SUGGESTIONS_ENABLED (model-gateway)",
+   "EP-10-S9 ChatPage.tsx destructuring and pass-through; ConnectorSuggestionCard.tsx and its test (see fixes)",
+   "EP-9-E3 execution-core lib.rs: pub mod egress_proxy",
+   "EP-9-E3 rust/Cargo.toml: tools/mp-netbridge member (Cargo.lock updated)",
+   "EP-9-E3 runtime_loop/mod.rs: egress param on execute_code_interpreter → run_with_egress; Space branch uses run_egress().call_egress; thread branch passes CallEgress::off()",
+   "EP-9-E3 sandbox_lease.rs: record_lease after AcquireLease",
+   "EP-9-E3 capability_client.rs: egress_allowlist field + test literal",
+   "EP-9-E3 capability_verifier.go: GrantEgressAtOff, grantAtOff param, both conditions, doc sentence; new test TestVerifyGrantsAnUngrantedEgressClaimAtOffOnlyWhenAsked in capability_verifier_egress_test.go (where the v2 egress tests live)",
+   "EP-9-E3 lease.go: EgressTierPermitted on Lease and SpaceGrant, defaults to off, INSERT $14; lease_test.go asserts args[13]==\"off\"",
+   "EP-9-E3 memory_store.go: EgressTierPermitted in the literal",
+   "EP-9-E3 cmd/main.go: WithEgressTiers(egressTiersEnabled(os.Getenv(\"SANDBOX_MANAGER_EGRESS_TIERS\"))) + strict parser",
+   "EP-9-E3 execution-core Dockerfile: builds and copies mp-netbridge",
+   "EP-9-E3 docker-compose.yml: EXECUTION_SANDBOX_EGRESS (execution-core, default off) and SANDBOX_MANAGER_EGRESS_TIERS (sandbox-manager, default false)",
+   "EP-9-E3 docs/capability-ownership-matrix.md G1: AllowDomains is now enforced by the per-call proxy (egress_proxy.rs); HTTPS_PROXY is no longer trusted",
+   "EP-9-E3 docs/ZDR.md: sandbox egress row",
+   "EP-12-S14 model-gateway state.rs: ThreadShareServiceClient import, field, both constructors, both assignment lists",
+   "EP-12-S14 docker-compose.yml: MODEL_GATEWAY_THREAD_SHARES and SESSION_THREAD_SHARES_ENABLED",
+   "EP-12-S14 docs/ZDR.md: share snapshots row after artifact revisions",
+   "EP-12-S15 session-core thread_export.rs: import_thread delegating to thread_import::serve",
+   "EP-12-S15 docs/ZDR.md: conversation import row beside skill import",
+   "EP-12-S15 docker-compose.yml: SESSION_THREAD_IMPORT_ENABLED"
+  ],
+  "shared_edits_skipped": [
+   "EP-2-S7 apps/Model Plane/docs/decisions/ledger.md entry (the lead books it)",
+   "EP-9-E3 apps/Model Plane/docs/decisions/ledger.md sandbox egress entry D-E1/D-E2/D-E3 (the lead books it)",
+   "EP-9-E3 .env.example additions for EXECUTION_SANDBOX_EGRESS / SANDBOX_MANAGER_EGRESS_TIERS (the owner adds them)",
+   "EP-2-S7 DashboardComposer knowledge_only deep-research button (needs a capability flag; design, see still_broken)",
+   "Builder-requested vitest/cargo test runs (task forbids tests except the generation steps)"
+  ],
+  "notes": "The batch compiles. cargo check of the Model Plane workspace is clean, sandbox-manager passes go build and go vet, tsc6 on tsconfig.app.json reports 0 errors, the SSE taxonomy check is current, and buf breaking reports nothing.\n\n1. **Line endings.** Several shared files are LF in git but CRLF in this worktree's checkout (the old stat cache hid this). Editing them in CRLF turned each diff into a whole-file rewrite. I changed the edited files back to LF to match what is committed, so the diffs are minimal: sandbox-manager's cmd/main.go, capability_verifier.go, capability_verifier_egress_test.go, lease.go, lease_test.go, memory_store.go; rust/Cargo.toml; capability_client.rs; sandbox_lease.rs; room_run.rs; docs/capability-ownership-matrix.md. zdr_feature_table.rs is CRLF in git and stays CRLF.\n\n2. **Truncation incident.** A one-line python rewrite of those files truncated them. None of them held builder changes; server.go, the only E3 sandbox-manager file the builder changed, was not touched. I wrote each one back from its HEAD content and re-applied every shared edit. The final diffs are small and targeted: for example lease.go +51/-30 (mostly gofmt realignment), main.go +7, room_run.rs +1.\n\n3. **Shared edit outside a builder list.** model-access.ts got a row for chat.accept_connector_suggestion. The admission golden cannot be generated without it.\n\n4. **New UI wiring not tested.** The EP-10 S8/S9 wiring in the controller, ChatMessages, ChatPage and ConnectorSuggestionCard is written and typechecks, but it is not tested. The lead should run:\n   - `vitest run src/features/chat/components/ConnectorSuggestionCard.test.tsx src/shared/integrations/connect-intent.test.ts src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/chat-normalizers.connector-suggestion.test.ts`\n   - the builder-requested cargo tests: model-gateway `deep_research::tests::sources`, `connector_reads`, `zdr_features`, `--test zdr_feature_table`, `thread_share_routes`, `thread_export_routes`; session-core `thread_shares` and `thread_import`\n   - `go test` for sandbox-manager (authz, lease, server)\n\n5. **Python bindings.** The generator also wanted to add four space_*_pb2.py files that were missing before this batch. I left them out because they are not part of it."
+ }
+}

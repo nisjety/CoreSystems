@@ -1,0 +1,628 @@
+{
+ "batchId": "W3-04",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/rust/services/inference-core/src/provider/routing_policy.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/role.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/rust/services/inference-core/src/http_health.rs",
+    "apps/Model Plane/rust/services/inference-core/tests/fallback_test.rs",
+    "apps/Model Plane/rust/services/inference-core/tests/model_entitlement_chain_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/role_routing.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "Line-ending check of provider/fallback.rs with python3, before and after the edits",
+     "outcome": "Before: 5704 CRLF, 5704 LF. After: 5740 CRLF, 5740 LF. No bare LF introduced."
+    },
+    {
+     "command": "cargo check -p inference-core --lib --tests (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0), started in the background after the fix",
+     "outcome": "Launched. Its completion was not observed before this report, so this is not a pass or fail claim. Output is in scratchpad s4-fix-check-lib-tests.txt. Expected only the streaming.rs test-literal error (lead_todo A) if fallback.rs is clean."
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib resolution_tests::plain_call_keeps_its_budget_note_and_a_role_call_adds_its_decision",
+     "outcome": "NOT RUN. The lib test target cannot compile: streaming.rs RouteNote literal (lines 139-144, test the_route_note_rides_the_final_chunk_only) has no role field (lead_todo A). The bin target also fails: main.rs PolicyState (lines 67-71) has no chain field (lead_todo B), and integration tests build the bin."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "A. shared-edit apps/Model Plane/rust/services/inference-core/src/streaming.rs: in the test literal RouteNote at lines 139-144 (fn the_route_note_rides_the_final_chunk_only), add `role: None,` after `applied_effort: None,`. Still missing at the time of this report, and it blocks every inference-core lib test target.",
+    "B. shared-edit apps/Model Plane/rust/services/inference-core/src/main.rs: in `http_health::PolicyState { auth, policy, client }` at lines 67-71, add `chain: chain.clone(),` after `client: chain.policy_client(),`. Still missing at the time of this report, and it blocks the bin target and so every integration test.",
+    "After A and B, run: cargo test -q -p inference-core --lib resolution_tests (this includes the new attach_role test), then the other inference-core commands from the previous report: --lib role, --lib routing_policy, --lib http_health, --test fallback_test, --test model_entitlement_chain_test. Confirm the output of scratchpad s4-fix-check-lib-tests.txt first.",
+    "C through L from the previous report are unchanged and still open."
+   ],
+   "deviations": [
+    "The new unit test sits in the existing mod resolution_tests of fallback.rs, not in a new file."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/inference-core/src/streaming.rs",
+    "apps/Model Plane/rust/services/inference-core/src/main.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "shared-edit apps/Model Plane/rust/services/inference-core/src/main.rs (http_health::PolicyState literal, about line 67-71): add `chain: chain.clone(),` after `client: chain.policy_client(),`. Without it the inference-core bin does not compile (E0063), and so no integration test can run either.",
+     "shared-edit apps/Model Plane/rust/services/inference-core/src/streaming.rs (test the_route_note_rides_the_final_chunk_only, RouteNote literal about line 139-144): add `role: None,` after `applied_effort: None,`. Without it the inference-core lib test target does not compile.",
+     "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: in the tool-round InferRequest literal (about line 8457, after `image_parts: Vec::new(),`) add `role_fallback_model: String::new(),`. In the test route_shift_names_only_a_budget_move, mpv1::RouteNote literal (about line 9367), add `role: String::new(), role_source: String::new(),`. Without these the model-gateway lib does not compile.",
+     "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: in the pb::InferRequest literal at about line 3075 (after `image_parts: image_parts.clone(),` at about line 3135) add `role_fallback_model: String::new(),`. Without it the execution-core lib does not compile (E0063). This site is not in the implementer's lead_todo.",
+     "shared-edit apps/Model Plane/rust/services/inference-core/src/grpc.rs: the infer handler (about line 345, `.infer_noted(&internal_req, !no_store)`) and the infer_stream handler (about line 379, `.infer_stream_noted(&internal_req)`) must call `infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)` and `infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))`. Use `crate::provider::role::RoleCall`. This is safe for a call that is not a role call, because resolve_role_call returns early for any model other than verevon-role. Why: today no wire call reaches the resolver. With MODEL_GATEWAY_ROLE_ROUTING on, every verevon-role title, follow-ups, judge or research-plan call takes the role=None path and is refused as RequestRejected (invalid_argument). The row's resolver is then dead code on the wire."
+    ],
+    "dod_gaps": [
+     "Regenerate apps/Model Plane/go/gen/model_plane/v1/inference.pb.go, an owned file that is still unchanged, and the Python inference_pb2 from the new proto (role_fallback_model=23, RouteNote role=5 and role_source=6).",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `MODEL_GATEWAY_ROLE_ROUTING: ${MODEL_GATEWAY_ROLE_ROUTING:-false}`, with a comment that inference-core must roll out before the gateway switch.",
+     "Ledger entry in apps/Model Plane/docs/decisions/ledger.md: 'Side-task models come from a platform role table; a role never fails a turn' (D6, D7).",
+     "Live proof per design section 4 S4 on an Anthropic-only stack. PUT title [gpt-4o-mini, claude-sonnet-5-5], turn the switch on and run one turn: expect role=title, role_source=table and model claude-sonnet-5-5. PUT an empty table: expect turn_model. With the switch off, the request shapes must be identical. Save the evidence as ep13-s4-roles-<date>.txt. This needs the grpc.rs wiring first.",
+     "After the shared edits, re-run in the real worktree: cargo check --workspace --all-targets plus the 8 plan test commands. I ran them only on a scratch copy that had these edits applied."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The new attach_role test and the rest of the inference-core lib and integration tests have not run. Run them once lead_todo A and B are applied, and check the cargo check output in scratchpad s4-fix-check-lib-tests.txt before reporting a pass."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives a verevon-role request through the gRPC handler. The fallback_test and entitlement tests call infer_role_noted directly, which is why the missing grpc.rs wiring went unnoticed. Add a grpc.rs test in which a pb::InferRequest with model verevon-role, purpose Title and role_fallback_model resolves, and its RouteNote carries role and role_source."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The D7 no-reasoning filter for small-budget purposes runs only at PUT (validate_roles), never at resolve time. The turn-model fallback is never checked for it either. A title or follow-ups call can therefore land on a reasoning-only turn model, such as an Opus turn, and lose its 24-token budget to hidden reasoning."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The research plan's role fallback is the configured plan model. The design said `verevon-budget`. The behaviour is defensible, since off-switch behaviour is unchanged, but the deviation is not recorded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "resolve_role_call runs after anthropic::with_current_model. A retired Claude id chosen from the role table or as the turn model is therefore not mapped to its successor before the entitlement and cache checks run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "PUT validation refuses intent ids such as verevon-budget as unknown_model, because they are not in list_models. The resolver, however, admits intent ids as candidates. Stored tables and validation disagree on whether an intent id is a valid candidate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Two design tests are missing. role_id_without_purpose_is_invalid_argument is covered only inside verevon_role_never_reaches_a_provider_verbatim. small_budget_role_rejects_reasoning_only_model has no resolve-time counterpart. The sse test covers only the switch-off half of aux_requests_use_role_id_only_when_switch_on; the switch-on half is covered only by the pure side_task_model test."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo check -p inference-core --lib --tests",
+      "outcome": "Lib builds (1 pre-existing dead-code warning). Two targets fail. Bin test: main.rs:67 PolicyState is missing field `chain` (E0063). Lib test: streaming.rs:139 RouteNote literal is missing `role` (E0063). Both are the unapplied lead_todo A and B.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib role",
+      "outcome": "Not run. Lib test target does not compile (streaming.rs:139, missing `role`).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib routing_policy",
+      "outcome": "Not run. Same compile blocker (streaming.rs:139).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib http_health",
+      "outcome": "Not run. Same compile blocker (streaming.rs:139).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --test fallback_test",
+      "outcome": "Not run. The integration tests build the bin, which fails (main.rs:67 PolicyState missing `chain`).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --test model_entitlement_chain_test",
+      "outcome": "Not run. Same bin compile blocker (main.rs:67).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib role_routing",
+      "outcome": "Passed: 3 passed, 0 failed (2762 filtered), on two runs. See the note on the model-gateway compile check, which fails when run separately.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib sse::",
+      "outcome": "Passed: 331 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib --tests",
+      "outcome": "Fails. tool_loop.rs:8427 InferRequest literal is missing `role_fallback_model` (lib and mp_contracts types). tool_loop.rs:9367 mpv1::RouteNote literal is missing `role` and `role_source` (lib test). tool_loop.rs is not owned by the slice and is listed in needs_other_files, but the implementer's lead_todo does not name these lines. The lead must add `role_fallback_model: String::new()` and `role: String::new(), role_source: String::new()`, or the equivalent for the field types. The `cargo test --lib` runs above compiled and passed anyway, so cargo check and cargo test disagree here. I did not resolve why.",
+      "passed": false
+     },
+     {
+      "command": "buf lint (apps/Model Plane/proto, path inference.proto)",
+      "outcome": "The whole-tree buf lint run from the plane root fails on unresolved imports. Run from proto/, the lint output is dominated by the repo's pre-existing baseline of 1013 findings in buf-lint-baseline.json. The three new fields (role_fallback_model=23, role=5, role_source=6) carry comments, and grep shows no new role-related finding on them. No new lint finding was found by inspection. This was not a diff against the baseline JSON.",
+      "passed": true
+     },
+     {
+      "command": "buf breaking --against baseline.binpb (apps/Model Plane/proto)",
+      "outcome": "Exit 0, no output. The change is 17 added lines only.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "policy"
+   ],
+   "notes": "Required fix 1 applied in apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs. attach_role was `let decision = decision?;`, which returned None for every non-role call and so dropped the budget RouteNote that resolve_intent produces when INFERENCE_ROUTE_NOTE is on (route_note_enabled().then(...) at about line 1280). It is now `match decision { None => note, Some(decision) => Some(RouteNote { role: Some(decision), ..note.unwrap_or_else(RouteNote::unbudgeted) }) }`. A non-role call keeps its note unchanged. A role call still always carries a note, unbudgeted when none exists. With the switch off, attach_role(None, None) is None, as before. The existing doc comment already described this behaviour, so it was not edited. New unit test plain_call_keeps_its_budget_note_and_a_role_call_adds_its_decision in mod resolution_tests asserts attach_role(Some(budget), None) == Some(budget), attach_role(None, None) == None, and both role-call branches. No other file changed this round, and the files_changed list is the full slice list from the previous report. The test has not run, so the fix is verified by reading only. Lib tests remain blocked by the two unowned sites in lead_todo A and B."
+  },
+  {
+   "id": "EP-2-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-event-contract.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-types.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.connector-citation.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-media-markdown.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-media-markdown.citation-number.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-event-contract.test.ts src/shared/api/chat-client.test.ts src/features/chat/components/chat-normalizers.connector-citation.test.ts src/features/chat/components/chat-media-markdown.citation-href.test.tsx (baseline, before edits)",
+     "outcome": "4 files, 161 passed"
+    },
+    {
+     "command": "same 4 files plus the new chat-media-markdown.citation-number.test.tsx, after writing the tests and before the source change",
+     "outcome": "10 new tests failed for the expected reasons (number dropped at the client, the normalizer, and marker binding); the rest passed"
+    },
+    {
+     "command": "pnpm exec vitest run (same 5 files) after the source change",
+     "outcome": "5 files, 173 passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat/components/chat-normalizers.connector-citation.test.ts src/features/chat/components/chat-normalizers.test.ts (after adding the merge and stored-turn tests)",
+     "outcome": "2 files, 46 passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/shared/api (final tree, the slice's test command)",
+     "outcome": "235 files, 2846 tests passed"
+    },
+    {
+     "command": "pnpm exec eslint on the 8 touched files",
+     "outcome": "6 files clean; chat-normalizers.ts (43 errors) and chat-media-markdown.tsx (4 warnings) carry only findings outside the changed lines, all pre-existing"
+    },
+    {
+     "command": "pnpm lint (the slice's lint command, eslint .)",
+     "outcome": "exit 1 from 51 pre-existing problems outside this slice (43 in chat-normalizers.ts, 6 in public/boot-watchdog.js, 2 in tests/visual/space-ui-shots.mjs); none on a line this slice changed"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "1 error, in src/shared/api/schedule-contract.test.ts (not touched; the known tsc6 red); no error in any touched file"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit exactly the eight files in files_changed as one change. Do not include the EP-6-S1 edits in the same worktree (ScheduledRunsPanel.tsx, shared/actions/*, features/automations/).",
+    "Live proof F1 (design section 6, and the S1 live proof): on a rebuilt frontend served from a restarted second dev server (:5173 serves the main checkout), drive a KB plus web turn whose server numbering has a gap through the BFF. Check that the SSE citation frames carry `number`, that the chip popover and the Sources tab show the numbered sources at 1280 and 375 px, and that a reload of the same thread binds the same chips. This needs the stack, so this slice did not run it."
+   ],
+   "deviations": [
+    "No golden JSON row was added: the `citation` row with `number` already exists in src/shared/api/contracts/sse-event-payloads.json. Its key check is covered by a new mutation test in chat-event-contract.test.ts instead.",
+    "The AG-UI custom citation case in chat-client.ts (dispatchAgUiEvent) also reads `number`, beyond the two sites the slice row names, because it feeds the same onCitation callback.",
+    "Two extra normalizer tests were added to chat-normalizers.connector-citation.test.ts: an earlier number survives upsertCitation when a later frame has none, and a number survives the stored-turn read. They pin the reload and merge behaviour the design relies on."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof F1 (design section 6) needs the stack: run a KB plus web turn with a gap in the server numbering through the BFF on a restarted second dev server. Confirm the SSE citation frames carry `number`, that the chips and the Sources tab bind correctly at 1280 and 375 px, and that a reload binds the same chips."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof of EP-2-S1 is still owed (design section 6 flow F1). It needs a KB plus web turn with a server numbering gap, a reload of the thread, and the SSE frames showing `number`. It feeds the citation evidence for D1-102 and D1-104. The slice has no switch, so the proof gates acceptance, not enablement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Client-extracted tool-output citations (extractCitationsFromToolOutput, use-chat-controller.ts:3937) carry no `number`. In any turn that also has numbered sources, a `[n]` marker that used to land on such a source by position now stays plain text. This follows the read/unread rule, but the F1 proof should confirm it is the intended result."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\ag-ui-client.ts drops `number` in the citation.added projection (about :456-466) and the citation custom event (about :633-644). No production code imports streamAgentChat or dispatchAgUiChatEvent, so nothing is affected today. Add `number` there, or delete the module, when it is next touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Stored citations reach the SPA raw: transcriptTurnToChatTurn filters with isCitation (chat-normalizers.ts:891), so `number` survives reload only because the object passes through unconverted. A typed reader for stored citations would remove that dependency."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "For the lead: depth register row D1-107 (citation half) can be marked closed. The `citation` golden row with `number` exists, and the SPA reads of it are checked by chat-event-contract.test.ts. The batched `citations` and `search_results` envelopes stay transport-only by design."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "pnpm lint exits 1 on 51 pre-existing problems outside this slice: 43 Norwegian-copy errors in chat-normalizers.ts, 6 in public/boot-watchdog.js and 2 in tests/visual/space-ui-shots.mjs. None sits on a line this slice changed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "EP-2-S1 has no live proof yet (F1: SSE frames carry `number`, gap-case chips bind correctly, reload binds the same way). The slice has no switch, so this proof gates acceptance."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Citations that the client extracts from tool output (extractCitationsFromToolOutput) carry no `number`. In a turn that also has numbered sources, a `[n]` marker that used to bind to one of those citations by position now stays plain text. This is intended by the read/unread rule, but F1 should confirm it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test covers duplicate server numbers in one turn. `citations.find` silently takes the first match, and nothing asserts what should happen instead."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "ag-ui-client.ts still drops `number` in its citation projections. Nothing in production imports it today, so add the field or delete the module the next time it is touched."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "pnpm lint exits 1 on pre-existing problems only. chat-normalizers.ts has 43 errors at both HEAD and in the tree. The 4 warnings in chat-media-markdown.tsx are outside the changed lines. The touched files add no new error."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd verevonv3 && pnpm exec vitest run --pool=threads src/features/chat src/shared/api",
+      "outcome": "235 files passed, 2846 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cd verevonv3 && pnpm lint",
+      "outcome": "exit 1: 366 problems (51 errors, 315 warnings). Errors are the pre-existing ones the implementer named: 43 Norwegian-text errors in chat-normalizers.ts at lines 143-350 and similar, plus errors in public/boot-watchdog.js and tests/visual/space-ui-shots.mjs. The slice changed only chat-normalizers.ts lines 1707-1715, which are not among the error lines I saw. Eslint on the 8 touched files reports only those Norwegian-text errors in chat-normalizers.ts. I did not diff against HEAD, so I did not confirm that the errors predate the slice.",
+      "passed": false
+     },
+     {
+      "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "1 error: src/shared/api/schedule-contract.test.ts(28,16) TS2352. That file is not touched by this slice. No error in any touched file.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Citation chips bind by the server's citation number. `ChatCitationEvent` and `Citation` carry `number?`; `emitCitation` (chat-client.ts) and the AG-UI custom citation case read `num(...number)`; `normalizeCitation` carries it with a conditional spread so a later frame without a number does not clear an earlier one in `upsertCitation`. In `parseInline` (chat-media-markdown.tsx, inside the citation branch), a `[n]` marker resolves with `citations.find(c => c.number === n)` when any citation in the turn has a number, and by array position only when none does; a marker with no source stays plain text. Reload binds the same way because stored citations pass through `transcriptTurnToChatTurn` raw and keep `number` (test added). No flag, no proto, no migration, no golden or generator edit; ZDR: nothing stored. The golden already has the `citation` row with `number` (optional integer), identical to the Model Plane golden; the new mutation test in chat-event-contract.test.ts proves the new read is checked against it. The worktree also holds uncommitted EP-6-S1 edits (ScheduledRunsPanel.tsx, shared/actions/*, features/automations/); none of them is this slice and none is in files_changed."
+  },
+  {
+   "id": "EP-6-S0",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [],
+   "tests_run": [
+    {
+     "command": "python3 check of the six drafted table rows in the scratchpad draft (cell counts 6, 8 and 6; emoji scan)",
+     "outcome": "pass: every row has its target cell count and there are 0 emoji. Not a repo test: EP-6-S0 defines no test_commands, so no test was run."
+    },
+    {
+     "command": "python3 CR byte count of apps/Model Plane/docs/decisions/ledger.md",
+     "outcome": "0 CR bytes, so the working copy is LF"
+    },
+    {
+     "command": "git status and git ls-files --eol on the four shared files and docs/plans/wave3, before any edit",
+     "outcome": "clean: no partial edits from an earlier attempt; the slice has no owned files"
+    },
+    {
+     "command": "git grep -n VITE_FLEET_CONSOLE over tracked files, excluding .md",
+     "outcome": "only App.tsx lines 21-22 and vite-env.d.ts line 8; no tracked config sets the flag"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (LF file): insert after the '---' separator at line 23 and before the heading '## 2026-11-02 - Main merged into model-plane: ...' at line 25, newest first. Apply Entry A, a blank line, the separator '---', a blank line, Entry B, a blank line, '---', a blank line, Entry C, a blank line, '---', and a blank line, so the existing heading keeps its rhythm. Entry A: ## 2026-11-03 - Run now is a manual schedule fire through the same Control fire authorisation; creator only (EP-6 S2) ... Status line: **Status: decided at the default; not built yet (EP-6 S2 builds it, dark).** Decided: OD-1 (creator only), OD-8 (manual fires count toward the three-failure auto-pause) and OD-9 (limits). A creator presses Run now on one of their own schedules. The fire takes the same Control decisions as a cron fire: `AuthorizeFire` on the route, as the sweeper makes it for a cron slot, and then the task dispatcher's checks (`AuthorizeFire`, then `AuthorizeScheduledRun`) before `StartWorkflow`. Run now never calls `StartWorkflow` directly, and it writes the same `tasks` and `cron_fires` rows as a cron fire, with fire key `manual:<uuid>`. Creator only is enforced in capability-core and in the BFF. Org admins and owners keep pause and delete but cannot press Run now, because a press spends the creator's stored authority at a moment the creator did not choose. One manual fire may be in flight per schedule, and at most six manual fires per schedule per rolling hour; the refusals are typed 409 and 429. ZDR refuses the route at the capability-core router, as it refuses every non-read request from a ZDR principal. Supersedes nothing. Entry B: ## 2026-11-03 - The Automations hub shows Active, Paused and Expired; the Fleet console stays hidden until Quarry has a fleet model (EP-6 S0, OD-2, OD-3). Status line: **Status: decided at the defaults. The Fleet route is already hidden: it mounts only when `VITE_FLEET_CONSOLE` is `'1'`, and no tracked config sets it.** Decided: OD-3, the hub states are Active, Paused and Expired. Expired means the approval lapsed. Paused shows its reason (set by the owner, or after failures). There is no Completed state until one-shot schedules exist, and those are out of scope. OD-2: no producer starts a fleet, and proxying `/v1/fleets/:id` through a Quarry-audience BFF would add a cross-plane route with nothing behind it, so the console stays hidden. When Quarry rules that it has no fleet model, the code is removed rather than proxied, and EP-6 S5 removes any link to it. Supersedes nothing. Entry C: ## 2026-11-03 - Agent definitions stay in Convex and are versioned there; capability-core keeps policy only (EP-6, OD-4, OD-5, DEC-14). Status line: **Status: proposed until the owner rules on OD-4 and OD-5.** It blocks EP-6 S7 to S11; S0 to S6 do not depend on it. OD-4 (recommended: immutable published versions): each definition has numbered, immutable versions in Convex with a canonical digest, one editable draft, and a `publishedVersion` pointer on the agent. A binding or a run pins a version, and publishing never changes a running turn. Rollback publishes an old version again as a new number. OD-5 (recommended: the Convex definition holds the join): the tool allowlist and the autonomy cap live on the definition and apply tighten-only at invoke. They narrow what the WS05 bindings and the org policy already allow and never grant. capability-core stays the policy of record under DEC-14 and gains no agent table; the agent cap is one more input to the WS25-S6 strictest-wins resolve. OD-6 (named-agent authority, phase 3) is open in the depth register. Supersedes nothing.",
+    "shared-edit docs/plans/model-plane-depth-register.md (LF file): insert directly before the line '## Cross-wave' (line 2715), after the W3-03b table whose last row is D3-108, this block followed by one blank line. IDs D3-109 to D3-112 are the next free after D3-108 at HEAD e5d3189f8; renumber on apply if another W3-04 slice lands D3 rows first. Block: ### Wave-mode batch W3-04 (2026-11-03) then a blank line, then | ID | Slice | Kind | P | Finding | Status | then |---|---|---|---|---|---| then these four rows: | D3-109 | EP-6-S0 | decision | P1 | OD-4 (agent definition schema and version semantics) is a proposal: immutable published versions in Convex (`agentDefinitionVersions`), one editable draft and a `publishedVersion` pointer on `agents`, recommended over a mutable row with history or git-like branches. The owner must rule before EP-6 S7 starts; S7 to S11 are blocked, S0 to S6 are not. | open | ; | D3-110 | EP-6-S0 | decision | P1 | OD-5 (the DEC-14 join) is a proposal: the tool allowlist and the autonomy cap live on the Convex definition and apply tighten-only at invoke; capability-core keeps the policy of record and gains no agent table. The owner must rule before EP-6 S9 and S10 start. | open | ; | D3-111 | EP-6-S0 | decision | P1 | OD-6 (named-agent authority, phase 3) is a proposal: a named agent runs as the invoking person for interactive turns and under WS20 stored consent for unattended runs, and never holds a service principal or a stored creator grant. The owner must rule before any persistent named agent is designed. | open | ; | D3-112 | EP-6-S0 | decision | P1 | OD-7 widens D2-121 from the fires listing to the org-wide schedule list: `GET /api/v1/cron` returns every schedule with its `task_template` to any member, and capability-core scopes get, PATCH and DELETE by org only (creator checks live in the BFF). Recommended: capability-core filters the list to the caller's own schedules unless the caller is an admin (a filter, never a grant), as a WS20 depth fix; EP-6 S1 filters client-side until S2 adds `creator=self`. The owner must rule before the hub shows an org view to admins. | open |",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md (CRLF working copy: keep CRLF): insert after the row beginning '| Durable tasks + cron' (line 62) this row: | Run now (manual schedule fire) | **capability-core** owns the route and the `cron_fires` row; **Control Plane** signs both fire decisions, creator only (OD-1) | Postgres (`tasks`, `cron_fires`; fire key `manual:<uuid>`) | BFF creator gate; capability-core router refuses ZDR (`authz.go:81`); dispatcher re-asks Control before `StartWorkflow` | NATS: none new (reuses the scheduled-run path) | planned, EP-6 S2 (dark); reuses the cron fire path, no second one |",
+    "shared-edit docs/master-ownership-matrix.md (CRLF working copy: keep CRLF; the batch's apps/master-ownership-matrix.md does not exist): insert after the row beginning '| Tasks / cron |' (line 88) this row: | Run now (manual schedule fire) | no | no | **Owner** of the manual fire; Control Plane signs each fire decision | Automations hub: Run now button and manual chip | reuses the existing fire path; no new Rust path | **capability-core-go** (route and fire row) | no |",
+    "lead review (design DoD, docs/plans/wave3/EP-6-agents-and-automations-hubs.md section 4, S0): the three must-design-first items in plan 3.3.2 EP-6 each point at a row now: named-agent authority at D3-111, definition schema and version semantics at D3-109 and ledger entry C, Fleet keep or remove at ledger entry B. The slice defines no test command."
+   ],
+   "deviations": [
+    "No owned files existed for this slice, so all four target files are listed in needs_other_files and their exact lines are in lead_todo, as the batch requires.",
+    "The batch names apps/master-ownership-matrix.md, which does not exist; the tracked file is docs/master-ownership-matrix.md, and the row is handed back against that path.",
+    "The batch says ledger.md is CRLF; the working copy is LF, so the entries are written with LF.",
+    "OD-3 is recorded inside entry B, alongside OD-2, rather than as a fourth entry, because the batch names three entries.",
+    "Entries A and B use the status 'decided at the default; not built yet', which is not one of the ledger's listed states (proposed, implemented, deferred, rejected, archived)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "docs/plans/model-plane-depth-register.md",
+    "apps/Model Plane/docs/capability-ownership-matrix.md",
+    "docs/master-ownership-matrix.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The lead must apply the four shared edits in lead_todo (ledger.md, the depth register, capability-ownership-matrix.md and docs/master-ownership-matrix.md). Until then the slice's deliverable is not in the repo.",
+     "The owner must rule on OD-4, OD-5, OD-6 and OD-7 (proposed rows D3-109 to D3-112) before EP-6 S7 to S11 and before the hub shows an org-wide view to admins."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "EP-6 S2 hazard: can_author_own_schedule in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs (about line 82) admits org owners and admins as well as the schedule's creator. Reusing it for Run now would give admins the press and contradict OD-1; S2 needs its own creator-only check in the BFF, and capability-core, which scopes by org only today, needs a creator match."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "OD-3 sits in ledger entry B with OD-2 because the batch names three entries; the owner may want OD-3 as its own entry."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The ledger's listed states (proposed, implemented, deferred, rejected, archived) have no decided-but-unbuilt state; entries A and B say 'decided at the default; not built yet'. The lead should confirm that wording or pick a state."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Register IDs D3-109 to D3-112 are the next free after D3-108 at HEAD e5d3189f8. Other W3-04 slices also append D3 rows, so renumber on apply if another batch member lands first."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CLAUDE.md and the batch name apps/master-ownership-matrix.md and apps/CODEBASE_INFORMATION_SYSTEM.md; neither exists in the tracked tree. Both live under docs/ (docs/master-ownership-matrix.md and docs/CODEBASE_INFORMATION_SYSTEM.md)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Working-copy line endings: ledger.md and model-plane-depth-register.md are LF; capability-ownership-matrix.md and docs/master-ownership-matrix.md are CRLF. Apply each file in its own style."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Confirmed: can_author_own_schedule in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:82 admits org owners and admins as well as the creator. If EP-6 S2 reuses it for Run now, admins could press Run now, which breaks OD-1. S2 needs its own creator-only check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "D3-108 is the highest D3 ID at HEAD, and '## Cross-wave' is at line 2715. Renumber D3-109 to D3-112 on apply if another W3-04 slice adds D3 rows first."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The status 'decided at the default; not built yet' used by ledger entries A and B is not one of the ledger's listed states. The lead should confirm the wording or pick a listed state when applying."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The batch notes name apps/master-ownership-matrix.md, which does not exist. The tracked file is docs/master-ownership-matrix.md, and the '| Tasks / cron |' row is at line 88, so the handback path is correct."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "read EP-6-S0 entry in batch-args/W3-04.json (files, new_files, test_commands, flag)",
+      "outcome": "files=[], new_files=[], test_commands=[], no flag. Slice defines no tests and owns no files, so no test or compile check exists to run.",
+      "passed": true
+     },
+     {
+      "command": "git status --short (outside .plan-work)",
+      "outcome": "No file attributable to this slice. The changes shown are 7 modified verevonv3 chat files, 1 untracked chat-media-markdown.citation-number.test.tsx, an untracked audit-verify.exe and an untracked 'apps/Frontend Plane/Ingestion Plane/' folder. Most match the pre-existing git status snapshot, and the docs targets (ledger.md, depth register, capability-ownership-matrix.md, docs/master-ownership-matrix.md) are unmodified, consistent with the implementer handing the edits back via lead_todo.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Docs-only slice with no owned files, so no repo file was edited, staged or committed. The four target files are shared, so their exact lines are handed back in lead_todo and nothing reaches the repo until the lead applies them. Decisions: OD-1, OD-2, OD-8 and OD-9 are recorded as decided at the defaults, and OD-3 is recorded in entry B; OD-4 to OD-7 are recorded as proposed owner decisions (register rows D3-109 to D3-112). Design DoD: each of the three must-design-first items in plan 3.3.2 EP-6 now points at a row. Verified before drafting: no existing Run now, Fleet or agent-definition entry in the ledger, the register or either matrix, and D3-109 to D3-112 are free. The draft rows are in C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\ep6s0-draft.txt."
+  },
+  {
+   "id": "EP-6-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\model-access.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ScheduledRunsPanel.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\app\\App.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\automations\\lib\\automation-state.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\automations\\lib\\automation-state.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\automations\\components\\AutomationsHub.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\automations\\components\\AutomationsHub.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\automations\\components\\AutomationsHubPage.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run --pool=forks src/features/automations src/features/chat/components/ScheduledRunsPanel.test.tsx src/shared/actions (cwd apps/Frontend Plane/verevonv3; node used instead of pnpm so pnpm-lock.yaml is not rewritten)",
+     "outcome": "22 files: 20 passed. 232 tests: 230 passed. The 2 failures are action-registry P-SPA1 (spaces.* contiguity; red at HEAD before any edit, untouched) and admission-contract 'is the file every plane vendors' (golden stale at HEAD and 6 rows short after this slice; lead regenerates it)."
+    },
+    {
+     "command": "same runner: src/features/automations src/features/chat/components/ScheduledRunsPanel.test.tsx (final state)",
+     "outcome": "3 files, 43 tests, all passed."
+    },
+    {
+     "command": "same runner: ChatMessages.schedule-action, ScheduleDialog, DashboardComposer.schedule-command, CronSchedulesSection, cron-client, schedule-contract, schedule-from-chat tests",
+     "outcome": "7 files, 29 tests, all passed."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "1 error, identical to the HEAD baseline (src/shared/api/schedule-contract.test.ts(28,16) TS2352). No new errors."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on every changed file (src/shared/actions, src/features/automations, ScheduledRunsPanel.tsx and its test, App.tsx)",
+     "outcome": "exit 0, no errors, no warnings."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json: regenerate with VEREVON_UPDATE_GOLDEN=1 on src/shared/actions/admission-contract.test.ts (node node_modules/vitest/vitest.mjs run --pool=forks, cwd apps/Frontend Plane/verevonv3). Expect 259 rows: 253 at HEAD (243 registry plus 10 read-surface rows) plus 6 from this slice; the file has 219 today. Then re-vendor the canonical apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256, and the copies in apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json and apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json (include_str! at tool_loop.rs:11186). Update the pin at scripts/tests/zdr-contract-sync.test.sh line 209, then run apps/Model Plane/scripts/tests/agent-action-admission-proof.sh and scripts/tests/zdr-contract-sync.test.sh.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: append the EP-6-S1 hub block from C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\ep6s1\\automations-hub.global.css. The owned files carry no CSS; without this the hub is unstyled and the 375 px layout is not met.",
+    "shared-edit docs/plans/model-plane-depth-register.md: close D0-017 (schedule.fires.list is registered in action-registry.ts with the W2-13 text by EP-6-S1).",
+    "Follow-up outside this slice: ScheduleDialog.tsx (not owned) must render the goal field prefilled for a copy and accept a seeded cadence. Then the hub passes that prop (one line in AutomationsHub.tsx, not added now because it would not typecheck yet).",
+    "Evidence for the definition of done, not run in wave mode: a second dev server on this worktree (localhost:5173 serves the main checkout), screenshots at 1280 and 375 px for each filter, and a network log showing only list, PATCH, DELETE and fires calls.",
+    "The hub is not linked from navigation yet (EP-6-S5). Reach it at /agents/automations."
+   ],
+   "deviations": [
+    "Duplicate with changes keeps the goal but does not prefill the cadence and cannot edit the goal: ScheduleDialog (not owned) hides its goal field when a goal is seeded and starts at the daily preset. The design expects the goal editable.",
+    "Edit time is not offered on expired schedules; the design lists it without a state rule.",
+    "The owner pause reads Pauset / Paused; the design's 'by you' wording is not shown.",
+    "The paused reason is read per schedule and updated_at (refetched after a pause or resume), not strictly once per schedule.",
+    "Expired overrides the enabled flag for a lapsed approval (the chat panel's rule, and OD-3)."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (golden; regenerate per lead_todo)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256; apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json; apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json; apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json; scripts/tests/zdr-contract-sync.test.sh (pin at line 209)",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css (hub CSS block from the scratchpad file named in lead_todo)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx (prefilled editable goal and seeded cadence for copies)",
+    "docs/plans/model-plane-depth-register.md (close D0-017)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The admission golden (src/shared/api/contracts/agent-action-admission.json) must be regenerated with VEREVON_UPDATE_GOLDEN=1. The canonical Model Plane copy, its .sha256 and the capability-core, execution-core and model-gateway fixtures must then be re-vendored, and the zdr-contract-sync pin updated. Until then admission-contract.test.ts stays red. It was already red at HEAD (219 rows against 243 actions).",
+     "The hub's CSS block must be appended to src/styles/global.css (shared file, from the implementer's scratchpad). Until then /agents/automations is unstyled and the 375 px layout is unmet.",
+     "Close D0-017 in docs/plans/model-plane-depth-register.md (schedule.fires.list is now registered).",
+     "Live evidence was not produced: screenshots at 1280 and 375 px for each filter, and a network log showing only the list, PATCH, DELETE and fires calls. These need a second dev server on this worktree."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Duplicate with changes cannot change the goal or the cadence: ScheduleDialog hides the Oppgave field when a goal is seeded and starts the cadence at the daily preset, so the design's goal edit needs a ScheduleDialog change first."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The hub labels a lapsed approval Expired, but the sweeper pauses lapsed approvals only when CRON_CONTRACT_GUARDS_ENABLED is on, and Control does not decode the contract fields yet (D2-290). Today DELEGABLE_SCHEDULE_TOOLS is empty, so no schedule carries an approval and the state is unreachable in practice; re-review before the consent card lists any tool."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Every member's browser still receives every schedule's goal text from GET /api/v1/cron (D2-121); the hub filters only on screen. Closing it needs the server creator=self filter (EP-6-S2) or the owner's ruling on OD-7."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing checks that the hub fits 375 px without horizontal scroll or shows focus rings; jsdom has no layout, so this needs a browser check once the CSS is applied."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The 1280 and 375 px screenshots per filter and the dev-server evidence named in the design were not produced (wave mode)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The paused-reason read has no error-path test; a failed fires read silently falls back to plain Paused, and nothing retries it until the schedule's updated_at changes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner pause copy reads Pauset / Paused rather than the design's 'by you'; the owner should confirm the wording."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The admission golden was already 34 rows behind HEAD before this slice (it lacks spaces.toggle_reaction and spaces.update_sidebar); the regeneration in lead_todo clears that gap and this slice's 6 rows together."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The P-SPA1 contiguity test in action-registry.test.ts was red at HEAD and is untouched; this slice only moved its count assertion from 243 to 249."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Duplicate with changes opens ScheduleDialog with seedGoal, and ScheduleDialog hides its goal field when a goal is seeded and starts at the daily preset. A copy therefore cannot change its goal and does not keep its cadence. Fixing this needs a ScheduleDialog change (not owned)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The 'mine' filter is client-side only (OD-7): listMySchedules still receives every org schedule, goal text included, from GET /api/v1/cron (D2-121). It stays that way until EP-6-S2 adds a server-side creator=self filter."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the paused-reason read failing. If listScheduleFires rejects, the hub silently shows plain Paused, and the requestedFires key blocks a retry until the schedule's updated_at changes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the custom-cron retime path (the preset 'custom' with typed text), or that an empty custom expression is refused with an error and no request."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner pause reads 'Pauset / Paused', not the design's 'by you' wording; the owner should confirm the copy."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In action-registry.test.ts the three new schedule tests were inserted between the P-SPA1 explanatory comment and its it(...). That comment now sits above the wrong test and should move down."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "schedule.list and schedule.fires.list use envelopeStatusOutput ({status}) as their outputSchema, though they return lists. Harmless while modelAccess is none, but the output contract is inaccurate."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "AutomationsHub imports ScheduleFires, formatWhen and scheduleResultsEnabled from the chat feature's ScheduledRunsPanel. This makes a cross-feature dependency; these helpers could move into automations/lib or shared."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "vitest run --pool=forks src/features/automations src/features/chat/components/ScheduledRunsPanel.test.tsx src/shared/actions (node node_modules/vitest/vitest.mjs, cwd verevonv3)",
+      "outcome": "22 files (20 passed, 2 failed); 232 tests (230 passed, 2 failed). Failures: action-registry.test.ts 'spaces.* entries contiguous ... (P-SPA1)' (reported red at HEAD, not from this slice) and admission-contract.test.ts 'is the file every plane vendors' (golden agent-action-admission.json stale; lead must regenerate with VEREVON_UPDATE_GOLDEN=1). All automations and ScheduledRunsPanel tests pass.",
+      "passed": false
+     },
+     {
+      "command": "pnpm lint equivalent: node node_modules/eslint/bin/eslint.js on src/shared/actions, src/features/automations, ScheduledRunsPanel.tsx and its test, App.tsx",
+      "outcome": "No output, no errors or warnings (whole-tree pnpm lint not run).",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck equivalent: node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "1 error: src/shared/api/schedule-contract.test.ts(28,16) TS2352. That file is not owned by the slice; the implementer reported the same error at the HEAD baseline. No errors in slice files. The pnpm typecheck script itself was not run (it reportedly fails at HEAD in quarry-client.ts).",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built /agents/automations (AutomationsHub plus page frame) over the existing cron calls: list, PATCH enabled, PATCH schedule_expr only, DELETE, fires. Six action contracts are registered (schedule.list, pause, resume, update_time, delete, fires.list with the W2-13 text, closing D0-017), each with modelAccess none, and the model-facing tool surfaces filter them out. Approval-lapse logic moved to features/automations/lib/automation-state.ts; the chat panel imports it with unchanged behaviour. No server, proto, migration or flag change. Status is partial for two reasons outside my ownership: (1) the admission golden must be regenerated and re-vendored; it was already 34 rows stale at HEAD and this slice adds 6; (2) the hub has no CSS in an owned file, so the lead must append the block I wrote to global.css. Not run: pnpm lint on the whole tree, pnpm typecheck (script fails at HEAD in quarry-client.ts), the full vitest suite, cargo, go, docker. The working tree also holds EP-2-S1 edits in chat-* files from a sibling slice; I did not touch them."
+  }
+ ]
+}

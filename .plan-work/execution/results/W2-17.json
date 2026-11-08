@@ -1,0 +1,285 @@
+{
+ "batchId": "W2-17",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS24-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/workspace_edit.rs (new: WorkspaceRoot, Version, EditError codes, read/grep/glob/list/edit/put, atomic write, in-file tests)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/workspace_edit_contract.rs (new: contract tests incl. concurrent edits with one winner)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/lib.rs (+1 line: pub mod workspace_edit)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/state.rs (workspace_locks map, workspace_lock(run_id), take_hydrated_workspace also drops the lock, one new unit test; CRLF kept)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib workspace_edit",
+     "outcome": "PASSED: 22 passed, 0 failed (EXIT 0). Run before a concurrent slice's edits broke the lib build. 22 = all workspace_edit in-file tests on Windows (the unix-only symlink test is excluded)."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib workspace_lock",
+     "outcome": "NOT VERIFIED: lib fails to compile for reasons outside my files: unresolved `crate::owner_actions` at permission/mod.rs:84 and runtime_loop/agent.rs:1302,1324. owner_actions.rs exists in the worktree (another slice, WS24-S6) but is not registered in lib.rs yet. My state.rs test was added and a warning fixed after the earlier green run; it has not been compiled."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --test workspace_edit_contract",
+     "outcome": "NOT RUN: blocked by the same lib compile failure. The file is written and has not been compiled."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "After the WS24-S6 batch registers `pub mod owner_actions;` in execution-core lib.rs, run: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib workspace_edit && cargo test -q -p execution-core --lib workspace_lock && cargo test -q -p execution-core --test workspace_edit_contract. Only the unit test for state.rs and the integration file have not compiled yet.",
+    "No docker, compose, migration, proto or flag change in this slice. No shared-edit lines are needed. The new file lives under execution-core src with no switch, so behaviour is unchanged while every edit path is unwired (the Do-loop tools are S3)."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "After WS24-S6 registers `pub mod owner_actions;` in execution-core lib.rs, the lead must run the row's test command in the live tree to confirm the lib compiles with S2 and S6 together (the isolated run only proves S2 against HEAD of the other files).",
+     "Run `cargo fmt` on src/workspace_edit.rs and tests/workspace_edit_contract.rs before commit; the repo's rustfmt config (none found at rust/ root) is otherwise default and the implementer's new files are not formatted.",
+     "Line endings: the two new .rs files are LF in the working copy while every other execution-core source in the working copy is CRLF (index is LF because core.autocrlf=true). Cosmetic, normalise on commit.",
+     "No docker, compose, migration, proto or flag change in this slice, so no live proof is owed; the row's evidence belongs to S3/S4."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The lib does not compile right now because a concurrent WS24-S6 change references `crate::owner_actions` (permission/mod.rs:84, runtime_loop/agent.rs:1302,1324) before lib.rs registers the module; this blocks verification of the state.rs test and the contract test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Glob has no `[...]` character classes and walks skip only `.verevon*` names; `attachments/` stays visible to read, grep and list, which the plan does not settle."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The EOL-normalised ladder step's origin map has no test over multi-byte characters adjacent to a CRLF, and the tolerant step has no test with a match at end of file without a trailing newline."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "write_atomic renames over the target with no retry, so on Windows a transient sharing violation (antivirus or indexer holding the file) returns io_error with no retry."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The lock lives on StateStore rather than HydratedWorkspace; moving it onto the struct later needs the seven sandbox_lease.rs literals edited together, so the owner should decide when S3 wires the dispatch."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The 5001-file glob cap test writes 5001 small files on every run, which is slow on Windows; a cap parameter or a smaller test seam would keep it fast."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new .rs files are written with LF while the execution-core working copy is CRLF; the index is LF, so this is cosmetic but the lead should normalise on commit."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "WorkspaceLock lives on StateStore keyed by run id (state.rs workspace_locks), not on HydratedWorkspace as the row says; the seven sandbox_lease.rs literals are unowned, so this is a justified deviation, but the lead should record it, and S3 must confirm that lock lifetime matches the workspace lifetime."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "StateStore::workspace_lock creates a map entry on first call and only take_hydrated_workspace removes it, so a run that never hydrates leaks one Arc per run id, and an in-flight holder of the old lock would be split from a lock created after take; S3 must address both when it wires the calls."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "EditError is not the row's closed list: reserved_path, io_error and invalid_argument are added; S3 tool results and the golden strings must use exactly this set, and the row or ledger should be updated to say so."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "glob refuses any walk over 5000 entries even under a literal prefix (walk(&base, usize::MAX, WALK_MAX_ENTRIES) then GlobTooBroad), whereas the row says the refusal applies to scans without a literal prefix; a literal-prefixed scan of a large subtree is refused where the row allows it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On Windows, is_symlink() is false for junctions and other reparse points, so walk, grep and list can descend through a junction that points outside the root; the model cannot create one through these tools, but a hydrated workspace containing one would leak files outside the root."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "io_error is never reached by a test, mode preservation on edit (set_permissions on the staging file) has no test, and the attachments/ directory stays readable through read, grep, glob and list because only writes refuse it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "write_atomic renames over the target with no retry, so a Windows sharing violation returns io_error with the original content kept; put's create-only check is not atomic against an external creator, since rename overwrites a file created in the window."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "concurrent_edits_from_one_version_serialise_with_exactly_one_winner proves stale-version refusal more than lock behaviour, because each edit is synchronous inside the held write guard and no await point sits in the critical section."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The glob cap test writes 5001 files on every run, which is slow on Windows; a cap parameter or a smaller test seam would keep it fast."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "policy"
+   ],
+   "notes": "Implemented the WS24-S2 pure workspace edit engine in execution-core, plus the run-scoped workspace lock. Deviations from the row, each forced by ownership or the offline cache: (1) `globset` is absent from Cargo.lock and from the local registry cache, so Cargo.toml and Cargo.lock are untouched and glob is hand-rolled (`*`, `?`, `**`; no `[...]` classes). The plan's D8 fallback. (2) The lock lives on `StateStore` keyed by run id (`workspace_lock`), not on `HydratedWorkspace`, because seven `HydratedWorkspace { .. }` literals in sandbox_lease.rs are not owned; `take_hydrated_workspace` drops the lock. (3) EditError has three codes beyond the closed list: `reserved_path` (attachments and .verevon* components, refused for writes), `io_error`, and `invalid_argument` (empty old_string, bad regex, bad token, malformed path). (4) `read` refuses files over 1 MiB as too_large. (5) The secret check runs on new_string for edit and on the full content for put. (6) The EOL-normalised and trailing-whitespace ladder steps map spans back to the original bytes; the first replacement drives the diff preview and first_changed_line. Pure functions take no lock; callers hold WorkspaceLock. Test pattern: tests create temp dirs under the OS temp dir and remove them on drop.\"]"
+  },
+  {
+   "id": "WS24-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.up.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/registry/agent_action_admissions_store.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/registry/agent_action_admissions_integration_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/model_action_view.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/model_action_view_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/owner_actions.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib only_the_server_resolved_view_may_offer_ticket_create",
+     "outcome": "NOT PASSED: does not compile. 3 x E0433 'cannot find owner_actions in crate' because lib.rs still lacks the 'pub mod owner_actions;' line (lead shared-edit). No other compile errors reported. The fixture fix is applied but the test was not run."
+    },
+    {
+     "command": "CRLF measure of runtime_loop/agent.rs after the edit",
+     "outcome": "26584 CRLF of 26584 LF: line endings preserved"
+    }
+   ],
+   "db_tests_written": [
+    "TestAgentActionAdmissionsSeedOffersOnlyTicketsCreate"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: add the line `pub mod owner_actions;` in alphabetical position among the `pub mod` declarations (next to `pub mod ticket_tools;` at about line 51). Until it lands, execution-core does not compile and the Rust tests cannot run.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: in the `if modelActionViewVerifier, viewVerifierErr := modelActionViewVerifierFromEnv(os.Getenv); viewVerifierErr != nil {...} else {` branch (about lines 267-270), before `ch = ch.WithModelActionViewVerifier(modelActionViewVerifier)` insert: `if admissionStore, storeErr := registry.NewAgentActionAdmissionsStore(pool); storeErr == nil { modelActionViewVerifier.WithAgentActionAdmissions(admissionStore, api.ModelActionAdmissionTableFromLookup(os.Getenv)) }` (add the registry import if absent). Without it the table can never be on, which is the safe default.",
+    "After the lib.rs line lands, run `cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib owner_actions` and `... --lib only_the_server_resolved_view_may_offer_ticket_create`, plus `cargo check -q -p execution-core --lib`.",
+    "Lead proof steps (not run here): capability-core migration 0022 applies at boot; with MODEL_ACTION_ADMISSION unset the stack behaves as before; with MODEL_ACTION_ADMISSION=table and only tickets.create enabled, MP/scripts/tests/tickets-create-proof.sh should give the same result. Run the DB test TestAgentActionAdmissionsSeedOffersOnlyTicketsCreate with -tags integration against DATABASE_URL (not run here)."
+   ],
+   "deviations": [
+    "The v2 payload carries action_schema_hashes (action id to signed schema hash) instead of a separate action_ids list plus hashes.",
+    "The table lookup lives on ControlModelActionViewVerifier (WithAgentActionAdmissions), not on CapabilitiesHandler, because capabilities.go is not owned.",
+    "execution-core does not read MODEL_ACTION_ADMISSION in S6; behaviour is identical with the single pinned owner action."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edit (required to compile): add `pub mod owner_actions;` to apps/Model Plane/rust/services/execution-core/src/lib.rs. The worktree execution-core does not compile without it. With that line added in a scratch copy, owner_actions (4), only_the_server_resolved_view_may_offer_ticket_create, the untrusted-tool guard and the full execution-core lib (1403 plus 2 slow tests) all pass.",
+     "Lead shared-edit: wire the switch in apps/Model Plane/go/services/capability-core/cmd/main.go as lead_todo says (WithAgentActionAdmissions with ModelActionAdmissionTableFromLookup). Until then the table code is unreachable in production; default stays off, so no behaviour change.",
+     "Proof-stack setting for MODEL_ACTION_ADMISSION=table (flag says table on the proof stack) was not supplied as a shared-edit for apps/Model Plane/deploy/docker-compose.yml. The lead should decide the exact line when running the proof.",
+     "Live proof not done here (no docker): capability-core migration 0022 applies at boot; MP/scripts/tests/tickets-create-proof.sh gives the same result with MODEL_ACTION_ADMISSION=table; decode the v2 claims (no secrets). Also run the DB test with -tags integration against DATABASE_URL.",
+     "ZDR golden row owner_actions_under_zdr_not_offered belongs to S9 (zdr-posture-matrix.json), not this slice."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execution-core capability_policy.rs (about line 474) rejects any model action view with more than one action, so enabling a second admitted row under table fails closed at the executor until that check changes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability_policy.rs ModelActionViewTool is deny_unknown_fields; class, authority and loop_tool_name must be accepted there in the same change that starts emitting them from capability-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The tickets.create schema hash is enforced in capability_policy.rs against hard-coded constants; that check should consume owner_actions::OWNER_ACTION_PINS so the pin table is the single source."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The migration duplicates tickets.create parameters, hash and description as SQL literals; only a string-contains unit test pins them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestAgentActionAdmissionsSeedOffersOnlyTicketsCreate (integration tag) was written and vetted but not run; it needs the DB harness the lead runs."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Declared rows brreg.lookup_organization and shipping.get_quotes use capability ids cap.tool.information.read and cap.tool.shipping.read, inferred from capability_policy's Ask mapping; confirm before WS24-S5/S8 rely on them."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Whether execution-core should read MODEL_ACTION_ADMISSION directly or only through the S7 request change; S6 leaves it unread."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The ZDR golden row owner_actions_under_zdr_not_offered belongs to WS24-S9; S6 keeps the ZeroDataRetention refusal and tests it at handler level only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "resolveModelActionView (model_action_view.go, admission loop) returns early with the actions already accumulated plus reason_code when a later admitted row's capability is unavailable, so the offered set depends on action-id order and drops later available rows; fix before a second row can be admitted (exec-core currently rejects views with more than one action, so it fails closed today)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execution-core capability_policy.rs resolve_server_tool_definitions (about lines 450-490, outside this slice's ownership) rejects any view with more than one action and hard-codes tickets.create, so enabling a second admitted row fails the whole resolve closed; this must change before the table can offer a second action."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "modelActionToolDefinition does not gain class, authority or loop_tool_name as the S6 row lists, and the implementer's deviations omit this; adding them first requires ModelActionViewTool (deny_unknown_fields) to accept them in capability_policy.rs, so record the deferral (class waits on WS05 per the row's data-only fallback)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "ServerResolvedAction::admits checks only name, description and parameters: OWNER_ACTION_PINS.schema_sha256 and adapter are never read (the hash is enforced only in capability_policy.rs against the hard-coded constant), and no test covers a drifted hash (the drift test changes parameters only)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "description and parameters_json offered from the admission table are not bound by the signed hash; exec-core checks parameters exactly against the pin but description only for non-emptiness, so a table edit can change the text the model sees."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "execution-core does not read MODEL_ACTION_ADMISSION although the flag line names capability-core and execution-core; behaviour is unchanged because exec-core admits only pinned names, but the flag doc should say capability-core only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The tickets.create literals in migration 0022 are checked only by a Go substring test, so the seeded row equal to the Go constants is not proven at DB level; TestModelActionViewTicketsCreateIsByteIdenticalUnderV2 compares the constant with itself, not with the seeded row."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The golden row owner_actions_under_zdr_not_offered named in the S6 ZDR clause is absent and deferred to S9; ZDR is refused only by the handler test TestModelActionViewStillRefusesZeroDataRetention."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "capability_policy.rs (about line 487) and runtime_loop/mod.rs (about line 1022) still hard-code tickets.create and the pin's adapter is unused, so adding a second pin needs edits in those files too."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "WithAgentActionAdmissions is exported but takes the unexported agentActionAdmissionBackend interface, which is awkward for callers outside the package."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr"
+   ],
+   "notes": "Required fix 1 applied: in runtime_loop/agent.rs, test only_the_server_resolved_view_may_offer_ticket_create, the parameters_json fixture now uses crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON.to_owned() (was the conversation_id-only schema). Intent unchanged: name-only pin, alias still refused. Not run: execution-core cannot compile until lib.rs declares owner_actions (not owned by this slice). Owner_actions tests (an_unpinned_server_action_is_dropped, a_pinned_action_with_a_drifted_schema_is_dropped, only_the_pinned_ticket_action_requires_durable_approval) also not run for the same reason. Go half unchanged in this round; its tests were run in the previous round and not repeated."
+  }
+ ]
+}

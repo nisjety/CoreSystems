@@ -1,0 +1,1423 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs
+index 7ac0a8b3f..a1261db84 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
+@@ -18,7 +18,7 @@ use std::{
+ };
+ 
+ use axum::{
+-    extract::{Extension, Path, Query, State},
++    extract::{DefaultBodyLimit, Extension, Path, Query, State},
+     http::{HeaderMap, StatusCode},
+     response::IntoResponse,
+     routing::{get, post},
+@@ -63,6 +63,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/skills/{skill_id}/versions/{version}/restore",
+             post(restore_skill_version),
+         )
++        // EP-11 S8: import a skill from a SKILL.md or a zip, sent as base64 inside JSON. capability-core
++        // mounts the route only while SKILL_IMPORT_ENABLED is on and answers 404 otherwise.
++        .route(
++            "/api/v1/skills/import",
++            post(import_skill).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)),
++        )
+         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
+         .route(
+             "/api/v1/plugins/{plugin_id}",
+@@ -562,6 +568,70 @@ async fn restore_skill_version(
+     proxy_skill_draft_call(&state, &user, &headers, &skill_id, &action, Method::POST).await
+ }
+ 
++/// Request body ceiling for the skill import route, and only for it. The file arrives as base64
++/// inside JSON, a third bigger than the file, so axum's 2 MiB default would cap an import at about
++/// 1.5 MiB. 12 MiB carries the largest bundle (8 MiB and its zip headers); capability-core bounds the
++/// body again.
++pub(crate) const SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
++
++/// The body an import is forwarded with (EP-11 S8), or `None` when the caller may not import it.
++/// Only the file and the scope pass, so an org id, an owner or a review state sent by the client
++/// never reaches capability-core. An admin imports any scope; a member imports a private skill of
++/// their own only, and only while `SKILL_MEMBER_AUTHORING` is on. No scope is sent as `user`, so a
++/// member's import can never be read as org-wide.
++fn skill_import_body(body: &Value, admin: bool, member_switch_on: bool) -> Option<Value> {
++    let scope = match body.get("scope") {
++        None | Some(Value::Null) => "user",
++        Some(Value::String(scope)) => scope.as_str(),
++        Some(_) => return None,
++    };
++    if !admin && (!member_switch_on || scope != "user") {
++        return None;
++    }
++    let content = body.get("content_base64").cloned().unwrap_or(Value::Null);
++    Some(json!({"content_base64": content, "scope": scope}))
++}
++
++/// Import a skill from a file (EP-11 S8). Proxied to model-gateway `/v1/skills/import`
++/// (→ capability-core), which checks the file, refuses files beside SKILL.md from anyone but an
++/// admin, and creates the skill switched off as a draft. Org id is derived from the verified
++/// capability token, never from the body.
++async fn import_skill(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Json(body): Json<Value>,
++) -> impl IntoResponse {
++    let admin = can_author_skills(&state, &user).await;
++    let Some(forwarded) = skill_import_body(&body, admin, skill_member_authoring_enabled()) else {
++        return (
++            StatusCode::FORBIDDEN,
++            Json(error(
++                "forbidden",
++                "Only organization admins can import skills for the organization.",
++            )),
++        )
++            .into_response();
++    };
++    let token = shared::model_token(&state, &user, &headers).await;
++    let capability = match shared::required_capability_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
++    };
++    let url = format!("{}/v1/skills/import", state.model_gateway_url);
++    shared::proxy_model_json_with_capability(
++        &state,
++        Method::POST,
++        &url,
++        Some(forwarded),
++        token.as_deref(),
++        Some(&capability),
++        &user,
++    )
++    .await
++    .into_response()
++}
++
+ /// List the org's plugin packages (open to members so the UI can show them).
+ async fn list_plugins(
+     State(state): State<AppState>,
+@@ -1770,8 +1840,8 @@ mod tests {
+     use super::{
+         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
+         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
+-        draft_from_request, member_private_skill_body, parse_builder_definition, version_to_api,
+-        BuilderDefinition,
++        draft_from_request, member_private_skill_body, parse_builder_definition, skill_import_body,
++        version_to_api, BuilderDefinition, SKILL_IMPORT_BODY_LIMIT_BYTES,
+     };
+     use crate::middleware::AuthenticatedUser;
+     use axum::{body::Body, http::Request};
+@@ -2783,4 +2853,126 @@ mod tests {
+             .collect();
+         assert_eq!(forwarded, ["limit=5"]);
+     }
++
++    // Skill import (EP-11 S8).
++
++    #[test]
++    fn skill_import_body_keeps_only_the_file_and_scope() {
++        let body = json!({
++            "content_base64": "LS0t", "scope": "user",
++            "org_id": "org-forged", "owner_user_id": "user-2", "review_state": "accepted"
++        });
++        assert_eq!(
++            skill_import_body(&body, false, true),
++            Some(json!({"content_base64": "LS0t", "scope": "user"}))
++        );
++        // No scope is sent as a private import, never left for the upstream to default.
++        assert_eq!(
++            skill_import_body(&json!({"content_base64": "LS0t"}), false, true),
++            Some(json!({"content_base64": "LS0t", "scope": "user"}))
++        );
++    }
++
++    #[test]
++    fn skill_import_body_keeps_org_imports_for_admins() {
++        let org = json!({"content_base64": "LS0t", "scope": "org"});
++        assert_eq!(skill_import_body(&org, false, true), None);
++        assert_eq!(
++            skill_import_body(&org, true, false),
++            Some(json!({"content_base64": "LS0t", "scope": "org"}))
++        );
++        // With the member switch off a member imports nothing, as they author nothing.
++        assert_eq!(skill_import_body(&json!({"content_base64": "LS0t", "scope": "user"}), false, false), None);
++        assert_eq!(skill_import_body(&json!({"content_base64": "LS0t", "scope": 7}), true, true), None);
++    }
++
++    async fn mount_skill_import(model: &MockServer) {
++        Mock::given(wm_method("POST"))
++            .and(wm_path("/v1/skills/import"))
++            .respond_with(
++                ResponseTemplate::new(201).set_body_json(json!({"id": "skill_imported", "draft": true})),
++            )
++            .mount(model)
++            .await;
++    }
++
++    #[tokio::test]
++    async fn member_imports_a_private_skill_when_switch_on() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        mount_skill_import(&servers.2).await;
++        let (status, body) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/import",
++            Some(json!({"content_base64": "LS0t", "org_id": "org-forged"})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::CREATED);
++        assert_eq!(body["draft"], true);
++        assert_eq!(
++            skill_calls(&servers.2, "POST", "/v1/skills/import").await,
++            vec![json!({"content_base64": "LS0t", "scope": "user"})]
++        );
++    }
++
++    #[tokio::test]
++    async fn member_cannot_import_an_org_skill_or_with_the_switch_off() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        mount_skill_import(&servers.2).await;
++        let (status, body) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/import",
++            Some(json!({"content_base64": "LS0t", "scope": "org"})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["code"], "forbidden");
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/import",
++            Some(json!({"content_base64": "LS0t", "scope": "user"})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert!(skill_calls(&servers.2, "POST", "/v1/skills/import").await.is_empty());
++    }
++
++    /// A file larger than axum's 2 MiB default still reaches the upstream; the route's own ceiling
++    /// is what bounds it.
++    #[tokio::test]
++    async fn admin_import_carries_a_body_above_the_default_limit() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("owner", "org", "").await;
++        mount_skill_import(&servers.2).await;
++        let file = "A".repeat(3 * 1024 * 1024);
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/import",
++            Some(json!({"content_base64": file, "scope": "org"})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::CREATED);
++        assert_eq!(skill_calls(&servers.2, "POST", "/v1/skills/import").await.len(), 1);
++
++        let too_large = "A".repeat(SKILL_IMPORT_BODY_LIMIT_BYTES);
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/import",
++            Some(json!({"content_base64": too_large, "scope": "org"})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
++        assert_eq!(skill_calls(&servers.2, "POST", "/v1/skills/import").await.len(), 1);
++    }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.import.test.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.import.test.tsx
+new file mode 100644
+index 000000000..b9bc95698
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.import.test.tsx	
+@@ -0,0 +1,66 @@
++// @vitest-environment jsdom
++
++// EP-11 S8: "Import from file" shows only while the server's listing says import is on, and an
++// import says the skill arrived as a switched-off draft. Off, the page is as before.
++
++import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/shared/session/session-store', () => ({
++  getSession: () => ({
++    status: 'authenticated',
++    user: { id: 'user-1' },
++    activeOrg: { id: 'org-1', name: 'Test', role: 'owner' },
++    permissions: [],
++  }),
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return {
++    ...actual,
++    listSkills: vi.fn(),
++    memberSkillAuthoring: vi.fn(async () => false),
++    importSkillFile: vi.fn(async () => ({
++      id: 'skill_new',
++      name: 'Utrulling',
++      scope: 'org',
++      enabled: false,
++      draft: true,
++    })),
++  }
++})
++
++import { importSkillFile, listSkills } from '@/shared/api/skills-client'
++import { SkillsSection } from './SkillsSection'
++
++const mockedList = vi.mocked(listSkills)
++const importButton = /^(Importer fra fil|Import from file)$/
++
++afterEach(() => {
++  cleanup()
++  vi.clearAllMocks()
++})
++
++describe('SkillsSection import', () => {
++  it('hides_import_while_the_server_has_it_off', async () => {
++    mockedList.mockResolvedValue({ skills: [], drafts_enabled: true })
++    const { findByText, queryByRole } = render(() => <SkillsSection />)
++    expect(await findByText(/Ingen ferdigheter er opprettet/)).toBeTruthy()
++    expect(queryByRole('button', { name: importButton })).toBeNull()
++  })
++
++  it('imports_a_file_as_a_switched_off_draft', async () => {
++    mockedList.mockResolvedValue({ skills: [], drafts_enabled: true, import_enabled: true })
++    const { findByRole, getByLabelText, findByText } = render(() => <SkillsSection />)
++    expect(await findByRole('button', { name: importButton })).toBeTruthy()
++    const file = new File(['---\nname: Utrulling\ndescription: Steps\n---\nDeploy.\n'], 'SKILL.md', {
++      type: 'text/markdown',
++    })
++    const input = getByLabelText(/Velg en SKILL.md eller zip|Choose a SKILL.md or zip/) as HTMLInputElement
++    fireEvent.change(input, { target: { files: [file] } })
++    await waitFor(() => expect(importSkillFile).toHaveBeenCalledWith('org-1', file, 'org'))
++    expect(await findByText(/importert som et utkast|imported as a draft/)).toBeTruthy()
++    await waitFor(() => expect(mockedList).toHaveBeenCalledTimes(2))
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx
+index 31b185a9d..788c287f9 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
+@@ -6,6 +6,7 @@ import {
+   createSkill,
+   deleteSkill,
+   discardSkillDraft,
++  importSkillFile,
+   listSkills,
+   listSkillVersions,
+   memberSkillAuthoring,
+@@ -274,14 +275,21 @@ export function SkillsSection() {
+   // EP-11 S5: the server says in the listing whether edits go through a draft; off, nothing here
+   // shows a draft, a publish or a restore.
+   const [draftsEnabled, setDraftsEnabled] = createSignal(false)
++  // EP-11 S8: the same listing says whether a skill may be imported from a file; off, no import shows.
++  const [importEnabled, setImportEnabled] = createSignal(false)
+   const [skills, { refetch }] = createResource(
+     () => orgId() || undefined,
+     (id) =>
+       listSkills(id).then((result) => {
+         setDraftsEnabled(result.drafts_enabled === true)
++        setImportEnabled(result.import_enabled === true)
+         return result.skills
+       }),
+   )
++  const [importing, setImporting] = createSignal(false)
++  const [importError, setImportError] = createSignal<string | null>(null)
++  const [importNote, setImportNote] = createSignal<string | null>(null)
++  let importInput: HTMLInputElement | undefined
+ 
+   const [name, setName] = createSignal('')
+   const [description, setDescription] = createSignal('')
+@@ -515,6 +523,49 @@ export function SkillsSection() {
+     }
+   }
+ 
++  // EP-11 S8: an imported skill arrives switched off with its text as a draft, so the person reads
++  // it, publishes it and switches it on before it steers a conversation.
++  const handleImportFile = async (file: File) => {
++    const id = orgId()
++    if (!id || importing()) return
++    setImporting(true)
++    setImportError(null)
++    setImportNote(null)
++    try {
++      const imported = await importSkillFile(id, file, isAdmin() ? 'org' : 'user')
++      const warnings = skillLintWarnings(imported)
++      setImportNote(
++        [
++          i18n.tr(
++            `«${imported.name}» er importert som et utkast og er av. Les det, publiser det og slå det på.`,
++            `“${imported.name}” is imported as a draft and switched off. Read it, publish it and switch it on.`,
++          ),
++          warnings.length > 0 ? lintSummary(warnings) : '',
++        ]
++          .filter(Boolean)
++          .join(' '),
++      )
++      await refetch()
++    } catch (err) {
++      const refused = skillLintRefusal(err)
++      if (refused.length > 0) {
++        setImportError(lintSummary(refused))
++      } else if (err instanceof RangeError) {
++        setImportError(i18n.tr('Filen er større enn 8 MB.', 'The file is larger than 8 MB.'))
++      } else {
++        setImportError(
++          translateApiError(err, i18n.tr, {
++            no: 'Kunne ikke importere ferdigheten. Bruk en SKILL.md eller en zip med SKILL.md øverst.',
++            en: 'Could not import the skill. Use a SKILL.md or a zip with SKILL.md at the top.',
++          }),
++        )
++      }
++    } finally {
++      setImporting(false)
++      if (importInput) importInput.value = ''
++    }
++  }
++
+   const handleDelete = async (skill: Skill) => {
+     const id = orgId()
+     if (!id || busySkillId()) return
+@@ -814,6 +865,48 @@ export function SkillsSection() {
+         </form>
+       </Show>
+ 
++      <Show when={canAuthor() && importEnabled()}>
++        <div>
++          <input
++            ref={(element) => (importInput = element)}
++            type="file"
++            accept=".md,.zip,text/markdown,application/zip"
++            hidden
++            aria-label={i18n.tr('Velg en SKILL.md eller zip', 'Choose a SKILL.md or zip')}
++            onChange={(event) => {
++              const file = event.currentTarget.files?.[0]
++              if (file) void handleImportFile(file)
++            }}
++          />
++          <SettingsButton settingsSize="sm" disabled={importing()} onClick={() => importInput?.click()}>
++            <Show when={importing()} fallback={<>{i18n.tr('Importer fra fil', 'Import from file')}</>}>
++              <Loader2 size={14} aria-hidden="true" /> {i18n.tr('Importerer…', 'Importing…')}
++            </Show>
++          </SettingsButton>
++          <span class="verevon-settings-help">
++            {' '}
++            {i18n.tr(
++              'En SKILL.md, eller en zip med SKILL.md og filene den bruker.',
++              'A SKILL.md, or a zip with SKILL.md and the files it uses.',
++            )}
++          </span>
++          <Show when={importError()}>
++            {(message) => (
++              <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++                {message()}
++              </p>
++            )}
++          </Show>
++          <Show when={importNote()}>
++            {(note) => (
++              <p class="verevon-settings-help" role="status">
++                {note()}
++              </p>
++            )}
++          </Show>
++        </div>
++      </Show>
++
+       <Show when={canAuthor() && kindsEnabled() === true}>
+         <Show
+           when={authoredEditor()}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index cafa880ac..a4ea3bcb6 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1603,6 +1603,17 @@ describe('action registry', () => {
+     expect(getActionDescriptor('skills.publish')?.outputSchema.safeParse({ id: 'sk-1', version: 3, published: true }).success).toBe(true)
+   })
+ 
++  it('registers skill import as a person-only write bounded by the bundle cap (EP-11-S8)', () => {
++    const importAction = getActionDescriptor('skills.import')
++    expect(importAction?.ownerPlane).toBe('model')
++    expect(importAction?.requiresApproval).toBe(false)
++    expect(MODEL_ACCESS['skills.import'].access).toBe('none')
++    expect(importAction?.inputSchema.safeParse({ fileName: 'SKILL.md', sizeBytes: 120 }).success).toBe(true)
++    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 9 * 1024 * 1024 }).success).toBe(false)
++    expect(importAction?.inputSchema.safeParse({ fileName: 'x.zip', sizeBytes: 10, orgId: 'org-2' }).success).toBe(false)
++    expect(importAction?.outputSchema.safeParse({ id: 'skill_1', draft: true, enabled: false }).success).toBe(true)
++  })
++
+   it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
+     const save = getActionDescriptor('skills.save_from_message')
+     expect(save?.ownerPlane).toBe('model')
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 97d334e2e..a23691d2c 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -794,6 +794,22 @@ const skillsVersionRestoreOutput = z.object({
+   bundle_restored: z.boolean(),
+ })
+ 
++// Import a skill from a file (EP-11 S8). The file itself travels to the server; the contract names
++// what the person picked and bounds it by the server's bundle cap (8 MiB and zip headers).
++const skillsImportInput = z
++  .object({
++    fileName: z.string().trim().min(1).max(255),
++    sizeBytes: z.number().int().min(1).max(8 * 1024 * 1024 + 256 * 1024),
++    scope: z.enum(['user', 'org']).optional(),
++  })
++  .strict()
++
++const skillsImportOutput = z.object({
++  id: z.string(),
++  draft: z.literal(true),
++  enabled: z.literal(false),
++})
++
+ // Authored templates and presets (EP-11 S6): rows of the skills registry with a kind. A template
+ // is text the composer inserts before the person sends, with `{{input}}` as its only placeholder;
+ // a preset is a closed set of visible controls. The server lints both and binds the owner to the
+@@ -3590,6 +3606,17 @@ export const actionRegistry = [
+     inputSchema: skillsVersionRestoreInput,
+     outputSchema: skillsVersionRestoreOutput,
+   },
++  {
++    id: 'skills.import',
++    label: 'Import a skill from a file',
++    description: 'Bring in a SKILL.md, or a zip with SKILL.md and the files it uses. The server checks the file (size caps, safe paths, no links, scripts only under scripts/), lints its text and creates the skill switched off, with its text and files as a draft: nothing steers a turn until the draft is published and the skill switched on. A person imports a private skill; an org-wide skill, or a zip with files beside SKILL.md, is an admin\'s. Refused under zero data retention. Never fetches anything and never model-executable.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillsImportInput,
++    outputSchema: skillsImportOutput,
++  },
+   {
+     id: 'templates.create',
+     label: 'Create a slash template',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts
+index 8acf72bae..506bf3b2f 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
+@@ -102,9 +102,64 @@ export async function listAvailableSkills(signal?: AbortSignal): Promise<Skill[]
+ /**
+  * The org's skills as the Skills page lists them. `drafts_enabled` (EP-11 S5) is true only while
+  * the server saves edits of published skills as drafts; absent, the page offers no draft controls.
++ * `import_enabled` (EP-11 S8) is true only while the server imports skills from a file; absent,
++ * the page offers no import.
+  */
+-export function listSkills(orgId: string): Promise<{ skills: Skill[]; drafts_enabled?: boolean }> {
+-  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean }>('/api/v1/skills', {
++export function listSkills(
++  orgId: string,
++): Promise<{ skills: Skill[]; drafts_enabled?: boolean; import_enabled?: boolean }> {
++  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean; import_enabled?: boolean }>('/api/v1/skills', {
++    headers: { 'x-verevon-org-id': orgId },
++  })
++}
++
++/**
++ * Mirrors capability-core's bound on an uploaded bundle (`maxSkillBundleBodyBytes`: the 8 MiB of
++ * files and room for the zip headers); the server checks again.
++ */
++export const MAX_SKILL_IMPORT_BYTES = 8 * 1024 * 1024 + 256 * 1024
++
++/** What an import created: a switched-off skill whose text and files wait as a draft. */
++export interface SkillImportResult {
++  id: string
++  name: string
++  scope: 'org' | 'user'
++  enabled: false
++  draft: true
++  /** The draft bundle, present when the zip held files beside SKILL.md. */
++  bundle?: { manifest_sha256: string; file_count: number; total_bytes: number }
++  /** Skill lint warnings of an import that went ahead. */
++  warnings?: Array<{ code: string; field: string; severity: string }>
++}
++
++function bytesToBase64(bytes: Uint8Array): string {
++  let binary = ''
++  // Chunked, so a large file never overflows the argument list of String.fromCharCode.
++  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
++    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
++  }
++  return btoa(binary)
++}
++
++/**
++ * Import a skill from a `SKILL.md` or a zip with `SKILL.md` and its files (EP-11 S8, action
++ * `skills.import`). The server checks the file, creates the skill switched off and keeps its text
++ * and files as a draft: nothing is used until the draft is published and the skill switched on.
++ * Files beside `SKILL.md` are an admin's to import. A file over the bundle cap is refused here
++ * before it is read.
++ */
++export async function importSkillFile(
++  orgId: string,
++  file: Blob,
++  scope: 'org' | 'user' = 'user',
++): Promise<SkillImportResult> {
++  if (file.size > MAX_SKILL_IMPORT_BYTES) {
++    throw new RangeError('skill_import_too_large')
++  }
++  const content = bytesToBase64(new Uint8Array(await file.arrayBuffer()))
++  return requestJson<SkillImportResult>('/api/v1/skills/import', {
++    method: 'POST',
++    body: JSON.stringify({ content_base64: content, scope }),
+     headers: { 'x-verevon-org-id': orgId },
+   })
+ }
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skill_import.go b/apps/Model Plane/go/services/capability-core/internal/api/skill_import.go
+new file mode 100644
+index 000000000..4e4f09b28
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skill_import.go	
+@@ -0,0 +1,307 @@
++package api
++
++import (
++	"bytes"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"log/slog"
++	"net/http"
++	"os"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/triodelab/model-plane/pkg/authctx"
++	"github.com/triodelab/model-plane/pkg/publisher"
++	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
++)
++
++// ---------------------------------------------------------------------------
++// SkillImportHandler  POST /api/v1/skills/import (EP-11 S8)
++// ---------------------------------------------------------------------------
++
++const skillImportEnv = "SKILL_IMPORT_ENABLED"
++
++// SkillImportFromLookup reads SKILL_IMPORT_ENABLED strictly: only the literal "true" mounts the
++// import, and only together with SKILL_BUNDLES_ENABLED and SKILL_DRAFT_PUBLISH, because an import
++// is a draft (with a draft bundle) that nothing uses until it is published.
++func SkillImportFromLookup(lookup func(string) string) bool {
++	return lookup(skillImportEnv) == "true" && SkillBundlesAPIFromLookup(lookup) && DraftPublishFromLookup(lookup)
++}
++
++// skillAuthoringZDRFeature is the zdr-refusals.json feature an import refusal names.
++const skillAuthoringZDRFeature = "skill_authoring"
++
++// skillAuthoringZDRMessage is the catalogue sentence of zdr_feature_not_supported with that
++// feature's label, as mp-contracts' Refusal::message writes it.
++const skillAuthoringZDRMessage = "This is not supported with zero data retention yet: saving or editing skills. The request was refused before any model call."
++
++// maxSkillImportBodyBytes bounds the JSON body before it is read: the largest bundle upload
++// (maxSkillBundleBodyBytes) in base64, plus room for the other field.
++const maxSkillImportBodyBytes = maxSkillBundleBodyBytes/3*4 + 64<<10
++
++// zipMagic starts every zip archive; anything else is read as a lone SKILL.md.
++var zipMagic = []byte("PK\x03\x04")
++
++// importDraftSQL opens the imported skill's draft from its own live fields (session-core's version
++// body, migrations 0108/0109) with the draft bundle's digest ($3, '' for a lone SKILL.md). The
++// draft is what the author reviews and publishes; publishing it makes the bundle live.
++const importDraftSQL = `
++	UPDATE agent_skills
++	SET draft = agent_skill_version_body(agent_skills)
++	        || CASE WHEN $3 <> '' THEN jsonb_build_object('bundle_sha256', $3::text) ELSE '{}'::jsonb END,
++	    draft_updated_at = $4, draft_by = $5
++	WHERE id = $1 AND org_id = $2
++`
++
++// importSkillSQL creates the imported skill switched off, with empty trigger lists and no shares:
++// it steers no turn until its author has read it, published it and switched it on.
++const importSkillSQL = `
++	INSERT INTO agent_skills (id, org_id, name, description, content,
++	    trigger_keywords, trigger_file_patterns, tool_restrictions,
++	    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
++	VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, false, $6, $7, '[]'::jsonb, $8, $8)
++`
++
++// errSkillImportNameTaken ends an import whose name another skill of the same scope and owner holds.
++var errSkillImportNameTaken = errors.New("skill_name_taken")
++
++// SkillImportHandler brings a skill in from a file: a lone SKILL.md (Agent Skills format) or a zip
++// with SKILL.md at its root and the files it uses. The file is checked by the bundle validator
++// (caps, zip-slip, symlinks, the executable bit only under scripts/), and the skill is created
++// switched off with its text as a draft and its files as a draft bundle. Nothing an import writes
++// reaches a turn until the author publishes the draft and switches the skill on. Import never
++// fetches anything.
++type SkillImportHandler struct {
++	// skills carries the registry's transaction (mutateSkill names the actor for the revision and
++	// version triggers), its lint mode and its retention switch.
++	skills  *SkillsHandler
++	enabled bool
++}
++
++// NewSkillImportHandler builds the handler; enabled comes from SkillImportFromLookup. With it off
++// Register mounts nothing, so the path is the skill subtree's as before.
++func NewSkillImportHandler(pool registryDatabase, enabled bool) *SkillImportHandler {
++	return &SkillImportHandler{skills: NewSkillsHandler(pool), enabled: enabled}
++}
++
++// WithPublisher wires reconcile-event emission, as for a created skill. Optional, nil-safe.
++func (h *SkillImportHandler) WithPublisher(pub publisher.EventPublisher) *SkillImportHandler {
++	h.skills.WithPublisher(pub)
++	return h
++}
++
++// Register mounts POST /api/v1/skills/import while the switch is on. Its exact pattern takes
++// precedence over the /api/v1/skills/ subtree.
++func (h *SkillImportHandler) Register(mux *http.ServeMux) {
++	if !h.enabled {
++		return
++	}
++	mux.HandleFunc("/api/v1/skills/import", h.importSkill)
++}
++
++// skillImportBody carries the file as base64 inside JSON, the only body the model-gateway and BFF
++// proxies forward. org_id, which model-gateway adds to skill creates, is ignored: the org is the
++// verified caller's.
++type skillImportBody struct {
++	ContentBase64 string `json:"content_base64"`
++	Scope         string `json:"scope"`
++}
++
++// importedFile is a checked import: the skill's text and, for a zip with more than SKILL.md, the
++// bundle of its files.
++type importedFile struct {
++	document  skillbundle.SkillDocument
++	bundle    skillbundle.Bundle
++	hasBundle bool
++}
++
++func (h *SkillImportHandler) importSkill(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPost {
++		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST imports a skill.")
++		return
++	}
++	principal, ok := authctx.PrincipalFromContext(r.Context())
++	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
++		writeTypedError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
++		return
++	}
++	// authz refuses a ZDR principal before this handler; the check stays here so the refusal is
++	// the typed one and cannot depend on the middleware's order. Nothing has been read yet.
++	if principal.ZeroDataRetention || !principal.RetentionPolicyPresent {
++		writeSkillAuthoringZDRRefusal(w)
++		return
++	}
++	// An imported skill is owned by the person who brought it in; a workload or an API key has
++	// no one to own it.
++	if principal.PrincipalType != "user" {
++		writeTypedError(w, http.StatusForbidden, "skill_import_requires_person", "Only a signed-in person can import a skill.")
++		return
++	}
++	r.Body = http.MaxBytesReader(w, r.Body, maxSkillImportBodyBytes)
++	var body skillImportBody
++	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++		var tooLarge *http.MaxBytesError
++		if errors.As(err, &tooLarge) {
++			writeTypedError(w, http.StatusRequestEntityTooLarge, "bundle_too_large", "The file is larger than a skill bundle may be.")
++			return
++		}
++		writeTypedError(w, http.StatusBadRequest, "invalid_body", "The body must be {content_base64, scope?}.")
++		return
++	}
++	raw, err := base64.StdEncoding.DecodeString(body.ContentBase64)
++	if err != nil || len(raw) == 0 {
++		writeTypedError(w, http.StatusBadRequest, "invalid_body", "content_base64 must hold the file, base64-encoded.")
++		return
++	}
++	scope := strings.TrimSpace(body.Scope)
++	if scope == "" {
++		scope = "user"
++	}
++	if !validSkillScope(scope) {
++		writeTypedError(w, http.StatusUnprocessableEntity, "invalid_skill_scope", "scope must be user or org.")
++		return
++	}
++	admin := verifiedIsAdmin(r)
++	if scope == "org" && !admin {
++		writeTypedError(w, http.StatusForbidden, "forbidden", "Only an admin can import an org-wide skill.")
++		return
++	}
++	imported, ok := h.checkFile(w, raw)
++	if !ok {
++		return
++	}
++	if imported.hasBundle {
++		// Files beside SKILL.md may be scripts the agent can run, so they are org configuration:
++		// admin-only, as the bundle route is.
++		if !admin {
++			writeTypedError(w, http.StatusForbidden, "skill_import_bundle_requires_admin", "Only an admin can import a skill with files beside SKILL.md.")
++			return
++		}
++		// Without retention a publish never makes a draft bundle live, so the files could not be used.
++		if !h.skills.bundleRetention {
++			writeTypedError(w, http.StatusConflict, "skill_import_bundle_unavailable", "Importing a skill with files beside SKILL.md is not turned on.")
++			return
++		}
++	}
++	document := imported.document
++	// The whole lint runs on an import whatever SKILL_LINT_MODE says, as the kind rules do: no
++	// stored row predates an import, and a 1 MiB SKILL.md must not become a skill unchecked.
++	findings := skilllint.Lint(skilllint.Input{
++		Name: document.Name, Description: document.Description, Content: document.Body, Kind: skilllint.KindSkill,
++	})
++	if h.skills.lintMode != skilllint.ModeOff {
++		skilllint.Count(r.Context(), h.skills.lintMode, findings)
++	}
++	if skilllint.HasError(findings) {
++		writeSkillLintRefusal(w, findings)
++		return
++	}
++
++	orgID := principal.OrganizationID
++	ownerUserID := ""
++	if scope == "user" {
++		ownerUserID = principal.ActorID
++	}
++	skillID := "skill_" + uuid.New().String()
++	manifest := ""
++	if imported.hasBundle {
++		manifest = imported.bundle.ManifestSHA256
++	}
++	now := time.Now().UTC()
++	err = h.skills.mutateSkill(r, "", "imported", func(tx registryDatabase) error {
++		_, err := tx.Exec(r.Context(), importSkillSQL, skillID, orgID, document.Name, document.Description,
++			document.Body, scope, ownerUserID, now)
++		var pgErr *pgconn.PgError
++		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
++			return errSkillImportNameTaken
++		}
++		if err != nil {
++			return err
++		}
++		if imported.hasBundle {
++			pgxTx, ok := tx.(pgx.Tx)
++			if !ok {
++				return errSkillTransactionUnavailable
++			}
++			if err := skillbundle.PutImportedDraft(r.Context(), pgxTx, orgID, skillID, principal.ActorID, imported.bundle); err != nil {
++				return err
++			}
++		}
++		_, err = tx.Exec(r.Context(), importDraftSQL, skillID, orgID, manifest, now, principal.ActorID)
++		return err
++	})
++	if errors.Is(err, errSkillImportNameTaken) {
++		writeTypedError(w, http.StatusConflict, "skill_name_taken", "A skill with this name already exists.")
++		return
++	}
++	if err != nil {
++		slog.Error("skill import failed", "error", err)
++		writeTypedError(w, http.StatusInternalServerError, "database_unavailable", "The skill could not be imported.")
++		return
++	}
++	if eerr := reconcile.Emit(r.Context(), h.skills.pub, reconcile.KindSkill,
++		reconcile.ActionRegistered, skillID, orgID); eerr != nil {
++		slog.Warn("reconcile emit failed", "kind", reconcile.KindSkill, "id", skillID, "error", eerr)
++	}
++	answer := map[string]any{"id": skillID, "name": document.Name, "scope": scope, "enabled": false, "draft": true}
++	if imported.hasBundle {
++		answer["bundle"] = map[string]any{
++			"manifest_sha256": manifest, "file_count": len(imported.bundle.Files), "total_bytes": imported.bundle.TotalBytes,
++		}
++	}
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(http.StatusCreated)
++	_ = json.NewEncoder(w).Encode(withLintWarnings(answer, findings))
++}
++
++// checkFile validates the uploaded bytes and answers a refusal itself. A zip goes through the
++// bundle validator (and the deck template checks while they are on, as an upload does); a zip
++// holding only SKILL.md imports as that file alone. Anything else must be a SKILL.md.
++func (h *SkillImportHandler) checkFile(w http.ResponseWriter, raw []byte) (importedFile, bool) {
++	var imported importedFile
++	var err error
++	if bytes.HasPrefix(raw, zipMagic) {
++		var bundle skillbundle.Bundle
++		bundle, err = skillbundle.Parse(raw)
++		if err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {
++			err = skillbundle.ValidateDeckTemplate(bundle)
++		}
++		if err == nil {
++			imported = importedFile{document: skillbundle.BundleSkillDocument(bundle), bundle: bundle, hasBundle: len(bundle.Files) > 1}
++		}
++	} else {
++		imported.document, err = skillbundle.ParseSkillFile(raw)
++	}
++	if err != nil {
++		var refusal *skillbundle.RefusalError
++		if errors.As(err, &refusal) {
++			writeTypedError(w, http.StatusUnprocessableEntity, refusal.Code, "The file is not a skill this registry can import.")
++			return importedFile{}, false
++		}
++		writeTypedError(w, http.StatusUnprocessableEntity, "invalid_skill_bundle", "The file is not a skill this registry can import.")
++		return importedFile{}, false
++	}
++	return imported, true
++}
++
++// writeSkillAuthoringZDRRefusal answers the catalogue's zdr_feature_not_supported for
++// skill_authoring, in the body mp-contracts writes, with the feature also under details as the
++// envelope rule asks.
++func writeSkillAuthoringZDRRefusal(w http.ResponseWriter) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(http.StatusPreconditionFailed)
++	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
++		"code":      "zdr_feature_not_supported",
++		"message":   skillAuthoringZDRMessage,
++		"retryable": false,
++		"action":    "turn_off_feature",
++		"feature":   skillAuthoringZDRFeature,
++		"details":   map[string]any{"feature": skillAuthoringZDRFeature},
++	}})
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skill_import_test.go b/apps/Model Plane/go/services/capability-core/internal/api/skill_import_test.go
+new file mode 100644
+index 000000000..4a6b1f71b
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skill_import_test.go	
+@@ -0,0 +1,367 @@
++package api
++
++import (
++	"archive/zip"
++	"bytes"
++	"encoding/base64"
++	"encoding/json"
++	"io/fs"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/triodelab/model-plane/pkg/authctx"
++	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
++)
++
++// EP-11 S8: importing a skill from a SKILL.md or a zip creates it switched off, as a draft.
++
++const importSkillMD = "---\nname: Utrulling\ndescription: Steps for a release\n---\n\n1. Run the tests\n2. Deploy\n"
++
++type importZipEntry struct {
++	name string
++	body string
++	mode fs.FileMode
++}
++
++func importZip(t *testing.T, entries ...importZipEntry) []byte {
++	t.Helper()
++	var buffer bytes.Buffer
++	writer := zip.NewWriter(&buffer)
++	for _, entry := range entries {
++		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
++		mode := entry.mode
++		if mode == 0 {
++			mode = 0o644
++		}
++		header.SetMode(mode)
++		file, err := writer.CreateHeader(header)
++		if err != nil {
++			t.Fatalf("create %s: %v", entry.name, err)
++		}
++		if _, err := file.Write([]byte(entry.body)); err != nil {
++			t.Fatalf("write %s: %v", entry.name, err)
++		}
++	}
++	if err := writer.Close(); err != nil {
++		t.Fatalf("close zip: %v", err)
++	}
++	return buffer.Bytes()
++}
++
++func importHandler(database *recordingDatabase, retention bool) *SkillImportHandler {
++	return &SkillImportHandler{
++		skills:  &SkillsHandler{pool: database, lintMode: skilllint.ModeOff, bundleRetention: retention},
++		enabled: true,
++	}
++}
++
++func importPrincipal(admin bool) authctx.Principal {
++	scopes := []string{authz.WriteScope}
++	if admin {
++		scopes = append(scopes, "admin")
++	}
++	return authctx.Principal{
++		OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user", Scopes: scopes,
++		RetentionPolicyPresent: true,
++	}
++}
++
++func importBody(t *testing.T, file []byte, scope string) string {
++	t.Helper()
++	body, err := json.Marshal(map[string]string{"content_base64": base64.StdEncoding.EncodeToString(file), "scope": scope})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return string(body)
++}
++
++func postImport(t *testing.T, handler *SkillImportHandler, principal authctx.Principal, body string) *httptest.ResponseRecorder {
++	t.Helper()
++	mux := http.NewServeMux()
++	handler.Register(mux)
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/skills/import", strings.NewReader(body))
++	request = request.WithContext(authctx.ContextWithPrincipal(request.Context(), principal))
++	response := httptest.NewRecorder()
++	mux.ServeHTTP(response, request)
++	return response
++}
++
++// execWith returns the first recorded statement holding fragment.
++func execWith(database *recordingDatabase, fragment string) (databaseCall, bool) {
++	for _, call := range database.execs {
++		if strings.Contains(call.query, fragment) {
++			return call, true
++		}
++	}
++	return databaseCall{}, false
++}
++
++func TestSkillImportReadsOnlyTheLiteralTrueWithBundlesAndDrafts(t *testing.T) {
++	all := map[string]string{skillImportEnv: "true", skillBundlesAPIEnv: "true", draftPublishEnv: "true"}
++	if !SkillImportFromLookup(func(key string) string { return all[key] }) {
++		t.Fatal("all three switches on must mount the import")
++	}
++	for _, value := range []string{"", "1", "TRUE", "on"} {
++		env := map[string]string{skillImportEnv: value, skillBundlesAPIEnv: "true", draftPublishEnv: "true"}
++		if SkillImportFromLookup(func(key string) string { return env[key] }) {
++			t.Errorf("SKILL_IMPORT_ENABLED=%q mounted the import", value)
++		}
++	}
++	for _, missing := range []string{skillBundlesAPIEnv, draftPublishEnv} {
++		env := map[string]string{skillImportEnv: "true", skillBundlesAPIEnv: "true", draftPublishEnv: "true"}
++		delete(env, missing)
++		if SkillImportFromLookup(func(key string) string { return env[key] }) {
++			t.Errorf("the import mounted without %s", missing)
++		}
++	}
++}
++
++// Off, the route is not mounted and nothing is read or written.
++func TestImportRouteIsAbsentWhileTheSwitchIsOff(t *testing.T) {
++	database := &recordingDatabase{}
++	handler := importHandler(database, false)
++	handler.enabled = false
++	response := postImport(t, handler, importPrincipal(false), importBody(t, []byte(importSkillMD), ""))
++	if response.Code != http.StatusNotFound {
++		t.Fatalf("status = %d, want 404", response.Code)
++	}
++	if database.databaseCalls() != 0 || database.commits != 0 {
++		t.Fatal("the registry was touched with the switch off")
++	}
++}
++
++func TestImportSkillMdCreatesDraft(t *testing.T) {
++	database := &recordingDatabase{}
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, []byte(importSkillMD), ""))
++	if response.Code != http.StatusCreated {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.execs) != 2 || database.execs[0].query != importSkillSQL || database.execs[1].query != importDraftSQL {
++		t.Fatalf("statements = %#v, want the insert then the draft", database.execs)
++	}
++	args := database.execs[0].args
++	if args[2] != "Utrulling" || args[3] != "Steps for a release" || args[4] != "1. Run the tests\n2. Deploy" ||
++		args[5] != "user" || args[6] != "user-a" {
++		t.Fatalf("insert args = %#v", args)
++	}
++	if !strings.Contains(importSkillSQL, "false, $6") {
++		t.Fatal("an imported skill must be created switched off")
++	}
++	if draft := database.execs[1].args; draft[2] != "" || draft[4] != "user-a" {
++		t.Fatalf("draft args = %#v, want no bundle and the importer", draft)
++	}
++	if len(database.actorCalls) != 1 || database.actorCalls[0].args[1] != "user-a" || database.actorCalls[0].args[2] != "imported" {
++		t.Fatalf("actor = %#v, want the verified person and the import reason", database.actorCalls)
++	}
++	if database.commits != 1 {
++		t.Fatalf("commits = %d, want one transaction", database.commits)
++	}
++	var body map[string]any
++	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
++		t.Fatal(err)
++	}
++	if body["draft"] != true || body["enabled"] != false || body["scope"] != "user" || body["bundle"] != nil {
++		t.Fatalf("body = %s", response.Body.String())
++	}
++}
++
++func TestImportZipCreatesDraftBundle(t *testing.T) {
++	database := &recordingDatabase{}
++	file := importZip(t,
++		importZipEntry{name: "SKILL.md", body: importSkillMD},
++		importZipEntry{name: "scripts/run.py", body: "print(1)\n", mode: 0o755},
++	)
++	response := postImport(t, importHandler(database, true), importPrincipal(true), importBody(t, file, "user"))
++	if response.Code != http.StatusCreated {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	bundle, ok := execWith(database, "INSERT INTO skill_bundles")
++	if !ok || !strings.Contains(bundle.query, "'draft'") {
++		t.Fatalf("the bundle must be stored as a draft: %#v", database.execs)
++	}
++	manifest, _ := bundle.args[3].(string)
++	if manifest == "" || bundle.args[2] != database.execs[0].args[0] {
++		t.Fatalf("bundle args = %#v, want the new skill and its manifest", bundle.args)
++	}
++	if audit, ok := execWith(database, "INSERT INTO registry_audit_log"); !ok || audit.args[2] != "skill_bundle.imported" {
++		t.Fatalf("audit = %#v", audit)
++	}
++	draft, ok := execWith(database, "SET draft = agent_skill_version_body")
++	if !ok || draft.args[2] != manifest {
++		t.Fatalf("the draft must name the draft bundle: %#v", draft)
++	}
++	if database.commits != 1 {
++		t.Fatalf("commits = %d, want the skill and its files in one transaction", database.commits)
++	}
++	var body struct {
++		Bundle struct {
++			FileCount int `json:"file_count"`
++		} `json:"bundle"`
++	}
++	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Bundle.FileCount != 2 {
++		t.Fatalf("body = %s", response.Body.String())
++	}
++}
++
++// A zip with nothing beside SKILL.md is the file alone: any member may import it, with no bundle.
++func TestImportZipWithOnlySkillMdStoresNoBundle(t *testing.T) {
++	database := &recordingDatabase{}
++	file := importZip(t, importZipEntry{name: "SKILL.md", body: importSkillMD})
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, file, ""))
++	if response.Code != http.StatusCreated {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if _, ok := execWith(database, "skill_bundles"); ok {
++		t.Fatalf("no bundle may be stored: %#v", database.execs)
++	}
++}
++
++// Files beside SKILL.md are admin-only, and need retention so a publish can make them live.
++func TestImportBundleNeedsAdminAndRetention(t *testing.T) {
++	file := importZip(t,
++		importZipEntry{name: "SKILL.md", body: importSkillMD},
++		importZipEntry{name: "references/notes.md", body: "notes"},
++	)
++	for _, test := range []struct {
++		name      string
++		admin     bool
++		retention bool
++		status    int
++		code      string
++	}{
++		{"member", false, true, http.StatusForbidden, "skill_import_bundle_requires_admin"},
++		{"admin without retention", true, false, http.StatusConflict, "skill_import_bundle_unavailable"},
++	} {
++		database := &recordingDatabase{}
++		response := postImport(t, importHandler(database, test.retention), importPrincipal(test.admin), importBody(t, file, ""))
++		if response.Code != test.status || errorCode(t, response) != test.code {
++			t.Errorf("%s: status = %d, body=%s", test.name, response.Code, response.Body.String())
++		}
++		if database.databaseCalls() != 0 {
++			t.Errorf("%s: the registry was touched", test.name)
++		}
++	}
++}
++
++func TestImportRefusesZipSlipAndSymlink(t *testing.T) {
++	for _, test := range []struct {
++		name  string
++		entry importZipEntry
++		code  string
++	}{
++		{"zip slip", importZipEntry{name: "../evil.sh", body: "rm -rf /"}, "unsafe_path"},
++		{"symlink", importZipEntry{name: "secrets", body: "/etc/passwd", mode: fs.ModeSymlink | 0o777}, "symlink_refused"},
++		{"exec bit outside scripts", importZipEntry{name: "run.sh", body: "echo", mode: 0o755}, "exec_bit_outside_scripts"},
++	} {
++		database := &recordingDatabase{}
++		file := importZip(t, importZipEntry{name: "SKILL.md", body: importSkillMD}, test.entry)
++		response := postImport(t, importHandler(database, true), importPrincipal(true), importBody(t, file, ""))
++		if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != test.code {
++			t.Errorf("%s: status = %d, body=%s", test.name, response.Code, response.Body.String())
++		}
++		if database.databaseCalls() != 0 {
++			t.Errorf("%s: the registry was touched", test.name)
++		}
++	}
++}
++
++func TestImportRefusesASkillMdWithoutFrontMatter(t *testing.T) {
++	database := &recordingDatabase{}
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, []byte("# No front matter\n"), ""))
++	if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != "skill_md_front_matter" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if database.databaseCalls() != 0 {
++		t.Fatal("the registry was touched")
++	}
++}
++
++func TestImportOrgScopeAdminOnly(t *testing.T) {
++	database := &recordingDatabase{}
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, []byte(importSkillMD), "org"))
++	if response.Code != http.StatusForbidden || database.databaseCalls() != 0 {
++		t.Fatalf("a member's org import: status = %d, calls = %d", response.Code, database.databaseCalls())
++	}
++	database = &recordingDatabase{}
++	response = postImport(t, importHandler(database, false), importPrincipal(true), importBody(t, []byte(importSkillMD), "org"))
++	if response.Code != http.StatusCreated {
++		t.Fatalf("an admin's org import: status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if args := database.execs[0].args; args[5] != "org" || args[6] != "" {
++		t.Fatalf("an org skill has no owner: %#v", args)
++	}
++}
++
++// The lint runs on every import, whatever SKILL_LINT_MODE says: an over-long body is refused
++// before anything is written.
++func TestImportLintsBody(t *testing.T) {
++	database := &recordingDatabase{}
++	long := "---\nname: Lang\ndescription: Too long\n---\n" + strings.Repeat("a", skilllint.MaxContentChars+1)
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, []byte(long), ""))
++	if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != skilllint.ErrorCode {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if !strings.Contains(response.Body.String(), skilllint.CodeContentTooLong) {
++		t.Fatalf("body = %s, want the content rule named", response.Body.String())
++	}
++	if database.databaseCalls() != 0 {
++		t.Fatal("a refused import touched the registry")
++	}
++}
++
++func TestImportNameTakenIsAConflict(t *testing.T) {
++	database := &recordingDatabase{execErr: &pgconn.PgError{Code: "23505"}, execErrAt: 1}
++	response := postImport(t, importHandler(database, false), importPrincipal(false), importBody(t, []byte(importSkillMD), ""))
++	if response.Code != http.StatusConflict || errorCode(t, response) != "skill_name_taken" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if database.commits != 0 {
++		t.Fatal("a refused import committed")
++	}
++}
++
++// A ZDR principal is refused with the catalogue's refusal before anything is read, and through the
++// real middleware a ZDR token never reaches the handler at all.
++func TestImportRefusesZDRPrincipals(t *testing.T) {
++	database := &recordingDatabase{}
++	principal := importPrincipal(true)
++	principal.ZeroDataRetention = true
++	response := postImport(t, importHandler(database, true), principal, importBody(t, []byte(importSkillMD), ""))
++	if response.Code != http.StatusPreconditionFailed || errorCode(t, response) != "zdr_feature_not_supported" ||
++		!strings.Contains(response.Body.String(), `"feature":"skill_authoring"`) {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if database.databaseCalls() != 0 {
++		t.Fatal("a ZDR import touched the registry")
++	}
++
++	database = &recordingDatabase{}
++	mux := http.NewServeMux()
++	importHandler(database, true).Register(mux)
++	handler, sign := mcpAuthenticatedHandlerWithSigner(t, mux)
++	zdr := true
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/skills/import", strings.NewReader(importBody(t, []byte(importSkillMD), "")))
++	request.Header.Set("Authorization", "Bearer "+sign("user", []string{authz.WriteScope, "admin"}, &zdr))
++	recorder := httptest.NewRecorder()
++	handler.ServeHTTP(recorder, request)
++	if recorder.Code == http.StatusCreated || database.databaseCalls() != 0 {
++		t.Fatalf("a ZDR token imported: status = %d, calls = %d", recorder.Code, database.databaseCalls())
++	}
++}
++
++func TestImportRequiresAPerson(t *testing.T) {
++	database := &recordingDatabase{}
++	principal := importPrincipal(true)
++	principal.PrincipalType = "service"
++	response := postImport(t, importHandler(database, true), principal, importBody(t, []byte(importSkillMD), ""))
++	if response.Code != http.StatusForbidden || errorCode(t, response) != "skill_import_requires_person" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if database.databaseCalls() != 0 {
++		t.Fatal("a service import touched the registry")
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/import_draft.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/import_draft.go
+new file mode 100644
+index 000000000..79f9c7ecd
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/import_draft.go	
+@@ -0,0 +1,33 @@
++package skillbundle
++
++import (
++	"context"
++	"fmt"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// PutImportedDraft stores the bundle of a skill that is being imported (EP-11 S8) as that skill's
++// draft bundle, inside the import's transaction tx, so the skill row and its files are written
++// together or not at all. The skill is new, so there is no live bundle to supersede and nothing to
++// collect. The bundle becomes live only when the draft is published (PublishDraftBundle); every
++// read leaves a draft bundle out until then. The audit row names the digest and the totals, never
++// a path or a body.
++func PutImportedDraft(ctx context.Context, tx pgx.Tx, orgID, skillID, actor string, bundle Bundle) error {
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return fmt.Errorf("lock skill bundles: %w", err)
++	}
++	bundleID := "skb_" + uuid.NewString()
++	if _, err := tx.Exec(ctx, `
++		INSERT INTO skill_bundles (id, org_id, skill_id, manifest_sha256, file_count, total_bytes, created_by, state)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft')
++	`, bundleID, orgID, skillID, bundle.ManifestSHA256, len(bundle.Files), bundle.TotalBytes, actor); err != nil {
++		return fmt.Errorf("insert imported skill bundle: %w", err)
++	}
++	if err := storeFiles(ctx, tx, orgID, bundleID, bundle); err != nil {
++		return err
++	}
++	return appendAudit(ctx, tx, "skill_bundle.imported", orgID, skillID, actor, bundle.ManifestSHA256,
++		len(bundle.Files), bundle.TotalBytes)
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go
+index e30910bce..dce3de671 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go	
+@@ -187,6 +187,57 @@ func FrontMatterName(bundle Bundle) string {
+ 	return ""
+ }
+ 
++// SkillDocument is what an imported skill is made from (EP-11 S8): the name and description in
++// SKILL.md's front matter and the instructions below the block.
++type SkillDocument struct {
++	Name        string
++	Description string
++	Body        string
++}
++
++// ParseSkillFile checks a lone SKILL.md by the rules Parse holds a bundle's SKILL.md to: within
++// the per-file cap, UTF-8 text, and a closed front matter block naming the skill and saying when
++// to use it. A refusal carries the same closed codes as a bundle's.
++func ParseSkillFile(body []byte) (SkillDocument, error) {
++	if len(body) > MaxFileBytes {
++		return SkillDocument{}, refuse("file_too_large")
++	}
++	if isBinary(body) || !validFrontMatter(body) {
++		return SkillDocument{}, refuse("skill_md_front_matter")
++	}
++	return skillDocument(body), nil
++}
++
++// BundleSkillDocument reads the SKILL.md of a bundle Parse accepted, which always holds one.
++func BundleSkillDocument(bundle Bundle) SkillDocument {
++	for _, file := range bundle.Files {
++		if file.Path == SkillFileName {
++			return skillDocument(file.Body)
++		}
++	}
++	return SkillDocument{}
++}
++
++func skillDocument(body []byte) SkillDocument {
++	fields, _ := frontMatter(body)
++	return SkillDocument{Name: fields["name"], Description: fields["description"], Body: strings.TrimSpace(frontMatterRest(body))}
++}
++
++// frontMatterRest is the text after the line that closes the front matter block, found by the
++// rule frontMatter reads the block with; "" when the block is not closed.
++func frontMatterRest(body []byte) string {
++	text := string(body)
++	lines := strings.SplitAfter(text, "\n")
++	offset := len(lines[0])
++	for _, line := range lines[1:] {
++		offset += len(line)
++		if strings.TrimRight(line, "\r\n") == "---" {
++			return text[offset:]
++		}
++	}
++	return ""
++}
++
+ // DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
+ // turns it on; off, an upload is checked exactly as before and no listing reports a template.
+ const DeckTemplatesEnv = "SKILL_DECK_TEMPLATES_ENABLED"
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go
+index 732e62833..64c92616b 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go	
+@@ -260,6 +260,53 @@ func TestParseMarksNonTextFilesBinary(t *testing.T) {
+ 	}
+ }
+ 
++// EP-11 S8: an imported SKILL.md gives the skill its name, description and instructions.
++func TestParseSkillFileSplitsFrontMatterFromBody(t *testing.T) {
++	document, err := ParseSkillFile([]byte("---\r\nname: xlsx\r\ndescription: Build spreadsheets\r\n---\r\n\r\n# Steps\r\nUse the template.\r\n"))
++	if err != nil {
++		t.Fatalf("ParseSkillFile: %v", err)
++	}
++	if document.Name != "xlsx" || document.Description != "Build spreadsheets" {
++		t.Fatalf("front matter = %q, %q", document.Name, document.Description)
++	}
++	if document.Body != "# Steps\r\nUse the template." {
++		t.Fatalf("body = %q", document.Body)
++	}
++}
++
++// A lone SKILL.md is held to the bundle's rules, with the bundle's codes.
++func TestParseSkillFileRefusesWhatABundleWouldRefuse(t *testing.T) {
++	for name, body := range map[string][]byte{
++		"no front matter":   []byte("# Just a body\n"),
++		"unclosed block":    []byte("---\nname: x\ndescription: y\n"),
++		"missing describe":  []byte("---\nname: x\n---\nBody\n"),
++		"indented name key": []byte("---\n name: x\ndescription: y\n---\nBody\n"),
++		"not text":          append([]byte("---\nname: x\ndescription: y\n---\n"), 0x00, 0xff),
++	} {
++		if _, err := ParseSkillFile(body); refusalCode(t, err) != "skill_md_front_matter" {
++			t.Errorf("%s: code = %q, want skill_md_front_matter", name, refusalCode(t, err))
++		}
++	}
++	big := append([]byte(validSkillMD), bytes.Repeat([]byte("a"), MaxFileBytes)...)
++	if _, err := ParseSkillFile(big); refusalCode(t, err) != "file_too_large" {
++		t.Errorf("an over-cap SKILL.md: code = %q, want file_too_large", refusalCode(t, err))
++	}
++}
++
++func TestBundleSkillDocumentReadsTheBundlesSkillFile(t *testing.T) {
++	bundle, err := Parse(buildZip(t,
++		zipEntry{name: "references/notes.md", body: []byte("---\nname: other\ndescription: no\n---\nNot this.\n")},
++		zipEntry{name: "SKILL.md", body: []byte(validSkillMD)},
++	))
++	if err != nil {
++		t.Fatalf("Parse: %v", err)
++	}
++	document := BundleSkillDocument(bundle)
++	if document.Name != "xlsx" || document.Description != "Build spreadsheets" || document.Body != "Body." {
++		t.Fatalf("document = %#v", document)
++	}
++}
++
+ // pngLogo and minimalMaster are the smallest bodies the deck template checks accept.
+ var pngLogo = []byte("\x89PNG\r\n\x1a\nrest-of-image")
+ 

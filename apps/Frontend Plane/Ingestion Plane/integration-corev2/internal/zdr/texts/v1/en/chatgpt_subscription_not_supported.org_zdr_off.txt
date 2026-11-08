@@ -1,0 +1,7 @@
+title: This subscription does not provide ZDR
+continue: Understood
+cancel: Understood
+
+Your organisation is not using ZDR now, so nothing changes. Chats you run with your ChatGPT subscription are sent to OpenAI under your own account and terms, and OpenAI may keep them.
+
+If the organisation turns ZDR on later, we will ask you before you can use the subscription.

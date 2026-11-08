@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// Canonical identifiers for the Model Plane.
+// All IDs use ULID format (26-character Crockford Base32).
+// Immutability: once created, an ID value MUST NOT change.
+// Single-writer: each resource type has exactly one owning service.
+
+// AgentId — identifies an agent definition (capability-core owns).
+message AgentId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// ThreadId — identifies a conversation thread (session-core owns).
+message ThreadId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// SessionKey — groups threads within a user interaction session (session-core owns).
+message SessionKey {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// RunId — identifies a single agent run within a thread (session-core owns metadata, execution-core owns state).
+message RunId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// StepId — identifies one step within a run (execution-core owns).
+message StepId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// CheckpointId — identifies a resumable snapshot of run state (session-core owns).
+message CheckpointId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// SandboxLeaseId — identifies an active sandbox lease (sandbox-manager owns).
+message SandboxLeaseId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}
+
+// BrowserLeaseId — identifies an active browser grant (browser-broker owns).
+message BrowserLeaseId {
+  // ULID string, immutable after creation.
+  string value = 1;
+}

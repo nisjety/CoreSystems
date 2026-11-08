@@ -1,0 +1,248 @@
+[
+ {
+  "id": "WS04-S1",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "apps/Model Plane/rust/crates/mp-events/src/subjects.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/run_control_nats_acl_contract.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/run_control_nats_live.rs",
+   "apps/Model Plane/deploy/nats.conf",
+   "apps/Model Plane/deploy/docker-compose.replicas.yml",
+   "apps/Model Plane/scripts/compose.sh",
+   "apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go"
+  ],
+  "tests_run": [
+   {
+    "command": "grep of apps (excluding node_modules/target) for 28080 and 29090 as published or referenced ports",
+    "outcome": "no hits, so both are unused"
+   },
+   {
+    "command": "grep of Model Plane for replicas.yml, model-gateway-b, MODEL_PLANE_REPLICAS (to find anything that asserts the old ports)",
+    "outcome": "only compose.sh and the overlay itself; no test reads the ports"
+   },
+   {
+    "command": "Rust and Go tests",
+    "outcome": "not re-run this round: only a YAML port mapping and comments changed, no source or test file. The earlier-round results stand (model-gateway --lib 1946 passed; acl contract 5 passed; mp-events/mp-contracts passed; nats-provisioner go test ok)"
+   },
+   {
+    "command": "docker compose config on the overlay",
+    "outcome": "not run (docker is the lead's); the new ${VAR:-default} interpolation is standard compose syntax and sits inside the existing !override list"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Amend plan K2-5 and every evidence URL: replica B's host ports are now 127.0.0.1:28080 (HTTP) and 127.0.0.1:29090 (gRPC probe), overridable with MODEL_GATEWAY_B_HTTP_HOST_PORT and MODEL_GATEWAY_B_GRPC_HOST_PORT. :18080 and :19090 are org-core's host ports (apps/Control Plane/docker-compose.yml:542-543). Record in the ledger that K2-5 had only checked 8081 and 9091.",
+   "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, near MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, add these lines (the file is CRLF):\n      # Build plan WS04-S1: cancel, queue and probe routed to the replica that owns a stream, over NATS request/reply. OFF by default; only the literal `true` turns it on. Deploy order: the nats.conf ACL (mp.v1.runctl.>) first, then the gateways, then this switch. A boot self-test that finds the ACL missing leaves the bus degraded and behaving as off, never the gateway down. Roll back with off plus a restart.\n      MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-off}\n      MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750}\nAfter that, confirm whether docker-compose.production.yml (:48) and docker-compose.release.yml (:29) pass the variable through, and whether config-policy.tsv or runtime-public-policy.env must list the two new keys (the plan left this open).",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: add (1) 'Run control is routed to the owning replica over core NATS request/reply (mp.v1.runctl.>), at-most-once, 8 KiB, ids and queue text only after the ZDR gate, no bearers; a bus error is 503 run_control_unavailable (retryable), never a fake 202 or 404; flag MODEL_GATEWAY_RUN_CONTROL_BUS off by default, boot self-test degrades to off if the ACL is missing (DEC-07 D1/D2, WS04-S1)'; (2) correction to the 2026-08-24 'persist before deliver' entry (ledger.md:1663-1666): today the handler enqueues first and persists after (http_routes.rs invoke_queue_input, session_flow.rs); the code order is kept through WS04-S3 and reordered to persist-first only in WS04-S6 (DEC-07 D3); (3) the replicas overlay is a dev/proof profile on host ports 28080/29090, not a production replica count (WS01 D8, K2-5).",
+   "Run the live test against the model plane NATS after the nats.conf ACL is deployed (recreate model-nats): cd 'apps/Model Plane/rust' && NATS_URL=<model-nats url> NATS_USER=model-gateway-runtime NATS_PASSWORD=<from the stack env, do not print> cargo test -q -p model-gateway --test run_control_nats_live -- --ignored. It must show a request to nobody returning NoOwner within 2 s (async-nats 0.49.1 no-responders against nats 2.12.12, still unverified), the cross-replica round trip, drop-unsubscribes, the timeout, and the self-test passing.",
+   "Validate the overlay without starting anything: MODEL_PLANE_REPLICAS=2 ./scripts/compose.sh config --quiet (check extends plus !override render, that B publishes only 28080 and 29090 on 127.0.0.1, and that B keeps the base environment, healthcheck and depends_on). Also check it renders with the Control Plane stack's org-core up.",
+   "Evidence for the DoD: rebuild model-gateway; MODEL_PLANE_REPLICAS=2 ./scripts/compose.sh up -d model-gateway model-gateway-b; curl http://127.0.0.1:8080/healthz and :28080 both healthy; with MODEL_GATEWAY_RUN_CONTROL_BUS=true confirm the gateway logs 'run control: bus self-test passed' on both replicas and the NATS log has no 'Permissions Violation' for mp.v1.runctl; with the ACL withheld (old nats.conf) confirm the log 'bus self-test failed' and unchanged behaviour. /readyz run_control: ok needs the http_routes.rs follow-up above.",
+   "Rebuild the nats container with the new nats.conf BEFORE setting the flag; nats.conf ships in the release artifact (release-artifact.sh:92), so the artifact needs rebuilding too.",
+   "buf, protos and migrations: none touched by this slice."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (readyz handler: add run_control status from AppState; also needs readiness wiring, or main.rs) - /readyz run_control: ok|degraded|off from RunControl::status()",
+   "apps/Model Plane/deploy/docker-compose.yml (lead applies, see lead_todo)",
+   "apps/Model Plane/docs/decisions/ledger.md (lead applies, see lead_todo)",
+   "apps/Model Plane/deploy/docker-compose.production.yml and docker-compose.release.yml (inheritance of the new env var not determined; the plan says to check)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "/readyz run_control (ok|degraded|off) is not reported. The handler is readyz() in src/http_routes.rs:568 (takes only Extension<GrpcReadiness>), which is not in the owned set; RunControl::status() is ready. Fold it into the first slice that edits http_routes.rs (S2), or have the lead add it now. Until then a degraded bus is visible only in the boot log.",
+    "Not run against a live broker (docker is the lead's): tests/run_control_nats_live.rs (5 tests, #[ignore], needs NATS_URL plus NATS_USER and NATS_PASSWORD) must show no-responders mapping to NoOwner within 2 s on async-nats 0.49.1 vs nats 2.12.12, the cross-replica round trip, drop-unsubscribes, the timeout, and the boot self-test passing. Recreate model-nats with the new nats.conf first, and check the NATS log for 'Permissions Violation' on mp.v1.runctl.",
+    "The overlay has not been rendered by compose: the lead must run `MODEL_PLANE_REPLICAS=2 ./scripts/compose.sh config --quiet` to check `extends` plus `!override` (needs compose >= 2.24), that B publishes only 127.0.0.1:28080 and 29090, and that B keeps the base env, healthcheck and depends_on. Also check it renders beside the Control Plane stack.",
+    "Lead-applied shared edits still pending: docker-compose.yml needs the MODEL_GATEWAY_RUN_CONTROL_BUS (default off) and MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS (default 750) lines. Then confirm whether docker-compose.production.yml and docker-compose.release.yml, config-policy.tsv or runtime-public-policy.env must list the keys. The ledger.md entries are also pending, including the D3 correction that code order is enqueue-then-persist.",
+    "Plan amendments needed. K2-5 and every evidence URL say 127.0.0.1:18080/19090, but 18080 and 19090 are org-core's host ports (Control Plane docker-compose.yml:542-543), so the implementer used 28080/29090, overridable via MODEL_GATEWAY_B_HTTP_HOST_PORT and MODEL_GATEWAY_B_GRPC_HOST_PORT. I confirmed the org-core collision. The plan's evidence command `MODEL_PLANE_REPLICAS=1 ./scripts/compose.sh up -d` yields two replicas, but the implementation treats the variable as a replica count: 1 (default) changes nothing and 2 adds model-gateway-b. Amend the plan and the S9 script accordingly.",
+    "nats.conf ships in the release artifact (release-artifact.sh:92), so the artifact must be rebuilt. Deploy order is ACL first, then the gateways, then the flag."
+   ]
+  },
+  "review_defects": [],
+  "notes": "THIS ROUND (fix 1, port collision with Control Plane org-core on 18080/19090):\n- apps/Model Plane/deploy/docker-compose.replicas.yml: replica B now publishes 127.0.0.1:${MODEL_GATEWAY_B_HTTP_HOST_PORT:-28080}:8080 and 127.0.0.1:${MODEL_GATEWAY_B_GRPC_HOST_PORT:-29090}:9090, so a clash can be overridden. The header comment now names 28080/29090, the two override variables, and why 8081, 9091, 18080 and 19090 are avoided (Ingestion quarry-control, session-core gRPC, org-core host ports).\n- apps/Model Plane/scripts/compose.sh: the MODEL_PLANE_REPLICAS comment says 28080/29090. Logic unchanged.\n- Both files are LF and stay LF.\n\nEverything else from the previous report stands. Still NOT DONE: /readyz run_control (the handler is in http_routes.rs, not owned; RunControl::status() is ready for it) and nothing was run against a live broker or docker.\n\nDeviation carried over: MODEL_PLANE_REPLICAS is a replica count (1 default, 2 adds B); the plan evidence command MODEL_PLANE_REPLICAS=1 becomes MODEL_PLANE_REPLICAS=2, and the evidence URL for replica B is now :28080 (was :18080)."
+ },
+ {
+  "id": "WS11-S2.code",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\openai.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p inference-core --lib openai",
+    "outcome": "45 passed, 0 failed (includes all seven plan-named tests plus switch parsing, catalogue levels and two wiremock retry tests)"
+   },
+   {
+    "command": "cargo test -q -p inference-core --lib effort",
+    "outcome": "32 passed, 0 failed (shared ladder module unaffected)"
+   },
+   {
+    "command": "rustfmt --check --config newline_style=Auto openai.rs",
+    "outcome": "clean after fixing 3 formatting spots; file still fully CRLF (1926/1926)"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the inference-core service environment add the lines `      INFERENCE_CORE_OPENAI_REASONING_EFFORT: ${INFERENCE_CORE_OPENAI_REASONING_EFFORT:-false}` and `      INFERENCE_CORE_EFFORT_MODEL_ALIASES: ${INFERENCE_CORE_EFFORT_MODEL_ALIASES:-}` (the second only if WS11-S1 or WS11-S3 has not already added it; the Azure deployment=base alias list, e.g. `prod-chat=gpt-5-mini`)",
+   "Live proof, after S5 is deployed so a level reaches the adapter: `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core`. With the flag on, run an authenticated invoke on the gpt-5-mini route with effort quick, then deep, and check the effort_resolved log lines and provider reasoning_tokens (temporary debug log). Also run the negative probe on gpt-4o-mini: no reasoning_effort key. Rollback is unsetting the flag and restarting.",
+   "Azure api-version 2025-01-01-preview may reject reasoning_effort: the P0 probe result decides the flag default. The one-shot retry logs 'deployment rejected reasoning_effort' when it triggers.",
+   "Owner sign-off on cost is still needed before the flag goes on in any real deploy: the allowances (Low 1024 up to Max 16384, total cap 32768) raise max_completion_tokens."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Live proof not run (needs docker and WS11-S5 so a level reaches the adapter): rebuild inference-core with `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core`. With the flag on, run gpt-5-mini quick vs deep and compare provider reasoning_tokens. Check the effort_resolved lines. Run the gpt-4o-mini negative probe (no reasoning_effort key).",
+    "Shared edit left to the lead: add INFERENCE_CORE_OPENAI_REASONING_EFFORT (default false) and INFERENCE_CORE_EFFORT_MODEL_ALIASES (only if WS11-S1/S3 has not already added it) to the inference-core environment in apps/Model Plane/deploy/docker-compose.yml.",
+    "Azure api-version 2025-01-01-preview may reject reasoning_effort. The P0 probe decides the flag default; the one-shot retry covers a rejection at runtime.",
+    "Owner sign-off on cost for the Q3 allowances (Low 1024 up to Max 16384, total cap 32768) before the flag is turned on in any real deploy.",
+    "Plan text says capabilities() should fill effort_levels, but ProviderCapabilities has no such field and provider/mod.rs is outside this slice. The catalogue (list_models/ModelInfo.effort_levels) carries the levels. The lead may want to note this deviation in the ledger."
+   ]
+  },
+  "review_defects": [],
+  "notes": "A previous attempt had left openai.rs essentially complete and compiling, so I kept it and only fixed 3 rustfmt spots with a CRLF-preserving script. In openai.rs:\n- INFERENCE_CORE_OPENAI_REASONING_EFFORT is read once at construction, and only the literal \"true\" enables it (via parse_enabled). Deployment aliases come from effort::ModelAliases (INFERENCE_CORE_EFFORT_MODEL_ALIASES).\n- Switch off, or no level requested: the request body is byte-identical to before (golden test). The o4 shape and alias resolution apply only when the switch is on.\n- Switch on: the support table decides which models get reasoning_effort (gpt-5 family, o-series), so Azure deployment aliases resolve to their base model. The level is clamped through effort::resolve, max_completion_tokens is raised by the level allowance (total cap 32768, never lowering a larger caller ceiling), and an effort_resolved log line is emitted.\n- infer and infer_stream now share post_chat. It makes one bounded retry without the key when a 400 names reasoning_effort (Azure api-version or model predating the parameter).\n- list_models fills effort_levels only while the switch is on.\n- ProviderCapabilities has no effort_levels field, and provider/mod.rs is not owned by this slice. The catalogue (list_models/ModelInfo) is the surface that carries the levels.\n- Nothing sets InferRequest.reasoning_effort until WS11-S5 (proto and gateway derivation). Until then flag-on has no visible effect for OpenAI/Azure, which is expected.\n- Live proof (gpt-5-mini quick vs deep reasoning-token delta, gpt-4o-mini negative probe) was not run: it needs docker and a provider connection."
+ },
+ {
+  "id": "WS11-S3.code",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p inference-core --lib anthropic",
+    "outcome": "61 passed, 0 failed (includes 14 new ladder_wire_tests)"
+   },
+   {
+    "command": "cargo build -p inference-core --lib",
+    "outcome": "clean, no warnings or errors"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Run probe P0(iii) against claude-opus-4-8 on Foundry with adaptive thinking (display summarized) plus output_config.effort, then with legacy budget_tokens, and record request body, status and reasoning-token usage in the PR. This decides the flag default and verified_on.",
+   "Rebuild inference-core with compose.sh: bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core.",
+   "Run the live proof with the flag set to true: Deep on claude-opus-4-8 via Foundry and on a budget-class model (Sonnet 4.5). Record the request body keys, HTTP status, reasoning SSE count and usage.output_tokens, and confirm Sonnet 4.5 is unchanged.",
+   "If Foundry rejects output_config, add a thinking-only fallback for the Foundry flavor in a follow-up edit to anthropic.rs.",
+   "Add the env var to the model-plane compose file (not owned by this slice)."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/deploy/docker-compose.yml (add INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING to the inference-core env, default unset or false)",
+   "apps/Model Plane/docs/decisions/ledger.md (the Q9 reversal entry, if the lead wants it recorded)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Probe P0(iii): claude-opus-4-8 on Foundry with adaptive thinking (display summarized) plus output_config.effort, then with legacy budget_tokens; this fixes the flag default and verified_on in effort.rs (all rows are still verified_on None).",
+    "Live proof with INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING=true after compose.sh rebuild of inference-core: Deep on claude-opus-4-8 via Foundry plus a budget-class model (Sonnet 4.5) unchanged; record body keys, HTTP status, reasoning SSE count, usage.output_tokens.",
+    "If Foundry rejects output_config, a thinking-only fallback for the Foundry flavor is still to be written (follow-up edit to anthropic.rs).",
+    "The env var is not yet in apps/Model Plane/deploy/docker-compose.yml (not an owned file); the Q9 reversal entry in docs/decisions/ledger.md is also not yet written.",
+    "Flag default stays off (vocabulary C) until P0(iii); flipping it to on is a later change if Foundry rejects the legacy shape."
+   ]
+  },
+  "review_defects": [],
+  "notes": "A prior attempt had already written the full implementation in anthropic.rs and it compiled. I reviewed it, kept it unchanged, and re-ran the tests. The flag INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING is off by default and only the literal \"true\" enables it. With it off, the budget-only thinking block is unchanged and list_models advertises no effort_levels. With it on, thinking comes from effort::resolve. Budget-class models send type enabled with a budget_tokens equal to the level's allowance. Adaptive-class models, including unknown claude-* models, send adaptive with display summarized, plus output_config.effort. Models with no effort control send nothing. max_tokens is raised by effort::raised_ceiling, so the budget sits on top of the answer ceiling, and the raise never lowers the caller's ceiling. A request with no explicit level falls back to effort::from_legacy_budget. The file is fully CRLF and the new lines keep that. The 14 new tests cover the plan's seven named tests plus the parser, the flag-off legacy body, legacy-budget mapping, clamping and the raise cap. The legacy test current_and_future_models_are_allowed_to_think still holds because it exercises the flag-off path. The Q9 reversal (unknown models getting budget_tokens) only takes effect when the lead turns the flag on. The default stays off (vocabulary C) until probe P0(iii) shows whether Foundry rejects the legacy shape on claude-opus-4-8. If it does, flip the default to on in a later change."
+ },
+ {
+  "id": "WS12-S4",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\verevonv3-ci.yml",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\eslint.config.js",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\eslint.ui-gates.config.js",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\eslint-suppressions.json",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\scripts\\ui-gates-new-files.mjs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\ui-gates.guard.test.ts",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\chat-localization.test.ts"
+  ],
+  "tests_run": [
+   {
+    "command": "pnpm exec vitest run src/features/chat/lib/ui-gates.guard.test.ts src/features/voice/web-speech-guard.test.ts src/shared/read-data/fabrication-guard.test.ts src/features/chat/lib/chat-localization.test.ts",
+    "outcome": "exit 0; 4 files, 61 tests passed (final run after the last edit; 34 of them are the new guard cases, run under both the product config and the standalone gate)"
+   },
+   {
+    "command": "pnpm exec eslint -c eslint.ui-gates.config.js src",
+    "outcome": "exit 0 with the baseline, no output. Without the baseline the same run reports 1,105 findings in 42 files"
+   },
+   {
+    "command": "red proofs against the standalone gate (probe file removed afterwards; baseline copies in scratchpad, not the repo)",
+    "outcome": "new chat file with bare JSX copy: exit 1. Baseline count one below the tree: exit 1. Baseline count one above the tree (fixed leak not pruned): exit 2 with 'suppressions left that do not occur anymore'. --prune-suppressions on that copy: exit 0 and the count returns to the tree's"
+   },
+   {
+    "command": "pnpm exec eslint src/features/chat src/features/agents (product config; CLI applies the baseline)",
+    "outcome": "exit 0, 0 errors, 38 warnings, all Solid rules (37 solid/reactivity, 1 solid/components-return-once), present before this slice"
+   },
+   {
+    "command": "pnpm exec eslint eslint.config.js eslint.ui-gates.config.js scripts/ui-gates-new-files.mjs <two test files>",
+    "outcome": "exit 0"
+   },
+   {
+    "command": "node scripts/ui-gates-new-files.mjs 6ddfae42~1",
+    "outcome": "exit 1: 5 findings in src/features/chat/lib/run-park.ts, a product file that range adds (a real finding). HEAD base: exit 0. Unresolvable base: exit 2 with a one-line message. No argument: exit 2"
+   },
+   {
+    "command": "pnpm typecheck",
+    "outcome": "34 errors, none in files this slice touches: RemoteSupportPage.tsx (@verevon/remote-core not built in this worktree), quarry-client.ts (generated Quarry SDK absent), chat-client.ts (1 error in an untouched file)"
+   },
+   {
+    "command": "pnpm lint (full repo, product config)",
+    "outcome": "exit 1 from one pre-existing error, src/shared/api/chat-client.ts:964 (unused failureFeature; file untouched). No findings from the new rule and no unpruned-suppression error"
+   },
+   {
+    "command": "git diff --check on the modified files; whitespace scan of the new files",
+    "outcome": "clean"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit the seven paths listed in files_changed (the lead commits; I did not stage or commit). Suggested subject: feat(verevonv3): UI copy and raw-colour gate with a baseline (WS12-S4).",
+   "Push the integration branch (fix/ui-premium-restore is in the workflow's trigger list) or open a PR into it, so spa-ui-gates runs. Record the run URL and show it is green with the baseline (DoD evidence, per Appendix B N1: CI run URL).",
+   "Red proof on a throwaway commit: add <button>Lagre</button> to a chat component (or a new file under src/features/chat/components), push, confirm spa-ui-gates fails with 'Bare copy in chat or agents'. Optionally fix a baselined leak without pruning to see exit 2. Revert the throwaway commit. Record both URLs.",
+   "Put the evidence in the PR: eslint-suppressions.json is 4,813 bytes; the dry run without the baseline is 1,105 findings in 42 files (labels 664, colour 271, Norwegian 94, copy 60, branch 15, naming 1).",
+   "The workflow YAML was not parsed by a YAML tool (none installed in the worktree). Structure was checked by hand: no tabs, LF, job at the right indent, between spa-verify and docker-image. GitHub's parser is the first real check.",
+   "Pre-existing red outside this slice that keeps spa-verify red: src/shared/api/chat-client.ts:964 (unused failureFeature) makes `pnpm lint` exit 1, and `pnpm typecheck` has 34 errors that need the remote-core build and the generated Quarry SDK (CI builds both; verify on CI).",
+   "Owner decision: error from first merge vs warn for 3 runs (see deviations).",
+   "Owner decision: the data-label selector is the largest debt (664, 427 in verevon-agent-blueprints.tsx). Tuning it with key :not() exclusions would shrink the baseline but changes what the gate means.",
+   "Check once in an editor: editors that use the ESLint class (not the CLI) do not apply the baseline, so chat and agents files will show the 1,105 baselined findings. If that is unacceptable, the UI block in eslint.config.js is the piece to remove, and the standalone job still enforces the gate.",
+   "Process rule for the PR and the Space session: change eslint-suppressions.json only with `pnpm exec eslint -c eslint.ui-gates.config.js --prune-suppressions src` (or a reviewed --suppress-all), never by hand. To opt a scope in, add its glob with the extension, e.g. 'src/features/spaces/**/*.{ts,tsx}', to UI_GATE_SCOPES, after its own leaks are fixed."
+  ],
+  "deviations": [
+   "Scope globs end in /**/*.{ts,tsx}, not the plan's bare /**. Measured: a bare directory glob makes `pnpm lint` lint chat-export/sample-exports.mts and adds 21 findings the baseline does not cover. The config comment records this for the Space session's opt-in.",
+   "The product config (eslint.config.js) also applies the UI selectors to chat and agents, as the WS12 design specifies. So spa-verify's `pnpm lint` enforces the gate as well as spa-ui-gates. The plan's DoD names only spa-ui-gates.",
+   "Error severity from the first merge. The plan's warn-for-3-runs phase is not applied, because the baseline makes the gate green from day one, and a warn phase would only hide new leaks. Owner call.",
+   "The standalone config registers eslint-plugin-solid (no solid rules enabled) and sets linterOptions.reportUnusedDisableDirectives to off. Product files carry inline solid/* disable directives that otherwise fail the standalone run with 'Definition not found'. Not in the plan text.",
+   "The branch selector covers JSXFragment as well as JSXElement, for JSX children.",
+   "The new-file scan passes --no-renames, so a file moved into src/ is scanned as added. The plan's literal command did not do this.",
+   "Moved only BASE_RESTRICTED_SYNTAX and its inputs out of eslint.config.js. WEB_SPEECH_GLOBALS and WEB_SPEECH_PROPERTIES stay there, built from the exported WEB_SPEECH_NAMES and WEB_SPEECH_MESSAGE.",
+   "eslint-rules/ui-copy.js was not created: the esquery spike passed.",
+   "The unpruned-suppression check is the ESLint CLI's own exit code 2 on the plain run, not a separate --prune-suppressions step. Equivalent gating; verified with a stale copy."
+  ],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Push the integration branch or open a PR so spa-ui-gates runs, and record the CI run URL (Appendix B N1: CI-only slice states 'Evidence: CI run URL'). The workflow YAML has not been parsed by a YAML tool; GitHub's parser is the first real check.",
+    "Red proof on a throwaway commit in CI (add <button>Lagre</button> under src/features/chat/components, expect spa-ui-gates red with 'Bare copy in chat or agents'), plus a fixed-but-unpruned baselined leak turning it red (CLI exit 2). Record both run URLs. Locally the guard tests and the implementer's probe runs cover these cases, but the plan wants CI evidence.",
+    "Record the baseline count (1,105 findings in 42 files without the baseline; eslint-suppressions.json is 4,813 bytes) in the PR.",
+    "Owner call on the deviation from the plan's rollout convention: the gate is at error severity from the first merge rather than warn for 3 runs. The baseline makes it green from day one, so it is defensible, but the plan says warn first.",
+    "Pre-existing reds outside this slice keep spa-verify red: the chat-client.ts:964 unused-variable lint error and the typecheck errors that need the remote-core build and the generated Quarry SDK. CI builds both, so verify there."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built the WS12-S4 gate. eslint.ui-gates.config.js holds BASE_RESTRICTED_SYNTAX (the A1 selector and governed speech, moved from eslint.config.js), UI_GATE_SCOPES, TEST_FILE_IGNORES, the six copy selectors (UI_COPY_SYNTAX: JSX text, naming attributes, conditional/logical JSX copy, data labels, Norwegian letters outside i18n.tr) and the colour selectors (UI_COLOR_SYNTAX: hex, rgb(), hsl()), plus a standalone default export used by the new job. eslint.config.js imports the base and adds a chat/agents block that spreads the base first, then the UI selectors; test files are excluded. eslint-suppressions.json (4,813 bytes, 42 files, one no-restricted-syntax count per file) came from `--suppress-all`. Baseline by selector: data labels 664 (427 of them in src/features/agents/lib/verevon-agent-blueprints.tsx), colour 271, Norwegian letters 94, bare JSX copy 60, conditional/logical JSX copy 15, naming attribute 1. scripts/ui-gates-new-files.mjs lints product files the change adds, with no baseline. CI: new spa-ui-gates job after spa-verify (Quarry SDK generated as in spa-verify, fetch-depth 0, the eslint pass, then the new-file scan; a push that creates a branch falls back to HEAD~1). chat-localization.test.ts header corrected: its 'pnpm lint cannot run against TypeScript 7' claim is stale, the lockfile pins TypeScript 6. Spike result: the ESLint 10.10 selector parser (esquery 1.7.0) accepts the u flag, :not(A > B), :not(A > B > C), :matches and quoted attribute values, so eslint-rules/ui-copy.js was not needed. ESLint's class does not apply suppressions (the CLI does), which is why the new-file scan and the tests see raw findings."
+ }
+]

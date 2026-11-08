@@ -1,0 +1,52 @@
+[
+ {
+  "key": "auth-core-postgres-specs-schema",
+  "rows": [],
+  "title": "auth-core-postgres-specs-schema",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "node_modules/.bin/tsc -p tsconfig.json --noEmit (apps/Control Plane/auth-core)",
+    "outcome": "Exit 0, no errors at all (none in other files either).",
+    "passed": true
+   },
+   {
+    "command": "node_modules/.bin/jest --runInBand src/auth/gdpr-outbox-erasure.postgres.spec.ts src/auth/membership-audit-outbox.postgres.spec.ts",
+    "outcome": "Exit 0. Test Suites: 1 skipped, 1 passed, 1 of 2 total. Tests: 17 skipped, 2 passed, 19 total. Without a test database the DB-backed tests skip rather than fail; the 2 that ran are non-DB tests. The lead must run the DB-backed membership spec on a disposable Postgres. The GDPR spec was left unchanged by the coder (blocked on a missing base schema) so its DB tests remain unproven.",
+    "passed": true
+   },
+   {
+    "command": "lifecycle harness step 1 (lead, disposable Postgres)",
+    "outcome": "57 passed, 6 failed: all 6 in gdpr-outbox-erasure (D1-812); membership-audit-outbox passes",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "D1-805 is only half closed. gdpr-outbox-erasure.postgres.spec.ts is unchanged and its 6 DB tests will still fail at setup with ENOENT on init_better_auth.sql. I checked the coder's three blockers and they hold: init_better_auth.sql is missing but docker-entrypoint.sh:181 still lists it; drizzle/0002 lines 98/100 change column types with no USING clause; team_member is created in 0002, dropped in 0005 line 30 and never recreated, while gdpr_hard_delete.sql deletes from it. Its plpgsql EXCEPTION WHEN OTHERS handler would turn that into success:false. The brief allows stopping here. The row stays open for an owner decision on a committed base schema.",
+   "The membership spec is fixed as the task asked. It now applies gdpr_hard_delete.sql and then 014-027 in a row, the same order production uses minus init_better_auth. It still skips 028_org_group_grants.sql. That is fine for the tables under test, but the schema stops one migration short of production.",
+   "The 020/023/025 triggers on the inline \"user\" and account tables are now live in the fixture. The spec never inserts into account, whose inline table has no user_id or scope, so 020's provider_linked trigger never fires. Its one user email UPDATE (line 639) is not a GDPR anonymisation, so the 023/025 erase and fence triggers return early. A future test that inserts into account or deletes a user would hit columns or tables the inline schema lacks.",
+   "This was not run on Postgres here. The lead must run all 11 DB tests in membership-audit-outbox.postgres.spec.ts on a disposable Postgres. The 2 claim_token flush tests are the regression proof, because they fail on the old migration list. Also confirm that the other 9 still pass now that 023's stricter protect_organization_membership_audit_outbox and its CHECK constraints apply.",
+   "The spec file has 927 CRLF line endings and keeps them, matching the worktree. Eslint's prettier 'Delete CR' warnings were already there before this change.",
+   "Paths: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts (changed), C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts (blocked, unchanged)."
+  ],
+  "db_tests": [
+   "Lead, on a disposable Postgres with TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set, from apps/Control Plane/auth-core: node_modules/.bin/jest --runInBand src/auth/membership-audit-outbox.postgres.spec.ts. That is 11 DB-backed tests. The two flush tests ('flushes a dead-lettered row whose timestamps arrive as strings' and 'retries a failing row no sooner than its exponential backoff') should now get past claim_token. The other nine must still pass with 020 to 026 applied. Not run here.",
+   "Lead, same setup: src/auth/gdpr-outbox-erasure.postgres.spec.ts, 6 DB-backed tests. Expected to fail at setup until the base-schema owner decision is made. No change was made to this file."
+  ],
+  "needs_other_files": [
+   "apps/Control Plane/auth-core/drizzle/0002_ambitious_ares.sql lines 98 and 100: ALTER COLUMN count / last_request SET DATA TYPE integer / bigint without USING. PostgreSQL rejects text to integer or bigint on a fresh database, so the drizzle chain cannot run in order.",
+   "apps/Control Plane/auth-core/drizzle/0010_performance_indexes.sql line 30: WHERE expires_at > NOW() in an index predicate, which PostgreSQL rejects. Fix it or leave the file out of any base.",
+   "apps/Control Plane/auth-core/drizzle/0005_easy_dazzler.sql lines 27 and 30: disables RLS on, then drops, team_member. No committed SQL recreates it.",
+   "apps/Control Plane/auth-core/migrations/gdpr_hard_delete.sql lines 61-64: the erasure function deletes from team_member. The file is checksum-ledgered, so a fix needs a new numbered migration or a committed team_member definition.",
+   "apps/Control Plane/auth-core/docker-entrypoint.sh lines 181 and 184: init_better_auth.sql is still listed and skipped silently when absent. Production bootstrap decision.",
+   "apps/Control Plane/auth-core/src/db/schema.ts lines 243-258: team and team_member are declared in the ORM with no committed DDL."
+  ],
+  "deploy_notes": "Owner decisions needed before the GDPR spec can pass:\n1. Test base authority. Either (a) commit a test-only base file under apps/Control Plane/auth-core/test/ (not migrations/, so production never applies it), derived from the deleted init file at commit 932b30d26^ and including team and team_member, which the spec applies before gdpr_hard_delete.sql; or (b) repair drizzle/0002 lines 98 and 100 with USING, keep team and team_member in the chain, and fix or drop drizzle/0010 line 30, then have the spec read the chain in order.\n2. team_member. If team management is live, it needs a committed definition, because the erasure path requires team_member(id, user_id). If it is not live, a new numbered migration must replace the team block in gdpr_hard_delete_user_unfenced, since gdpr_hard_delete.sql is checksum-ledgered and cannot change.\n3. Production bootstrap. docker-entrypoint.sh still lists init_better_auth.sql and skips it when absent. A fresh database fails at migration 014 (loud, not silent). Databases whose ledger already holds that row are unaffected. The production base source needs a decision.\n4. Membership base: name is nullable, but production's column is NOT NULL. Accept this, or have the seeds supply names.\nNote: the task text said \"Files you may edit or create: (none)\", which contradicts the packet's files list. I followed the packet, which names both spec files.",
+  "summary": "D1-805 is half done. The membership spec is fixed (setup only, no assertion changed). The GDPR spec is blocked and left unchanged, because the base schema it needs has no runnable committed source.\n\nMembership spec: the inline \"user\" table gains name (nullable), email_verified, banned and ban_reason, copied from committed drizzle 0000 and 0005. The migration run now starts with gdpr_hard_delete.sql and applies 014 through 027 in order; 020, 021, 023, 024, 025 and 026 are added. 025 needs 020's identity outbox for claim_token, and 023 and 025 harden or rename the routines gdpr_hard_delete.sql creates. I checked every trigger, UPDATE OF list and index in 014-027 against the base columns. The DB tests were not run here (no Postgres, no Docker).\n\nGDPR spec (not edited): (1) init_better_auth.sql was deleted in 932b30d26, and the entrypoint skips it silently when absent. (2) The drizzle chain cannot run in order on a fresh database: drizzle/0002 lines 98 and 100 change text columns to integer and bigint without USING, which PostgreSQL rejects (not run here; based on its cast rules). (3) team_member has no committed producer: 0002 creates it, 0005 line 30 drops it, and nothing recreates it. gdpr_hard_delete.sql lines 61-64 delete from it, so the three hard-delete tests (spec lines 202, 211, 294) would still fail even with a base. Every other table and column the spec and migrations 014-025 need comes from committed drizzle SQL, but only after the 0002 fix. drizzle/0010 cannot be included as is, since line 30 puts NOW() in an index predicate. Lead, 2026-10-28: run-isolated-control-lifecycle-e2e.sh step 1 on a disposable Postgres: membership-audit-outbox.postgres.spec.ts now PASSES (the two claim_token flush tests included); step 1 is 57 passed / 6 failed (was 55 / 8), the 6 being gdpr-outbox-erasure.postgres.spec.ts, still blocked on the missing base schema (new row D1-812). D1-805 stays open."
+ }
+]

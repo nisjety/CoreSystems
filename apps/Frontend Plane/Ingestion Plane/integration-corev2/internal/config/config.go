@@ -1,0 +1,1441 @@
+package config
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/triodelab/integration-corev2/internal/attestation"
+)
+
+type Config struct {
+	Port                   string
+	ServiceName            string
+	Environment            string
+	DatabaseURL            string
+	InternalAPIKey         string
+	InternalAPIKeyHeader   string
+	AllowLegacyTenantKey   bool
+	AuthCoreURL            string
+	AuthCoreInternalAPIKey string
+	AuthCoreJWKSURL        string
+	// AuthCoreOAuth* identify integration-corev2 to auth-core's scoped
+	// `/internal/oauth/*` surface (principal registry
+	// AUTH_INTERNAL_SERVICE_CREDENTIALS). Used to re-mint a Microsoft
+	// sign-in credential that Control Plane owns. Empty token = disabled.
+	AuthCoreOAuthCredentialID        string
+	AuthCoreOAuthPrincipal           string
+	AuthCoreOAuthServiceToken        string
+	PlaneTokenIssuer                 string
+	IngestionAuthAudience            string
+	ProviderWriteAttestationKeysJSON string
+	UserCoreURL                      string
+	OrgCoreURL                       string
+	OrgCoreServiceToken              string
+	SessionCoreURL                   string
+	BillingCoreURL                   string
+	BillingCoreServiceToken          string
+	AuditCoreURL                     string
+	AuditCoreServiceToken            string
+	FinspoCoreURL                    string
+	FinspoCoreAPIKey                 string
+	FinspoCoreAPIKeyHeader           string
+	ConversationIngestURL            string
+	ConversationIngestServiceToken   string
+	// MailTask* configures the inbound "forward an email to create a task"
+	// receiver (chat-wave2 mail-task spec, owner ruling 2026-09-28: Postmark
+	// inbound, self-forward only). Off by default: an empty MailTaskProvider
+	// or MailTaskWebhookSecret disables the whole feature -- the webhook route
+	// stays registered (so a probe gets a stable 404, not a routing error) but
+	// never authenticates or processes a payload.
+	MailTaskProvider             string // "postmark" only for v1; anything else is treated as disabled
+	MailTaskWebhookSecret        string
+	MailTaskReceivingDomain      string
+	MailTaskUserCoreURL          string
+	MailTaskUserCoreServiceID    string
+	MailTaskUserCoreServiceToken string
+	MailTaskGatewayIngestURL     string
+	MailTaskGatewayServiceToken  string
+	MailTaskImportsCoreURL       string
+	MailTaskImportsCoreToken     string
+	EmailSyncInterval            time.Duration
+	EmailSyncBackfillWindow      time.Duration
+	EmailSyncGraphFullBackfill   bool
+	EmailSyncMaxPerCycle         int
+	DataPlaneDocumentsURL        string
+	IntegrationServiceID         string
+	IntegrationServiceAPIKey     string
+	DataPlaneGraphIndexURL       string
+	WebhookHotPathURL            string
+	IntegrationCoreURL           string
+	PublicBaseURL                string
+	OAuthAllowedReturnOrigins    []string
+	MetaJSSDKAppID               string
+	MetaJSSDKAPIVersion          string
+	MetaJSSDKLocale              string
+	MetaBusinessLoginConfigID    string
+	MetaBusinessLoginConfigIDs   map[string]string
+	MetaWebhookVerifyToken       string
+	MetaWebhookSecret            string
+	MetaThreadsAPIBaseURL        string
+	EncryptionKey                []byte
+	AllowInMemoryStore           bool
+	NATSEnabled                  bool
+	NATSURL                      string
+	NATSUsername                 string
+	NATSPassword                 string
+	NATSToken                    string
+	NATSSubjectPrefix            string
+	RateLimitEnabled             bool
+	RateLimitMax                 int
+	RateLimitWindow              time.Duration
+	TokenLeaseConsumers          []string
+
+	// Codex subscription sign-in state lives in this service-owned directory
+	// (one Codex auth.json per connection, written by the Codex CLI sign-in
+	// and refreshed in place by the broker), never in the integration
+	// database.
+	ZDRAcknowledgementEnabled          bool
+	CodexSubscriptionEnabled           bool
+	CodexAppServerCommand              string
+	CodexSubscriptionHome              string
+	CodexSubscriptionModelPlaneAPIKey  string
+	CodexSubscriptionLoginTTL          time.Duration
+	CodexSubscriptionInvocationTimeout time.Duration
+	// Non-secret broker knobs (see README "ChatGPT subscription connections").
+	// Transport is "direct" (default) or "app-server".
+	CodexSubscriptionTransport                   string
+	CodexSubscriptionDirectBaseURL               string
+	CodexSubscriptionDirectOriginator            string
+	CodexSubscriptionDirectRequestShape          string
+	CodexSubscriptionDirectPromptMode            string
+	CodexSubscriptionDirectMaxRetries            int
+	CodexSubscriptionRefreshSkew                 time.Duration
+	CodexSubscriptionMaxConcurrency              int
+	CodexSubscriptionMaxConcurrencyPerConnection int
+	CodexSubscriptionQueueTimeout                time.Duration
+	CodexAppServerHardened                       bool
+	CodexAppServerThreadEffort                   bool
+	// CodexSubscriptionWideReasoningEffort admits medium and xhigh beside low
+	// and high (WS11-S9). Off unless CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT is
+	// exactly "true"; the Q7 gate is still open.
+	CodexSubscriptionWideReasoningEffort bool
+	// codexSubscriptionUnparsed names broker knobs whose value did not parse;
+	// ValidateRuntime rejects them instead of silently using the default.
+	codexSubscriptionUnparsed []string
+
+	MicrosoftTenantID              string
+	MicrosoftClientID              string
+	MicrosoftClientSecret          string
+	MicrosoftClientAuthMode        string
+	MicrosoftTokenOrigin           string
+	MicrosoftAuthorizationURL      string
+	MicrosoftTokenURL              string
+	MicrosoftGraphBaseURL          string
+	SlackClientID                  string
+	SlackClientSecret              string
+	SlackSigningSecret             string
+	SlackAuthorizationURL          string
+	SlackTokenURL                  string
+	SlackAPIBaseURL                string
+	GoogleClientID                 string
+	GoogleClientSecret             string
+	GoogleAuthorizationURL         string
+	GoogleTokenURL                 string
+	GoogleAPIBaseURL               string
+	NotionClientID                 string
+	NotionClientSecret             string
+	NotionAuthorizationURL         string
+	NotionTokenURL                 string
+	NotionAPIBaseURL               string
+	GitHubClientID                 string
+	GitHubClientSecret             string
+	GitHubWebhookSecret            string
+	GitHubAuthorizationURL         string
+	GitHubTokenURL                 string
+	GitHubAPIBaseURL               string
+	ShopifyClientID                string
+	ShopifyClientSecret            string
+	ShopifyWebhookSecret           string
+	ShopifyAPIBaseURL              string
+	StripeClientID                 string
+	StripeClientSecret             string
+	StripeAuthorizationURL         string
+	StripeTokenURL                 string
+	StripeAPIBaseURL               string
+	StripeWebhookSecret            string
+	GoogleAnalyticsAdminAPIBaseURL string
+	GoogleAnalyticsDataAPIBaseURL  string
+	// AllowUnverifiedWebhooks is a dev-only escape hatch: provider webhooks
+	// are rejected fail-closed when their signature scheme is unconfigured
+	// or unimplemented, unless this is explicitly true (never in production).
+	AllowUnverifiedWebhooks   bool
+	LinkedInClientID          string
+	LinkedInClientSecret      string
+	LinkedInAuthorizationURL  string
+	LinkedInTokenURL          string
+	LinkedInAPIBaseURL        string
+	LinkedInMarketingVersion  string
+	XClientID                 string
+	XClientSecret             string
+	XAuthorizationURL         string
+	XTokenURL                 string
+	XAPIBaseURL               string
+	InstagramClientID         string
+	InstagramClientSecret     string
+	InstagramAuthorizationURL string
+	InstagramTokenURL         string
+	InstagramAPIBaseURL       string
+	// MetaClientID and MetaClientSecret are the credentials for the unified
+	// Meta provider (Messenger, Pages, and the Meta inbox). They deliberately
+	// remain separate from the legacy Facebook and dedicated Instagram OAuth
+	// clients: a single OAuth request can have only one client_id.
+	MetaClientID             string
+	MetaClientSecret         string
+	MetaAuthorizationURL     string
+	MetaTokenURL             string
+	MetaAPIBaseURL           string
+	FacebookClientID         string
+	FacebookClientSecret     string
+	FacebookAuthorizationURL string
+	FacebookTokenURL         string
+	FacebookAPIBaseURL       string
+	SnapchatClientID         string
+	SnapchatClientSecret     string
+	SnapchatRedirectBaseURL  string
+	SnapchatAuthorizationURL string
+	SnapchatTokenURL         string
+	SnapchatAPIBaseURL       string
+	// SnapchatBusinessAPIBaseURL is the Public Profile API host
+	// (businessapi.snapchat.com) used for organic Story/Spotlight/Saved Story
+	// content management. It is a DIFFERENT host from SnapchatAPIBaseURL
+	// (adsapi.snapchat.com, the Ads/Marketing API), though both authenticate
+	// with the same Snapchat Marketing API OAuth (scope snapchat-marketing-api).
+	SnapchatBusinessAPIBaseURL string
+	// TikTok Login Kit v2. TikTok calls the client id "client_key" — it is NOT
+	// a client_id and must be sent as client_key in both the authorize query
+	// and the token body.
+	TikTokClientKey         string
+	TikTokClientSecret      string
+	TikTokAuthorizationURL  string
+	TikTokTokenURL          string
+	TikTokAPIBaseURL        string
+	DiscordClientID         string
+	DiscordClientSecret     string
+	DiscordAuthorizationURL string
+	DiscordTokenURL         string
+	DiscordAPIBaseURL       string
+	// DiscordBotToken is the app-level bot token the inbound message worker
+	// reads guild channels with (the OAuth connection only proves the
+	// install). Optional: without it the Discord inbox source stays off.
+	DiscordBotToken string
+	// GoogleAdsDeveloperToken is the Google Ads API developer token (sent as a
+	// `developer-token` header on Ads API calls — separate from OAuth). Ads
+	// capability is offered without it, but API calls require it.
+	GoogleAdsDeveloperToken        string
+	PageSpeedAPIKey                string
+	CrUXAPIKey                     string
+	PyTrendsDevEnabled             bool
+	ClarityBindingsFile            string
+	WebVitalsBindingsFile          string
+	MarketingProvidersBindingsFile string
+	AlgoliaMCPOAuthClientFile      string
+	OktaDomain                     string
+	OktaClientID                   string
+	OktaClientSecret               string
+	OktaAPIToken                   string
+	OktaAPIBaseURL                 string
+	SessionTTL                     time.Duration
+	TokenRefreshSkew               time.Duration
+}
+
+func Load() (Config, error) {
+	encryptionKey, err := loadEncryptionKey("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	googleClientSecret, err := loadOptionalSecret("GOOGLE_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	cruxAPIKey, err := loadCrUXKey()
+	if err != nil {
+		return Config{}, err
+	}
+	if strings.TrimSpace(os.Getenv("PAGESPEED_API_KEY")) != "" {
+		return Config{}, fmt.Errorf("PAGESPEED_API_KEY must be provided through PAGESPEED_API_KEY_FILE")
+	}
+	pageSpeedAPIKey, err := loadOptionalSecret("PAGESPEED_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	for _, name := range []string{"CLARITY_API_TOKEN", "CLARITY_TOKEN"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return Config{}, fmt.Errorf("Clarity tokens must use protected CLARITY_BINDINGS_FILE token-file bindings")
+		}
+	}
+	metaAppClientSecret, err := loadOptionalSecret("META_APP_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	azureClientSecretValue, err := loadOptionalSecret("AZURE_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	legacyMicrosoftSecretValue, err := loadOptionalSecret("MICROSOFT_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	metaLegacyClientSecret, err := loadOptionalSecret("META_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	facebookClientSecretValue, err := loadOptionalSecret("FACEBOOK_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+	instagramClientSecretValue, err := loadOptionalSecret("INSTAGRAM_CLIENT_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
+
+	publicBaseURL := strings.TrimRight(envOr("INTEGRATION_PUBLIC_BASE_URL", "http://localhost:3026"), "/")
+	tenant := envOr("AZURE_TENANT_ID", "common")
+	rawFacebookClientID := strings.TrimSpace(os.Getenv("FACEBOOK_CLIENT_ID"))
+	rawFacebookClientSecret := facebookClientSecretValue
+	rawInstagramClientID := strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_ID"))
+	rawInstagramClientSecret := instagramClientSecretValue
+	facebookClientID := firstNonEmpty(rawFacebookClientID, rawInstagramClientID)
+	facebookClientSecret := firstNonEmpty(rawFacebookClientSecret, rawInstagramClientSecret)
+	// Instagram inbox consent belongs to a distinct Meta product/client. Falling
+	// back to Facebook credentials creates an OAuth URL that asks a Messenger
+	// app for Instagram-only permissions, which Meta rejects as invalid scopes.
+	instagramClientID := rawInstagramClientID
+	instagramClientSecret := rawInstagramClientSecret
+	metaClientID := firstNonEmpty(strings.TrimSpace(os.Getenv("META_APP_CLIENT_ID")), facebookClientID)
+	metaClientSecret := firstNonEmpty(
+		metaAppClientSecret,
+		metaLegacyClientSecret,
+		facebookClientSecret,
+	)
+
+	codexKnobs := loadCodexSubscriptionKnobs()
+
+	return Config{
+		Port:        envOr("PORT", "3026"),
+		ServiceName: envOr("SERVICE_NAME", "integration-corev2"),
+		// Treat an omitted environment as production. Local HTTP OAuth callbacks
+		// require an explicit development environment and a loopback host.
+		Environment:                      envOr("ENVIRONMENT", "dev"),
+		DatabaseURL:                      strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		InternalAPIKey:                   strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		InternalAPIKeyHeader:             envOr("INTERNAL_API_KEY_HEADER", "X-Internal-API-Key"),
+		AllowLegacyTenantKey:             os.Getenv("ALLOW_LEGACY_TENANT_KEY") == "1" && os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" && os.Getenv("ISOLATED_E2E") == "1",
+		AuthCoreURL:                      envOr("AUTH_CORE_URL", "http://auth-core:3011"),
+		AuthCoreInternalAPIKey:           strings.TrimSpace(envOr("AUTH_CORE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
+		AuthCoreJWKSURL:                  strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")),
+		AuthCoreOAuthCredentialID:        envOr("AUTH_CORE_OAUTH_CREDENTIAL_ID", "integration-core-primary"),
+		AuthCoreOAuthPrincipal:           envOr("AUTH_CORE_OAUTH_PRINCIPAL", "integration-core"),
+		AuthCoreOAuthServiceToken:        strings.TrimSpace(os.Getenv("AUTH_CORE_OAUTH_SERVICE_TOKEN")),
+		PlaneTokenIssuer:                 strings.TrimSpace(os.Getenv("PLANE_TOKEN_ISSUER")),
+		IngestionAuthAudience:            envOr("INGESTION_AUTH_AUDIENCE", "ingestion"),
+		ProviderWriteAttestationKeysJSON: strings.TrimSpace(os.Getenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON")),
+		UserCoreURL:                      envOr("USER_CORE_URL", "http://user-core:3012"),
+		OrgCoreURL:                       envOr("ORG_CORE_URL", "http://org-core:8080"),
+		OrgCoreServiceToken:              strings.TrimSpace(os.Getenv("ORG_CORE_SERVICE_TOKEN")),
+		SessionCoreURL:                   envOr("SESSION_CORE_URL", "http://session-core:9091"),
+		BillingCoreURL:                   envOr("BILLING_CORE_URL", "http://billing-core:3014"),
+		BillingCoreServiceToken:          strings.TrimSpace(os.Getenv("BILLING_CORE_SERVICE_TOKEN")),
+		AuditCoreURL:                     envOr("AUDIT_CORE_URL", "http://audit-core:8187"),
+		AuditCoreServiceToken:            strings.TrimSpace(os.Getenv("AUDIT_CORE_SERVICE_TOKEN")),
+		FinspoCoreURL:                    envOr("FINSPO_CORE_URL", envOr("FINSPO_API_URL", "http://finspo-api:3130")),
+		FinspoCoreAPIKey:                 strings.TrimSpace(os.Getenv("FINSPO_API_KEY")),
+		FinspoCoreAPIKeyHeader:           envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
+		ConversationIngestURL:            strings.TrimRight(envOr("CONVERSATION_INGEST_URL", "http://conversation-ingest-rs:3161"), "/"),
+		ConversationIngestServiceToken:   strings.TrimSpace(os.Getenv("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN")),
+		MailTaskProvider:                 strings.ToLower(strings.TrimSpace(os.Getenv("MAIL_TASK_PROVIDER"))),
+		MailTaskWebhookSecret:            strings.TrimSpace(os.Getenv("MAIL_TASK_WEBHOOK_SECRET")),
+		MailTaskReceivingDomain:          strings.ToLower(strings.TrimSpace(os.Getenv("MAIL_TASK_RECEIVING_DOMAIN"))),
+		MailTaskUserCoreURL:              strings.TrimRight(envOr("MAIL_TASK_USER_CORE_URL", envOr("USER_CORE_URL", "http://user-core:3012")), "/"),
+		MailTaskUserCoreServiceID:        strings.TrimSpace(envOr("MAIL_TASK_USER_CORE_SERVICE_ID", "integration-mail-task-worker")),
+		MailTaskUserCoreServiceToken:     strings.TrimSpace(os.Getenv("MAIL_TASK_USER_CORE_SERVICE_TOKEN")),
+		MailTaskGatewayIngestURL:         strings.TrimRight(envOr("MAIL_TASK_GATEWAY_INGEST_URL", "http://verevon-gateway-rs:3185"), "/"),
+		MailTaskGatewayServiceToken:      strings.TrimSpace(os.Getenv("MAIL_TASK_GATEWAY_SERVICE_TOKEN")),
+		MailTaskImportsCoreURL:           strings.TrimRight(envOr("MAIL_TASK_IMPORTS_CORE_URL", "http://imports-api:3025"), "/"),
+		MailTaskImportsCoreToken:         strings.TrimSpace(os.Getenv("MAIL_TASK_IMPORTS_CORE_TOKEN")),
+		EmailSyncInterval:                envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
+		EmailSyncBackfillWindow:          envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
+		EmailSyncGraphFullBackfill:       envBool("EMAIL_SYNC_GRAPH_FULL_BACKFILL", true),
+		EmailSyncMaxPerCycle:             envInt("EMAIL_SYNC_MAX_PER_CYCLE", 100),
+		DataPlaneDocumentsURL:            envOr("DATA_PLANE_DOCUMENTS_URL", envOr("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")),
+		IntegrationServiceID:             envOr("INTEGRATION_SERVICE_ID", "integration-corev2"),
+		IntegrationServiceAPIKey:         strings.TrimSpace(os.Getenv("INTEGRATION_SERVICE_API_KEY")),
+		DataPlaneGraphIndexURL:           envOr("DATA_PLANE_GRAPH_INDEX_URL", envOr("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203")),
+		WebhookHotPathURL:                strings.TrimRight(strings.TrimSpace(envOr("INTEGRATION_WEBHOOK_HOTPATH_URL", "")), "/"),
+		IntegrationCoreURL:               strings.TrimRight(envOr("INTEGRATION_CORE_URL", publicBaseURL), "/"),
+		PublicBaseURL:                    publicBaseURL,
+		OAuthAllowedReturnOrigins:        envCSV("INTEGRATION_ALLOWED_RETURN_ORIGINS", defaultOAuthReturnOrigins(envOr("ENVIRONMENT", "dev"))),
+		MetaJSSDKAppID:                   strings.TrimSpace(envOr("META_JS_SDK_APP_ID", metaClientID)),
+		MetaJSSDKAPIVersion:              normalizeGraphAPIVersion(envOr("META_JS_SDK_API_VERSION", "v25.0")),
+		MetaJSSDKLocale:                  envOr("META_JS_SDK_LOCALE", "en_US"),
+		MetaBusinessLoginConfigID:        strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")),
+		MetaBusinessLoginConfigIDs:       metaBusinessLoginConfigIDs(),
+		MetaWebhookVerifyToken:           strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")),
+		MetaWebhookSecret:                strings.TrimSpace(envOr("META_WEBHOOK_SECRET", metaClientSecret)),
+		MetaThreadsAPIBaseURL:            strings.TrimRight(envOr("THREADS_API_BASE_URL", "https://graph.threads.net/v1.0"), "/"),
+		EncryptionKey:                    encryptionKey,
+		AllowInMemoryStore:               envBool("INTEGRATION_ALLOW_IN_MEMORY_STORE", false),
+		NATSEnabled:                      envBool("NATS_ENABLED", false),
+		NATSURL:                          envOr("NATS_URL", "nats://localhost:4222"),
+		NATSUsername:                     strings.TrimSpace(os.Getenv("NATS_USERNAME")),
+		NATSPassword:                     strings.TrimSpace(os.Getenv("NATS_PASSWORD")),
+		// NATS_TOKEN authenticates against the shared cross-plane verevon-nats
+		// broker, which enforces `authorization { token: $VEREVON_NATS_TOKEN }`
+		// (see nats-shared.conf) rather than username/password.
+		NATSToken:           strings.TrimSpace(envOr("NATS_TOKEN", os.Getenv("VEREVON_NATS_TOKEN"))),
+		NATSSubjectPrefix:   envOr("NATS_SUBJECT_PREFIX", ""),
+		RateLimitEnabled:    envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
+		RateLimitMax:        envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
+		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
+		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
+
+		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
+		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
+		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
+		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),
+		CodexSubscriptionModelPlaneAPIKey:  strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")),
+		CodexSubscriptionLoginTTL:          envDuration("CODEX_SUBSCRIPTION_LOGIN_TTL", 10*time.Minute),
+		CodexSubscriptionInvocationTimeout: envDuration("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT", 90*time.Second),
+
+		CodexSubscriptionTransport:                   strings.ToLower(envOr("CODEX_SUBSCRIPTION_TRANSPORT", "app-server")),
+		CodexSubscriptionDirectBaseURL:               envOr("CODEX_SUBSCRIPTION_DIRECT_BASE_URL", "https://chatgpt.com/backend-api/codex"),
+		CodexSubscriptionDirectOriginator:            envOr("CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR", "verevon"),
+		CodexSubscriptionDirectRequestShape:          strings.ToLower(envOr("CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE", "classic")),
+		CodexSubscriptionDirectPromptMode:            strings.ToLower(envOr("CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE", "roles")),
+		CodexSubscriptionDirectMaxRetries:            codexKnobs.maxRetries,
+		CodexSubscriptionRefreshSkew:                 codexKnobs.refreshSkew,
+		CodexSubscriptionMaxConcurrency:              codexKnobs.maxConcurrency,
+		CodexSubscriptionMaxConcurrencyPerConnection: codexKnobs.maxPerConnection,
+		CodexSubscriptionQueueTimeout:                codexKnobs.queueTimeout,
+		CodexSubscriptionWideReasoningEffort:         codexKnobs.wideReasoningEffort,
+		CodexAppServerHardened:                       codexKnobs.hardened,
+		CodexAppServerThreadEffort:                   codexKnobs.threadEffort,
+		codexSubscriptionUnparsed:                    codexKnobs.unparsed,
+
+		MicrosoftTenantID:              tenant,
+		MicrosoftClientID:              envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
+		MicrosoftClientSecret:          firstNonEmpty(azureClientSecretValue, legacyMicrosoftSecretValue),
+		MicrosoftClientAuthMode:        normalizeMicrosoftClientAuthMode(envOr("MICROSOFT_CLIENT_AUTH_MODE", "public")),
+		MicrosoftTokenOrigin:           envOr("MICROSOFT_TOKEN_ORIGIN", urlOrigin(publicBaseURL)),
+		MicrosoftAuthorizationURL:      microsoftAuthorizeURL(tenant),
+		MicrosoftTokenURL:              microsoftTokenURL(tenant),
+		MicrosoftGraphBaseURL:          envOr("MICROSOFT_GRAPH_BASE_URL", "https://graph.microsoft.com"),
+		SlackClientID:                  strings.TrimSpace(os.Getenv("SLACK_CLIENT_ID")),
+		SlackClientSecret:              strings.TrimSpace(os.Getenv("SLACK_CLIENT_SECRET")),
+		SlackSigningSecret:             strings.TrimSpace(os.Getenv("SLACK_SIGNING_SECRET")),
+		SlackAuthorizationURL:          envOr("SLACK_AUTHORIZATION_URL", "https://slack.com/oauth/v2/authorize"),
+		SlackTokenURL:                  envOr("SLACK_TOKEN_URL", "https://slack.com/api/oauth.v2.access"),
+		SlackAPIBaseURL:                envOr("SLACK_API_BASE_URL", "https://slack.com/api"),
+		GoogleClientID:                 strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
+		GoogleClientSecret:             googleClientSecret,
+		GoogleAuthorizationURL:         envOr("GOOGLE_AUTHORIZATION_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+		GoogleTokenURL:                 envOr("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+		GoogleAPIBaseURL:               envOr("GOOGLE_API_BASE_URL", "https://www.googleapis.com"),
+		NotionClientID:                 strings.TrimSpace(os.Getenv("NOTION_CLIENT_ID")),
+		NotionClientSecret:             strings.TrimSpace(os.Getenv("NOTION_CLIENT_SECRET")),
+		NotionAuthorizationURL:         envOr("NOTION_AUTHORIZATION_URL", "https://api.notion.com/v1/oauth/authorize"),
+		NotionTokenURL:                 envOr("NOTION_TOKEN_URL", "https://api.notion.com/v1/oauth/token"),
+		NotionAPIBaseURL:               envOr("NOTION_API_BASE_URL", "https://api.notion.com"),
+		GitHubClientID:                 strings.TrimSpace(os.Getenv("GITHUB_CLIENT_ID")),
+		GitHubClientSecret:             strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET")),
+		GitHubWebhookSecret:            strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		GitHubAuthorizationURL:         envOr("GITHUB_AUTHORIZATION_URL", "https://github.com/login/oauth/authorize"),
+		GitHubTokenURL:                 envOr("GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
+		GitHubAPIBaseURL:               normalizeGitHubAPIBaseURL(envOr("GITHUB_API_BASE_URL", "https://api.github.com")),
+		ShopifyClientID:                strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_ID")),
+		ShopifyClientSecret:            strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_SECRET")),
+		ShopifyWebhookSecret:           strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_SECRET")),
+		ShopifyAPIBaseURL:              envOr("SHOPIFY_API_BASE_URL", "https://{shop}"),
+		StripeClientID:                 strings.TrimSpace(os.Getenv("STRIPE_CLIENT_ID")),
+		StripeClientSecret:             strings.TrimSpace(os.Getenv("STRIPE_CLIENT_SECRET")),
+		StripeAuthorizationURL:         envOr("STRIPE_AUTHORIZATION_URL", "https://connect.stripe.com/oauth/authorize"),
+		StripeTokenURL:                 envOr("STRIPE_TOKEN_URL", "https://connect.stripe.com/oauth/token"),
+		StripeAPIBaseURL:               envOr("STRIPE_API_BASE_URL", "https://api.stripe.com"),
+		StripeWebhookSecret:            strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+		AllowUnverifiedWebhooks:        envBool("ALLOW_UNVERIFIED_WEBHOOKS", false),
+		LinkedInClientID:               strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_ID")),
+		LinkedInClientSecret:           strings.TrimSpace(os.Getenv("LINKEDIN_CLIENT_SECRET")),
+		LinkedInAuthorizationURL:       envOr("LINKEDIN_AUTHORIZATION_URL", "https://www.linkedin.com/oauth/v2/authorization"),
+		LinkedInTokenURL:               envOr("LINKEDIN_TOKEN_URL", "https://www.linkedin.com/oauth/v2/accessToken"),
+		LinkedInAPIBaseURL:             envOr("LINKEDIN_API_BASE_URL", "https://api.linkedin.com"),
+		LinkedInMarketingVersion:       envOr("LINKEDIN_MARKETING_VERSION", "202606"),
+		XClientID:                      strings.TrimSpace(os.Getenv("X_CLIENT_ID")),
+		XClientSecret:                  strings.TrimSpace(os.Getenv("X_CLIENT_SECRET")),
+		XAuthorizationURL:              envOr("X_AUTHORIZATION_URL", "https://x.com/i/oauth2/authorize"),
+		XTokenURL:                      envOr("X_TOKEN_URL", "https://api.x.com/2/oauth2/token"),
+		XAPIBaseURL:                    envOr("X_API_BASE_URL", "https://api.x.com"),
+		InstagramClientID:              instagramClientID,
+		InstagramClientSecret:          instagramClientSecret,
+		PageSpeedAPIKey:                pageSpeedAPIKey,
+		CrUXAPIKey:                     cruxAPIKey,
+		PyTrendsDevEnabled:             envBool("PYTRENDS_DEV_ENABLED", false),
+		ClarityBindingsFile:            strings.TrimSpace(os.Getenv("CLARITY_BINDINGS_FILE")),
+		WebVitalsBindingsFile:          strings.TrimSpace(os.Getenv("WEB_VITALS_BINDINGS_FILE")),
+		MarketingProvidersBindingsFile: strings.TrimSpace(os.Getenv("MARKETING_PROVIDERS_BINDINGS_FILE")),
+		AlgoliaMCPOAuthClientFile:      strings.TrimSpace(os.Getenv("ALGOLIA_MCP_OAUTH_CLIENT_FILE")),
+		GoogleAnalyticsAdminAPIBaseURL: envOr("GOOGLE_ANALYTICS_ADMIN_API_BASE_URL", "https://analyticsadmin.googleapis.com"),
+		GoogleAnalyticsDataAPIBaseURL:  envOr("GOOGLE_ANALYTICS_DATA_API_BASE_URL", "https://analyticsdata.googleapis.com"),
+		// Instagram API with Instagram Login uses Instagram OAuth and the
+		// graph.instagram.com host. Facebook Login's graph.facebook.com API and
+		// instagram_* permissions are a separate product with a different token
+		// model and must not be mixed into this provider.
+		InstagramAuthorizationURL:  envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.instagram.com/oauth/authorize"),
+		InstagramTokenURL:          envOr("INSTAGRAM_TOKEN_URL", "https://api.instagram.com/oauth/access_token"),
+		InstagramAPIBaseURL:        envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.instagram.com/v25.0"),
+		MetaClientID:               metaClientID,
+		MetaClientSecret:           metaClientSecret,
+		MetaAuthorizationURL:       envOr("META_AUTHORIZATION_URL", envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth")),
+		MetaTokenURL:               envOr("META_TOKEN_URL", envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token")),
+		MetaAPIBaseURL:             envOr("META_GRAPH_API_BASE_URL", envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")),
+		FacebookClientID:           facebookClientID,
+		FacebookClientSecret:       facebookClientSecret,
+		FacebookAuthorizationURL:   envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
+		FacebookTokenURL:           envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
+		FacebookAPIBaseURL:         envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
+		SnapchatClientID:           strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_ID")),
+		SnapchatClientSecret:       strings.TrimSpace(os.Getenv("SNAPCHAT_CLIENT_SECRET")),
+		SnapchatRedirectBaseURL:    strings.TrimRight(envOr("SNAPCHAT_REDIRECT_BASE_URL", publicBaseURL), "/"),
+		SnapchatAuthorizationURL:   envOr("SNAPCHAT_AUTHORIZATION_URL", "https://accounts.snapchat.com/login/oauth2/authorize"),
+		SnapchatTokenURL:           envOr("SNAPCHAT_TOKEN_URL", "https://accounts.snapchat.com/login/oauth2/access_token"),
+		SnapchatAPIBaseURL:         envOr("SNAPCHAT_API_BASE_URL", "https://adsapi.snapchat.com/v1"),
+		SnapchatBusinessAPIBaseURL: envOr("SNAPCHAT_BUSINESS_API_BASE_URL", "https://businessapi.snapchat.com/v1"),
+		// TikTok Login Kit v2 (client_key naming; v1 open-api.tiktok.com endpoints
+		// died Feb 2024). Web-app redirect URIs must be public https — localhost
+		// only works for Desktop-type TikTok apps.
+		TikTokClientKey:         strings.TrimSpace(firstNonEmpty(os.Getenv("TIKTOK_CLIENT_KEY"), os.Getenv("TIKTOK_CLIENT_ID"))),
+		TikTokClientSecret:      strings.TrimSpace(os.Getenv("TIKTOK_CLIENT_SECRET")),
+		TikTokAuthorizationURL:  envOr("TIKTOK_AUTHORIZATION_URL", "https://www.tiktok.com/v2/auth/authorize/"),
+		TikTokTokenURL:          envOr("TIKTOK_TOKEN_URL", "https://open.tiktokapis.com/v2/oauth/token/"),
+		TikTokAPIBaseURL:        envOr("TIKTOK_API_BASE_URL", "https://open.tiktokapis.com/v2"),
+		DiscordClientID:         strings.TrimSpace(os.Getenv("DISCORD_CLIENT_ID")),
+		DiscordClientSecret:     strings.TrimSpace(os.Getenv("DISCORD_CLIENT_SECRET")),
+		DiscordAuthorizationURL: envOr("DISCORD_AUTHORIZATION_URL", "https://discord.com/oauth2/authorize"),
+		DiscordTokenURL:         envOr("DISCORD_TOKEN_URL", "https://discord.com/api/oauth2/token"),
+		DiscordAPIBaseURL:       envOr("DISCORD_API_BASE_URL", "https://discord.com/api/v10"),
+		DiscordBotToken:         strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
+		GoogleAdsDeveloperToken: strings.TrimSpace(os.Getenv("GOOGLE_ADS_DEVELOPER_TOKEN")),
+		OktaDomain:              strings.TrimRight(strings.TrimSpace(os.Getenv("OKTA_DOMAIN")), "/"),
+		OktaClientID:            strings.TrimSpace(os.Getenv("OKTA_CLIENT_ID")),
+		OktaClientSecret:        strings.TrimSpace(os.Getenv("OKTA_CLIENT_SECRET")),
+		OktaAPIToken:            strings.TrimSpace(os.Getenv("OKTA_API_TOKEN")),
+		OktaAPIBaseURL:          strings.TrimRight(envOr("OKTA_API_BASE_URL", strings.TrimSpace(os.Getenv("OKTA_DOMAIN"))), "/"),
+		SessionTTL:              envDuration("INTEGRATION_CONNECT_SESSION_TTL", 10*time.Minute),
+		TokenRefreshSkew:        envDuration("INTEGRATION_TOKEN_REFRESH_SKEW", 2*time.Minute),
+	}, nil
+}
+
+func (c Config) ValidateRuntime() error {
+	if c.InternalAPIKey == "" {
+		return fmt.Errorf("INTERNAL_API_KEY is required")
+	}
+	if c.AuthCoreURL == "" {
+		return fmt.Errorf("AUTH_CORE_URL is required")
+	}
+	if c.ControlPlaneInternalAPIKey() == "" {
+		return fmt.Errorf("AUTH_CORE_INTERNAL_API_KEY or INTERNAL_API_KEY is required")
+	}
+	if c.CodexSubscriptionEnabled {
+		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
+			return fmt.Errorf("CODEX_APP_SERVER_COMMAND is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionHome) == "" {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_HOME is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionModelPlaneAPIKey) == "" {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if c.CodexSubscriptionLoginTTL <= 0 {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_LOGIN_TTL must be positive")
+		}
+		if c.CodexSubscriptionInvocationTimeout <= 0 {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT must be positive")
+		}
+		if problems := c.codexSubscriptionKnobProblems(); len(problems) > 0 {
+			return fmt.Errorf("%s %s", problems[0].env, problems[0].reason)
+		}
+	}
+	if c.OrgCoreURL == "" {
+		return fmt.Errorf("ORG_CORE_URL is required")
+	}
+	if !validDedicatedServiceToken(c.OrgCoreServiceToken) {
+		return fmt.Errorf("ORG_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	if !validDedicatedServiceToken(c.BillingCoreServiceToken) {
+		return fmt.Errorf("BILLING_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	if !validDedicatedServiceToken(c.AuditCoreServiceToken) {
+		return fmt.Errorf("AUDIT_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	seenCredentials := make(map[[sha256.Size]byte]string, 5)
+	for name, value := range map[string]string{
+		"INTERNAL_API_KEY":           c.InternalAPIKey,
+		"AUTH_CORE_INTERNAL_API_KEY": c.AuthCoreInternalAPIKey,
+	} {
+		if strings.TrimSpace(value) != "" {
+			seenCredentials[sha256.Sum256([]byte(strings.TrimSpace(value)))] = name
+		}
+	}
+	for name, value := range map[string]string{
+		"ORG_CORE_SERVICE_TOKEN":     c.OrgCoreServiceToken,
+		"BILLING_CORE_SERVICE_TOKEN": c.BillingCoreServiceToken,
+		"AUDIT_CORE_SERVICE_TOKEN":   c.AuditCoreServiceToken,
+	} {
+		digest := sha256.Sum256([]byte(strings.TrimSpace(value)))
+		if reusedFrom, exists := seenCredentials[digest]; exists {
+			return fmt.Errorf("%s must not reuse %s", name, reusedFrom)
+		}
+		seenCredentials[digest] = name
+	}
+	if c.PublicBaseURL == "" {
+		return fmt.Errorf("INTEGRATION_PUBLIC_BASE_URL is required")
+	}
+	if err := validatePublicBaseURL(c.PublicBaseURL, c.Environment); err != nil {
+		return fmt.Errorf("INTEGRATION_PUBLIC_BASE_URL is invalid: %w", err)
+	}
+	for _, origin := range c.OAuthAllowedReturnOrigins {
+		if _, err := normalizeOAuthAllowedReturnOrigin(origin, c.Environment); err != nil {
+			return fmt.Errorf("INTEGRATION_ALLOWED_RETURN_ORIGINS is invalid: %w", err)
+		}
+	}
+	if c.DatabaseURL == "" && !c.AllowInMemoryStore {
+		return fmt.Errorf("DATABASE_URL is required unless INTEGRATION_ALLOW_IN_MEMORY_STORE=true")
+	}
+	if len(c.EncryptionKey) != 32 {
+		return fmt.Errorf("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY must decode to 32 bytes")
+	}
+	if _, err := attestation.ParseTrustedKeysJSON(c.ProviderWriteAttestationKeysJSON); err != nil {
+		return fmt.Errorf("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON must contain trusted conversation-core Ed25519 public keys: %w", err)
+	}
+	return nil
+}
+
+func (c Config) ValidateFinspoWorkerRuntime() error {
+	if c.InternalAPIKey == "" {
+		return fmt.Errorf("INTERNAL_API_KEY is required")
+	}
+	if c.IntegrationCoreURL == "" {
+		return fmt.Errorf("INTEGRATION_CORE_URL is required")
+	}
+	if c.FinspoCoreURL == "" {
+		return fmt.Errorf("FINSPO_CORE_URL is required")
+	}
+	if c.FinspoCoreAPIKey == "" {
+		return fmt.Errorf("FINSPO_API_KEY is required")
+	}
+	if c.DataPlaneDocumentsURL != "" {
+		if c.AuthCoreURL == "" {
+			return fmt.Errorf("AUTH_CORE_URL is required for Data Plane token minting")
+		}
+		if c.IntegrationServiceID == "" {
+			return fmt.Errorf("INTEGRATION_SERVICE_ID is required for Data Plane token minting")
+		}
+		if c.IntegrationServiceAPIKey == "" {
+			return fmt.Errorf("INTEGRATION_SERVICE_API_KEY is required for Data Plane token minting")
+		}
+	}
+	return nil
+}
+
+// ValidateEmailWorkerRuntime checks the env the email inbound sync worker
+// needs: direct DB access (connections + cursors), the token vault key, the
+// conversation-ingest bridge target, and the internal key it authenticates
+// to that bridge with.
+func (c Config) ValidateEmailWorkerRuntime() error {
+	if c.DatabaseURL == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+	if len(c.EncryptionKey) == 0 {
+		return fmt.Errorf("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required")
+	}
+	if c.ConversationIngestURL == "" {
+		return fmt.Errorf("CONVERSATION_INGEST_URL is required")
+	}
+	if !validDedicatedServiceToken(c.ConversationIngestServiceToken) {
+		return fmt.Errorf("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	if c.InternalAPIKey == "" {
+		return fmt.Errorf("INTERNAL_API_KEY is required")
+	}
+	if c.IntegrationCoreURL == "" {
+		return fmt.Errorf("INTEGRATION_CORE_URL is required")
+	}
+	return nil
+}
+
+func validDedicatedServiceToken(token string) bool {
+	token = strings.TrimSpace(token)
+	lower := strings.ToLower(token)
+	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "test") &&
+		!strings.HasPrefix(lower, "placeholder") &&
+		!strings.HasPrefix(lower, "change-me") &&
+		!strings.HasPrefix(lower, "replace-with")
+}
+
+func (c Config) ControlPlaneInternalAPIKey() string {
+	if strings.TrimSpace(c.AuthCoreInternalAPIKey) != "" {
+		return strings.TrimSpace(c.AuthCoreInternalAPIKey)
+	}
+	return strings.TrimSpace(c.InternalAPIKey)
+}
+
+func (c Config) ValidateProvider(providerKey string) error {
+	switch providerKey {
+	case "algolia":
+		_, err := c.AlgoliaRegistration()
+		return err
+	case "microsoft":
+		if c.MicrosoftClientID == "" {
+			return fmt.Errorf("AZURE_CLIENT_ID is required for Microsoft OAuth")
+		}
+		mode := normalizeMicrosoftClientAuthMode(c.MicrosoftClientAuthMode)
+		if mode != "public" && mode != "confidential" {
+			return fmt.Errorf("MICROSOFT_CLIENT_AUTH_MODE must be public or confidential")
+		}
+		if mode == "confidential" && c.MicrosoftClientSecret == "" {
+			return fmt.Errorf("AZURE_CLIENT_SECRET is required for Microsoft OAuth")
+		}
+	case "slack":
+		if c.SlackClientID == "" {
+			return fmt.Errorf("SLACK_CLIENT_ID is required for Slack OAuth")
+		}
+		if c.SlackClientSecret == "" {
+			return fmt.Errorf("SLACK_CLIENT_SECRET is required for Slack OAuth")
+		}
+	case "google":
+		if c.GoogleClientID == "" {
+			return fmt.Errorf("GOOGLE_CLIENT_ID is required for Google OAuth")
+		}
+		if c.GoogleClientSecret == "" {
+			return fmt.Errorf("GOOGLE_CLIENT_SECRET is required for Google OAuth")
+		}
+	case "notion":
+		if c.NotionClientID == "" {
+			return fmt.Errorf("NOTION_CLIENT_ID is required for Notion OAuth")
+		}
+		if c.NotionClientSecret == "" {
+			return fmt.Errorf("NOTION_CLIENT_SECRET is required for Notion OAuth")
+		}
+	case "github":
+		if c.GitHubClientID == "" {
+			return fmt.Errorf("GITHUB_CLIENT_ID is required for GitHub OAuth")
+		}
+		if c.GitHubClientSecret == "" {
+			return fmt.Errorf("GITHUB_CLIENT_SECRET is required for GitHub OAuth")
+		}
+	case "shopify":
+		if c.ShopifyClientID == "" {
+			return fmt.Errorf("SHOPIFY_CLIENT_ID is required for Shopify OAuth")
+		}
+		if c.ShopifyClientSecret == "" {
+			return fmt.Errorf("SHOPIFY_CLIENT_SECRET is required for Shopify OAuth")
+		}
+	case "stripe":
+		if c.StripeClientID == "" {
+			return fmt.Errorf("STRIPE_CLIENT_ID is required for Stripe OAuth")
+		}
+		if c.StripeClientSecret == "" {
+			return fmt.Errorf("STRIPE_CLIENT_SECRET is required for Stripe OAuth")
+		}
+	case "linkedin":
+		if c.LinkedInClientID == "" {
+			return fmt.Errorf("LINKEDIN_CLIENT_ID is required for LinkedIn OAuth")
+		}
+		if c.LinkedInClientSecret == "" {
+			return fmt.Errorf("LINKEDIN_CLIENT_SECRET is required for LinkedIn OAuth")
+		}
+	case "x":
+		if c.XClientID == "" {
+			return fmt.Errorf("X_CLIENT_ID is required for X OAuth")
+		}
+		if c.XClientSecret == "" {
+			return fmt.Errorf("X_CLIENT_SECRET is required for X OAuth")
+		}
+	case "instagram":
+		if c.InstagramClientID == "" {
+			return fmt.Errorf("INSTAGRAM_CLIENT_ID is required for Instagram OAuth")
+		}
+		if c.InstagramClientSecret == "" {
+			return fmt.Errorf("INSTAGRAM_CLIENT_SECRET is required for Instagram OAuth")
+		}
+	case "meta":
+		if firstNonEmpty(c.MetaClientID, c.FacebookClientID) == "" {
+			return fmt.Errorf("META_APP_CLIENT_ID or FACEBOOK_CLIENT_ID is required for Meta OAuth")
+		}
+		if firstNonEmpty(c.MetaClientSecret, c.FacebookClientSecret) == "" {
+			return fmt.Errorf("META_APP_CLIENT_SECRET, META_CLIENT_SECRET, or FACEBOOK_CLIENT_SECRET is required for Meta OAuth")
+		}
+	case "facebook", "whatsapp", "meta-ads":
+		label := "Meta"
+		switch providerKey {
+		case "facebook":
+			label = "Facebook"
+		case "whatsapp":
+			label = "WhatsApp"
+		case "meta-ads":
+			label = "Meta Ads"
+		}
+		if c.FacebookClientID == "" {
+			return fmt.Errorf("FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID is required for %s OAuth", label)
+		}
+		if c.FacebookClientSecret == "" {
+			return fmt.Errorf("FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET is required for %s OAuth", label)
+		}
+	case "snapchat":
+		if c.SnapchatClientID == "" {
+			return fmt.Errorf("SNAPCHAT_CLIENT_ID is required for Snapchat OAuth")
+		}
+		if c.SnapchatClientSecret == "" {
+			return fmt.Errorf("SNAPCHAT_CLIENT_SECRET is required for Snapchat OAuth")
+		}
+		if c.snapchatHTTPSRedirectBaseURL() == "" {
+			return fmt.Errorf("SNAPCHAT_REDIRECT_BASE_URL or HTTPS INTEGRATION_PUBLIC_BASE_URL is required for Snapchat OAuth")
+		}
+	case "tiktok":
+		if c.TikTokClientKey == "" {
+			return fmt.Errorf("TIKTOK_CLIENT_KEY or TIKTOK_CLIENT_ID is required for TikTok OAuth")
+		}
+		if c.TikTokClientSecret == "" {
+			return fmt.Errorf("TIKTOK_CLIENT_SECRET is required for TikTok OAuth")
+		}
+	case "discord":
+		if c.DiscordClientID == "" {
+			return fmt.Errorf("DISCORD_CLIENT_ID is required for Discord OAuth")
+		}
+		if c.DiscordClientSecret == "" {
+			return fmt.Errorf("DISCORD_CLIENT_SECRET is required for Discord OAuth")
+		}
+	case "okta":
+		if c.OktaAPIBaseURL == "" && c.OktaDomain == "" {
+			return fmt.Errorf("OKTA_DOMAIN or OKTA_API_BASE_URL is required for Okta")
+		}
+		if c.OktaAPIToken == "" && (c.OktaClientID == "" || c.OktaClientSecret == "") {
+			return fmt.Errorf("OKTA_API_TOKEN or OKTA_CLIENT_ID/OKTA_CLIENT_SECRET is required for Okta")
+		}
+	}
+	return nil
+}
+
+func (c Config) ProviderReadiness() map[string][]string {
+	readiness := map[string][]string{}
+	// A global catalog cannot establish a tenant/site API-key binding. Reports
+	// enforce the protected mapping; these providers never offer an OAuth flow.
+	readiness["cookiebot"] = []string{"SITE_SCOPED_API_KEY_BINDING"}
+	if _, err := c.AlgoliaRegistration(); err != nil {
+		readiness["algolia"] = []string{"ALGOLIA_MCP_OAUTH_CLIENT_FILE"}
+	}
+	microsoftChecks := map[string]string{
+		"AZURE_CLIENT_ID": c.MicrosoftClientID,
+	}
+	if normalizeMicrosoftClientAuthMode(c.MicrosoftClientAuthMode) == "confidential" {
+		microsoftChecks["AZURE_CLIENT_SECRET"] = c.MicrosoftClientSecret
+	}
+	checks := map[string]map[string]string{
+		"microsoft": microsoftChecks,
+		"google": {
+			"GOOGLE_CLIENT_ID":     c.GoogleClientID,
+			"GOOGLE_CLIENT_SECRET": c.GoogleClientSecret,
+		},
+		"slack": {
+			"SLACK_CLIENT_ID":     c.SlackClientID,
+			"SLACK_CLIENT_SECRET": c.SlackClientSecret,
+		},
+		"github": {
+			"GITHUB_CLIENT_ID":     c.GitHubClientID,
+			"GITHUB_CLIENT_SECRET": c.GitHubClientSecret,
+		},
+		"notion": {
+			"NOTION_CLIENT_ID":     c.NotionClientID,
+			"NOTION_CLIENT_SECRET": c.NotionClientSecret,
+		},
+		"shopify": {
+			"SHOPIFY_CLIENT_ID":     c.ShopifyClientID,
+			"SHOPIFY_CLIENT_SECRET": c.ShopifyClientSecret,
+		},
+		"stripe": {
+			"STRIPE_CLIENT_ID":     c.StripeClientID,
+			"STRIPE_CLIENT_SECRET": c.StripeClientSecret,
+		},
+		"linkedin": {
+			"LINKEDIN_CLIENT_ID":     c.LinkedInClientID,
+			"LINKEDIN_CLIENT_SECRET": c.LinkedInClientSecret,
+		},
+		"x": {
+			"X_CLIENT_ID":     c.XClientID,
+			"X_CLIENT_SECRET": c.XClientSecret,
+		},
+		"instagram": {
+			"INSTAGRAM_CLIENT_ID":     c.InstagramClientID,
+			"INSTAGRAM_CLIENT_SECRET": c.InstagramClientSecret,
+		},
+		"facebook": {
+			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
+			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
+		},
+		"whatsapp": {
+			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
+			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
+		},
+		"meta-ads": {
+			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
+			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
+		},
+		"meta": {
+			"META_APP_CLIENT_ID or FACEBOOK_CLIENT_ID":                              firstNonEmpty(c.MetaClientID, c.FacebookClientID),
+			"META_APP_CLIENT_SECRET, META_CLIENT_SECRET, or FACEBOOK_CLIENT_SECRET": firstNonEmpty(c.MetaClientSecret, c.FacebookClientSecret),
+		},
+		"snapchat": {
+			"SNAPCHAT_CLIENT_ID":     c.SnapchatClientID,
+			"SNAPCHAT_CLIENT_SECRET": c.SnapchatClientSecret,
+			"SNAPCHAT_REDIRECT_BASE_URL or HTTPS INTEGRATION_PUBLIC_BASE_URL": c.snapchatHTTPSRedirectBaseURL(),
+		},
+		"tiktok": {
+			"TIKTOK_CLIENT_KEY or TIKTOK_CLIENT_ID": c.TikTokClientKey,
+			"TIKTOK_CLIENT_SECRET":                  c.TikTokClientSecret,
+		},
+		"discord": {
+			"DISCORD_CLIENT_ID":     c.DiscordClientID,
+			"DISCORD_CLIENT_SECRET": c.DiscordClientSecret,
+		},
+	}
+	for provider, providerChecks := range checks {
+		for key, value := range providerChecks {
+			if strings.TrimSpace(value) == "" {
+				readiness[provider] = append(readiness[provider], key)
+			}
+		}
+	}
+	if strings.TrimSpace(c.OktaAPIBaseURL) == "" && strings.TrimSpace(c.OktaDomain) == "" {
+		readiness["okta"] = append(readiness["okta"], "OKTA_DOMAIN")
+	}
+	if strings.TrimSpace(c.OktaAPIToken) == "" && (strings.TrimSpace(c.OktaClientID) == "" || strings.TrimSpace(c.OktaClientSecret) == "") {
+		readiness["okta"] = append(readiness["okta"], "OKTA_API_TOKEN or OKTA_CLIENT_ID/OKTA_CLIENT_SECRET")
+	}
+	if !c.CodexSubscriptionEnabled {
+		readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_ENABLED=true")
+	} else {
+		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_APP_SERVER_COMMAND")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionHome) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_HOME")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionModelPlaneAPIKey) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")
+		}
+		for _, problem := range c.codexSubscriptionKnobProblems() {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], problem.env)
+		}
+	}
+	return readiness
+}
+
+type codexSubscriptionKnobProblem struct {
+	env    string
+	reason string
+}
+
+// codexImpersonatedOriginators are first-party or other third-party client
+// names the broker must never claim to be.
+var codexImpersonatedOriginators = map[string]struct{}{
+	"codex_cli_rs": {}, "codex-tui": {}, "codex_vscode": {}, "codex_exec": {}, "codex_sdk_ts": {},
+	"opencode": {}, "crush": {}, "pi": {},
+}
+
+var codexOriginatorPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+
+// codexSubscriptionKnobProblems validates the non-secret broker knobs. Each
+// problem names the env var, so readiness can list it.
+func (c Config) codexSubscriptionKnobProblems() []codexSubscriptionKnobProblem {
+	var problems []codexSubscriptionKnobProblem
+	add := func(env, reason string) {
+		problems = append(problems, codexSubscriptionKnobProblem{env: env, reason: reason})
+	}
+	for _, env := range c.codexSubscriptionUnparsed {
+		add(env, "is not a valid value")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionTransport)) {
+	case "", "direct", "app-server":
+	default:
+		add("CODEX_SUBSCRIPTION_TRANSPORT", "must be direct or app-server")
+	}
+	if !validCodexDirectBaseURL(c.CodexSubscriptionDirectBaseURL) {
+		add("CODEX_SUBSCRIPTION_DIRECT_BASE_URL", "must be an https URL on host chatgpt.com without userinfo, query, or fragment")
+	}
+	if !validCodexOriginator(c.CodexSubscriptionDirectOriginator) {
+		add("CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR", "must match ^[a-z][a-z0-9_-]{1,63}$ and must not name another client")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionDirectRequestShape)) {
+	case "", "classic", "lite":
+	default:
+		add("CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE", "must be classic or lite")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionDirectPromptMode)) {
+	case "", "roles", "flattened":
+	default:
+		add("CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE", "must be roles or flattened")
+	}
+	if c.CodexSubscriptionDirectMaxRetries < 0 || c.CodexSubscriptionDirectMaxRetries > 3 {
+		add("CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES", "must be between 0 and 3")
+	}
+	if c.CodexSubscriptionRefreshSkew < time.Minute || c.CodexSubscriptionRefreshSkew > 24*time.Hour {
+		add("CODEX_SUBSCRIPTION_REFRESH_SKEW", "must be between 1m and 24h")
+	}
+	if c.CodexSubscriptionMaxConcurrency < 1 {
+		add("CODEX_SUBSCRIPTION_MAX_CONCURRENCY", "must be at least 1")
+	}
+	if c.CodexSubscriptionMaxConcurrencyPerConnection < 1 || c.CodexSubscriptionMaxConcurrencyPerConnection > max(c.CodexSubscriptionMaxConcurrency, 1) {
+		add("CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION", "must be between 1 and CODEX_SUBSCRIPTION_MAX_CONCURRENCY")
+	}
+	if c.CodexSubscriptionQueueTimeout <= 0 || (c.CodexSubscriptionInvocationTimeout > 0 && c.CodexSubscriptionQueueTimeout > c.CodexSubscriptionInvocationTimeout) {
+		add("CODEX_SUBSCRIPTION_QUEUE_TIMEOUT", "must be positive and no more than CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT")
+	}
+	return problems
+}
+
+// CodexSubscriptionWarnings are startup warnings for knobs that are valid
+// but risky. A refresh skew below Codex's own 5-minute window plus the call
+// timeout lets the app-server fallback refresh a token mid-call, which makes
+// the broker no longer the only refresher.
+func (c Config) CodexSubscriptionWarnings() []string {
+	if !c.CodexSubscriptionEnabled {
+		return nil
+	}
+	var warnings []string
+	if c.CodexSubscriptionRefreshSkew < 5*time.Minute+c.CodexSubscriptionInvocationTimeout {
+		warnings = append(warnings, "CODEX_SUBSCRIPTION_REFRESH_SKEW is below 5m plus CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT; the app-server fallback may refresh a token during a call")
+	}
+	return warnings
+}
+
+func validCodexDirectBaseURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == "chatgpt.com" && parsed.User == nil &&
+		parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && !strings.Contains(raw, "#")
+}
+
+func validCodexOriginator(raw string) bool {
+	value := strings.TrimSpace(raw)
+	if !codexOriginatorPattern.MatchString(value) || strings.HasPrefix(value, "codex") {
+		return false
+	}
+	_, impersonated := codexImpersonatedOriginators[value]
+	return !impersonated
+}
+
+// codexSubscriptionKnobs are the broker knobs whose values are validated at
+// startup rather than silently replaced by a default. They are read before
+// the Config literal so every unparsed name is collected first.
+type codexSubscriptionKnobs struct {
+	maxRetries          int
+	refreshSkew         time.Duration
+	maxConcurrency      int
+	maxPerConnection    int
+	queueTimeout        time.Duration
+	hardened            bool
+	threadEffort        bool
+	wideReasoningEffort bool
+	unparsed            []string
+}
+
+func loadCodexSubscriptionKnobs() codexSubscriptionKnobs {
+	var knobs codexSubscriptionKnobs
+	knobs.maxRetries = strictEnvInt("CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES", 2, &knobs.unparsed)
+	knobs.refreshSkew = strictEnvDuration("CODEX_SUBSCRIPTION_REFRESH_SKEW", 10*time.Minute, &knobs.unparsed)
+	knobs.maxConcurrency = strictEnvInt("CODEX_SUBSCRIPTION_MAX_CONCURRENCY", 16, &knobs.unparsed)
+	knobs.maxPerConnection = strictEnvInt("CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION", 4, &knobs.unparsed)
+	knobs.queueTimeout = strictEnvDuration("CODEX_SUBSCRIPTION_QUEUE_TIMEOUT", 30*time.Second, &knobs.unparsed)
+	knobs.hardened = strictEnvBool("CODEX_APP_SERVER_HARDENED", true, &knobs.unparsed)
+	knobs.threadEffort = strictEnvBool("CODEX_APP_SERVER_THREAD_EFFORT", true, &knobs.unparsed)
+	// Exactly "true" only: strictEnvBool uses ParseBool, which would also switch
+	// this on for "1".
+	knobs.wideReasoningEffort = strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT")) == "true"
+	return knobs
+}
+
+// strictEnvInt reads an integer knob, keeping zero and negative values for
+// range validation and recording an unparseable value in unparsed.
+func strictEnvInt(key string, fallback int, unparsed *[]string) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
+}
+
+// strictEnvDuration reads a duration knob like strictEnvInt.
+func strictEnvDuration(key string, fallback time.Duration, unparsed *[]string) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
+}
+
+// strictEnvBool reads a boolean knob like strictEnvInt.
+func strictEnvBool(key string, fallback bool, unparsed *[]string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
+}
+
+func (c Config) snapchatHTTPSRedirectBaseURL() string {
+	baseURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(c.SnapchatRedirectBaseURL, c.PublicBaseURL)), "/")
+	parsed, err := url.Parse(baseURL)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
+		return ""
+	}
+	return baseURL
+}
+
+func microsoftAuthorizeURL(tenant string) string {
+	return "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/authorize"
+}
+
+func microsoftTokenURL(tenant string) string {
+	return "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token"
+}
+
+func loadEncryptionKey(key string) ([]byte, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil, fmt.Errorf("%s is required", key)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err == nil && len(decoded) == 32 {
+		return decoded, nil
+	}
+	if len(raw) == 32 {
+		return []byte(raw), nil
+	}
+	return nil, fmt.Errorf("%s must be 32 raw bytes or base64-encoded 32 bytes", key)
+}
+
+// loadOptionalSecret accepts either KEY or KEY_FILE, never both. File-backed
+// values allow container runtimes to mount sensitive provider secrets without
+// materializing them in the process environment or Compose configuration.
+func loadOptionalSecret(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	path := strings.TrimSpace(os.Getenv(key + "_FILE"))
+	if value != "" && path != "" {
+		return "", fmt.Errorf("%s and %s_FILE cannot both be set", key, key)
+	}
+	if path == "" {
+		return value, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s_FILE must reference a readable regular file", key)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s_FILE must reference a readable regular file", key)
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", fmt.Errorf("%s_FILE must not be empty", key)
+	}
+	return secret, nil
+}
+
+func envOr(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func normalizeGitHubAPIBaseURL(raw string) string {
+	value := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if value == "" {
+		return "https://api.github.com"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return value
+	}
+	host := strings.ToLower(parsed.Host)
+	switch host {
+	case "github.com", "www.github.com":
+		return "https://api.github.com"
+	case "api.github.com":
+		parsed.Path = strings.TrimRight(parsed.Path, "/")
+		if parsed.Path == "" {
+			return parsed.Scheme + "://" + parsed.Host
+		}
+		return parsed.String()
+	}
+	if host == "localhost" || strings.HasPrefix(host, "localhost:") ||
+		strings.HasPrefix(host, "127.") || strings.HasPrefix(host, "[::1]") {
+		return value
+	}
+	if strings.Trim(parsed.Path, "/") == "" {
+		parsed.Path = "/api/v3"
+	}
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func normalizeMicrosoftClientAuthMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "public", "pkce", "none":
+		return "public"
+	case "confidential", "secret", "web":
+		return "confidential"
+	default:
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+}
+
+func urlOrigin(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// NormalizeOAuthReturnURL permits a browser destination only when its exact
+// origin appears in the deployment-owned allowlist. Empty is supported for
+// callers that poll connect-session status instead of using a browser return.
+func (c Config) NormalizeOAuthReturnURL(raw string) (string, string, error) {
+	destination := strings.TrimSpace(raw)
+	if destination == "" {
+		return "", "", nil
+	}
+	parsed, err := url.Parse(destination)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", "", fmt.Errorf("returnUrl must be an absolute HTTP(S) URL without credentials or a fragment")
+	}
+	origin, err := normalizedHTTPOAuthOrigin(parsed, c.Environment)
+	if err != nil {
+		return "", "", fmt.Errorf("returnUrl is invalid: %w", err)
+	}
+	for _, allowed := range c.OAuthAllowedReturnOrigins {
+		allowedOrigin, allowedErr := normalizeOAuthAllowedReturnOrigin(allowed, c.Environment)
+		if allowedErr != nil {
+			return "", "", fmt.Errorf("return URL allowlist is invalid")
+		}
+		if origin == allowedOrigin {
+			return parsed.String(), origin, nil
+		}
+	}
+	return "", "", fmt.Errorf("returnUrl origin is not allowed")
+}
+
+func validatePublicBaseURL(raw, environment string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) origin without credentials, query, or fragment")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return fmt.Errorf("must not include a path")
+	}
+	_, err = normalizedHTTPOAuthOrigin(parsed, environment)
+	return err
+}
+
+func normalizeOAuthAllowedReturnOrigin(raw, environment string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("allowlist entries must be absolute HTTP(S) origins")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", fmt.Errorf("allowlist entries must not include a path")
+	}
+	return normalizedHTTPOAuthOrigin(parsed, environment)
+}
+
+func normalizedHTTPOAuthOrigin(parsed *url.URL, environment string) (string, error) {
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "https" && scheme != "http" {
+		return "", fmt.Errorf("must use HTTP or HTTPS")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	if scheme == "http" && (!isLocalDevelopmentEnvironment(environment) || !isLoopbackOAuthHost(host)) {
+		return "", fmt.Errorf("must use HTTPS except for loopback hosts in an explicit local development environment")
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	port := parsed.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host, nil
+}
+
+// defaultOAuthReturnOrigins keeps the local frontend flow working when
+// INTEGRATION_ALLOWED_RETURN_ORIGINS is unset: in an explicit local/dev/test
+// environment the Vite dev server origin is allowed. Any other environment has
+// no default, so every returnUrl is rejected until origins are configured.
+func defaultOAuthReturnOrigins(environment string) string {
+	if isLocalDevelopmentEnvironment(environment) {
+		return "http://localhost:5173"
+	}
+	return ""
+}
+
+func isLocalDevelopmentEnvironment(environment string) bool {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "dev", "development", "local", "test":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLoopbackOAuthHost(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(host))
+	return parsedIP != nil && parsedIP.IsLoopback()
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envCSV(key, fallback string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		value = fallback
+	}
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizeGraphAPIVersion(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "v25.0"
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "v") {
+		return trimmed
+	}
+	return "v" + trimmed
+}
+
+// metaBusinessLoginConfigIDs collects every named Facebook Login for
+// Business configuration this deployment has been given. Meta bakes
+// permissions into the configuration itself rather than a per-request scope
+// param, so a Business-type app that needs more than one permission set
+// (e.g. general Pages/Instagram access vs. a narrower Conversions API
+// partner integration) needs one configuration per set, not one shared
+// across every bundle. "default" is used whenever a connect session doesn't
+// name a specific one (providerContext["business_login_config"]).
+func metaBusinessLoginConfigIDs() map[string]string {
+	ids := map[string]string{}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")); id != "" {
+		ids["default"] = id
+	}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID")); id != "" {
+		ids["support_messaging"] = id
+	}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID")); id != "" {
+		ids["conversions"] = id
+	}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID")); id != "" {
+		ids["studio_ads"] = id
+	}
+	return ids
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}

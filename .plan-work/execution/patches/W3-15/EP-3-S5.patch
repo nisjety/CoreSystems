@@ -1,0 +1,2231 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index 9b0916971..8c7311cde 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -63,6 +63,7 @@ import {
+   type ToolIntent,
+ } from '@/shared/chat-nodes'
+ import type { DockedNodes } from '@/shared/chat-nodes/types'
++import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
+ // The barrel does not re-export it yet; one more line there when it next changes.
+ import { nodeKey } from '@/shared/chat-nodes/derive'
+ import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+@@ -1220,6 +1221,7 @@ export function UserMessage(props: {
+             <UserMessageContent content={props.message.content} />
+             <ToolChips tools={props.message.tools} />
+             <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
++            <ContextRefChips refs={props.message.contextRefs ?? []} />
+           </div>
+           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
+             <Show
+@@ -3338,6 +3340,27 @@ export function AttachmentChips(props: {
+   )
+ }
+ 
++/**
++ * The context chips a user turn was sent with (EP-3 S5), read back from `metadata.context_refs`. Labels
++ * only: a chip is a reference the gateway resolved, never content, so nothing here opens or fetches it.
++ */
++function ContextRefChips(props: { refs: readonly ChatContextRef[] }) {
++  const i18n = useI18n()
++  return (
++    <Show when={props.refs.length > 0}>
++      <div class="verevon-chat-context-refs" role="list" aria-label={i18n.tr('Kontekst', 'Context')}>
++        <For each={props.refs}>
++          {(ref) => (
++            <span role="listitem" class="verevon-chat-context-ref" data-kind={ref.kind}>
++              {ref.label || ref.id}
++            </span>
++          )}
++        </For>
++      </div>
++    </Show>
++  )
++}
++
+ /** Connector-attach picker provenance labels — mirrors the composer's own
+  * CONNECTOR_SOURCE_LABELS (DashboardComposer.tsx), kept as a small local
+  * copy here rather than a cross-file import: this is a display-only label
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ContextRefPicker.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ContextRefPicker.tsx
+new file mode 100644
+index 000000000..fa4a289a4
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ContextRefPicker.tsx	
+@@ -0,0 +1,121 @@
++import { createMemo, createSignal, For, Show } from 'solid-js'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { listDocuments, type Document } from '@/shared/api/knowledge-client'
++import { listAvailableSkills, type Skill } from '@/shared/api/skills-client'
++import { useI18n } from '@/shared/i18n'
++import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
++
++/**
++ * The context picker (EP-3 S5, OD-4): opened by the composer's "+ Kontekst" button or `/kontekst`,
++ * never by a typed character. Each tab lists what the person can already open through an existing
++ * read, so the picker offers nothing they could not reach; the gateway resolves every pick again
++ * under their own authority. Conversations are not offered yet: the gateway refuses a thread
++ * reference until the thread tools (EP-3 S7) exist.
++ */
++export type ContextRefPickerSpace = { id: string; label: string }
++
++type PickerTab = 'documents' | 'skills' | 'space'
++
++export function ContextRefPicker(props: {
++  orgId?: string
++  /** The conversation's own Space. A Space reference may only name it, so no other Space is listed. */
++  space?: ContextRefPickerSpace
++  selected: readonly ChatContextRef[]
++  onPick: (ref: ChatContextRef) => void
++  onClose: () => void
++}) {
++  const i18n = useI18n()
++  const [tab, setTab] = createSignal<PickerTab>('documents')
++  const [filter, setFilter] = createSignal('')
++  const [documents] = createResource(
++    () => (tab() === 'documents' && props.orgId ? props.orgId : false),
++    async (orgId) => {
++      try {
++        return await listDocuments(orgId)
++      } catch {
++        return [] as Document[]
++      }
++    },
++  )
++  const [skills] = createResource(
++    () => tab() === 'skills',
++    async () => {
++      try {
++        return await listAvailableSkills()
++      } catch {
++        return [] as Skill[]
++      }
++    },
++  )
++  const candidates = createMemo<ChatContextRef[]>(() => {
++    const query = filter().trim().toLowerCase()
++    const all: ChatContextRef[] = tab() === 'documents'
++      ? (documents() ?? []).map((document) => ({ kind: 'document' as const, id: document.id, label: document.title }))
++      : tab() === 'skills'
++        ? (skills() ?? []).map((skill) => ({ kind: 'skill' as const, id: skill.id, label: skill.name }))
++        : props.space
++          ? [{ kind: 'space' as const, id: props.space.id, label: props.space.label }]
++          : []
++    return all.filter((ref) =>
++      ref.id.trim().length > 0
++      && !props.selected.some((item) => item.kind === ref.kind && item.id === ref.id)
++      && (!query || ref.label.toLowerCase().includes(query)))
++  })
++  const tabs: Array<{ id: PickerTab; no: string; en: string }> = [
++    { id: 'documents', no: 'Dokumenter', en: 'Documents' },
++    { id: 'skills', no: 'Ferdigheter', en: 'Skills' },
++    { id: 'space', no: 'Rom', en: 'Space' },
++  ]
++
++  return (
++    <div
++      class="dashboard-composer-context-picker"
++      role="dialog"
++      aria-label={i18n.tr('Legg til kontekst', 'Add context')}
++      onKeyDown={(event) => {
++        if (event.key === 'Escape') {
++          event.preventDefault()
++          props.onClose()
++        }
++      }}
++    >
++      <div role="tablist" class="flex gap-1">
++        <For each={tabs.filter((item) => item.id !== 'space' || props.space)}>
++          {(item) => (
++            <button
++              type="button"
++              role="tab"
++              aria-selected={tab() === item.id ? 'true' : 'false'}
++              onClick={() => setTab(item.id)}
++            >
++              {i18n.tr(item.no, item.en)}
++            </button>
++          )}
++        </For>
++      </div>
++      <input
++        type="search"
++        aria-label={i18n.tr('Filtrer', 'Filter')}
++        value={filter()}
++        onInput={(event) => setFilter(event.currentTarget.value)}
++      />
++      <Show
++        when={candidates().length > 0}
++        fallback={<p role="note">{i18n.tr('Ingenting å legge til her.', 'Nothing to add here.')}</p>}
++      >
++        <ul role="listbox" aria-label={i18n.tr('Kontekst', 'Context')}>
++          <For each={candidates()}>
++            {(ref) => (
++              <li>
++                <button type="button" role="option" aria-selected="false" onClick={() => props.onPick(ref)}>
++                  {ref.label || ref.id}
++                </button>
++              </li>
++            )}
++          </For>
++        </ul>
++      </Show>
++      <button type="button" onClick={() => props.onClose()}>{i18n.tr('Lukk', 'Close')}</button>
++    </div>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.test.tsx b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.test.tsx
+new file mode 100644
+index 000000000..423e53737
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.test.tsx	
+@@ -0,0 +1,117 @@
++// @vitest-environment jsdom
++
++/**
++ * EP-3 S5 context chips: a chip is removed whole, no character opens the picker, and `/kontekst`
++ * (registered in the composer's slash registry) does. The picker's reads are mocked; the chips are a
++ * controlled prop, as the composer wires them.
++ */
++
++import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { createRoot, createSignal, flush } from 'solid-js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
++
++vi.mock('@/shared/api/knowledge-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/knowledge-client')>()
++  return {
++    ...actual,
++    listDocuments: vi.fn().mockResolvedValue([{ id: 'doc-9', title: 'Prisliste', sourceId: 'src-1' }]),
++  }
++})
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return { ...actual, listAvailableSkills: vi.fn().mockResolvedValue([]) }
++})
++
++import { ComposerContextChips } from './ComposerContextChips'
++import { createSlashCommandRegistry, type SlashCommandRegistry } from './composer-slash-registry'
++
++const budget: ChatContextRef = { kind: 'document', id: 'doc-1', label: 'Budsjett' }
++const writing: ChatContextRef = { kind: 'skill', id: 'skill.a', label: 'Skriv' }
++
++let dispose: (() => void) | undefined
++
++function mount(options: { available?: boolean; refs?: ChatContextRef[] } = {}) {
++  let registry!: SlashCommandRegistry
++  createRoot((rootDispose) => {
++    dispose = rootDispose
++    registry = createSlashCommandRegistry()
++  })
++  const changes: ChatContextRef[][] = []
++  const [refs, setRefs] = createSignal<ChatContextRef[]>(options.refs ?? [])
++  render(() => (
++    <ComposerContextChips
++      available={options.available ?? true}
++      refs={refs()}
++      onChange={(next) => {
++        changes.push(next)
++        setRefs(next)
++      }}
++      registry={registry}
++      orgId="org-1"
++    />
++  ))
++  flush()
++  return { registry, changes }
++}
++
++afterEach(() => {
++  dispose?.()
++  dispose = undefined
++})
++
++describe('ComposerContextChips', () => {
++  it('chip_is_atomic_on_backspace', () => {
++    const { changes } = mount({ refs: [budget, writing] })
++    const chip = screen.getByRole('listitem', { name: 'Budsjett' })
++    chip.focus()
++    fireEvent.keyDown(chip, { key: 'Backspace' })
++    flush()
++    expect(changes.at(-1)).toEqual([writing])
++    expect(screen.queryByRole('listitem', { name: 'Budsjett' })).toBeNull()
++    // The rest of the row is untouched: no chip is ever edited down to part of its label.
++    expect(screen.getByRole('listitem', { name: 'Skriv' })).toBeTruthy()
++  })
++
++  it('at_sign_opens_nothing', () => {
++    const { registry } = mount({ refs: [budget] })
++    const row = screen.getByRole('list', { name: /kontekst|context/i })
++    fireEvent.keyDown(row, { key: '@' })
++    fireEvent.keyDown(screen.getByRole('listitem', { name: 'Budsjett' }), { key: '@' })
++    flush()
++    expect(screen.queryByRole('dialog')).toBeNull()
++    // The only trigger this row adds is a slash command; `@` stays reserved for Space agents.
++    for (const command of registry.commands()) {
++      expect(command.name.startsWith('@')).toBe(false)
++      expect(command.aliases.some((alias) => alias.startsWith('@'))).toBe(false)
++    }
++  })
++
++  it('slash_kontekst_opens_picker', async () => {
++    const { registry } = mount()
++    const command = registry.commands().find((item) => item.name === 'kontekst')
++    expect(command).toBeDefined()
++    command?.run()
++    flush()
++    expect(screen.getByRole('dialog')).toBeTruthy()
++    await waitFor(() => expect(screen.getByRole('option', { name: 'Prisliste' })).toBeTruthy())
++  })
++
++  it('picking adds one atomic chip and closes the picker', async () => {
++    const { changes } = mount()
++    fireEvent.click(screen.getByRole('button', { name: /kontekst|context/i }))
++    flush()
++    await waitFor(() => expect(screen.getByRole('option', { name: 'Prisliste' })).toBeTruthy())
++    fireEvent.click(screen.getByRole('option', { name: 'Prisliste' }))
++    flush()
++    expect(changes.at(-1)).toEqual([{ kind: 'document', id: 'doc-9', label: 'Prisliste' }])
++    expect(screen.queryByRole('dialog')).toBeNull()
++  })
++
++  it('is absent, and registers no command, where references are not available', () => {
++    const { registry } = mount({ available: false, refs: [budget] })
++    expect(screen.queryByRole('list', { name: /kontekst|context/i })).toBeNull()
++    expect(registry.commands()).toHaveLength(0)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.tsx b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.tsx
+new file mode 100644
+index 000000000..af3d9322a
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.tsx	
+@@ -0,0 +1,135 @@
++import { createEffect, createSignal, For, Show } from 'solid-js'
++import { BookOpen, CirclePlus, X } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import {
++  addContextRef,
++  CONTEXT_REFS_LIMIT,
++  removeContextRef,
++  type ChatContextRef,
++} from '@/shared/actions/chat-context-refs'
++import { ContextRefPicker, type ContextRefPickerSpace } from '@/features/chat/components/ContextRefPicker'
++import type { SlashCommandRegistry } from './composer-slash-registry'
++
++/**
++ * The composer's context chips (EP-3 S5): a "+ Kontekst" button, the `/kontekst` command and the chips
++ * the person attached. Mounted by the composer in one line; it owns its picker and its command.
++ *
++ * OD-4: references are added from the picker only. No character opens it (`@` names Space agents,
++ * DEC-26, and `#` is a Markdown heading), and a chip is atomic: Backspace or Delete on a focused chip
++ * removes the whole chip, never part of its label. The row exists only where the catalogue says the
++ * gateway resolves references and the turn may carry them.
++ */
++export function ComposerContextChips(props: {
++  /** The catalogue advertises `context_refs` and this turn may carry references. */
++  available: boolean
++  refs: readonly ChatContextRef[]
++  onChange: (refs: ChatContextRef[]) => void
++  registry: SlashCommandRegistry
++  orgId?: string
++  space?: ContextRefPickerSpace
++  disabled?: boolean
++}) {
++  const i18n = useI18n()
++  const [pickerOpen, setPickerOpen] = createSignal(false)
++
++  // `/kontekst` exists only while the row does, so the menu never offers a command that does nothing.
++  // The cleanup is returned, not `onCleanup`: inside a two-argument effect this fork drops onCleanup.
++  createEffect(
++    () => props.available,
++    (available) => {
++      if (!available) {
++        setPickerOpen(false)
++        return undefined
++      }
++      return props.registry.register({
++        id: 'builtin:context_refs',
++        name: 'kontekst',
++        aliases: ['context', 'kilde', 'referanse'],
++        label: 'Kontekst',
++        description: {
++          no: 'Legg ved et dokument, en ferdighet eller rommet som kontekst for meldingen.',
++          en: 'Attach a document, a skill or the Space as context for the message.',
++        },
++        icon: BookOpen,
++        run: () => setPickerOpen(true),
++      })
++    },
++  )
++
++  const remove = (ref: ChatContextRef) => props.onChange(removeContextRef(props.refs, ref))
++  const full = () => props.refs.length >= CONTEXT_REFS_LIMIT
++
++  return (
++    <Show when={props.available}>
++      <div
++        class="dashboard-composer-context-chips"
++        role="list"
++        aria-label={i18n.tr('Kontekst for meldingen', 'Context for the message')}
++        style={{ display: 'flex', 'flex-wrap': 'wrap', gap: '4px', padding: '2px 12px' }}
++      >
++        <For each={props.refs}>
++          {(ref) => (
++            <span
++              role="listitem"
++              tabindex="0"
++              class="dashboard-composer-context-chip"
++              data-kind={ref.kind}
++              aria-label={ref.label || ref.id}
++              onKeyDown={(event) => {
++                if (event.key === 'Backspace' || event.key === 'Delete') {
++                  event.preventDefault()
++                  remove(ref)
++                }
++              }}
++              style={{
++                display: 'inline-flex',
++                'align-items': 'center',
++                gap: '4px',
++                'max-width': '240px',
++                padding: '1px 8px',
++                'border-radius': '999px',
++                'font-size': '12px',
++                border: '1px solid currentColor',
++              }}
++            >
++              <span style={{ overflow: 'hidden', 'text-overflow': 'ellipsis', 'white-space': 'nowrap' }}>
++                {ref.label || ref.id}
++              </span>
++              <button
++                type="button"
++                aria-label={i18n.tr(`Fjern ${ref.label || ref.id}`, `Remove ${ref.label || ref.id}`)}
++                disabled={props.disabled}
++                onClick={() => remove(ref)}
++              >
++                <X size={11} strokeWidth={2} />
++              </button>
++            </span>
++          )}
++        </For>
++        <button
++          type="button"
++          class="dashboard-composer-context-add"
++          aria-haspopup="dialog"
++          aria-expanded={pickerOpen() ? 'true' : 'false'}
++          disabled={props.disabled || full()}
++          onClick={() => setPickerOpen((open) => !open)}
++        >
++          <CirclePlus size={12} strokeWidth={2} />
++          {i18n.tr('Kontekst', 'Context')}
++        </button>
++      </div>
++      <Show when={pickerOpen()}>
++        <ContextRefPicker
++          orgId={props.orgId}
++          space={props.space}
++          selected={props.refs}
++          onPick={(ref) => {
++            props.onChange(addContextRef(props.refs, ref))
++            setPickerOpen(false)
++          }}
++          onClose={() => setPickerOpen(false)}
++        />
++      </Show>
++    </Show>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx
+index 044b5c695..a1ec857b6 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx	
+@@ -160,6 +160,14 @@ import {
+ 	toggleConnectorScope,
+ 	type ConnectorScopeBlock,
+ } from "@/shared/actions/chat-connector-scope";
++import {
++	catalogueAdvertisesContextRefs,
++	contextRefsBlocked,
++	normalizeContextRefs,
++	type ChatContextRef,
++} from "@/shared/actions/chat-context-refs";
++import { ComposerContextChips } from "./ComposerContextChips";
++import { createSlashCommandRegistry, type RegisteredSlashCommand } from "./composer-slash-registry";
+ import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
+ import type { BrowserTab } from "@/shared/api/browser-client";
+ import {
+@@ -325,6 +333,8 @@ export type ComposerCommand = {
+ 	label: string;
+ 	/** Canonical token after "/", lowercase and space-free. */
+ 	name: string;
++	/** A command a composer piece registered (`composer-slash-registry`); picking it runs its own `run`. */
++	registered?: RegisteredSlashCommand;
+ 	specialized?: SpecializedAction;
+ };
+ 
+@@ -444,6 +454,11 @@ export type DashboardComposerSubmitPayload = {
+      * without connected apps is unchanged on the wire.
+      */
+     connectorScope?: string[];
++    /**
++     * The context chips attached to this send (EP-3 S5). Omitted when none were attached, so a turn
++     * without references is unchanged on the wire.
++     */
++    contextRefs?: ChatContextRef[];
+     /**
+      * The agent mode the person picked for this send (WS25-S11). Omitted unless they picked one, so an
+      * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
+@@ -1403,6 +1418,17 @@ export function DashboardComposer(props: {
+ 	createEffect(() => connectorScopeBlockReason(), (reason) => {
+ 		if (reason) setConnectorScope([]);
+ 	});
++	// This composer's slash-command registry (C-B10): pieces that bring their own `/` command register it here.
++	const slashRegistry = createSlashCommandRegistry();
++	// Context chips for this turn (EP-3 S5). They exist only where the catalogue says the gateway resolves
++	// references and the turn may carry them; like connected apps, they are cleared once the turn is sent.
++	const [contextRefs, setContextRefs] = createSignal<ChatContextRef[]>([]);
++	const contextRefsAvailable = createMemo(() =>
++		catalogueAdvertisesContextRefs(models() ?? [])
++		&& !contextRefsBlocked({ zeroRetention: zeroRetentionTurn(), subscriptionBacked: subscriptionBacked() }));
++	createEffect(() => contextRefsAvailable(), (available) => {
++		if (!available) setContextRefs([]);
++	});
+ 	const selectedModelLabel = () => {
+ 		const id = selectedModel();
+ 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
+@@ -1560,6 +1586,15 @@ export function DashboardComposer(props: {
+ 					name: slugifyCommandName(action.name),
+ 					specialized: action,
+ 				})),
++			...slashRegistry.commands().map((command) => ({
++				aliases: command.aliases,
++				description: command.description,
++				icon: command.icon,
++				id: command.id,
++				label: command.label,
++				name: command.name,
++				registered: command,
++			})),
+ 		];
+ 	});
+ 	// The draft's leading `/name`, when it resolves to a real command. Null for
+@@ -1838,6 +1873,10 @@ export function DashboardComposer(props: {
+ 	};
+ 
+ 	const runCommand = (command: ComposerCommand) => {
++		if (command.registered) {
++			command.registered.run();
++			return;
++		}
+ 		if (command.builtin === "file") {
+ 			openFileDialog();
+ 			return;
+@@ -2842,6 +2881,7 @@ export function DashboardComposer(props: {
+ 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
+ 			? normalizeConnectorScope(connectorScope())
+ 			: [];
++		const submittedContextRefs = contextRefsAvailable() ? normalizeContextRefs(contextRefs()) : [];
+ 
+ 		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
+ 		// turn, which runs no agent.
+@@ -2866,6 +2906,8 @@ export function DashboardComposer(props: {
+ 			}
+ 			// Omitted when nothing was picked, like `retrievalScope` above.
+ 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
++			// Omitted when no chip was attached, like `connectorScope` above.
++			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
+ 			// Omitted when nothing was picked, like `connectorScope` above.
+ 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
+ 			// Omitted unless the text has a mention; a conversation-only turn reads no page.
+@@ -2879,6 +2921,7 @@ export function DashboardComposer(props: {
+ 			else await writePendingChatLaunch(payload);
+ 			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
+ 			if (submittedConnectorScope.length > 0) setConnectorScope([]);
++			if (submittedContextRefs.length > 0) setContextRefs([]);
+ 		} catch (error) {
+ 			const message = error instanceof PendingChatLaunchError
+ 				? error.reason === 'unreadable'
+@@ -3917,6 +3960,8 @@ export function DashboardComposer(props: {
+ 						</Show>
+ 					</div>
+ 
++					<ComposerContextChips available={contextRefsAvailable()} refs={contextRefs()} onChange={setContextRefs} registry={slashRegistry} orgId={activeOrgId() || undefined} disabled={props.submitting} />
++
+ 					<Show when={tabMentionResolutions().length > 0}>
+ 						<div
+ 							class="dashboard-composer-tab-mentions"
+diff --git a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/composer-slash-registry.ts b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/composer-slash-registry.ts
+new file mode 100644
+index 000000000..0df0947a7
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/composer-slash-registry.ts	
+@@ -0,0 +1,40 @@
++import { createSignal, type Accessor, type Component } from 'solid-js'
++import type { LucideProps } from '@/shared/icons'
++
++/**
++ * The composer's slash-command registry (Wave 3 C-B10): one per composer, created by the composer and
++ * handed to the pieces that bring their own `/` command, so a feature registers its command where it
++ * lives instead of growing the composer's built-in list. EP-3 S5's `/kontekst` is the first entry;
++ * slash templates and `/learn` (EP-11 S6/S7) register here too. `@` is not a slash command and stays
++ * reserved for Space agents (DEC-26).
++ */
++export type RegisteredSlashCommand = {
++  /** Unique across the registry; also the menu item's id. */
++  id: string
++  /** Canonical token after "/", lowercase and space-free. */
++  name: string
++  aliases: string[]
++  label: string
++  description: { no: string; en: string }
++  icon: Component<LucideProps>
++  /** What picking the command does. The `/name` the person typed is cleared first. */
++  run: () => void
++}
++
++export type SlashCommandRegistry = {
++  /** The commands registered right now, in registration order. */
++  commands: Accessor<readonly RegisteredSlashCommand[]>
++  /** Adds a command (replacing one with the same id) and returns the function that removes it. */
++  register: (command: RegisteredSlashCommand) => () => void
++}
++
++export function createSlashCommandRegistry(): SlashCommandRegistry {
++  const [commands, setCommands] = createSignal<readonly RegisteredSlashCommand[]>([])
++  return {
++    commands,
++    register(command) {
++      setCommands((current) => [...current.filter((item) => item.id !== command.id), command])
++      return () => setCommands((current) => current.filter((item) => item !== command))
++    },
++  }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 982a037ce..7f65e4b81 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -669,6 +669,33 @@ describe('action registry', () => {
+     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
+   })
+ 
++  it('registers the context chips as model-plane actions the model cannot execute, and bounds them like the gateway', () => {
++    const set = getActionDescriptor('chat.set_context_refs')
++    expect(set).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.set_context_refs')).toBe(false)
++    expect(set?.description ?? '').toContain('Never model-executable')
++
++    const schema = set?.inputSchema
++    const doc = { kind: 'document', id: 'doc-1', label: 'Budsjett' }
++    expect(schema?.safeParse({ contextRefs: [] }).success).toBe(true)
++    expect(schema?.safeParse({ contextRefs: [doc, { kind: 'skill', id: 'skill.a', label: 'Skriv' }] }).success).toBe(true)
++    expect(schema?.safeParse({ contextRefs: Array.from({ length: 20 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(true)
++    expect(schema?.safeParse({ contextRefs: Array.from({ length: 21 }, (_, i) => ({ ...doc, id: `d${i}` })) }).success).toBe(false)
++    expect(schema?.safeParse({ contextRefs: [doc, doc] }).success).toBe(false)
++    expect(schema?.safeParse({ contextRefs: [{ ...doc, id: 'a b' }] }).success).toBe(false)
++    expect(schema?.safeParse({ contextRefs: [{ ...doc, label: 'x'.repeat(121) }] }).success).toBe(false)
++    // A conversation and a selection are not chips yet (EP-3 S6/S7), and a reference carries no content.
++    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'thread' }] }).success).toBe(false)
++    expect(schema?.safeParse({ contextRefs: [{ ...doc, kind: 'artifact_selection' }] }).success).toBe(false)
++    expect(schema?.safeParse({ contextRefs: [{ ...doc, content: 'text' }] }).success).toBe(false)
++
++    const pick = getActionDescriptor('chat.pick_context_ref')
++    expect(pick).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
++    expect(isModelExecutableAction('chat.pick_context_ref')).toBe(false)
++    expect(pick?.inputSchema.safeParse({ tab: 'documents' }).success).toBe(true)
++    expect(pick?.inputSchema.safeParse({ tab: 'threads' }).success).toBe(false)
++  })
++
+   it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
+     const mode = getActionDescriptor('chat.set_agent_mode')
+ 
+@@ -1160,7 +1187,8 @@ describe('action registry', () => {
+     // 275 after EP-2-S4 registered chat.open_cited_passage, the cited-passage viewer read.
+     // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.
+     // +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.
+-    expect(ids).toHaveLength(277)
++    // +2 after EP-3-S5 registered chat.set_context_refs and chat.pick_context_ref, the composer's context chips.
++    expect(ids).toHaveLength(279)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 6a99b4a43..b919dfcfd 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1089,6 +1089,37 @@ const chatSetConnectorScopeInput = z
+   })
+   .strict()
+ 
++// The context chips one chat turn carries (EP-3 S5), sent as `context_refs`. The bounds are the gateway's own
++// (mp-contracts `context_refs`): at most 20 references, ids of 1-128 characters from [A-Za-z0-9_.:-], labels
++// of at most 120 characters, no repeated kind and id. A selection is EP-3 S6's and is not a chip, and a
++// conversation joins the list with the thread tools (EP-3 S7), which the gateway refuses until then.
++const chatContextRefInput = z
++  .object({
++    kind: z.enum(['document', 'space', 'skill']),
++    id: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
++    label: z.string().max(120),
++  })
++  .strict()
++
++const chatSetContextRefsInput = z
++  .object({
++    contextRefs: z
++      .array(chatContextRefInput)
++      .max(20)
++      .refine((refs) => new Set(refs.map((ref) => `${ref.kind}:${ref.id}`)).size === refs.length, {
++        message: 'context references must be distinct',
++      }),
++  })
++  .strict()
++
++// Opening the context picker reads what the person can already open: one tab, and an optional filter.
++const chatPickContextRefInput = z
++  .object({
++    tab: z.enum(['documents', 'skills', 'space']),
++    query: z.string().max(200).optional(),
++  })
++  .strict()
++
+ // The agent mode one chat turn runs under (WS25-S6): the four ids of `api/contracts/agent-modes.json`,
+ // read by the gateway as `agent_mode`. A closed list, so an id outside it is refused.
+ const chatSetAgentModeInput = z
+@@ -4055,6 +4086,28 @@ export const actionRegistry = [
+     inputSchema: chatSetConnectorScopeInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.set_context_refs',
++    label: 'Attach context to a chat turn',
++    description: 'Name the context one chat turn carries: the composer\'s context chips (knowledge documents, skills, the conversation\'s own Space), sent as context_refs on that turn only. At most 20 distinct references, each a kind, an id and a display label; an empty list clears the choice. The gateway resolves every reference again under the person\'s own access, a document only narrows the knowledge search, and a Space can only name the conversation\'s own. A zero-retention or temporary turn never carries references. Never model-executable: a model does not choose what the person attaches.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatSetContextRefsInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'chat.pick_context_ref',
++    label: 'Open the context picker',
++    description: 'Open the composer\'s context picker (the "+ Kontekst" button or /kontekst) on one tab: knowledge documents, skills, or the conversation\'s own Space. Read only: it lists what the person can already open through the existing document and skill reads, and nothing is attached until they pick. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatPickContextRefInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.set_agent_mode',
+     label: 'Choose the agent mode for a chat turn',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/chat-context-refs.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-context-refs.ts
+new file mode 100644
+index 000000000..4df0b9ace
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-context-refs.ts	
+@@ -0,0 +1,93 @@
++/**
++ * Typed context references for one chat turn (Wave 3 EP-3 S5). The composer attaches atomic chips
++ * (a knowledge document, a past conversation, the current Space, a skill) that travel as a list next
++ * to the text, never as text in the prompt. A reference is a selector: the gateway resolves its id
++ * under the person's own authority, and the label is display text for the chip only.
++ *
++ * The bounds are the gateway's own (model-gateway `context_refs`, mp-contracts `context_refs`): at
++ * most 20 references, at most 20 conversations, ids of 1-128 characters from [A-Za-z0-9_.:-], labels
++ * cut to 120 characters, no repeat of a kind and id. Nothing here sends a list the gateway would
++ * refuse for its shape.
++ */
++export const CONTEXT_REFS_LIMIT = 20
++export const CONTEXT_REF_THREAD_LIMIT = 20
++export const CONTEXT_REF_LABEL_MAX = 120
++
++/** The kinds a chip can name. `artifact_selection` is the selection edit's (EP-3 S6), not a picker tab. */
++export type ChatContextRefKind = 'document' | 'thread' | 'space' | 'skill' | 'artifact_selection'
++
++export const CONTEXT_REF_KINDS: readonly ChatContextRefKind[] = ['document', 'thread', 'space', 'skill', 'artifact_selection']
++
++/** One chip as the send carries it and as `metadata.context_refs` stores it after the turn. */
++export type ChatContextRef = {
++  kind: ChatContextRefKind
++  id: string
++  label: string
++}
++
++const CONTEXT_REF_ID = /^[A-Za-z0-9_.:-]{1,128}$/
++
++function isKind(value: unknown): value is ChatContextRefKind {
++  return typeof value === 'string' && (CONTEXT_REF_KINDS as readonly string[]).includes(value)
++}
++
++/** The label as the gateway keeps it: trimmed, control characters dropped, cut to the cap. */
++export function capContextRefLabel(label: string): string {
++  // eslint-disable-next-line no-control-regex
++  return Array.from(label.trim().replace(/[\u0000-\u001f\u007f-\u009f]/g, '')).slice(0, CONTEXT_REF_LABEL_MAX).join('')
++}
++
++/**
++ * Drops anything the gateway would refuse for its shape (an unknown kind, a malformed id, a repeat),
++ * and keeps at most the limits. Used for the wire and for the stored chips a reload reads back.
++ */
++export function normalizeContextRefs(value: unknown): ChatContextRef[] {
++  if (!Array.isArray(value)) return []
++  const refs: ChatContextRef[] = []
++  let threads = 0
++  for (const item of value) {
++    if (!item || typeof item !== 'object') continue
++    const { kind, id, label } = item as Record<string, unknown>
++    if (!isKind(kind) || typeof id !== 'string') continue
++    const trimmed = id.trim()
++    if (!CONTEXT_REF_ID.test(trimmed)) continue
++    if (refs.some((ref) => ref.kind === kind && ref.id === trimmed)) continue
++    if (kind === 'thread' && threads >= CONTEXT_REF_THREAD_LIMIT) continue
++    if (kind === 'thread') threads += 1
++    refs.push({ kind, id: trimmed, label: capContextRefLabel(typeof label === 'string' ? label : '') })
++    if (refs.length === CONTEXT_REFS_LIMIT) break
++  }
++  return refs
++}
++
++/** The list with one reference added (a repeat or a reference past the limit is not added). */
++export function addContextRef(current: readonly ChatContextRef[], ref: ChatContextRef): ChatContextRef[] {
++  return normalizeContextRefs([...current, ref])
++}
++
++/** The list without one reference: a chip is removed whole, never edited. */
++export function removeContextRef(current: readonly ChatContextRef[], ref: Pick<ChatContextRef, 'kind' | 'id'>): ChatContextRef[] {
++  return current.filter((item) => !(item.kind === ref.kind && item.id === ref.id))
++}
++
++/**
++ * The catalogue flag that says the gateway resolves references on this deployment: a chat model
++ * lists it only while `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` is on, so the picker and `/kontekst`
++ * exist only when the server says they work. Nothing here derives it from a name.
++ */
++export const CONTEXT_REFS_CAPABILITY = 'context_refs'
++
++export function catalogueAdvertisesContextRefs(
++  models: readonly { modality?: string; capabilities?: readonly string[] }[],
++): boolean {
++  return models.some((model) => model.modality === 'chat' && (model.capabilities?.includes(CONTEXT_REFS_CAPABILITY) ?? false))
++}
++
++/**
++ * Why references cannot ride a turn. A zero-retention or temporary turn is refused by the gateway
++ * (`context_references`), and a subscription route carries no reference, so the chips are hidden
++ * there and none is sent.
++ */
++export function contextRefsBlocked(turn: { zeroRetention: boolean; subscriptionBacked: boolean }): boolean {
++  return turn.zeroRetention || turn.subscriptionBacked
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.context-refs.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.context-refs.test.ts
+new file mode 100644
+index 000000000..8adf9f976
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.context-refs.test.ts	
+@@ -0,0 +1,76 @@
++import { describe, expect, it } from 'vitest'
++import { buildChatWireBody, type ChatInvokeRequest } from './chat-client'
++import {
++  catalogueAdvertisesContextRefs,
++  normalizeContextRefs,
++  removeContextRef,
++  type ChatContextRef,
++} from '@/shared/actions/chat-context-refs'
++
++// EP-3 S5: `context_refs` is the wire form of the composer's context chips. These tests pin the
++// rules that matter: the field is present only when a chip was attached and the turn may carry it,
++// its shape is the gateway's, and the catalogue, not the client, says whether references exist.
++
++const ask: ChatInvokeRequest = { content: 'Hva sier budsjettet?', model: 'verevon-balance' }
++const budget: ChatContextRef = { kind: 'document', id: 'doc-1', label: 'Budsjett 2027' }
++
++describe('buildChatWireBody context_refs', () => {
++  it('omitted_when_empty', () => {
++    expect(buildChatWireBody(ask)).not.toHaveProperty('context_refs')
++    expect(buildChatWireBody({ ...ask, contextRefs: [] })).not.toHaveProperty('context_refs')
++  })
++
++  it('sends the attached chips as kind, id and label', () => {
++    expect(buildChatWireBody({ ...ask, contextRefs: [budget, { kind: 'skill', id: 'skill.a', label: 'Skriv' }] }))
++      .toMatchObject({ context_refs: [budget, { kind: 'skill', id: 'skill.a', label: 'Skriv' }] })
++  })
++
++  it('never_sent_on_temporary', () => {
++    // A temporary chat and a zero-retention workspace both send `zdr`; the gateway refuses references there.
++    expect(buildChatWireBody({ ...ask, zdr: true, contextRefs: [budget] })).not.toHaveProperty('context_refs')
++  })
++
++  it('is withheld on a subscription route', () => {
++    expect(buildChatWireBody({
++      ...ask,
++      provider: 'openai-codex-subscription',
++      subscriptionConnectionId: 'conn-1',
++      contextRefs: [budget],
++    })).not.toHaveProperty('context_refs')
++  })
++})
++
++describe('normalizeContextRefs', () => {
++  it('drops unknown kinds, malformed ids and repeats, and keeps the gateway limits', () => {
++    const refs = normalizeContextRefs([
++      budget,
++      budget,
++      { kind: 'mention', id: 'x', label: 'x' },
++      { kind: 'document', id: 'a b', label: 'bad' },
++      { kind: 'skill', id: ' skill.a ', label: '  Skriv  ' },
++      'doc-2',
++    ])
++    expect(refs).toEqual([budget, { kind: 'skill', id: 'skill.a', label: 'Skriv' }])
++    const many = Array.from({ length: 25 }, (_, n) => ({ kind: 'document', id: `d${n}`, label: '' }))
++    expect(normalizeContextRefs(many)).toHaveLength(20)
++  })
++
++  it('cuts a label to 120 characters', () => {
++    const [ref] = normalizeContextRefs([{ ...budget, label: 'é'.repeat(200) }])
++    expect(Array.from(ref?.label ?? '')).toHaveLength(120)
++  })
++
++  it('removes a chip whole', () => {
++    expect(removeContextRef([budget, { kind: 'skill', id: 'doc-1', label: 'same id' }], budget))
++      .toEqual([{ kind: 'skill', id: 'doc-1', label: 'same id' }])
++  })
++})
++
++describe('catalogueAdvertisesContextRefs', () => {
++  it('advertises references only when a chat model lists the capability', () => {
++    expect(catalogueAdvertisesContextRefs([{ modality: 'chat', capabilities: ['context_refs'] }])).toBe(true)
++    expect(catalogueAdvertisesContextRefs([{ modality: 'image', capabilities: ['context_refs'] }])).toBe(false)
++    expect(catalogueAdvertisesContextRefs([{ modality: 'chat', capabilities: ['vision'] }])).toBe(false)
++    expect(catalogueAdvertisesContextRefs([])).toBe(false)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 4dfffda0f..09e178efa 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -12,6 +12,7 @@ import type { ChatEventPayloads } from './chat-event-payloads.generated'
+ import { isSpaceDenial } from './space-denials'
+ import { isZdrCode } from './zdr-refusals'
+ import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
++import { normalizeContextRefs } from '@/shared/actions/chat-context-refs'
+ import {
+   isSelectablePrivacyTier,
+   normalizeAnswerServedBy,
+@@ -195,6 +196,12 @@ export type ChatInvokeRequest = {
+    * can take it: `buildChatWireBody` withholds it on the turns the composer blocks.
+    */
+   connectorScope?: string[]
++  /**
++   * The typed context references attached with the composer's chips (EP-3 S5). Sent as
++   * `context_refs` only when non-empty, and never on a zero-retention or temporary turn or a
++   * subscription route: the gateway refuses those, so this client never sends what it would refuse.
++   */
++  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+   content: string
+   model?: string
+   /** Explicit provider route for a user-owned model subscription. */
+@@ -1207,6 +1214,8 @@ export type ChatMessage = {
+   /** See `ChatInvokeRequest.retrievalScope`. Read back on history playback
+    * so a reopened thread's past turns can show their own receipt badge. */
+   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
++  /** The context chips a user turn was sent with (EP-3 S5), from `metadata.context_refs`: kind, id and label only. */
++  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+   id: string
+   role: 'user' | 'assistant'
+   content: string
+@@ -1875,6 +1884,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
+     || executeGranted || request.spaceRef?.trim() || retrievalScope !== 'auto'
+     ? []
+     : normalizeConnectorScope(request.connectorScope)
++  // Context references (EP-3 S5): present only when the person attached a chip. A zero-retention or
++  // temporary turn and a subscription route carry none; the server refuses them there regardless.
++  const contextRefs = request.zdr || subscriptionBacked
++    ? []
++    : normalizeContextRefs(request.contextRefs)
+ 
+   const uiLocale = request.locale ?? storedUiLocale()
+   return {
+@@ -1965,6 +1979,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
+     ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
+     // Omitted entirely when nothing was picked, like `retrieval_scope`: an ordinary turn is unchanged.
+     ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
++    // Omitted entirely when no chip was attached, like `connector_scope`: an ordinary turn is unchanged.
++    ...(contextRefs.length > 0 ? { context_refs: contextRefs } : {}),
+     attachments: request.attachments ?? [],
+     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
+     // nothing is pinned, so an ordinary turn's body is byte-identical to
+@@ -3693,6 +3709,9 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
+         const raw = item.retrieval_scope ?? objectValue(item.metadata)?.retrieval_scope
+         return raw === 'knowledge_only' ? 'knowledge_only' : raw === 'web_only' ? 'web_only' : undefined
+       })(),
++      // The chips the turn was sent with (EP-3 S5), read by name and normalized like the wire: a turn
++      // recorded before references existed has no key at all.
++      ...contextRefsField(objectValue(item.metadata)?.context_refs),
+       // Turn metadata the backend flattens onto the message. Present only for
+       // assistant turns recorded since the score became durable, so a missing
+       // field means "not recorded" — never a score of zero.
+@@ -3702,6 +3721,12 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
+     }))
+ }
+ 
++/** The `contextRefs` key for a turn that stored chips, and no key at all for one that did not. */
++function contextRefsField(value: unknown): { contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[] } {
++  const refs = normalizeContextRefs(value)
++  return refs.length > 0 ? { contextRefs: refs } : {}
++}
++
+ /** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */
+ function normalizeMessageVersion(value: unknown): ChatMessageVersion | undefined {
+   const record = objectValue(value)
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json
+index 7bcaacd90..8386b6a70 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json	
+@@ -236,6 +236,10 @@
+     {
+       "key": "run_inspection",
+       "label_en": "run timing and request inspection"
++    },
++    {
++      "key": "context_references",
++      "label_en": "references to documents, threads or selections"
+     }
+   ],
+   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256 b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256
+index 450fff85a..f1d99e878 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256	
+@@ -1 +1 @@
+-7b28a8283afa50db279a4f6fe72ea0f1a239129c168239611a208b45a48ebbdf *zdr-refusals.json
++2153c4f8801212893a42ad42328955a9e77d77ac17aede6e13cbabb526960915 *zdr-refusals.json
+diff --git a/apps/Model Plane/api/contracts/zdr-refusals.json b/apps/Model Plane/api/contracts/zdr-refusals.json
+index 7bcaacd90..8386b6a70 100644
+--- a/apps/Model Plane/api/contracts/zdr-refusals.json	
++++ b/apps/Model Plane/api/contracts/zdr-refusals.json	
+@@ -236,6 +236,10 @@
+     {
+       "key": "run_inspection",
+       "label_en": "run timing and request inspection"
++    },
++    {
++      "key": "context_references",
++      "label_en": "references to documents, threads or selections"
+     }
+   ],
+   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
+diff --git a/apps/Model Plane/api/contracts/zdr-refusals.json.sha256 b/apps/Model Plane/api/contracts/zdr-refusals.json.sha256
+index 450fff85a..f1d99e878 100644
+--- a/apps/Model Plane/api/contracts/zdr-refusals.json.sha256	
++++ b/apps/Model Plane/api/contracts/zdr-refusals.json.sha256	
+@@ -1 +1 @@
+-7b28a8283afa50db279a4f6fe72ea0f1a239129c168239611a208b45a48ebbdf *zdr-refusals.json
++2153c4f8801212893a42ad42328955a9e77d77ac17aede6e13cbabb526960915 *zdr-refusals.json
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/context_refs.rs b/apps/Model Plane/rust/crates/mp-contracts/src/context_refs.rs
+new file mode 100644
+index 000000000..199193495
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/context_refs.rs	
+@@ -0,0 +1,324 @@
++//! Typed context references a chat send carries next to its text (Wave 3 EP-3 S5).
++//!
++//! The composer attaches atomic references (a Data Plane document, a past thread, the turn's
++//! Space, a skill, a selection in an artifact) as a structured list, never as text in the
++//! prompt. This module is the shape and the bounds only, shared by the gateway and its tests;
++//! what each kind does for a turn, and when it is refused, is the gateway's resolver
++//! (`model-gateway` `context_refs`). A reference is a SELECTOR: its id names something the
++//! server resolves under the caller's own authority, and its label is display text for the chip,
++//! never trusted and never sent to a model.
++
++use std::collections::BTreeSet;
++
++/// Most references one send may carry, of every kind together.
++pub const MAX_CONTEXT_REFS: usize = 20;
++/// Most thread references one send may carry (EP-3 OD-7): each is read lazily at tool time, so
++/// the cap bounds what the model may browse, not what is injected.
++pub const MAX_THREAD_REFS: usize = 20;
++/// Most artifact selections one send may carry: a selection edit revises one range.
++pub const MAX_ARTIFACT_SELECTIONS: usize = 1;
++/// Longest label kept, in characters. A longer one is cut, never refused: it is display text.
++pub const MAX_LABEL_CHARS: usize = 120;
++/// Longest id accepted, in bytes. Every id this names (document, thread, Space, skill, artifact)
++/// is an ASCII identifier well under this length.
++pub const MAX_ID_LEN: usize = 128;
++
++/// What a reference names.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
++pub enum ContextRefKind {
++    /// A Data Plane document the viewer can read; it narrows the turn's knowledge search.
++    Document,
++    /// One of the owner's own earlier chat threads, read lazily by thread tools (EP-3 S7).
++    Thread,
++    /// The turn's own Space. It never widens a scope: it must equal the thread's Space.
++    Space,
++    /// A skill from the org's catalogue, merged into the turn's explicit skill picks.
++    Skill,
++    /// A range in the current revision of an artifact, for a selection edit (EP-3 S6).
++    ArtifactSelection,
++}
++
++impl ContextRefKind {
++    /// Every kind, in wire order.
++    pub const ALL: [Self; 5] = [
++        Self::Document,
++        Self::Thread,
++        Self::Space,
++        Self::Skill,
++        Self::ArtifactSelection,
++    ];
++
++    /// The wire spelling.
++    #[must_use]
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Document => "document",
++            Self::Thread => "thread",
++            Self::Space => "space",
++            Self::Skill => "skill",
++            Self::ArtifactSelection => "artifact_selection",
++        }
++    }
++
++    /// The kind a wire spelling names; an unknown spelling names none, and is refused by the
++    /// caller rather than guessed at.
++    #[must_use]
++    pub fn from_wire(value: &str) -> Option<Self> {
++        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
++    }
++}
++
++/// The range an `artifact_selection` names. Offsets are character offsets into the revision the
++/// client displayed; the quote itself never travels, only its SHA-256, so the server can check the
++/// range still holds the text the person selected.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ArtifactSelection {
++    pub artifact_id: String,
++    pub version: u32,
++    pub start: u32,
++    pub end: u32,
++    /// Lowercase hex SHA-256 of the selected text.
++    pub quote_sha256: String,
++}
++
++/// One reference as the send carries it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ContextRef {
++    pub kind: ContextRefKind,
++    pub id: String,
++    /// Display text for the chip. Never trusted, never sent to a model.
++    pub label: String,
++    /// Present exactly when `kind` is [`ContextRefKind::ArtifactSelection`].
++    pub selection: Option<ArtifactSelection>,
++}
++
++/// Why a list of references was refused. Each names the first rule the list broke.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ContextRefError {
++    /// More than [`MAX_CONTEXT_REFS`] references.
++    TooMany,
++    /// More than [`MAX_THREAD_REFS`] thread references.
++    TooManyThreads,
++    /// More than [`MAX_ARTIFACT_SELECTIONS`] artifact selections.
++    TooManySelections,
++    /// An id that is empty, too long or not ASCII-safe.
++    InvalidId,
++    /// The same kind and id twice.
++    Duplicate,
++    /// A selection on a kind that takes none, or an `artifact_selection` without a well-formed one.
++    InvalidSelection,
++}
++
++impl ContextRefError {
++    /// A stable reason string, for the refusal's `details`.
++    #[must_use]
++    pub const fn reason(self) -> &'static str {
++        match self {
++            Self::TooMany => "too_many_refs",
++            Self::TooManyThreads => "too_many_thread_refs",
++            Self::TooManySelections => "too_many_selections",
++            Self::InvalidId => "invalid_id",
++            Self::Duplicate => "duplicate_ref",
++            Self::InvalidSelection => "invalid_selection",
++        }
++    }
++}
++
++/// An id that can name a document, thread, Space, skill or artifact: 1 to [`MAX_ID_LEN`] ASCII
++/// letters, digits, `_`, `-`, `.` or `:`. Nothing that could break out of a filter or a path.
++#[must_use]
++pub fn is_safe_id(id: &str) -> bool {
++    !id.is_empty()
++        && id.len() <= MAX_ID_LEN
++        && id
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
++}
++
++fn is_sha256_hex(value: &str) -> bool {
++    value.len() == 64
++        && value
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++}
++
++fn selection_is_well_formed(reference: &ContextRef) -> bool {
++    match (reference.kind, &reference.selection) {
++        (ContextRefKind::ArtifactSelection, Some(selection)) => {
++            selection.artifact_id == reference.id
++                && selection.start < selection.end
++                && is_sha256_hex(&selection.quote_sha256)
++        }
++        (ContextRefKind::ArtifactSelection, None) => false,
++        (_, selection) => selection.is_none(),
++    }
++}
++
++/// The label as kept: trimmed, control characters dropped, cut to [`MAX_LABEL_CHARS`].
++#[must_use]
++pub fn capped_label(label: &str) -> String {
++    label
++        .trim()
++        .chars()
++        .filter(|ch| !ch.is_control())
++        .take(MAX_LABEL_CHARS)
++        .collect()
++}
++
++/// Checks a send's references and returns them with capped labels, in the order sent.
++///
++/// The counts are checked first, so an oversized list is refused before any id is looked at.
++///
++/// # Errors
++///
++/// The first [`ContextRefError`] the list breaks.
++pub fn validate_context_refs(refs: &[ContextRef]) -> Result<Vec<ContextRef>, ContextRefError> {
++    if refs.len() > MAX_CONTEXT_REFS {
++        return Err(ContextRefError::TooMany);
++    }
++    let count = |kind: ContextRefKind| refs.iter().filter(|r| r.kind == kind).count();
++    if count(ContextRefKind::Thread) > MAX_THREAD_REFS {
++        return Err(ContextRefError::TooManyThreads);
++    }
++    if count(ContextRefKind::ArtifactSelection) > MAX_ARTIFACT_SELECTIONS {
++        return Err(ContextRefError::TooManySelections);
++    }
++    let mut seen: BTreeSet<(ContextRefKind, &str)> = BTreeSet::new();
++    let mut out = Vec::with_capacity(refs.len());
++    for reference in refs {
++        if !is_safe_id(&reference.id) {
++            return Err(ContextRefError::InvalidId);
++        }
++        if !selection_is_well_formed(reference) {
++            return Err(ContextRefError::InvalidSelection);
++        }
++        if !seen.insert((reference.kind, reference.id.as_str())) {
++            return Err(ContextRefError::Duplicate);
++        }
++        out.push(ContextRef {
++            label: capped_label(&reference.label),
++            ..reference.clone()
++        });
++    }
++    Ok(out)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn reference(kind: ContextRefKind, id: &str) -> ContextRef {
++        ContextRef {
++            kind,
++            id: id.to_owned(),
++            label: format!("label {id}"),
++            selection: None,
++        }
++    }
++
++    fn selection(id: &str) -> ContextRef {
++        ContextRef {
++            selection: Some(ArtifactSelection {
++                artifact_id: id.to_owned(),
++                version: 3,
++                start: 4,
++                end: 9,
++                quote_sha256: "a".repeat(64),
++            }),
++            ..reference(ContextRefKind::ArtifactSelection, id)
++        }
++    }
++
++    #[test]
++    fn rejects_more_than_20_refs() {
++        let twenty: Vec<ContextRef> = (0..20)
++            .map(|n| reference(ContextRefKind::Document, &format!("doc-{n}")))
++            .collect();
++        assert_eq!(validate_context_refs(&twenty).map(|refs| refs.len()), Ok(20));
++        let mut twenty_one = twenty;
++        twenty_one.push(reference(ContextRefKind::Skill, "skill.a"));
++        assert_eq!(validate_context_refs(&twenty_one), Err(ContextRefError::TooMany));
++    }
++
++    #[test]
++    fn thread_refs_are_capped_at_20() {
++        let threads: Vec<ContextRef> = (0..20)
++            .map(|n| reference(ContextRefKind::Thread, &format!("thread-{n}")))
++            .collect();
++        assert!(validate_context_refs(&threads).is_ok());
++        assert_eq!(MAX_THREAD_REFS, MAX_CONTEXT_REFS, "today the total cap binds first");
++    }
++
++    #[test]
++    fn rejects_two_selections() {
++        assert!(validate_context_refs(&[selection("art-1")]).is_ok());
++        assert_eq!(
++            validate_context_refs(&[selection("art-1"), selection("art-2")]),
++            Err(ContextRefError::TooManySelections)
++        );
++    }
++
++    #[test]
++    fn label_is_capped() {
++        let mut long = reference(ContextRefKind::Document, "doc-1");
++        long.label = format!("  {}\u{7}", "é".repeat(200));
++        let kept = validate_context_refs(&[long]).expect("a long label is cut, not refused");
++        assert_eq!(kept[0].label.chars().count(), MAX_LABEL_CHARS);
++        assert!(kept[0].label.chars().all(|ch| ch == 'é'));
++    }
++
++    #[test]
++    fn duplicates_rejected() {
++        let doc = reference(ContextRefKind::Document, "doc-1");
++        assert_eq!(
++            validate_context_refs(&[doc.clone(), doc]),
++            Err(ContextRefError::Duplicate)
++        );
++        // The same id under two kinds names two different things.
++        assert!(validate_context_refs(&[
++            reference(ContextRefKind::Document, "x-1"),
++            reference(ContextRefKind::Skill, "x-1"),
++        ])
++        .is_ok());
++    }
++
++    #[test]
++    fn ids_must_be_ascii_safe() {
++        let too_long = "a".repeat(MAX_ID_LEN + 1);
++        for bad in ["", "a b", "../etc", "id\"", "ø", too_long.as_str()] {
++            assert_eq!(
++                validate_context_refs(&[reference(ContextRefKind::Document, bad)]),
++                Err(ContextRefError::InvalidId),
++                "{bad:?}"
++            );
++        }
++        assert!(is_safe_id("skill.web-search:v2_1"));
++    }
++
++    #[test]
++    fn a_selection_belongs_only_to_an_artifact_selection_and_must_be_well_formed() {
++        let mut stray = selection("doc-1");
++        stray.kind = ContextRefKind::Document;
++        assert_eq!(validate_context_refs(&[stray]), Err(ContextRefError::InvalidSelection));
++        let bare = reference(ContextRefKind::ArtifactSelection, "art-1");
++        assert_eq!(validate_context_refs(&[bare]), Err(ContextRefError::InvalidSelection));
++        let mut empty_range = selection("art-1");
++        if let Some(range) = empty_range.selection.as_mut() {
++            range.end = range.start;
++        }
++        assert_eq!(validate_context_refs(&[empty_range]), Err(ContextRefError::InvalidSelection));
++        let mut other_artifact = selection("art-1");
++        if let Some(range) = other_artifact.selection.as_mut() {
++            range.artifact_id = "art-2".to_owned();
++        }
++        assert_eq!(validate_context_refs(&[other_artifact]), Err(ContextRefError::InvalidSelection));
++    }
++
++    #[test]
++    fn kinds_round_trip_on_the_wire() {
++        for kind in ContextRefKind::ALL {
++            assert_eq!(ContextRefKind::from_wire(kind.as_str()), Some(kind));
++        }
++        assert_eq!(ContextRefKind::from_wire("mention"), None);
++    }
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 647c72ef5..ba982bbf9 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -5,6 +5,7 @@ pub mod approval_descriptor;
+ pub mod approval_edit;
+ pub mod attachments;
+ pub mod autonomy;
++pub mod context_refs;
+ pub mod dataplane_posture;
+ pub mod durable_gate;
+ pub mod effect_ledger;
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs b/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs
+index 1d3990337..d21f49cd8 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs	
+@@ -380,6 +380,12 @@ pub const FEATURES: &[Feature] = &[
+         key: "run_inspection",
+         label: "run timing and request inspection",
+     },
++    // EP-3 S5: a send's typed context references (documents, threads, selections) are refused on a
++    // ZDR turn before any network call, so no reference is resolved and none is silently dropped.
++    Feature {
++        key: "context_references",
++        label: "references to documents, threads or selections",
++    },
+ ];
+ 
+ /// The catalogue entry for `code`, if it is a catalogue code.
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/context_refs.rs b/apps/Model Plane/rust/services/model-gateway/src/context_refs.rs
+new file mode 100644
+index 000000000..7e50e2109
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/context_refs.rs	
+@@ -0,0 +1,589 @@
++//! Server-side resolution of a send's typed context references (Wave 3 EP-3 S5).
++//!
++//! The composer attaches references as a list next to the text (`InvokeRequest.context_refs`).
++//! The shape and its bounds are `mp_contracts::context_refs`; this module decides, before any run
++//! or model call, what each kind does for this turn and when the turn is refused:
++//!
++//! * `document`: added to the turn's `knowledge_search` filter as `document_ids`. The gateway never
++//!   reads the document; the Data Plane applies the viewer's own ACL to the narrowed search.
++//! * `space`: must equal the thread's existing Space, or the turn is refused. It never widens a
++//!   scope: Space access never widens an owner-plane ACL.
++//! * `skill`: merged into the turn's explicit skill picks, which the catalogue resolves as before.
++//! * `thread` and `artifact_selection`: refused until the thread tools (EP-3 S7) and the selection
++//!   edit (EP-3 S6) exist, so a reference is never accepted and then silently ignored.
++//!
++//! A Do turn takes `document`, `skill` and `space` only. A ZDR turn with any reference is refused
++//! with the catalogue's `context_references` feature (`zdr_features` refuses it too, so the answer
++//! is the same whichever check a turn reaches first).
++//!
++//! Off by default: `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` must be the literal `true`. With it off the
++//! field is never read and a non-ZDR turn is the one it was before the field existed.
++
++use std::collections::HashMap;
++use std::sync::{LazyLock, Mutex, PoisonError};
++
++use mp_contracts::context_refs::{
++    validate_context_refs, ArtifactSelection, ContextRef, ContextRefKind,
++};
++use mp_contracts::dataplane::retrieval_v2::Filters;
++use mp_contracts::zdr_refusal::Refusal;
++use serde::Deserialize;
++use serde_json::{json, Value};
++
++/// The switch. Only the literal `true` turns resolution on.
++pub const ENABLED_ENV: &str = "MODEL_GATEWAY_CONTEXT_REFS_ENABLED";
++/// The ZDR catalogue feature a turn with references is refused with.
++pub const ZDR_FEATURE: &str = "context_references";
++
++/// Whether the switch is on, from its raw value.
++#[must_use]
++pub fn parse_enabled(raw: Option<&str>) -> bool {
++    raw.map(str::trim) == Some("true")
++}
++
++/// The switch as this process reads it.
++#[must_use]
++pub fn enabled() -> bool {
++    parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// Whether a request carries references at all: anything but an absent field, `null` or `[]`. A
++/// malformed value counts, so a ZDR turn that sent one is refused rather than let through.
++#[must_use]
++pub fn requested(raw: Option<&Value>) -> bool {
++    raw.is_some_and(|value| match value {
++        Value::Null => false,
++        Value::Array(items) => !items.is_empty(),
++        _ => true,
++    })
++}
++
++/// What the resolver needs to know about the turn, all decided before it runs.
++#[derive(Debug, Clone, Copy, Default)]
++pub struct TurnFacts<'a> {
++    /// The verified token or route says zero retention.
++    pub zdr: bool,
++    /// The turn runs under a retention waiver (DEC-32).
++    pub waived: bool,
++    /// A Do (`agentic`) turn.
++    pub agentic: bool,
++    /// Organisation knowledge is searched and skills are matched on this turn (it is neither
++    /// conversation-only nor web-only, the two filters under which the turn reads neither).
++    pub knowledge: bool,
++    /// The thread's Space, from the Control-signed context the BFF injected; `None` off a Space.
++    pub space_id: Option<&'a str>,
++}
++
++/// The references of an admitted turn, split by what each does.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct ResolvedContextRefs {
++    /// Every reference as validated, labels capped, in the order sent.
++    pub refs: Vec<ContextRef>,
++    /// The documents the turn's knowledge search is narrowed to.
++    pub document_ids: Vec<String>,
++    /// The skills added to the turn's explicit picks.
++    pub skill_ids: Vec<String>,
++}
++
++/// Why a turn's references were refused, before any run or model call.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ContextRefRefusal {
++    /// A ZDR turn: the catalogue's `zdr_feature_not_supported` with [`ZDR_FEATURE`].
++    Zdr,
++    /// A typed refusal for the stream's `error` frame.
++    Typed {
++        code: &'static str,
++        message: &'static str,
++        /// A stable reason, for logs and the `details` of an HTTP body.
++        reason: &'static str,
++    },
++}
++
++impl ContextRefRefusal {
++    const fn typed(code: &'static str, message: &'static str, reason: &'static str) -> Self {
++        Self::Typed {
++            code,
++            message,
++            reason,
++        }
++    }
++
++    /// The ZDR catalogue refusal, for [`ContextRefRefusal::Zdr`].
++    #[must_use]
++    pub fn zdr_refusal() -> Refusal {
++        Refusal::feature_not_supported(ZDR_FEATURE)
++    }
++
++    /// The typed envelope for an HTTP body: `{error: {code, message, details}}`, details an object.
++    #[must_use]
++    pub fn json_body(&self) -> Value {
++        match self {
++            Self::Zdr => Self::zdr_refusal().json_body(),
++            Self::Typed {
++                code,
++                message,
++                reason,
++            } => json!({"error": {"code": code, "message": message, "details": {"reason": reason}}}),
++        }
++    }
++}
++
++/// The code for a list that breaks a bound or is not a list of references.
++pub const INVALID_CODE: &str = "context_refs_invalid";
++/// The code for a kind this turn cannot take.
++pub const UNSUPPORTED_CODE: &str = "context_ref_unsupported";
++/// The code for a Space reference that is not the thread's own Space.
++pub const SPACE_MISMATCH_CODE: &str = "context_ref_space_mismatch";
++
++const INVALID_MESSAGE: &str =
++    "The attached references could not be read. Remove them and attach them again.";
++
++#[derive(Deserialize)]
++struct WireSelection {
++    #[serde(alias = "artifactId")]
++    artifact_id: String,
++    version: u32,
++    start: u32,
++    end: u32,
++    #[serde(alias = "quoteSha256")]
++    quote_sha256: String,
++}
++
++#[derive(Deserialize)]
++struct WireRef {
++    kind: String,
++    id: String,
++    #[serde(default)]
++    label: String,
++    #[serde(default)]
++    selection: Option<WireSelection>,
++}
++
++/// The references a raw value names, validated. Every failure is the one invalid refusal: the
++/// reason says which rule, the message never echoes what was sent.
++fn parse(raw: &Value) -> Result<Vec<ContextRef>, ContextRefRefusal> {
++    let invalid =
++        |reason: &'static str| ContextRefRefusal::typed(INVALID_CODE, INVALID_MESSAGE, reason);
++    let Value::Array(items) = raw else {
++        return Err(invalid("not_a_list"));
++    };
++    // Bounded before anything is decoded, so an oversized body costs no per-item work.
++    if items.len() > mp_contracts::context_refs::MAX_CONTEXT_REFS {
++        return Err(invalid("too_many_refs"));
++    }
++    let mut refs = Vec::with_capacity(items.len());
++    for item in items {
++        let wire: WireRef =
++            serde_json::from_value(item.clone()).map_err(|_| invalid("malformed_ref"))?;
++        let kind = ContextRefKind::from_wire(&wire.kind).ok_or_else(|| invalid("unknown_kind"))?;
++        refs.push(ContextRef {
++            kind,
++            id: wire.id,
++            label: wire.label,
++            selection: wire.selection.map(|selection| ArtifactSelection {
++                artifact_id: selection.artifact_id,
++                version: selection.version,
++                start: selection.start,
++                end: selection.end,
++                quote_sha256: selection.quote_sha256,
++            }),
++        });
++    }
++    validate_context_refs(&refs).map_err(|error| invalid(error.reason()))
++}
++
++/// Resolves a turn's references, or refuses the turn.
++///
++/// `Ok(None)` when the request carries none, and when the switch is off for a non-ZDR turn (the
++/// field is then never read). A ZDR turn with references is refused whatever the switch says,
++/// exactly as `zdr_features::refusal` refuses it.
++///
++/// # Errors
++///
++/// The first refusal the turn's references meet: ZDR, then a malformed list, then the first
++/// reference this turn cannot take, in the order sent.
++pub fn resolve(
++    enabled: bool,
++    raw: Option<&Value>,
++    facts: &TurnFacts<'_>,
++) -> Result<Option<ResolvedContextRefs>, ContextRefRefusal> {
++    if !requested(raw) {
++        return Ok(None);
++    }
++    if facts.zdr {
++        return Err(ContextRefRefusal::Zdr);
++    }
++    let Some(raw) = raw.filter(|_| enabled) else {
++        return Ok(None);
++    };
++    let refs = parse(raw)?;
++    let mut resolved = ResolvedContextRefs::default();
++    for reference in &refs {
++        match reference.kind {
++            ContextRefKind::Thread | ContextRefKind::ArtifactSelection if facts.agentic => {
++                return Err(ContextRefRefusal::typed(
++                    UNSUPPORTED_CODE,
++                    "Do mode can use attached documents, skills and the current Space only. Remove the other references, or ask in chat.",
++                    "kind_not_in_do_mode",
++                ));
++            }
++            // OD-7 also keeps thread references from a waived turn (recall excludes waived content).
++            // Until the thread tools exist every thread reference is refused, so the waiver adds no
++            // separate answer yet.
++            ContextRefKind::Thread => {
++                return Err(ContextRefRefusal::typed(
++                    UNSUPPORTED_CODE,
++                    "References to other conversations are not available yet. Remove them and send again.",
++                    "thread_refs_unavailable",
++                ));
++            }
++            ContextRefKind::ArtifactSelection => {
++                return Err(ContextRefRefusal::typed(
++                    UNSUPPORTED_CODE,
++                    "Editing a selection is not available yet. Remove the selection and send again.",
++                    "selection_edit_unavailable",
++                ));
++            }
++            ContextRefKind::Space => {
++                if facts.space_id != Some(reference.id.as_str()) {
++                    return Err(ContextRefRefusal::typed(
++                        SPACE_MISMATCH_CODE,
++                        "Only the Space this conversation belongs to can be referenced here.",
++                        "space_mismatch",
++                    ));
++                }
++            }
++            ContextRefKind::Document => {
++                // A document narrows the knowledge search. A turn that searches no organisation
++                // knowledge would drop it without a word, so it is refused instead.
++                if !facts.knowledge {
++                    return Err(ContextRefRefusal::typed(
++                        UNSUPPORTED_CODE,
++                        "Attached documents need organisation knowledge on for this message. Switch the source filter back to include knowledge.",
++                        "documents_need_knowledge",
++                    ));
++                }
++                resolved.document_ids.push(reference.id.clone());
++            }
++            ContextRefKind::Skill => {
++                // Skills are matched only where knowledge is read; elsewhere the pick would vanish.
++                if !facts.knowledge {
++                    return Err(ContextRefRefusal::typed(
++                        UNSUPPORTED_CODE,
++                        "Attached skills cannot be used with a conversation-only or web-only source filter. Switch the source filter back to include knowledge.",
++                        "skills_need_knowledge",
++                    ));
++                }
++                resolved.skill_ids.push(reference.id.clone());
++            }
++        }
++    }
++    resolved.refs = refs;
++    Ok(Some(resolved))
++}
++
++/// The skill ids the catalogue resolves for this turn: the explicit picks, then the referenced
++/// skills not already picked. Nothing referenced leaves the picks exactly as sent.
++#[must_use]
++pub fn merged_skill_ids(requested: &[String], resolved: Option<&ResolvedContextRefs>) -> Vec<String> {
++    let mut ids = requested.to_vec();
++    for id in resolved.map_or(&[][..], |resolved| resolved.skill_ids.as_slice()) {
++        if !ids.contains(id) {
++            ids.push(id.clone());
++        }
++    }
++    ids
++}
++
++/// The `{kind, id, label}` of each reference, for the user message's `metadata.context_refs`, so the
++/// chips render after a reload. No selection range, quote or hash and no content is kept.
++#[must_use]
++pub fn metadata_value(refs: &[ContextRef]) -> Value {
++    Value::Array(
++        refs.iter()
++            .map(|reference| {
++                json!({
++                    "kind": reference.kind.as_str(),
++                    "id": reference.id,
++                    "label": reference.label,
++                })
++            })
++            .collect(),
++    )
++}
++
++/// The documents each live run's knowledge search is narrowed to, by run id. An entry exists only
++/// while its [`TurnDocuments`] guard is alive, so it is dropped with the turn, never persisted, and a
++/// run that named no document has none (its search is the one it was).
++static TURN_DOCUMENTS: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++
++/// Holds a run's document narrowing for as long as the turn runs.
++#[derive(Debug)]
++#[must_use = "the narrowing is removed when the guard is dropped"]
++pub struct TurnDocuments {
++    run_id: Option<String>,
++}
++
++impl Drop for TurnDocuments {
++    fn drop(&mut self) {
++        if let Some(run_id) = self.run_id.take() {
++            TURN_DOCUMENTS
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner)
++                .remove(&run_id);
++        }
++    }
++}
++
++/// Records the turn's referenced documents for its run. Nothing is recorded when the turn has none.
++pub fn register_turn_documents(run_id: &str, resolved: Option<&ResolvedContextRefs>) -> TurnDocuments {
++    let documents = resolved.map(|resolved| resolved.document_ids.clone()).unwrap_or_default();
++    if run_id.is_empty() || documents.is_empty() {
++        return TurnDocuments { run_id: None };
++    }
++    TURN_DOCUMENTS
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .insert(run_id.to_owned(), documents);
++    TurnDocuments {
++        run_id: Some(run_id.to_owned()),
++    }
++}
++
++/// The filter a `knowledge_search` of this run sends: `document_ids` when the turn referenced
++/// documents, otherwise `None`, the request as it was.
++#[must_use]
++pub fn knowledge_filters(run_id: &str) -> Option<Filters> {
++    let documents = TURN_DOCUMENTS
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .get(run_id)
++        .cloned()?;
++    Some(Filters {
++        document_ids: documents,
++        ..Default::default()
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn facts() -> TurnFacts<'static> {
++        TurnFacts {
++            knowledge: true,
++            ..TurnFacts::default()
++        }
++    }
++
++    fn one(kind: &str, id: &str) -> Value {
++        json!([{"kind": kind, "id": id, "label": format!("label {id}")}])
++    }
++
++    fn refused_code(result: Result<Option<ResolvedContextRefs>, ContextRefRefusal>) -> &'static str {
++        match result {
++            Err(ContextRefRefusal::Typed { code, .. }) => code,
++            other => panic!("expected a typed refusal, got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn the_switch_reads_only_the_literal_true() {
++        assert!(parse_enabled(Some("true")));
++        assert!(parse_enabled(Some(" true ")));
++        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on")] {
++            assert!(!parse_enabled(value), "{value:?}");
++        }
++    }
++
++    #[test]
++    fn flag_off_leaves_non_empty_refs_unread() {
++        // The design's `context_refs_disabled` refusal is not built: with the switch off the field is
++        // never read, so a non-ZDR turn is byte-identical to one sent before the field existed.
++        let raw = one("document", "doc-1");
++        assert_eq!(resolve(false, Some(&raw), &facts()), Ok(None));
++        // A ZDR turn is refused whatever the switch says.
++        let zdr = TurnFacts { zdr: true, ..facts() };
++        assert_eq!(resolve(false, Some(&raw), &zdr), Err(ContextRefRefusal::Zdr));
++    }
++
++    #[test]
++    fn an_absent_null_or_empty_list_is_no_request() {
++        for raw in [None, Some(Value::Null), Some(json!([]))] {
++            assert!(!requested(raw.as_ref()));
++            let zdr = TurnFacts { zdr: true, ..facts() };
++            assert_eq!(resolve(true, raw.as_ref(), &zdr), Ok(None));
++        }
++        assert!(requested(Some(&json!("doc-1"))), "a malformed value is still a request");
++    }
++
++    #[test]
++    fn zdr_turn_with_refs_is_refused_with_context_references() {
++        let zdr = TurnFacts { zdr: true, ..facts() };
++        let result = resolve(true, Some(&one("document", "doc-1")), &zdr);
++        assert_eq!(result, Err(ContextRefRefusal::Zdr));
++        let refusal = ContextRefRefusal::zdr_refusal();
++        assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
++        assert_eq!(refusal.feature(), Some(ZDR_FEATURE));
++        assert!(mp_contracts::zdr_refusal::feature(ZDR_FEATURE).is_some());
++    }
++
++    #[test]
++    fn document_ref_narrows_retrieval_filter() {
++        let raw = json!([
++            {"kind": "document", "id": "doc-1", "label": "Budsjett"},
++            {"kind": "document", "id": "doc-2", "label": "Plan"},
++        ]);
++        let resolved = resolve(true, Some(&raw), &facts())
++            .expect("admitted")
++            .expect("references");
++        assert_eq!(resolved.document_ids, vec!["doc-1", "doc-2"]);
++
++        let run_id = "run-document-ref-narrows";
++        assert_eq!(knowledge_filters(run_id), None, "no narrowing before the turn registers");
++        {
++            let _guard = register_turn_documents(run_id, Some(&resolved));
++            let filters = knowledge_filters(run_id).expect("narrowed");
++            assert_eq!(filters.document_ids, vec!["doc-1", "doc-2"]);
++            assert!(filters.workspace_ids.is_empty() && filters.sources.is_empty());
++        }
++        assert_eq!(knowledge_filters(run_id), None, "dropped with the turn");
++    }
++
++    #[test]
++    fn a_turn_without_documents_registers_nothing() {
++        let run_id = "run-without-documents";
++        let _guard = register_turn_documents(run_id, None);
++        assert_eq!(knowledge_filters(run_id), None);
++        let skills_only = ResolvedContextRefs {
++            skill_ids: vec!["skill.a".to_owned()],
++            ..ResolvedContextRefs::default()
++        };
++        let _guard = register_turn_documents(run_id, Some(&skills_only));
++        assert_eq!(knowledge_filters(run_id), None);
++    }
++
++    #[test]
++    fn document_ref_is_refused_when_the_turn_searches_no_knowledge() {
++        let no_knowledge = TurnFacts { knowledge: false, ..facts() };
++        let result = resolve(true, Some(&one("document", "doc-1")), &no_knowledge);
++        assert_eq!(refused_code(result), UNSUPPORTED_CODE);
++        let result = resolve(true, Some(&one("skill", "skill.a")), &no_knowledge);
++        assert_eq!(refused_code(result), UNSUPPORTED_CODE);
++    }
++
++    #[test]
++    fn space_ref_cannot_widen_scope() {
++        let raw = one("space", "space-a");
++        // Off a Space, a Space reference cannot add one.
++        assert_eq!(refused_code(resolve(true, Some(&raw), &facts())), SPACE_MISMATCH_CODE);
++        // In another Space it is refused too.
++        let other = TurnFacts { space_id: Some("space-b"), ..facts() };
++        assert_eq!(refused_code(resolve(true, Some(&raw), &other)), SPACE_MISMATCH_CODE);
++        // The thread's own Space is admitted and changes nothing.
++        let own = TurnFacts { space_id: Some("space-a"), ..facts() };
++        let resolved = resolve(true, Some(&raw), &own).expect("admitted").expect("references");
++        assert!(resolved.document_ids.is_empty() && resolved.skill_ids.is_empty());
++        assert_eq!(resolved.refs.len(), 1);
++    }
++
++    #[test]
++    fn skill_ref_merges_into_skill_ids() {
++        let raw = json!([
++            {"kind": "skill", "id": "skill.a"},
++            {"kind": "skill", "id": "skill.b"},
++        ]);
++        let resolved = resolve(true, Some(&raw), &facts()).expect("admitted");
++        let picked = vec!["skill.b".to_owned(), "skill.c".to_owned()];
++        assert_eq!(
++            merged_skill_ids(&picked, resolved.as_ref()),
++            vec!["skill.b", "skill.c", "skill.a"]
++        );
++        assert_eq!(merged_skill_ids(&picked, None), picked, "no references, picks as sent");
++    }
++
++    #[test]
++    fn thread_ref_refused_while_thread_tools_off() {
++        let result = resolve(true, Some(&one("thread", "thread-1")), &facts());
++        assert_eq!(refused_code(result), UNSUPPORTED_CODE);
++        let waived = TurnFacts { waived: true, ..facts() };
++        let result = resolve(true, Some(&one("thread", "thread-1")), &waived);
++        assert_eq!(refused_code(result), UNSUPPORTED_CODE);
++    }
++
++    #[test]
++    fn selection_ref_refused_while_selection_edit_off() {
++        let raw = json!([{
++            "kind": "artifact_selection", "id": "art-1", "label": "Avsnitt",
++            "selection": {"artifactId": "art-1", "version": 2, "start": 0, "end": 5, "quoteSha256": "b".repeat(64)}
++        }]);
++        assert_eq!(refused_code(resolve(true, Some(&raw), &facts())), UNSUPPORTED_CODE);
++    }
++
++    #[test]
++    fn do_turn_refuses_thread_ref() {
++        let agentic = TurnFacts { agentic: true, ..facts() };
++        let result = resolve(true, Some(&one("thread", "thread-1")), &agentic);
++        match result {
++            Err(ContextRefRefusal::Typed { code, reason, .. }) => {
++                assert_eq!(code, UNSUPPORTED_CODE);
++                assert_eq!(reason, "kind_not_in_do_mode");
++            }
++            other => panic!("expected the Do-mode refusal, got {other:?}"),
++        }
++        // Documents, skills and the turn's own Space are taken on a Do turn.
++        let own = TurnFacts { space_id: Some("space-a"), ..agentic };
++        let raw = json!([
++            {"kind": "document", "id": "doc-1"},
++            {"kind": "skill", "id": "skill.a"},
++            {"kind": "space", "id": "space-a"},
++        ]);
++        assert!(resolve(true, Some(&raw), &own).expect("admitted").is_some());
++    }
++
++    #[test]
++    fn a_malformed_list_is_refused_typed_and_never_echoed() {
++        let cases = [
++            json!("doc-1"),
++            json!([{"kind": "mention", "id": "x"}]),
++            json!([{"kind": "document"}]),
++            json!([{"kind": "document", "id": "a b"}]),
++            json!([{"kind": "document", "id": "doc-1"}, {"kind": "document", "id": "doc-1"}]),
++            Value::Array((0..21).map(|n| json!({"kind": "document", "id": format!("d{n}")})).collect()),
++        ];
++        for raw in cases {
++            let result = resolve(true, Some(&raw), &facts());
++            assert_eq!(refused_code(result), INVALID_CODE, "{raw}");
++        }
++    }
++
++    #[test]
++    fn the_http_body_is_the_typed_envelope_with_object_details() {
++        let refusal = ContextRefRefusal::typed(SPACE_MISMATCH_CODE, "m", "space_mismatch");
++        let body = refusal.json_body();
++        assert_eq!(body["error"]["code"], SPACE_MISMATCH_CODE);
++        assert!(body["error"]["details"].is_object());
++        assert_eq!(ContextRefRefusal::Zdr.json_body()["error"]["feature"], ZDR_FEATURE);
++    }
++
++    #[test]
++    fn metadata_stores_kind_id_label_only() {
++        let raw = json!([
++            {"kind": "document", "id": "doc-1", "label": format!("  {}", "x".repeat(300))},
++            {"kind": "skill", "id": "skill.a", "label": "Skriv"},
++        ]);
++        let resolved = resolve(true, Some(&raw), &facts()).expect("admitted").expect("references");
++        let metadata = metadata_value(&resolved.refs);
++        let items = metadata.as_array().expect("a list");
++        assert_eq!(items.len(), 2);
++        for item in items {
++            let mut keys: Vec<&str> = item.as_object().expect("an object").keys().map(String::as_str).collect();
++            keys.sort_unstable();
++            assert_eq!(keys, vec!["id", "kind", "label"]);
++        }
++        assert_eq!(items[0]["kind"], "document");
++        assert_eq!(items[0]["label"].as_str().map(|label| label.chars().count()), Some(120));
++        assert_eq!(items[1]["id"], "skill.a");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index cd449ad52..15f871978 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -9989,6 +9989,13 @@ pub struct InvokeRequest {
+     /// `item_cap` to the org's `research.max_fan_out_items`.
+     #[serde(default, alias = "wideResearch")]
+     pub wide_research: Option<serde_json::Value>,
++    /// Wave 3 EP-3 S5 — the typed context references the composer attached: `[{kind, id, label,
++    /// selection?}]`, selectors only, never content. Kept as raw JSON and read only while
++    /// `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` is on ([`crate::context_refs::resolve`]), so a body
++    /// carrying it parses exactly as before with the switch off. A ZDR turn carrying any is refused
++    /// with the `context_references` feature whatever the switch says.
++    #[serde(default, alias = "contextRefs")]
++    pub context_refs: Option<serde_json::Value>,
+ }
+ 
+ /// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 601ab074d..90fc4193a 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -20,6 +20,7 @@ pub mod citation_anchors;
+ pub mod compaction;
+ pub mod confidence;
+ pub mod context_reattach;
++pub mod context_refs;
+ pub mod conversation_delegation;
+ pub mod coordinator;
+ pub mod dataplane;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs
+index 47110147f..4f3563d87 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
+@@ -322,6 +322,29 @@ fn missing_thread_append_error(error: &tonic::Status) -> bool {
+     error.code() == Code::Internal && error.message().to_ascii_lowercase().contains("foreign key")
+ }
+ 
++tokio::task_local! {
++    /// The validated context references of the chat send whose run is being prepared (EP-3 S5).
++    /// Scoped by [`with_user_context_refs`] around that one preparation, so the user message it
++    /// appends records them, and every other append in the process sees none.
++    static USER_TURN_CONTEXT_REFS: Vec<mp_contracts::context_refs::ContextRef>;
++}
++
++/// Runs `preparation` (the chat send's run preparation) so the user message it appends records
++/// `refs` in `metadata.context_refs`. With no references the future runs exactly as it would alone.
++pub async fn with_user_context_refs<F: std::future::Future>(
++    refs: Option<&crate::context_refs::ResolvedContextRefs>,
++    preparation: F,
++) -> F::Output {
++    match refs.filter(|resolved| !resolved.refs.is_empty()) {
++        Some(resolved) => {
++            USER_TURN_CONTEXT_REFS
++                .scope(resolved.refs.clone(), preparation)
++                .await
++        }
++        None => preparation.await,
++    }
++}
++
+ /// Builds the durable `messages.metadata` Struct for the first-persisted user
+ /// turn (chat-wave2 scope spec §2.4): `source_scope` when the thread is
+ /// conversation-only, plus `retrieval_scope` when this turn's per-turn filter
+@@ -333,6 +356,17 @@ fn missing_thread_append_error(error: &tonic::Status) -> bool {
+ fn user_message_metadata(
+     conversation_only: bool,
+     retrieval_scope: Option<&str>,
++) -> Option<prost_types::Struct> {
++    // Outside [`with_user_context_refs`] (every caller but the chat send, and every send with the
++    // context-refs switch off) there is nothing to read, and the metadata is what it was.
++    let context_refs = USER_TURN_CONTEXT_REFS.try_with(Clone::clone).unwrap_or_default();
++    user_message_metadata_with(conversation_only, retrieval_scope, &context_refs)
++}
++
++fn user_message_metadata_with(
++    conversation_only: bool,
++    retrieval_scope: Option<&str>,
++    context_refs: &[mp_contracts::context_refs::ContextRef],
+ ) -> Option<prost_types::Struct> {
+     let mut fields = std::collections::BTreeMap::new();
+     if conversation_only {
+@@ -340,6 +374,14 @@ fn user_message_metadata(
+     } else if let Some(scope) = retrieval_scope.filter(|s| !s.is_empty()) {
+         fields.insert("retrieval_scope".to_owned(), json_to_prost_value(&serde_json::json!(scope)));
+     }
++    // The chips of the send (EP-3 S5): `{kind, id, label}` only, so they render after a reload. A ZDR
++    // turn appends no user message, so nothing is written for one.
++    if !context_refs.is_empty() {
++        fields.insert(
++            "context_refs".to_owned(),
++            json_to_prost_value(&crate::context_refs::metadata_value(context_refs)),
++        );
++    }
+     if fields.is_empty() {
+         None
+     } else {
+@@ -2594,6 +2636,76 @@ impl StringExt for String {
+ 
+ #[cfg(test)]
+ mod tests {
++    /// EP-3 S5: a send's references are stored on its user message as `{kind, id, label}` only, and a
++    /// send without any keeps the metadata it had before (absent when there is nothing else).
++    #[test]
++    fn metadata_stores_kind_id_label_only() {
++        use mp_contracts::context_refs::{ArtifactSelection, ContextRef, ContextRefKind};
++        assert!(super::user_message_metadata_with(false, None, &[]).is_none(), "byte-identical");
++        let refs = vec![
++            ContextRef {
++                kind: ContextRefKind::Document,
++                id: "doc-1".to_owned(),
++                label: "Budsjett".to_owned(),
++                selection: None,
++            },
++            ContextRef {
++                kind: ContextRefKind::ArtifactSelection,
++                id: "art-1".to_owned(),
++                label: "Avsnitt".to_owned(),
++                selection: Some(ArtifactSelection {
++                    artifact_id: "art-1".to_owned(),
++                    version: 2,
++                    start: 0,
++                    end: 4,
++                    quote_sha256: "c".repeat(64),
++                }),
++            },
++        ];
++        let metadata = super::user_message_metadata_with(false, Some("knowledge_only"), &refs)
++            .expect("metadata");
++        assert!(metadata.fields.contains_key("retrieval_scope"));
++        let Some(prost_types::value::Kind::ListValue(list)) =
++            metadata.fields.get("context_refs").and_then(|value| value.kind.clone())
++        else {
++            panic!("context_refs is a list");
++        };
++        assert_eq!(list.values.len(), 2);
++        for item in &list.values {
++            let Some(prost_types::value::Kind::StructValue(entry)) = &item.kind else {
++                panic!("each reference is an object");
++            };
++            let mut keys: Vec<&str> = entry.fields.keys().map(String::as_str).collect();
++            keys.sort_unstable();
++            assert_eq!(keys, vec!["id", "kind", "label"], "no selection, quote or hash is kept");
++        }
++    }
++
++    /// Outside the chat send's scope no references are read, so every other append is unchanged.
++    #[tokio::test]
++    async fn only_the_scoped_preparation_sees_the_references() {
++        assert!(super::user_message_metadata(false, None).is_none());
++        let resolved = crate::context_refs::ResolvedContextRefs {
++            refs: vec![mp_contracts::context_refs::ContextRef {
++                kind: mp_contracts::context_refs::ContextRefKind::Skill,
++                id: "skill.a".to_owned(),
++                label: "Skriv".to_owned(),
++                selection: None,
++            }],
++            ..Default::default()
++        };
++        let scoped = super::with_user_context_refs(Some(&resolved), async {
++            super::user_message_metadata(false, None)
++        })
++        .await;
++        assert!(scoped.is_some_and(|metadata| metadata.fields.contains_key("context_refs")));
++        let unscoped = super::with_user_context_refs(None, async {
++            super::user_message_metadata(false, None)
++        })
++        .await;
++        assert!(unscoped.is_none());
++    }
++
+     /// A send names itself to the transcript only with the switch on, only when the turn keeps a
+     /// transcript at all, and never when it restates the previous question on purpose.
+     #[test]
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 708a4d671..3e83a78fd 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -4611,8 +4611,11 @@ async fn dispatch_tool_with_cost(
+             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
+                 .unwrap_or(5)
+                 .clamp(1, 20);
+-            let request =
++            let mut request =
+                 knowledge_search_request(org_id, &query, top_k, data_plane_mode.clone(), sovereign_required);
++            // The documents the person attached to this turn narrow the search (EP-3 S5). Only the
++            // ids travel; the Data Plane applies the viewer's own ACL. `None` for every other turn.
++            request.filters = crate::context_refs::knowledge_filters(run_id);
+             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
+                 Ok(request) => request,
+                 Err(error) => {
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs
+index d049c61c1..7ee74f04f 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
+@@ -179,6 +179,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
+     // EP-2 S8: a wide-research run is a Do run, refused under ZDR through the `agentic` feature it
+     // rides on; the estimate route refuses a ZDR caller the same way.
+     ("wide_research", refused_feature("agentic")),
++    // EP-3 S5: a reference is resolved against durable state (a document's ACL, a thread, a
++    // revision), so a ZDR turn carrying any is refused, and none is silently dropped.
++    ("context_refs", refused_feature("context_references")),
+ ];
+ 
+ /// The feature strings the gateway reads, each with its treatment. A feature
+@@ -299,6 +302,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         agent_tool_capability_ids: _,
+         agent_autonomy_cap: _,
+         wide_research: _,
++        context_refs: _,
+     } = request;
+     vec![
+         "content",
+@@ -356,6 +360,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         "agent_tool_capability_ids",
+         "agent_autonomy_cap",
+         "wide_research",
++        "context_refs",
+     ]
+ }
+ 
+@@ -426,6 +431,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
+     if !request.pinned_message_ids.is_empty() {
+         return feature("pinned_messages");
+     }
++    if crate::context_refs::requested(request.context_refs.as_ref()) {
++        return feature(crate::context_refs::ZDR_FEATURE);
++    }
+     if request.max_cost_usd.is_some() {
+         return feature("spend_cap");
+     }
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/zdr_refusal_inventory.rs b/apps/Model Plane/rust/services/model-gateway/tests/zdr_refusal_inventory.rs
+index 8d04edd02..e1932037e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/zdr_refusal_inventory.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/zdr_refusal_inventory.rs	
+@@ -61,3 +61,15 @@ fn every_zdr_refusal_in_the_gateway_carries_a_catalogue_kind() {
+          so the status carries the catalogue kind): {untyped:#?}"
+     );
+ }
++
++/// EP-3 S5: the context-references refusal names a catalogue feature, so the typed body a ZDR turn
++/// with references gets carries a key every client can name.
++#[test]
++fn the_context_references_refusal_is_a_catalogue_feature() {
++    let key = model_gateway::context_refs::ZDR_FEATURE;
++    assert_eq!(key, "context_references");
++    assert!(mp_contracts::zdr_refusal::feature(key).is_some());
++    let body = model_gateway::context_refs::ContextRefRefusal::zdr_refusal().json_body();
++    assert_eq!(body["error"]["code"], mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
++    assert_eq!(body["error"]["feature"], key);
++}

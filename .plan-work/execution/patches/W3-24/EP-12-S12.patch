@@ -1,0 +1,1486 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index 27a305831..3cc10ef67 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -1,4 +1,5 @@
+ import { ForkAction, threadForkEnabled } from './ForkAction'
++import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
+ import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+ import { RunNotifyButton } from './RunNotifyButton'
+ import {
+@@ -253,6 +254,11 @@ export function MessageBlock(props: {
+    * attest zero data retention.
+    */
+   temporaryChat?: boolean
++  /**
++   * The thread is scoped to a Space. Its history has its own surface and authority, so the conversation export
++   * is not offered there (EP-12 D8).
++   */
++  spaceScoped?: boolean
+   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
+   docked?: DockedNodes
+   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
+@@ -573,6 +579,8 @@ export function AssistantMessage(props: {
+   threadId?: string | null
+   /** See `MessageBlock`'s doc: disables "Les høyt". */
+   temporaryChat?: boolean
++  /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
++  spaceScoped?: boolean
+   /** See `MessageBlock`'s doc. */
+   docked?: DockedNodes
+   /** See `MessageBlock`'s doc. */
+@@ -917,6 +925,14 @@ export function AssistantMessage(props: {
+             <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
+               <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
+             </Show>
++            {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
++            <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
++              <ExportConversationAction
++                threadId={props.threadId ?? ''}
++                temporaryChat={props.temporaryChat}
++                spaceScoped={props.spaceScoped}
++              />
++            </Show>
+             <Show when={canRemember()}>
+               <MessageAction
+                 label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.css b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.css
+new file mode 100644
+index 000000000..5450b5580
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.css	
+@@ -0,0 +1,101 @@
++/* The conversation export menu beside "Fork from here" on the latest answer (EP-12 S12). */
++.verevon-chat-export {
++  position: relative;
++  display: inline-flex;
++}
++
++.verevon-chat-export__trigger {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  min-height: 32px;
++  padding: 0 10px;
++  border: 0;
++  border-radius: 999px;
++  background: transparent;
++  color: var(--verevon-e-muted, #667085);
++  font-size: 12px;
++  cursor: pointer;
++}
++
++.verevon-chat-export__trigger:hover,
++.verevon-chat-export__trigger:focus-visible {
++  background: var(--verevon-surface-soft, #f3f4f6);
++  color: inherit;
++}
++
++.verevon-chat-export__panel {
++  position: absolute;
++  top: calc(100% + 6px);
++  left: 0;
++  z-index: 30;
++  display: grid;
++  gap: 10px;
++  box-sizing: border-box;
++  width: min(300px, calc(100vw - 32px));
++  padding: 12px;
++  border-radius: 10px;
++  background: var(--surface, #fff);
++  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
++}
++
++.verevon-chat-export__choices {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px 14px;
++  margin: 0;
++  padding: 0;
++  border: 0;
++  font-size: 12px;
++}
++
++.verevon-chat-export__choices legend {
++  margin-bottom: 4px;
++  padding: 0;
++  font-weight: 600;
++}
++
++.verevon-chat-export__option {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  cursor: pointer;
++}
++
++.verevon-chat-export__action {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  justify-self: start;
++  min-height: 32px;
++  padding: 0 12px;
++  border: 0;
++  border-radius: 999px;
++  background: var(--verevon-surface-soft, #f3f4f6);
++  color: inherit;
++  font-size: 12px;
++  cursor: pointer;
++}
++
++.verevon-chat-export__action:disabled {
++  opacity: 0.45;
++  cursor: default;
++}
++
++.verevon-chat-export__action:focus-visible,
++.verevon-chat-export__trigger:focus-visible {
++  outline: 2px solid var(--verevon-chat-fjord, #2b5cd9);
++  outline-offset: 2px;
++}
++
++.verevon-chat-export__refusal {
++  margin: 0;
++  color: #b42318;
++  font-size: 12px;
++  overflow-wrap: anywhere;
++}
++
++.verevon-chat-export__loading {
++  color: var(--verevon-e-muted, #667085);
++  font-size: 12px;
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx
+new file mode 100644
+index 000000000..053f5aad3
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx	
+@@ -0,0 +1,202 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { flush } from 'solid-js'
++import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
++import { THREAD_EXPORT_FORMAT } from '../replay/thread-export-schema'
++import { applyServerRetention, __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
++
++const { exportThread } = vi.hoisted(() => ({ exportThread: vi.fn() }))
++const { downloadBytes } = vi.hoisted(() => ({ downloadBytes: vi.fn() }))
++vi.mock('@/shared/api/chat-client', () => ({ exportThread }))
++vi.mock('@/features/chat/lib/chat-export/download', () => ({ downloadBytes }))
++vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
++
++// A redacted v1 export with one turn that the replay can show.
++const replayFile = JSON.stringify({
++  format: THREAD_EXPORT_FORMAT,
++  version: 1,
++  exported_at: '2026-11-05T10:00:00Z',
++  profile: 'redacted',
++  thread: { id: 'thread-1', title: 'Plan', created_at: '2026-11-04T09:00:00Z' },
++  messages: [
++    {
++      id: 'm-1',
++      role: 'user',
++      content: 'Hello, world',
++      created_at: '2026-11-04T09:00:01Z',
++      artifacts: [],
++      citations: [],
++      metadata: {},
++    },
++  ],
++  runs: [],
++  truncated: false,
++})
++
++afterEach(() => {
++  cleanup()
++  exportThread.mockReset()
++  downloadBytes.mockReset()
++  vi.unstubAllEnvs()
++  __resetRetentionForTests()
++})
++
++function renderMenu(props: { temporaryChat?: boolean; spaceScoped?: boolean } = {}) {
++  return render(() => <ExportConversationAction threadId="thread-1" {...props} />)
++}
++
++// Solid applies a signal's change to the DOM on the next flush, so each interaction is flushed before the test reads it.
++function openMenu() {
++  fireEvent.click(screen.getByRole('button', { name: 'Export conversation' }))
++  flush()
++}
++
++function choose(name: string) {
++  fireEvent.click(screen.getByRole('radio', { name }))
++  flush()
++}
++
++describe('ExportConversationAction', () => {
++  it('is off unless the build turns it on, with the strict literal true', () => {
++    expect(threadExportEnabled()).toBe(false)
++    vi.stubEnv('VITE_THREAD_EXPORT', 'yes')
++    expect(threadExportEnabled()).toBe(false)
++    vi.stubEnv('VITE_THREAD_EXPORT', 'true')
++    expect(threadExportEnabled()).toBe(true)
++  })
++
++  it('keeps the format and the content unchosen, and the download off, until the person picks both', () => {
++    renderMenu()
++    openMenu()
++
++    expect((screen.getByRole('radio', { name: 'JSON' }) as HTMLInputElement).checked).toBe(false)
++    expect((screen.getByRole('radio', { name: 'Redacted' }) as HTMLInputElement).checked).toBe(false)
++    expect((screen.getByRole('button', { name: 'Download' }) as HTMLButtonElement).disabled).toBe(true)
++  })
++
++  it('downloads the chosen format and content under the name the server gave the file', async () => {
++    exportThread.mockResolvedValue({
++      body: '# Plan',
++      mediaType: 'text/markdown; charset=utf-8',
++      fileName: 'verevon-thread-thread-1.md',
++    })
++    renderMenu()
++    openMenu()
++
++    choose('Markdown')
++    choose('Redacted')
++    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
++
++    await waitFor(() => expect(downloadBytes).toHaveBeenCalledTimes(1))
++    expect(exportThread).toHaveBeenCalledWith('thread-1', 'markdown', 'redacted')
++    expect(downloadBytes).toHaveBeenCalledWith(
++      expect.any(Uint8Array),
++      'verevon-thread-thread-1.md',
++      'text/markdown; charset=utf-8',
++    )
++  })
++
++  it('says why a thread may not leave in full, in place, from the typed reason', async () => {
++    exportThread.mockRejectedValue(
++      Object.assign(new Error('refused'), { code: 'thread_not_exportable', details: { reason: 'non_persistent_run' } }),
++    )
++    renderMenu()
++    openMenu()
++
++    choose('JSON')
++    choose('Full')
++    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
++
++    const alert = await screen.findByRole('alert')
++    expect(alert.textContent).toContain('cannot be exported in full')
++    expect(downloadBytes).not.toHaveBeenCalled()
++  })
++
++  it('names the feature a zero-retention refusal is about', async () => {
++    exportThread.mockRejectedValue(
++      Object.assign(new Error('refused'), { code: 'zdr_feature_not_supported', feature: 'conversation_export' }),
++    )
++    renderMenu()
++    openMenu()
++
++    choose('JSON')
++    choose('Full')
++    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
++
++    const alert = await screen.findByRole('alert')
++    expect(alert.textContent).toContain('conversation export and replay')
++  })
++
++  it('goes away once the deployment answers that exporting is off', async () => {
++    exportThread.mockRejectedValue(Object.assign(new Error('off'), { code: 'thread_export_disabled' }))
++    renderMenu()
++    openMenu()
++
++    choose('JSON')
++    choose('Full')
++    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
++
++    await waitFor(() => expect(screen.queryByRole('button', { name: 'Export conversation' })).toBeNull())
++  })
++
++  it('is not offered for a temporary chat', () => {
++    renderMenu({ temporaryChat: true })
++
++    expect(screen.queryByRole('button', { name: 'Export conversation' })).toBeNull()
++  })
++
++  it('is not offered for a thread scoped to a Space', () => {
++    renderMenu({ spaceScoped: true })
++
++    expect(screen.queryByRole('button', { name: 'Export conversation' })).toBeNull()
++  })
++
++  it('is not offered to a zero-retention caller', () => {
++    applyServerRetention(true)
++    renderMenu()
++
++    expect(screen.queryByRole('button', { name: 'Export conversation' })).toBeNull()
++  })
++
++  it('opens the redacted replay of the conversation', async () => {
++    exportThread.mockResolvedValue({ body: replayFile, mediaType: 'application/json; charset=utf-8', fileName: 'x.json' })
++    renderMenu()
++    openMenu()
++
++    fireEvent.click(screen.getByRole('button', { name: 'Replay conversation' }))
++
++    const dialog = await screen.findByRole('dialog')
++    expect(exportThread).toHaveBeenCalledWith('thread-1', 'json', 'redacted')
++    expect(dialog.textContent).toContain('Hello, world')
++  })
++
++  it('refuses an export version it does not know, and shows none of its contents', async () => {
++    exportThread.mockResolvedValue({
++      body: JSON.stringify({ ...JSON.parse(replayFile), version: 2 }),
++      mediaType: 'application/json; charset=utf-8',
++      fileName: 'x.json',
++    })
++    renderMenu()
++    openMenu()
++
++    fireEvent.click(screen.getByRole('button', { name: 'Replay conversation' }))
++
++    const alert = await screen.findByRole('alert')
++    expect(alert.textContent).toContain('cannot be shown here')
++    expect(screen.queryByRole('dialog')).toBeNull()
++  })
++
++  it('closes the replay on Escape', async () => {
++    exportThread.mockResolvedValue({ body: replayFile, mediaType: 'application/json; charset=utf-8', fileName: 'x.json' })
++    renderMenu()
++    openMenu()
++    fireEvent.click(screen.getByRole('button', { name: 'Replay conversation' }))
++    await screen.findByRole('dialog')
++    // The Escape listener is attached by an effect after the viewer mounts.
++    flush()
++
++    fireEvent.keyDown(document, { key: 'Escape' })
++
++    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx
+new file mode 100644
+index 000000000..25ddb0e7b
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx	
+@@ -0,0 +1,224 @@
++import { createSignal, createUniqueId, lazy, Loading, onCleanup, Show } from 'solid-js'
++import { exportThread, type ThreadExportFormat, type ThreadExportProfile } from '@/shared/api/chat-client'
++import { downloadBytes } from '@/features/chat/lib/chat-export/download'
++import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/chat/lib/chat-retention'
++import { isZdrCode, zdrRefusalPresentation, type Translate } from '@/shared/api/zdr-refusals'
++import { Download, Play } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import { readThreadExport, type ThreadExport } from '../replay/thread-export-schema'
++import './ExportConversationAction.css'
++
++// The replay is the heavier half of this menu, so its code loads only when someone opens it.
++const ThreadReplayView = lazy(() =>
++  import('../replay/ThreadReplayView').then((module) => ({ default: module.ThreadReplayView })),
++)
++
++/** Whether this build offers the conversation export (`VITE_THREAD_EXPORT`, read with the strict literal `true`). */
++export const threadExportEnabled = () => import.meta.env.VITE_THREAD_EXPORT === 'true'
++
++/**
++ * "Export conversation" beside "Fork from here" on the latest answer (EP-12 S12). The menu takes a format and a
++ * content choice, neither preselected, and downloads the whole active branch as a file. "Replay conversation" reads
++ * the redacted export into the read-only viewer. The control stays out of sight for a temporary chat, a Space
++ * thread and a zero-retention caller, and goes away once the deployment answers that exporting is off, as fork does.
++ */
++export function ExportConversationAction(props: {
++  threadId: string
++  temporaryChat?: boolean
++  spaceScoped?: boolean
++}) {
++  const i18n = useI18n()
++  const panelId = createUniqueId()
++  // The zero-retention posture of this caller can change while the page is open, so the menu follows it.
++  const [retentionAllowed, setRetentionAllowed] = createSignal(isLocalRetentionAllowed())
++  onCleanup(subscribeLocalRetention((allowed) => setRetentionAllowed(allowed)))
++  const [off, setOff] = createSignal(false)
++  const [open, setOpen] = createSignal(false)
++  const [format, setFormat] = createSignal<ThreadExportFormat | null>(null)
++  const [profile, setProfile] = createSignal<ThreadExportProfile | null>(null)
++  const [busy, setBusy] = createSignal<'download' | 'replay' | null>(null)
++  const [refusal, setRefusal] = createSignal<string | null>(null)
++  const [replay, setReplay] = createSignal<ThreadExport | null>(null)
++
++  const hidden = () =>
++    off() || !props.threadId || Boolean(props.temporaryChat) || Boolean(props.spaceScoped) || !retentionAllowed()
++
++  const refused = (error: unknown) => {
++    setRefusal(refusalText(error, i18n.tr))
++    if (failureOf(error).code === 'thread_export_disabled') setOff(true)
++  }
++
++  async function download() {
++    const chosenFormat = format()
++    const chosenProfile = profile()
++    if (!chosenFormat || !chosenProfile || busy()) return
++    setBusy('download')
++    setRefusal(null)
++    try {
++      const file = await exportThread(props.threadId, chosenFormat, chosenProfile)
++      downloadBytes(new TextEncoder().encode(file.body), file.fileName, file.mediaType)
++    } catch (error) {
++      refused(error)
++    } finally {
++      setBusy(null)
++    }
++  }
++
++  // The replay always reads the redacted copy: it is the one the viewer is built to show (EP-12 D9).
++  async function openReplay() {
++    if (busy()) return
++    setBusy('replay')
++    setRefusal(null)
++    try {
++      const reading = readThreadExport((await exportThread(props.threadId, 'json', 'redacted')).body)
++      if (reading.status === 'ok') {
++        setOpen(false)
++        setReplay(reading.document)
++      } else {
++        setRefusal(
++          reading.status === 'unsupported'
++            ? i18n.tr('Denne eksportversjonen kan ikke vises her.', 'This export version cannot be shown here.')
++            : i18n.tr('Eksporten kunne ikke leses.', 'The export could not be read.'),
++        )
++      }
++    } catch (error) {
++      refused(error)
++    } finally {
++      setBusy(null)
++    }
++  }
++
++  return (
++    <Show when={!hidden()}>
++      <div class="verevon-chat-export">
++        <button
++          type="button"
++          class="verevon-chat-export__trigger"
++          aria-expanded={open() ? 'true' : 'false'}
++          aria-controls={open() ? panelId : undefined}
++          onClick={() => setOpen(!open())}
++        >
++          <Download size={14} />
++          {i18n.tr('Eksporter samtalen', 'Export conversation')}
++        </button>
++        <Show when={open()}>
++          <div id={panelId} class="verevon-chat-export__panel">
++            <fieldset class="verevon-chat-export__choices">
++              <legend>{i18n.tr('Format', 'Format')}</legend>
++              <label class="verevon-chat-export__option">
++                <input
++                  type="radio"
++                  name={`${panelId}-format`}
++                  checked={format() === 'json'}
++                  onChange={() => setFormat('json')}
++                />
++                <span>JSON</span>
++              </label>
++              <label class="verevon-chat-export__option">
++                <input
++                  type="radio"
++                  name={`${panelId}-format`}
++                  checked={format() === 'markdown'}
++                  onChange={() => setFormat('markdown')}
++                />
++                <span>Markdown</span>
++              </label>
++            </fieldset>
++            <fieldset class="verevon-chat-export__choices">
++              <legend>{i18n.tr('Innhold', 'Content')}</legend>
++              <label class="verevon-chat-export__option">
++                <input
++                  type="radio"
++                  name={`${panelId}-profile`}
++                  checked={profile() === 'full'}
++                  onChange={() => setProfile('full')}
++                />
++                <span>{i18n.tr('Fullstendig', 'Full')}</span>
++              </label>
++              <label class="verevon-chat-export__option">
++                <input
++                  type="radio"
++                  name={`${panelId}-profile`}
++                  checked={profile() === 'redacted'}
++                  onChange={() => setProfile('redacted')}
++                />
++                <span>{i18n.tr('Redigert', 'Redacted')}</span>
++              </label>
++            </fieldset>
++            <button
++              type="button"
++              class="verevon-chat-export__action"
++              disabled={!format() || !profile() || busy() !== null}
++              onClick={() => void download()}
++            >
++              {busy() === 'download' ? i18n.tr('Laster ned …', 'Downloading …') : i18n.tr('Last ned', 'Download')}
++            </button>
++            <button
++              type="button"
++              class="verevon-chat-export__action"
++              disabled={busy() !== null}
++              onClick={() => void openReplay()}
++            >
++              <Play size={14} />
++              {busy() === 'replay' ? i18n.tr('Henter …', 'Loading …') : i18n.tr('Spill av samtalen', 'Replay conversation')}
++            </button>
++            <Show when={refusal()}>
++              {(message) => <p class="verevon-chat-export__refusal" role="alert">{message()}</p>}
++            </Show>
++          </div>
++        </Show>
++        <Show when={replay()}>
++          {(conversation) => (
++            <Loading fallback={<span class="verevon-chat-export__loading">{i18n.tr('Åpner gjenspillingen …', 'Opening the replay …')}</span>}>
++              <ThreadReplayView conversation={conversation()} onClose={() => setReplay(null)} />
++            </Loading>
++          )}
++        </Show>
++      </div>
++    </Show>
++  )
++}
++
++type Failure = { code?: string; feature?: string; reason?: string; message?: string }
++
++/** The parts of a refusal this menu reads. Anything it does not recognise is left out, never guessed. */
++function failureOf(error: unknown): Failure {
++  if (typeof error !== 'object' || error === null) return {}
++  const record = error as { code?: unknown; feature?: unknown; message?: unknown; details?: unknown }
++  const details =
++    typeof record.details === 'object' && record.details !== null ? (record.details as Record<string, unknown>) : {}
++  return {
++    code: typeof record.code === 'string' ? record.code : undefined,
++    feature: typeof record.feature === 'string' ? record.feature : undefined,
++    reason: typeof details.reason === 'string' ? details.reason : undefined,
++    message: typeof record.message === 'string' ? record.message : undefined,
++  }
++}
++
++/**
++ * What the person is told when an export is refused. A zero-retention refusal and the refusals of a conversation
++ * are said in the reader's language; any other refusal keeps the server's own sentence.
++ */
++function refusalText(error: unknown, tr: Translate): string {
++  const failure = failureOf(error)
++  if (failure.code && isZdrCode(failure.code)) {
++    const presented = zdrRefusalPresentation(failure.code, failure.feature, tr)
++    return presented.next ? `${presented.message} ${presented.next}` : presented.message
++  }
++  if (failure.code === 'thread_not_exportable') {
++    if (failure.reason === 'space_thread') {
++      return tr('En Space-samtale kan ikke eksporteres herfra.', 'A Space conversation cannot be exported from here.')
++    }
++    if (failure.reason === 'non_persistent_run') {
++      return tr(
++        'En kjøring i samtalen ble ikke lagret, så samtalen kan ikke eksporteres i sin helhet.',
++        'A run in this conversation was not kept, so it cannot be exported in full.',
++      )
++    }
++    return tr('Samtalen kan ikke eksporteres i sin helhet.', 'This conversation cannot be exported in full.')
++  }
++  if (failure.code === 'thread_not_found') return tr('Fant ikke samtalen.', 'The conversation was not found.')
++  if (failure.code === 'thread_export_disabled') return tr('Eksport er ikke slått på her.', 'Export is not turned on here.')
++  if (failure.code && failure.message) return failure.message
++  return tr('Samtalen kunne ikke eksporteres. Prøv igjen.', 'The conversation could not be exported. Try again.')
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.css b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.css
+new file mode 100644
+index 000000000..057fc0126
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.css	
+@@ -0,0 +1,157 @@
++/* The read-only replay of a redacted export (EP-12 S12). It is portalled above the chat, so it is never clipped by a message's box. */
++.verevon-chat-replay-backdrop {
++  position: fixed;
++  inset: 0;
++  z-index: 70;
++  display: grid;
++  place-items: center;
++  padding: 16px;
++  background: rgb(15 23 42 / 35%);
++}
++
++.verevon-chat-replay {
++  box-sizing: border-box;
++  display: grid;
++  gap: 14px;
++  width: min(680px, 100%);
++  max-height: min(80vh, 760px);
++  overflow: auto;
++  padding: 20px;
++  border-radius: 12px;
++  background: var(--surface, #fff);
++  box-shadow: 0 16px 48px rgb(0 0 0 / 20%);
++}
++
++.verevon-chat-replay:focus {
++  outline: none;
++}
++
++.verevon-chat-replay__header {
++  display: flex;
++  align-items: flex-start;
++  justify-content: space-between;
++  gap: 12px;
++}
++
++.verevon-chat-replay__header h2 {
++  margin: 2px 0 0;
++  font-size: 17px;
++  line-height: 1.3;
++  overflow-wrap: anywhere;
++}
++
++.verevon-chat-replay__kicker {
++  margin: 0;
++  color: var(--verevon-e-muted, #667085);
++  font-size: 11px;
++  font-weight: 600;
++  letter-spacing: 0.03em;
++  text-transform: uppercase;
++}
++
++.verevon-chat-replay__close,
++.verevon-chat-replay__steps button {
++  display: inline-grid;
++  place-items: center;
++  min-width: 40px;
++  min-height: 40px;
++  border: 0;
++  border-radius: 999px;
++  background: transparent;
++  color: inherit;
++  cursor: pointer;
++}
++
++.verevon-chat-replay__steps button:disabled {
++  opacity: 0.4;
++  cursor: default;
++}
++
++.verevon-chat-replay__close:focus-visible,
++.verevon-chat-replay__steps button:focus-visible {
++  outline: 2px solid var(--verevon-chat-fjord, #2b5cd9);
++  outline-offset: 2px;
++}
++
++.verevon-chat-replay__runs,
++.verevon-chat-replay__artifacts {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++
++.verevon-chat-replay__chip {
++  display: inline-flex;
++  flex-wrap: wrap;
++  gap: 4px 8px;
++  padding: 4px 10px;
++  border-radius: 999px;
++  background: var(--verevon-surface-soft, #f3f4f6);
++  color: var(--verevon-e-muted, #475467);
++  font-size: 12px;
++}
++
++.verevon-chat-replay__status {
++  color: inherit;
++  font-weight: 600;
++}
++
++.verevon-chat-replay__turn {
++  display: grid;
++  gap: 8px;
++  min-height: 120px;
++}
++
++.verevon-chat-replay__turn-head {
++  display: flex;
++  align-items: baseline;
++  gap: 10px;
++  color: var(--verevon-e-muted, #667085);
++  font-size: 12px;
++}
++
++.verevon-chat-replay__speaker {
++  color: inherit;
++  font-weight: 650;
++}
++
++.verevon-chat-replay__text {
++  margin: 0;
++  overflow-wrap: anywhere;
++  font-size: 14px;
++  line-height: 1.55;
++  white-space: pre-wrap;
++}
++
++.verevon-chat-replay__steps {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++}
++
++.verevon-chat-replay__position {
++  color: var(--verevon-e-muted, #667085);
++  font-size: 12px;
++}
++
++.verevon-chat-replay__empty {
++  margin: 0;
++  color: var(--verevon-e-muted, #667085);
++}
++
++.verevon-chat-replay__notes {
++  display: grid;
++  gap: 4px;
++  padding-top: 10px;
++  border-top: 1px solid var(--verevon-surface-soft, #e4e7ec);
++  color: var(--verevon-e-muted, #667085);
++  font-size: 12px;
++}
++
++.verevon-chat-replay__notes p {
++  margin: 0;
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx
+new file mode 100644
+index 000000000..0403ccb4f
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx	
+@@ -0,0 +1,139 @@
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { flush } from 'solid-js'
++import { ThreadReplayView } from './ThreadReplayView'
++import { readThreadExport, THREAD_EXPORT_FORMAT, type ThreadExport } from './thread-export-schema'
++
++vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
++
++afterEach(() => {
++  cleanup()
++})
++
++// A redacted v1 export: two turns, the second with a document, and one API run. Read through the schema so the
++// fixture is the same typed document the export menu hands the viewer.
++function documentOf(overrides: Record<string, unknown> = {}): ThreadExport {
++  const reading = readThreadExport(
++    JSON.stringify({
++      format: THREAD_EXPORT_FORMAT,
++      version: 1,
++      exported_at: '2026-11-05T10:00:00Z',
++      profile: 'redacted',
++      thread: { id: 'thread-1', title: 'Plan', created_at: '2026-11-04T09:00:00Z' },
++      messages: [
++        {
++          id: 'm-1',
++          role: 'user',
++          content: 'Hei fra brukeren',
++          created_at: '2026-11-04T09:00:01Z',
++          artifacts: [],
++          citations: [],
++          metadata: {},
++        },
++        {
++          id: 'm-2',
++          role: 'assistant',
++          content: 'Svar fra Verevon',
++          created_at: '2026-11-04T09:00:05Z',
++          artifacts: [{ kind: 'document', title: 'Notat' }],
++          citations: [],
++          metadata: {},
++        },
++      ],
++      runs: [
++        {
++          id: 'run-1',
++          status: 'completed',
++          origin: 'api',
++          model: 'model-a',
++          input_tokens: 120,
++          output_tokens: 40,
++          created_at: '2026-11-04T09:00:02Z',
++        },
++      ],
++      truncated: false,
++      ...overrides,
++    }),
++  )
++  if (reading.status !== 'ok') throw new Error(`the fixture is not a valid export: ${reading.status}`)
++  return reading.document
++}
++
++describe('ThreadReplayView', () => {
++  it('shows the first turn, the runs behind the conversation and what the copy leaves out', () => {
++    render(() => <ThreadReplayView conversation={documentOf()} onClose={() => {}} />)
++
++    const dialog = screen.getByRole('dialog', { name: 'Plan' })
++    expect(dialog.textContent).toContain('Hei fra brukeren')
++    expect(screen.getByText('Completed')).toBeTruthy()
++    expect(screen.getByText('API')).toBeTruthy()
++    expect(screen.getByText('in 120 · out 40')).toBeTruthy()
++    expect(screen.getByText('Message 1 of 2')).toBeTruthy()
++    expect(
++      screen.getByText(
++        'Tool arguments and results, connector data, citation snippets, URL query strings and attachment names are left out.',
++      ),
++    ).toBeTruthy()
++  })
++
++  it('steps through the turns and stops at either end', () => {
++    render(() => <ThreadReplayView conversation={documentOf()} onClose={() => {}} />)
++    const previous = screen.getByRole('button', { name: 'Previous message' }) as HTMLButtonElement
++    const next = screen.getByRole('button', { name: 'Next message' }) as HTMLButtonElement
++
++    expect(previous.disabled).toBe(true)
++    fireEvent.click(next)
++    flush()
++
++    expect(screen.getByText('Message 2 of 2')).toBeTruthy()
++    expect(screen.getByText('Svar fra Verevon')).toBeTruthy()
++    expect(screen.getByText('document: Notat')).toBeTruthy()
++    expect(next.disabled).toBe(true)
++
++    fireEvent.click(previous)
++    flush()
++    expect(screen.getByText('Message 1 of 2')).toBeTruthy()
++  })
++
++  it('shows the turn text as plain text, never as markup', () => {
++    const markup = '<img src=x onerror="alert(1)">'
++    const turn = {
++      id: 'm-1',
++      role: 'user',
++      content: markup,
++      created_at: '2026-11-04T09:00:01Z',
++      artifacts: [],
++      citations: [],
++      metadata: {},
++    }
++    render(() => <ThreadReplayView conversation={documentOf({ messages: [turn] })} onClose={() => {}} />)
++
++    expect(document.querySelector('img')).toBeNull()
++    expect(screen.getByText(markup)).toBeTruthy()
++  })
++
++  it('closes on Escape and from the close button', () => {
++    const onClose = vi.fn()
++    render(() => <ThreadReplayView conversation={documentOf()} onClose={onClose} />)
++    // The Escape listener is attached by an effect after mount.
++    flush()
++
++    fireEvent.keyDown(document, { key: 'Escape' })
++    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
++
++    expect(onClose).toHaveBeenCalledTimes(2)
++  })
++
++  it('says so when the conversation has no messages', () => {
++    render(() => <ThreadReplayView conversation={documentOf({ messages: [] })} onClose={() => {}} />)
++
++    expect(screen.getByText('This conversation has no messages.')).toBeTruthy()
++    expect((screen.getByRole('button', { name: 'Next message' }) as HTMLButtonElement).disabled).toBe(true)
++  })
++
++  it('says when the export stops at its size limit', () => {
++    render(() => <ThreadReplayView conversation={documentOf({ truncated: true })} onClose={() => {}} />)
++
++    expect(screen.getByRole('status').textContent).toContain('size limit')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx
+new file mode 100644
+index 000000000..a971e0d1c
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx	
+@@ -0,0 +1,214 @@
++import { createEffect, createSignal, createUniqueId, For, Show } from 'solid-js'
++import { Portal } from '@solidjs/web'
++import { ChevronLeft, ChevronRight, X } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import type { ThreadExport, ThreadExportMessage, ThreadExportRun } from './thread-export-schema'
++import './ThreadReplayView.css'
++
++type Locale = 'no' | 'en'
++type Translate = (noText: string, enText: string) => string
++type Wording = { no: string; en: string }
++
++// The run statuses the export names, in the reader's words. Any other status is shown as the server wrote it.
++const RUN_STATUS: Record<string, Wording> = {
++  completed: { no: 'Fullført', en: 'Completed' },
++  failed: { no: 'Feilet', en: 'Failed' },
++  cancelled: { no: 'Avbrutt', en: 'Cancelled' },
++  running: { no: 'Pågår', en: 'Running' },
++  queued: { no: 'I kø', en: 'Queued' },
++  awaiting_approval: { no: 'Venter på godkjenning', en: 'Awaiting approval' },
++  timed_out: { no: 'Tidsavbrudd', en: 'Timed out' },
++  paused: { no: 'Pauset', en: 'Paused' },
++}
++
++// The origins a run can carry: the closed vocabulary of the run read model (DEC-17).
++const RUN_ORIGIN: Record<string, Wording> = {
++  chat: { no: 'Chat', en: 'Chat' },
++  api: { no: 'API', en: 'API' },
++  schedule: { no: 'Tidsplan', en: 'Schedule' },
++  trigger: { no: 'Utløst', en: 'Trigger' },
++}
++
++function labelOf(table: Record<string, Wording>, key: string, tr: Translate): string {
++  const entry = Object.hasOwn(table, key) ? table[key] : undefined
++  return entry ? tr(entry.no, entry.en) : key
++}
++
++function speakerOf(role: string, tr: Translate): string {
++  if (role === 'user') return tr('Du', 'You')
++  if (role === 'assistant') return 'Verevon'
++  if (role === 'system') return 'System'
++  return tr('Melding', 'Message')
++}
++
++function stampOf(value: string, locale: Locale): string {
++  const date = new Date(value)
++  if (Number.isNaN(date.getTime())) return ''
++  return new Intl.DateTimeFormat(locale === 'no' ? 'nb-NO' : 'en', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
++}
++
++function tokensOf(run: ThreadExportRun, tr: Translate, locale: Locale): string {
++  const count = (value: number) => value.toLocaleString(locale === 'no' ? 'nb-NO' : 'en')
++  return `${tr('inn', 'in')} ${count(run.input_tokens)} · ${tr('ut', 'out')} ${count(run.output_tokens)}`
++}
++
++/** Each artifact of a turn as `kind: title`, from what the stored artifact carries. */
++function artifactLabelsOf(message: ThreadExportMessage): string[] {
++  return message.artifacts.flatMap((artifact) => {
++    if (typeof artifact !== 'object' || artifact === null) return []
++    const { kind, title } = artifact as { kind?: unknown; title?: unknown }
++    const parts = [kind, title].filter((part): part is string => typeof part === 'string' && part.trim() !== '')
++    return parts.length > 0 ? [parts.join(': ')] : []
++  })
++}
++
++/**
++ * The read-only replay of one redacted export (EP-12 S12, D9): the conversation one turn at a time, with the runs
++ * behind it as summary chips. It reads the document it is given and never calls a model. Every turn is plain
++ * text, so nothing in the conversation can become markup here. Opened lazily from the export menu.
++ */
++export function ThreadReplayView(props: { conversation: ThreadExport; onClose: () => void }) {
++  const i18n = useI18n()
++  const titleId = createUniqueId()
++  const [index, setIndex] = createSignal(0)
++  let dialog: HTMLElement | undefined
++
++  const locale = (): Locale => i18n.locale()
++  const count = () => props.conversation.messages.length
++  const current = () => props.conversation.messages[index()]
++  const step = (delta: number) => setIndex(Math.min(Math.max(index() + delta, 0), Math.max(count() - 1, 0)))
++
++  // Solid v2 has no onMount: a two-phase effect with a constant compute runs once after mount.
++  createEffect(() => undefined, () => {
++    dialog?.focus()
++    const onKey = (event: KeyboardEvent) => {
++      if (event.key === 'Escape') props.onClose()
++    }
++    document.addEventListener('keydown', onKey)
++    return () => document.removeEventListener('keydown', onKey)
++  })
++
++  return (
++    <Portal>
++      <div class="verevon-chat-replay-backdrop">
++        <section
++          ref={(element) => (dialog = element)}
++          class="verevon-chat-replay"
++          role="dialog"
++          aria-modal="true"
++          aria-labelledby={titleId}
++          tabIndex={-1}
++        >
++          <header class="verevon-chat-replay__header">
++            <div>
++              <p class="verevon-chat-replay__kicker">{i18n.tr('Gjenspilling, redigert', 'Replay, redacted')}</p>
++              <h2 id={titleId}>
++                {props.conversation.thread.title || i18n.tr('Samtale uten tittel', 'Untitled conversation')}
++              </h2>
++            </div>
++            <button
++              type="button"
++              class="verevon-chat-replay__close"
++              aria-label={i18n.tr('Lukk', 'Close')}
++              onClick={() => props.onClose()}
++            >
++              <X size={16} />
++            </button>
++          </header>
++
++          <Show when={props.conversation.runs.length > 0}>
++            <ul class="verevon-chat-replay__runs" aria-label={i18n.tr('Kjøringer i samtalen', 'Runs in this conversation')}>
++              <For each={props.conversation.runs}>
++                {(run) => (
++                  <li class="verevon-chat-replay__chip">
++                    <span class="verevon-chat-replay__status">{labelOf(RUN_STATUS, run.status, i18n.tr)}</span>
++                    <span>{labelOf(RUN_ORIGIN, run.origin, i18n.tr)}</span>
++                    <span>{run.model || i18n.tr('ukjent modell', 'unknown model')}</span>
++                    <span>{tokensOf(run, i18n.tr, locale())}</span>
++                  </li>
++                )}
++              </For>
++            </ul>
++          </Show>
++
++          <Show
++            when={current()}
++            fallback={<p class="verevon-chat-replay__empty">{i18n.tr('Samtalen har ingen meldinger.', 'This conversation has no messages.')}</p>}
++          >
++            {(message) => (
++              <article class="verevon-chat-replay__turn">
++                <header class="verevon-chat-replay__turn-head">
++                  <span class="verevon-chat-replay__speaker">{speakerOf(message().role, i18n.tr)}</span>
++                  <time dateTime={message().created_at}>{stampOf(message().created_at, locale())}</time>
++                </header>
++                <Show when={message().content.trim() !== ''}>
++                  <p class="verevon-chat-replay__text">{message().content}</p>
++                </Show>
++                <Show when={artifactLabelsOf(message()).length > 0}>
++                  <ul class="verevon-chat-replay__artifacts" aria-label={i18n.tr('Dokumenter i meldingen', 'Documents in this message')}>
++                    <For each={artifactLabelsOf(message())}>
++                      {(label) => <li class="verevon-chat-replay__chip">{label}</li>}
++                    </For>
++                  </ul>
++                </Show>
++              </article>
++            )}
++          </Show>
++
++          <nav class="verevon-chat-replay__steps" aria-label={i18n.tr('Bla i meldingene', 'Step through the messages')}>
++            <button
++              type="button"
++              aria-label={i18n.tr('Forrige melding', 'Previous message')}
++              disabled={index() <= 0}
++              onClick={() => step(-1)}
++            >
++              <ChevronLeft size={16} />
++            </button>
++            <span class="verevon-chat-replay__position" aria-live="polite">
++              {count() === 0 ? '' : i18n.tr(`Melding ${index() + 1} av ${count()}`, `Message ${index() + 1} of ${count()}`)}
++            </span>
++            <button
++              type="button"
++              aria-label={i18n.tr('Neste melding', 'Next message')}
++              disabled={index() >= count() - 1}
++              onClick={() => step(1)}
++            >
++              <ChevronRight size={16} />
++            </button>
++          </nav>
++
++          <aside class="verevon-chat-replay__notes" aria-label={i18n.tr('Ikke med i eksporten', 'Not in the export')}>
++            <p>
++              {i18n.tr(
++                'Binære filer, vedleggsinnhold og genererte filer er aldri med.',
++                'Binary files, attachment contents and generated files are never included.',
++              )}
++            </p>
++            <p>
++              {i18n.tr(
++                'Bare den aktive grenen av samtalen er med.',
++                'Only the active branch of the conversation is included.',
++              )}
++            </p>
++            <Show when={props.conversation.profile === 'redacted'}>
++              <p>
++                {i18n.tr(
++                  'Verktøyargumenter og -resultater, koblingsdata, siteringsutdrag, URL-spørringer og vedleggsnavn er utelatt.',
++                  'Tool arguments and results, connector data, citation snippets, URL query strings and attachment names are left out.',
++                )}
++              </p>
++            </Show>
++            <Show when={props.conversation.truncated}>
++              <p role="status">
++                {i18n.tr(
++                  'Eksporten stopper ved størrelsesgrensen, så de siste meldingene mangler.',
++                  'The export stops at its size limit, so the last messages are missing.',
++                )}
++              </p>
++            </Show>
++          </aside>
++        </section>
++      </div>
++    </Portal>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts
+new file mode 100644
+index 000000000..b425494dc
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts	
+@@ -0,0 +1,87 @@
++import { describe, expect, it } from 'vitest'
++import { readThreadExport, THREAD_EXPORT_FORMAT } from './thread-export-schema'
++
++// A redacted v1 export as the gateway writes it: two turns and one run.
++function exportFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
++  return {
++    format: THREAD_EXPORT_FORMAT,
++    version: 1,
++    exported_at: '2026-11-05T10:00:00Z',
++    profile: 'redacted',
++    thread: { id: 'thread-1', title: 'Plan', created_at: '2026-11-04T09:00:00Z' },
++    messages: [
++      {
++        id: 'm-1',
++        role: 'user',
++        content: 'Hei',
++        created_at: '2026-11-04T09:00:01Z',
++        artifacts: [],
++        citations: [],
++        metadata: {},
++      },
++      {
++        id: 'm-2',
++        role: 'assistant',
++        content: 'Hallo',
++        created_at: '2026-11-04T09:00:05Z',
++        artifacts: [{ kind: 'document', title: 'Notat' }],
++        citations: [],
++        metadata: { tool_steps: [] },
++      },
++    ],
++    runs: [
++      {
++        id: 'run-1',
++        status: 'completed',
++        origin: 'chat',
++        model: 'model-a',
++        input_tokens: 120,
++        output_tokens: 40,
++        created_at: '2026-11-04T09:00:02Z',
++      },
++    ],
++    truncated: false,
++    ...overrides,
++  }
++}
++
++const asText = (value: unknown) => JSON.stringify(value)
++
++describe('readThreadExport', () => {
++  it('reads a v1 export into the document it names', () => {
++    const reading = readThreadExport(asText(exportFixture()))
++
++    expect(reading.status).toBe('ok')
++    if (reading.status !== 'ok') return
++    expect(reading.document.thread.title).toBe('Plan')
++    expect(reading.document.messages.map((message) => message.role)).toEqual(['user', 'assistant'])
++    expect(reading.document.runs[0]).toMatchObject({ status: 'completed', origin: 'chat', input_tokens: 120 })
++  })
++
++  it('refuses a version it does not know, and reads none of its contents', () => {
++    expect(readThreadExport(asText(exportFixture({ version: 2 })))).toEqual({ status: 'unsupported' })
++  })
++
++  it('refuses a document that names another format', () => {
++    expect(readThreadExport(asText(exportFixture({ format: 'verevon.thread-export.v2' })))).toEqual({
++      status: 'unsupported',
++    })
++  })
++
++  it('refuses text that is not JSON, and JSON that is not an object', () => {
++    expect(readThreadExport('# Plan\n\nHei')).toEqual({ status: 'invalid' })
++    expect(readThreadExport('[]')).toEqual({ status: 'invalid' })
++    expect(readThreadExport('null')).toEqual({ status: 'invalid' })
++  })
++
++  it('refuses a v1 document whose shape is wrong', () => {
++    expect(readThreadExport(asText(exportFixture({ messages: 'none' })))).toEqual({ status: 'invalid' })
++    expect(readThreadExport(asText(exportFixture({ profile: 'everything' })))).toEqual({ status: 'invalid' })
++  })
++
++  it('leaves out fields it does not know rather than refusing the export', () => {
++    const reading = readThreadExport(asText(exportFixture({ future_field: { anything: true } })))
++
++    expect(reading.status).toBe('ok')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts b/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts
+new file mode 100644
+index 000000000..d2ea35bbb
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts	
+@@ -0,0 +1,71 @@
++import { z } from 'zod'
++
++// The owner's conversation export as the gateway writes it (`verevon.thread-export.v1`, EP-12 S10). The replay
++// shows what these fields carry and nothing else. A document with another format name or version is refused
++// before its contents are read: this build never shows a later version as if it were v1 (EP-12 D9).
++
++export const THREAD_EXPORT_FORMAT = 'verevon.thread-export.v1'
++export const THREAD_EXPORT_VERSION = 1
++
++const threadSchema = z.object({
++  id: z.string(),
++  title: z.string(),
++  created_at: z.string(),
++})
++
++const messageSchema = z.object({
++  id: z.string(),
++  role: z.string(),
++  content: z.string(),
++  created_at: z.string(),
++  // What the stored turn carried. The replay reads an artifact's kind and title and nothing more, so the
++  // entries are not checked further here.
++  artifacts: z.array(z.unknown()),
++  citations: z.array(z.unknown()),
++  metadata: z.record(z.string(), z.unknown()),
++})
++
++const runSchema = z.object({
++  id: z.string(),
++  status: z.string(),
++  origin: z.string(),
++  model: z.string(),
++  input_tokens: z.number(),
++  output_tokens: z.number(),
++  created_at: z.string(),
++})
++
++const threadExportSchema = z.object({
++  format: z.literal(THREAD_EXPORT_FORMAT),
++  version: z.literal(THREAD_EXPORT_VERSION),
++  exported_at: z.string(),
++  profile: z.enum(['full', 'redacted']),
++  thread: threadSchema,
++  messages: z.array(messageSchema),
++  runs: z.array(runSchema),
++  truncated: z.boolean(),
++})
++
++export type ThreadExport = z.infer<typeof threadExportSchema>
++export type ThreadExportMessage = ThreadExport['messages'][number]
++export type ThreadExportRun = ThreadExport['runs'][number]
++
++/** How one export file reads: the document, or why it is not shown. Neither failure shows any of its contents. */
++export type ThreadExportReading =
++  | { status: 'ok'; document: ThreadExport }
++  | { status: 'unsupported' }
++  | { status: 'invalid' }
++
++export function readThreadExport(text: string): ThreadExportReading {
++  let raw: unknown
++  try {
++    raw = JSON.parse(text)
++  } catch {
++    return { status: 'invalid' }
++  }
++  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { status: 'invalid' }
++  const { format, version } = raw as { format?: unknown; version?: unknown }
++  if (format !== THREAD_EXPORT_FORMAT || version !== THREAD_EXPORT_VERSION) return { status: 'unsupported' }
++  const parsed = threadExportSchema.safeParse(raw)
++  return parsed.success ? { status: 'ok', document: parsed.data } : { status: 'invalid' }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.thread-export.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.thread-export.test.ts
+new file mode 100644
+index 000000000..32f772b57
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.thread-export.test.ts	
+@@ -0,0 +1,115 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { exportThread } from './chat-client'
++import { ApiError } from './http'
++
++// The export is a file, not a JSON answer: the client reads it whole as text and keeps the headers the gateway
++// wrote. A refusal keeps its typed envelope, so the menu can say why the conversation may not leave.
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++})
++
++function file(body: string, headers: Record<string, string>): Response {
++  return new Response(body, { status: 200, headers })
++}
++
++function refusal(status: number, body: unknown): Response {
++  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
++}
++
++describe('exportThread', () => {
++  it('asks for the chosen format and profile of the thread, with the thread id encoded', async () => {
++    const fetchMock = vi.fn().mockResolvedValue(file('{}', { 'Content-Type': 'application/json; charset=utf-8' }))
++    vi.stubGlobal('fetch', fetchMock)
++
++    await exportThread('thread 1', 'markdown', 'redacted')
++
++    expect(fetchMock).toHaveBeenCalledTimes(1)
++    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
++    expect(url).toContain('/api/v1/chat/threads/thread%201/export?format=markdown&profile=redacted')
++    expect(init.credentials).toBe('include')
++  })
++
++  it('returns the file as text, with the media type and the save name the gateway gave it', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        file('# Plan\n', {
++          'Content-Type': 'text/markdown; charset=utf-8',
++          'Content-Disposition': 'attachment; filename="verevon-thread-thread-1.md"',
++        }),
++      ),
++    )
++
++    await expect(exportThread('thread-1', 'markdown', 'full')).resolves.toEqual({
++      body: '# Plan\n',
++      mediaType: 'text/markdown; charset=utf-8',
++      fileName: 'verevon-thread-thread-1.md',
++    })
++  })
++
++  it('falls back to a save name of its own when the gateway names none', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(file('{}', { 'Content-Type': 'application/json' })))
++
++    await expect(exportThread('thread-1', 'json', 'full')).resolves.toMatchObject({ fileName: 'verevon-thread.json' })
++  })
++
++  it('rejects with the typed refusal and its reason, so the menu can say why', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        refusal(412, {
++          error: {
++            code: 'thread_not_exportable',
++            message: 'a run here was kept outside retention',
++            details: { reason: 'non_persistent_run' },
++          },
++        }),
++      ),
++    )
++
++    const failure = await exportThread('thread-1', 'json', 'full').catch((error: unknown) => error)
++
++    expect(failure).toBeInstanceOf(ApiError)
++    expect(failure).toMatchObject({
++      status: 412,
++      code: 'thread_not_exportable',
++      details: { reason: 'non_persistent_run' },
++    })
++  })
++
++  it('keeps the feature that a zero-retention refusal names', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        refusal(412, {
++          error: {
++            code: 'zdr_feature_not_supported',
++            message: 'not with zero data retention',
++            feature: 'conversation_export',
++          },
++        }),
++      ),
++    )
++
++    await expect(exportThread('thread-1', 'json', 'full')).rejects.toMatchObject({
++      code: 'zdr_feature_not_supported',
++      feature: 'conversation_export',
++    })
++  })
++
++  it('answers a refusal that is not JSON with the status alone', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html>gateway down</html>', { status: 502 })))
++
++    await expect(exportThread('thread-1', 'json', 'full')).rejects.toMatchObject({ status: 502, code: null })
++  })
++
++  it('refuses a choice the action contract does not name, before anything is sent', async () => {
++    const fetchMock = vi.fn()
++    vi.stubGlobal('fetch', fetchMock)
++
++    await expect(exportThread('thread-1', 'pdf' as never, 'full')).rejects.toThrow()
++    await expect(exportThread('   ', 'json', 'full')).rejects.toThrow()
++    expect(fetchMock).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index a22ad1abc..a4f855a3e 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -1,4 +1,5 @@
+-import { ApiError, requestJson } from './http'
++import { ApiError, apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
++import { gatewayBaseUrl } from './config'
+ import {
+   normalizePlan,
+   planStepEditToWire,
+@@ -22,7 +23,7 @@ import {
+   type PrivacyTier,
+ } from './privacy-tier'
+ import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
+-import { parseChatHistoryAction } from '@/shared/actions/chat-history'
++import { parseChatHistoryAction, threadExportInput } from '@/shared/actions/chat-history'
+ import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
+ import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
+ import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
+@@ -3762,6 +3763,55 @@ export async function forkChatThread(
+   return normalizeChatThreadSession(objectValue(raw)?.session)
+ }
+ 
++/** The file formats a conversation is exported in (EP-12 S11). The person picks one; there is no default. */
++export type ThreadExportFormat = 'json' | 'markdown'
++
++/** `redacted` leaves out tool payloads, connector data and attachment names (EP-12 D7). The person picks one. */
++export type ThreadExportProfile = 'full' | 'redacted'
++
++/** One export as the gateway wrote it: the file's text, its media type and the name it asks to be saved under. */
++export type ChatThreadExport = {
++  body: string
++  mediaType: string
++  fileName: string
++}
++
++/**
++ * Export one of the owner's conversations as a file (EP-12 S12). The choices are checked against the action
++ * contract before anything is sent. The file is read whole as text: `requestJson` parses JSON, and a Markdown
++ * export is not JSON. Rejects with the server's typed refusal: `thread_export_disabled` while exporting is off,
++ * `thread_not_exportable` (with `details.reason`) for a thread that may not leave in full, and the zero-retention
++ * code for a zero-retention caller.
++ */
++export async function exportThread(
++  threadId: string,
++  format: ThreadExportFormat,
++  profile: ThreadExportProfile,
++): Promise<ChatThreadExport> {
++  const request = threadExportInput.parse({ threadId, format, profile })
++  const path = `/api/v1/chat/threads/${encodeURIComponent(request.threadId)}/export`
++  const response = await fetch(
++    `${gatewayBaseUrl()}${path}?format=${request.format}&profile=${request.profile}`,
++    { credentials: 'include' },
++  )
++  if (!response.ok) {
++    const failure = apiErrorFromResponse(await response.json().catch(() => null), response)
++    signalSessionExpiry(failure, path)
++    throw failure
++  }
++  const extension = request.format === 'json' ? 'json' : 'md'
++  return {
++    body: await response.text(),
++    mediaType: response.headers.get('Content-Type') ?? 'application/octet-stream',
++    fileName: downloadNameOf(response.headers.get('Content-Disposition')) ?? `verevon-thread.${extension}`,
++  }
++}
++
++/** The save name the gateway gave the file (`filename="..."`), or null when the header names none. */
++function downloadNameOf(disposition: string | null): string | null {
++  return disposition?.match(/filename="([^"]+)"/)?.[1] ?? null
++}
++
+ /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
+ export type ChatBranchMove = {
+   activeLeafMessageId: string

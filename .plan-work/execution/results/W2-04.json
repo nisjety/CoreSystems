@@ -1,0 +1,217 @@
+{
+ "batchId": "W2-04",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS22-S1",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sandboxes.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sandboxes.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/sandboxes_grpc.pb.go",
+    "apps/Model Plane/go/services/sandbox-manager/cmd/main.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/authz/authz.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/authz/authz_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease_integration_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/memory_store.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/store.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/types.go",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/store.go (new)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/store_test.go (new)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/store_integration_test.go (new)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/thread_workspace_test.go (new)",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/thread_lease_test.go (new)",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0005_thread_workspace.up.sql (new)",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0005_thread_workspace.down.sql (new)",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0006_thread_lease_unique.up.sql (new)",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0006_thread_lease_unique.down.sql (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/go/services/sandbox-manager' && GOFLAGS= go vet ./...",
+     "outcome": "pass (exit 0, no output)"
+    },
+    {
+     "command": "cd 'apps/Model Plane/go/services/sandbox-manager' && GOFLAGS= go test -count=1 ./...",
+     "outcome": "pass, exit 0: cmd, authz, lease, process, redact, server, snapshot, threadworkspace, workspace all ok (telemetry has no test files)"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo check -q -p execution-core",
+     "outcome": "FAIL as predicted: error[E0063] missing field `zdr` in initializer of `AcquireLeaseRequest` at services\\execution-core\\src\\sandbox_manager_client.rs:201. This is the only error reported for execution-core. The file is not owned by this slice and was not edited; the shared-edit in lead_todo fixes it. Not re-checked after the edit because the edit is not applied in this worktree."
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib",
+     "outcome": "160 passed, 1 failed: zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces (same pre-existing failure as before; apps/Model Plane/api/contracts/zdr-refusals.json is not modified in git status, its working copy has 221 CRLF lines while HEAD has 0, so the failure is the Windows line-ending checkout and not this slice)"
+    },
+    {
+     "command": "grep for 'AcquireLeaseRequest {' in apps/Model Plane/rust (excluding target)",
+     "outcome": "only one struct literal: services/execution-core/src/sandbox_manager_client.rs:201. No other Rust literal needs zdr."
+    }
+   ],
+   "db_tests_written": [
+    "TestLeaseStore_AcquireThreadIsIdempotentInPostgres",
+    "TestThreadStore_ApplyIsCompareAndSwapAndCapped"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs: in the AcquireLeaseRequest literal at line 201 (the struct initializer that begins `let message = AcquireLeaseRequest {`), add the line `zdr: false,` directly after `capability_claims_json: request.capability_claims_json.to_owned(),` (line 210), with the same 12-space indentation. Without it execution-core fails with E0063 missing field `zdr`. After applying, re-run `CARGO_INCREMENTAL=0 cargo check -q -p execution-core` in apps/Model Plane/rust.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the sandbox-manager service environment, next to `SANDBOX_MANAGER_BACKEND_ID: ${SANDBOX_MANAGER_BACKEND_ID:-}`, add these three lines with the same indentation: `SANDBOX_MANAGER_THREAD_WORKSPACE: ${SANDBOX_MANAGER_THREAD_WORKSPACE:-}`, `SANDBOX_MANAGER_THREAD_MAX_FILES: ${SANDBOX_MANAGER_THREAD_MAX_FILES:-256}`, `SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}`. Empty THREAD_WORKSPACE keeps the switch off.",
+    "Run DB tests through the harness (Docker, not run by the worker): `go test -tags integration -run 'TestLeaseStore_AcquireThreadIsIdempotentInPostgres' ./internal/lease/` and `go test -tags integration -run 'TestThreadStore_ApplyIsCompareAndSwapAndCapped' ./internal/threadworkspace/` in apps/Model Plane/go/services/sandbox-manager. Both apply migrations 0005 and 0006 (the lease test applies 0005 and 0006; the threadworkspace test applies 0005).",
+    "Before applying migration 0006 to any live database, confirm no two live thread-scoped leases share (org_id, owner_id, scope_id): `SELECT org_id, owner_id, scope_id, count(*) FROM leases WHERE scope_type='thread' AND state<>4 GROUP BY 1,2,3 HAVING count(*)>1;` must return zero rows, or the index creation fails.",
+    "Rebuild the sandbox-manager image from this worktree and recreate the container with the live env (Worktree Model Plane deploy recipe, recreate-with-live-env), then apply the shared-edit compose lines. Live proofs for the DoD are NOT done: grpcurl a user bearer AcquireLease(thread) twice and confirm the same lease_id; two writers with a stale base_hash give one conflict; dump thread_workspaces and thread_workspace_files; a second user gets NotFound; ZDR acquire is refused with nothing written. Thread RPCs stay refused (FailedPrecondition) until the switch is set to true.",
+    "Do not set SANDBOX_MANAGER_THREAD_WORKSPACE=true in any environment until WS22-S5 (retention and erasure) ships: the default-on gate in the plan is S5, and DeleteThreadWorkspace is still Unimplemented.",
+    "Stale generated Python bindings are not regenerated by this slice: apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sandboxes_pb2.py (the plan lists Go and Rust only). Regenerate in a later slice or when the python package is next built.",
+    "Pre-existing, not this slice: `go vet -tags integration ./...` fails in internal/process/store_integration_test.go:502 (ReadOutput called with 5 args, signature takes 6). Unchanged at HEAD; the process registry owner should fix it.",
+    "Pre-existing, not this slice: mp-contracts lib test zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails in the Windows working copy because apps/Model Plane/api/contracts/zdr-refusals.json has CRLF line endings in the working copy while HEAD has LF (file not modified in git status)."
+   ],
+   "deviations": [
+    "The required execution-core fix was not applied: the file is outside the ownership set, so it is handed back as a shared-edit in lead_todo, as the reviewer's own fix note says.",
+    "Edited internal/server/errors.go and then reverted it (git diff empty); the thread error mapping lives in server.go (threadWorkspaceErr) instead, because errors.go is outside the owned list.",
+    "Thread-scope acquire with space_id is refused only when the switch is on (InvalidArgument); with it off the pre-WS22 path is unchanged, as the byte-identical rule requires.",
+    "Added a thread-workspace store interface and a memory implementation to the server package (memory_store.go), and a new threadworkspace package with a pure PlanChanges function shared by both stores, so the CAS and quota rules are written once.",
+    "mp-contracts build.rs was edited only to bump the contract-revision comment, which the file documents as the fingerprint bust for Docker builds.",
+    "Proto regeneration used local protoc-gen-go and protoc-gen-go-grpc with buf generate --path (not the docker buf image); the same plugin versions reproduced the checked-in files byte-for-byte before the edit."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs (add `zdr: false,` after line 210 `capability_claims_json: request.capability_claims_json.to_owned(),` in the AcquireLeaseRequest literal at line 201; build break until applied; confirmed by cargo check)",
+    "apps/Model Plane/deploy/docker-compose.yml (three SANDBOX_MANAGER_THREAD_* env lines; given as shared-edit in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/execution-core/src/sandbox_manager_client.rs:201 (the `AcquireLeaseRequest {` struct literal in the acquire-lease method): add `zdr: false,` directly after `capability_claims_json: request.capability_claims_json.to_owned(),` (line 210), same 12-space indent. Why: the new proto field 8 makes the prost struct require `zdr`, so `CARGO_INCREMENTAL=0 cargo check -q -p execution-core` fails with E0063 (I re-ran it: this is the only error). The file is outside this slice's ownership set, so the lead applies it as a shared-edit; the verdict moves to pass once that edit lands and execution-core checks clean."
+    ],
+    "dod_gaps": [
+     "Postgres integration tests are not run (Docker is out of scope for me): `go test -tags integration -run TestLeaseStore_AcquireThreadIsIdempotentInPostgres ./internal/lease/` and `go test -tags integration -run TestThreadStore_ApplyIsCompareAndSwapAndCapped ./internal/threadworkspace/` in apps/Model Plane/go/services/sandbox-manager. I only confirmed with `go vet -tags integration` that they compile.",
+     "Before applying migration 0006 to any live database, run the duplicate check from the implementer's lead_todo: SELECT org_id, owner_id, scope_id, count(*) FROM leases WHERE scope_type='thread' AND state<>4 GROUP BY 1,2,3 HAVING count(*)>1; it must return zero rows.",
+     "Shared-edit to apps/Model Plane/deploy/docker-compose.yml: add the three SANDBOX_MANAGER_THREAD_WORKSPACE, _THREAD_MAX_FILES (256) and _THREAD_MAX_BYTES (67108864) lines beside SANDBOX_MANAGER_BACKEND_ID. Until then the env is unset, so the switch stays off.",
+     "Live proof for the row's Evidence is not done: rebuild the sandbox-manager image, recreate the container with the live env, then grpcurl a user bearer AcquireLease(thread) twice (same lease_id), two writers with a stale base_hash (one conflict), dump thread_workspaces and thread_workspace_files, a second user gets NotFound, and a ZDR acquire is refused with nothing written.",
+     "Do not set SANDBOX_MANAGER_THREAD_WORKSPACE=true in any environment until WS22-S5 ships; DeleteThreadWorkspace is still Unimplemented.",
+     "The mp-contracts lib test zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails in this worktree because apps/Model Plane/api/contracts/zdr-refusals.json is checked out with CRLF (221 CR, index eol=lf per git ls-files --eol). The file is untouched by this slice; it is a Windows checkout artefact and is not a blocker for WS22-S1."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "DeleteThreadWorkspace takes thread_id and org_id from the request body and authz grants write to any user principal, so S5 must derive the owner from the principal or a lease before erasing; it is Unimplemented now, so there is no exposure yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "threadworkspace Store.Apply and Get SQL (row lock, upsert, delete, revision) run only in the integration test, which has not been executed against Postgres."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No concurrency test for two simultaneous Apply calls on one thread; the header row lock is the only guard for quota and revision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Migration 0006 fails on a database with duplicate live thread leases; the check in lead_todo must be run before applying it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ApplyThreadWorkspaceChanges accepts any non-empty content_hash; format sha256:<hex> is not validated at the boundary."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "GetThreadWorkspace writes last_used_at on every read, one extra UPDATE per read; acceptable for retention but worth measuring."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No per-file size cap in the server (the 8 MiB exclusion belongs to WS22-S2 sync); only file count and total bytes are capped."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Thread leases have no expiry sweeper; expired thread leases stay in the table until S5 or S6 add lifecycle handling."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The zdr flag is honoured only for thread scope; a zdr=true agent-scope acquire is accepted as before, which is correct today because only thread scope carries workspace state."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A thread-scoped AcquireLease that names a space_id is still accepted while the switch is off (pre-WS22 path), and the row it creates sits in the leases_thread_live_uq index; after the switch is turned on, AcquireThread upserts onto that row and every thread RPC for that thread returns FailedPrecondition until it expires. Refuse thread scope with a non-empty space_id before the switch branch, or exclude space_id<>'' rows from the index predicate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "threadworkspace.checkPath accepts \".\" (path.Clean(\".\") == \".\" and it is not rejected), so a thread file named \".\" is stored; S2 hydration would then target the workspace root. Reject \".\" and add it to TestPlanChangesRefusesPathsThatEscapeOrRepeat before the switch can be on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The ZDR refusal exists only at acquire. threadLease, GetThreadWorkspace and ApplyThreadWorkspaceChanges take no zdr input, so a holder of a non-ZDR thread lease id can still read and write thread rows. S2 must refuse ZDR at workspace open and commit as well as at acquire, and a test should pin it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Store.Get reads the files and the revision in two statements outside a transaction, so a concurrent Apply can return files from a newer revision than the one reported. Read both in one REPEATABLE READ transaction or a single query."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "AcquireThread's ON CONFLICT DO UPDATE does not refresh backend_id, so after SANDBOX_MANAGER_BACKEND_ID changes an acquire returns the old backend and later thread RPCs fail with BackendMismatch until expiry; this should be stated or handled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Missing tests: the strict parser threadWorkspaceEnabled in cmd/main.go; a thread RPC on an expired lease; a ZDR-flagged Get/Apply path; a concurrent Apply on one thread; a batch with an unbounded number of changes (only resulting file count and bytes are capped, the gRPC 4 MiB limit is the only bound)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A mistyped SANDBOX_MANAGER_THREAD_WORKSPACE (for example True or yes) silently leaves the switch off with no log line; it fails safe, but the plan says strict true/false, so warn or refuse at startup for any non-empty value other than true or false."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "GetThreadWorkspace writes last_used_at on every read, adding one UPDATE per read; the retention sweeper needs it, but the cost should be measured in S5."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "DeleteThreadWorkspace is authorised for any write-scope principal and takes thread_id and org_id from the body; when S5 implements it, derive the owner from the principal or lease, as the implementer noted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Thread leases have no expiry sweeper and no lifecycle handling; expired rows stay in the live index until S5 or S6."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In internal/lease/lease.go the AcquireThread doc comment is glued to the stray lookup doc comment lines (\"participates in the WHERE clause...\") that were left above it, so the godoc for AcquireThread carries lookup's text."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "gofmt flags struct-field alignment in internal/lease/lease.go (Lease struct, ExpiresAt/CreatedAt) and internal/server/memory_store.go (about line 63); both were already unformatted at HEAD, so tidy them when the file is next touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sandboxes_pb2.py is stale (no zdr or thread RPCs); regenerate it in a later slice, as the lead note says."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "Round 2 fix: this round only re-verified. No source file was edited in this round, and the slice's files are the same as the previous report. The required fix (add zdr: false to the AcquireLeaseRequest literal in execution-core) lives in a file outside the ownership set, so it is handed back as a shared-edit and was not applied. Confirmed with cargo check that execution-core fails with E0063 until the lead applies it. Confirmed proto field 8 zdr is present in sandboxes.proto and the Go bindings (Zdr bool, tag varint 8) and in the prost-generated Rust struct. Go sandbox-manager vet and full uncached test suite pass. Status stays partial until the lead applies the shared-edits and runs the DB tests. Everything else from the previous report stands: all new switches default off, every new RPC returns FailedPrecondition while SANDBOX_MANAGER_THREAD_WORKSPACE is off, and ZDR thread acquire is refused before any write."
+  }
+ ]
+}

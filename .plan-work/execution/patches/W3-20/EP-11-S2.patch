@@ -1,0 +1,2566 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs
+index a7018af56..cd9524396 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
+@@ -45,6 +45,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/skills/{skill_id}",
+             post(update_skill).delete(delete_skill),
+         )
++        // EP-11 S2: a skill's read-only history. capability-core answers 404 while
++        // SKILL_VERSIONS_API is off, and the Skills page asks only when a skill carries a version.
++        .route(
++            "/api/v1/skills/{skill_id}/versions",
++            get(list_skill_versions),
++        )
+         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
+         .route(
+             "/api/v1/plugins/{plugin_id}",
+@@ -174,6 +180,44 @@ async fn list_skills(
+     .await
+ }
+ 
++/// List one skill's immutable versions, newest first (EP-11 S2). Open to any member, as the skill
++/// list is: capability-core shows the history only to whoever may read the skill, and answers a
++/// skill the caller cannot see as not found. `limit` and `before_version` pass through; the org is
++/// never named here, it comes from the verified capability token.
++async fn list_skill_versions(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(skill_id): Path<String>,
++    Query(params): Query<HashMap<String, String>>,
++) -> impl IntoResponse {
++    let token = shared::model_token(&state, &user, &headers).await;
++    let capability = match shared::required_capability_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return shared::delegated_auth_unavailable(error),
++    };
++    let paging: HashMap<String, String> = params
++        .into_iter()
++        .filter(|(key, _)| key == "limit" || key == "before_version")
++        .collect();
++    let url = format!(
++        "{}/v1/skills/{}/versions{}",
++        state.model_gateway_url,
++        urlencoding::encode(&skill_id),
++        build_query(&paging)
++    );
++    shared::proxy_model_json_with_capability(
++        &state,
++        Method::GET,
++        &url,
++        None,
++        token.as_deref(),
++        Some(&capability),
++        &user,
++    )
++    .await
++}
++
+ /// Whether the `SKILL_MEMBER_AUTHORING` switch (EP-11 S1) lets a member author private skills. Read
+ /// strictly: only the literal `true` enables it. Read per request, like `schedule_contract_enabled`.
+ fn skill_member_authoring_enabled() -> bool {
+@@ -2539,4 +2583,39 @@ mod tests {
+         let (status, _) = skill_request(&off, "GET", "/api/v1/skills/authoring", None, None).await;
+         assert_ne!(status, axum::http::StatusCode::OK);
+     }
++
++    /// EP-11 S2: a member reads a skill's history through the gateway; only the paging parameters
++    /// pass, so a caller cannot name an org or a user upstream.
++    #[tokio::test]
++    async fn skill_versions_pass_through_with_paging_only() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "org", "").await;
++        Mock::given(wm_method("GET"))
++            .and(wm_path("/v1/skills/skill_1/versions"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "versions": [{"version": 2, "digest": "a".repeat(64)}], "has_more": false
++            })))
++            .mount(&servers.2)
++            .await;
++        let (status, body) = skill_request(
++            &servers,
++            "GET",
++            "/api/v1/skills/skill_1/versions?limit=5&org_id=org-forged&for_user_id=user-2",
++            None,
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert_eq!(body["versions"][0]["version"], 2);
++        let forwarded: Vec<String> = servers
++            .2
++            .received_requests()
++            .await
++            .unwrap()
++            .iter()
++            .filter(|request| request.url.path() == "/v1/skills/skill_1/versions")
++            .map(|request| request.url.query().unwrap_or_default().to_owned())
++            .collect();
++        assert_eq!(forwarded, ["limit=5"]);
++    }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx
+index e41f5ba68..9c529880f 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
+@@ -1,14 +1,18 @@
+-import { BookOpen, Loader2, Sparkles, Trash2 } from '@/shared/icons'
++import { BookOpen, History, Loader2, Sparkles, Trash2, X } from '@/shared/icons'
+ import { createMemo, createSignal, For, Show } from 'solid-js'
++import { Portal } from '@solidjs/web'
+ import { createResource } from '@/shared/lib/create-resource-compat'
+ import {
+   createSkill,
+   deleteSkill,
+   listSkills,
++  listSkillVersions,
+   memberSkillAuthoring,
+   updateSkill,
+   type Skill,
++  type SkillVersion,
+ } from '@/shared/api/skills-client'
++import { ApiError } from '@/shared/api/api-error'
+ import { translateApiError, useI18n } from '@/shared/i18n'
+ import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
+ import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
+@@ -40,6 +44,175 @@ function parseKeywords(raw: string): string[] {
+     .filter((entry) => entry.length > 0)
+ }
+ 
++/** One line of a version's text against the version before it. */
++export interface SkillDiffLine {
++  kind: 'added' | 'removed' | 'same'
++  text: string
++}
++
++/**
++ * A line diff of `current` against `previous` by longest common subsequence, in reading order. A
++ * skill is at most 32,000 characters, so the table stays small.
++ */
++export function diffSkillLines(previous: string, current: string): SkillDiffLine[] {
++  const before = previous.split('\n')
++  const after = current.split('\n')
++  // common[i][j] is the length of the longest common run of before[i..] and after[j..].
++  const common = Array.from({ length: before.length + 1 }, () => new Array<number>(after.length + 1).fill(0))
++  for (let i = before.length - 1; i >= 0; i -= 1) {
++    for (let j = after.length - 1; j >= 0; j -= 1) {
++      common[i]![j] =
++        before[i] === after[j] ? common[i + 1]![j + 1]! + 1 : Math.max(common[i + 1]![j]!, common[i]![j + 1]!)
++    }
++  }
++  const lines: SkillDiffLine[] = []
++  let i = 0
++  let j = 0
++  while (i < before.length && j < after.length) {
++    if (before[i] === after[j]) {
++      lines.push({ kind: 'same', text: before[i]! })
++      i += 1
++      j += 1
++    } else if (common[i + 1]![j]! >= common[i]![j + 1]!) {
++      lines.push({ kind: 'removed', text: before[i]! })
++      i += 1
++    } else {
++      lines.push({ kind: 'added', text: after[j]! })
++      j += 1
++    }
++  }
++  for (; i < before.length; i += 1) lines.push({ kind: 'removed', text: before[i]! })
++  for (; j < after.length; j += 1) lines.push({ kind: 'added', text: after[j]! })
++  return lines
++}
++
++/**
++ * The read-only history of one skill (EP-11 S2): every immutable version, newest first, with its
++ * date, who cut it, a short digest and what changed in its text since the version before. Nothing
++ * here edits or restores; a version is never changed.
++ */
++function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () => void }) {
++  const i18n = useI18n()
++  const [history] = createResource(
++    () => props.skill.id,
++    (skillId) => listSkillVersions(props.orgId, skillId),
++  )
++  const versions = createMemo(() => history()?.versions ?? [])
++  const unavailable = () => history.error instanceof ApiError && history.error.status === 404
++
++  const actorLabel = (version: SkillVersion): string => {
++    if (version.actor_kind === 'system') return i18n.tr('Verevon (oppgradering)', 'Verevon (upgrade)')
++    if (version.actor_kind === 'service') return 'Verevon'
++    if (version.actor_kind === 'unattributed') return i18n.tr('Ukjent', 'Unknown')
++    return version.actor_id || i18n.tr('En person', 'A person')
++  }
++
++  const onKeyDown = (event: KeyboardEvent) => {
++    if (event.key === 'Escape') {
++      event.stopPropagation()
++      props.onClose()
++    }
++  }
++
++  return (
++    <Portal>
++      <div
++        class="verevon-schedule-dialog"
++        role="presentation"
++        onClick={(event) => {
++          if (event.target === event.currentTarget) props.onClose()
++        }}
++      >
++        <section
++          class="verevon-schedule-dialog__dialog"
++          role="dialog"
++          aria-modal="true"
++          aria-labelledby="skill-history-title"
++          onKeyDown={onKeyDown}
++        >
++          <header>
++            <h3 id="skill-history-title">
++              <History size={16} aria-hidden="true" /> {i18n.tr('Historikk', 'History')}: {props.skill.name}
++            </h3>
++            <button
++              type="button"
++              ref={(element) => queueMicrotask(() => element.focus())}
++              onClick={() => props.onClose()}
++              aria-label={i18n.tr('Lukk', 'Close')}
++            >
++              <X size={16} />
++            </button>
++          </header>
++
++          <Show when={history.loading}>
++            <p class="verevon-schedule-dialog__note" role="status" aria-busy="true">
++              {i18n.tr('Laster historikk…', 'Loading history…')}
++            </p>
++          </Show>
++          <Show when={history.error}>
++            <p class="verevon-schedule-dialog__error" role="alert">
++              {unavailable()
++                ? i18n.tr('Historikken er ikke tilgjengelig.', 'The history is not available.')
++                : i18n.tr('Kunne ikke laste historikken.', 'Could not load the history.')}
++            </p>
++          </Show>
++
++          <ol class="verevon-settings-list-card" aria-label={i18n.tr('Versjoner', 'Versions')}>
++            <For each={versions()}>
++              {(version, index) => {
++                const older = () => versions()[index() + 1]
++                const changes = () => {
++                  const previous = older()
++                  return previous ? diffSkillLines(previous.content, version.content).filter((line) => line.kind !== 'same') : []
++                }
++                return (
++                  <li class="verevon-settings-integration-row">
++                    <div>
++                      <p>
++                        <span class="verevon-trust-chip">v{version.version}</span>{' '}
++                        {new Date(version.created_at).toLocaleString()} · {actorLabel(version)}{' '}
++                        <code title={version.digest}>{version.digest.slice(0, 12)}</code>
++                      </p>
++                      <Show
++                        when={older()}
++                        fallback={
++                          <span class="verevon-settings-help">
++                            {version.version === 1
++                              ? i18n.tr('Første versjon.', 'First version.')
++                              : i18n.tr('Eldre versjoner er ikke vist.', 'Older versions are not shown.')}
++                          </span>
++                        }
++                      >
++                        <Show
++                          when={changes().length > 0}
++                          fallback={
++                            <span class="verevon-settings-help">
++                              {i18n.tr(
++                                'Teksten er uendret; noe annet ved ferdigheten er endret.',
++                                'The text is unchanged; something else about the skill changed.',
++                              )}
++                            </span>
++                          }
++                        >
++                          <pre class="verevon-settings-help">
++                            <For each={changes()}>
++                              {(line) => <span>{`${line.kind === 'added' ? '+' : '-'} ${line.text}\n`}</span>}
++                            </For>
++                          </pre>
++                        </Show>
++                      </Show>
++                    </div>
++                  </li>
++                )
++              }}
++            </For>
++          </ol>
++        </section>
++      </div>
++    </Portal>
++  )
++}
++
+ export function SkillsSection() {
+   const i18n = useI18n()
+   const session = getSession()
+@@ -68,6 +241,10 @@ export function SkillsSection() {
+ 
+   const [submitting, setSubmitting] = createSignal(false)
+   const [busySkillId, setBusySkillId] = createSignal<string | null>(null)
++  // EP-11 S2: the skill whose history is open. A skill carries a version only while the server's
++  // version history is on, so with it off nothing here shows and nothing asks.
++  const [historySkill, setHistorySkill] = createSignal<Skill | null>(null)
++  const hasVersion = (skill: Skill): boolean => typeof skill.version === 'number' && skill.version > 0
+   const [formError, setFormError] = createSignal<string | null>(null)
+   const [actionError, setActionError] = createSignal<string | null>(null)
+   // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
+@@ -310,6 +487,23 @@ export function SkillsSection() {
+                               {' '}
+                               <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
+                             </Show>
++                            <Show when={hasVersion(skill)}>
++                              {' '}
++                              <span
++                                class="verevon-trust-chip"
++                                title={skill.digest}
++                                aria-label={i18n.tr(`Versjon ${skill.version}`, `Version ${skill.version}`)}
++                              >
++                                v{skill.version}
++                              </span>{' '}
++                              <SettingsButton
++                                settingsSize="sm"
++                                onClick={() => setHistorySkill(skill)}
++                                aria-label={i18n.tr(`Historikk for ${skill.name}`, `History of ${skill.name}`)}
++                              >
++                                <History size={14} aria-hidden="true" /> {i18n.tr('Historikk', 'History')}
++                              </SettingsButton>
++                            </Show>
+                           </p>
+                           <Show when={skill.description.trim().length > 0}>
+                             <span>{skill.description}</span>
+@@ -479,6 +673,12 @@ export function SkillsSection() {
+         </form>
+       </Show>
+ 
++      <Show when={historySkill()}>
++        {(skill) => (
++          <SkillHistoryDrawer orgId={orgId()} skill={skill()} onClose={() => setHistorySkill(null)} />
++        )}
++      </Show>
++
+       <p class="verevon-settings-subnote">
+         <BookOpen size={14} aria-hidden="true" /> Org-tilhørighet utledes fra den
+         verifiserte økten.{' '}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.versions.test.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.versions.test.tsx
+new file mode 100644
+index 000000000..ea4a7b2ed
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.versions.test.tsx	
+@@ -0,0 +1,135 @@
++// @vitest-environment jsdom
++
++// EP-11 S2: a skill shows its version and a read-only history only when the server sends a version,
++// which it does only while its version history is on. With it off the page is as before and never
++// asks for a history.
++
++import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/shared/session/session-store', () => ({
++  getSession: () => ({
++    status: 'authenticated',
++    user: { id: 'user-1' },
++    activeOrg: { id: 'org-1', name: 'Test', role: 'owner' },
++    permissions: [],
++  }),
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return {
++    ...actual,
++    listSkills: vi.fn(),
++    listSkillVersions: vi.fn(),
++    memberSkillAuthoring: vi.fn(async () => false),
++  }
++})
++
++import { listSkills, listSkillVersions, type Skill, type SkillVersion } from '@/shared/api/skills-client'
++import { ApiError } from '@/shared/api/api-error'
++import { diffSkillLines, SkillsSection } from './SkillsSection'
++
++const mockedList = vi.mocked(listSkills)
++const mockedVersions = vi.mocked(listSkillVersions)
++
++function skill(overrides: Partial<Skill> = {}): Skill {
++  return {
++    id: 'skill-1',
++    org_id: 'org-1',
++    name: 'Utrulling',
++    description: '',
++    content: 'step one\nstep two',
++    trigger_keywords: [],
++    trigger_file_patterns: [],
++    tool_restrictions: [],
++    enabled: true,
++    scope: 'org',
++    review_state: 'accepted',
++    ...overrides,
++  }
++}
++
++function version(n: number, content: string): SkillVersion {
++  return {
++    version: n,
++    digest: String(n).repeat(64),
++    name: 'Utrulling',
++    description: '',
++    content,
++    trigger_keywords: [],
++    trigger_file_patterns: [],
++    tool_restrictions: [],
++    actor_kind: 'user',
++    actor_id: 'user-1',
++    created_at: '2026-11-04T10:00:00Z',
++  }
++}
++
++afterEach(() => {
++  cleanup()
++  vi.clearAllMocks()
++})
++
++describe('SkillsSection versions', () => {
++  it('shows_version_badge_when_the_server_sends_one', async () => {
++    mockedList.mockResolvedValue({ skills: [skill({ version: 3, digest: 'a'.repeat(64) })] })
++    const { findByText, getByRole } = render(() => <SkillsSection />)
++    expect(await findByText('v3')).toBeTruthy()
++    expect(getByRole('button', { name: /Historikk for Utrulling|History of Utrulling/ })).toBeTruthy()
++    expect(mockedVersions).not.toHaveBeenCalled()
++  })
++
++  it('hides_version_and_history_while_the_history_is_off', async () => {
++    mockedList.mockResolvedValue({ skills: [skill()] })
++    const { findByText, queryByText, queryByRole } = render(() => <SkillsSection />)
++    expect(await findByText('Utrulling', { exact: false })).toBeTruthy()
++    expect(queryByText(/^v\d+$/)).toBeNull()
++    expect(queryByRole('button', { name: /Historikk for|History of/ })).toBeNull()
++    expect(mockedVersions).not.toHaveBeenCalled()
++  })
++
++  it('history_drawer_lists_versions_with_actor_digest_and_diff', async () => {
++    mockedList.mockResolvedValue({ skills: [skill({ version: 2, digest: '2'.repeat(64) })] })
++    mockedVersions.mockResolvedValue({
++      versions: [version(2, 'step one\nstep two'), version(1, 'step one')],
++      has_more: false,
++    })
++    const { findByRole, findByText } = render(() => <SkillsSection />)
++    fireEvent.click(await findByRole('button', { name: /Historikk for Utrulling|History of Utrulling/ }))
++    await waitFor(() => expect(mockedVersions).toHaveBeenCalledWith('org-1', 'skill-1'))
++    const dialog = await findByRole('dialog')
++    await findByText('+ step two', { exact: false })
++    expect(dialog.textContent).toContain('v1')
++    expect(dialog.textContent).toContain('2'.repeat(12))
++    expect(dialog.textContent).not.toContain('2'.repeat(13))
++    expect(dialog.textContent).toContain('user-1')
++    expect(dialog.textContent).not.toContain('- step one')
++    // Read only: the drawer offers no way to change or restore a version.
++    expect(dialog.querySelectorAll('button')).toHaveLength(1)
++  })
++
++  it('history_drawer_says_unavailable_on_404', async () => {
++    mockedList.mockResolvedValue({ skills: [skill({ version: 1, digest: '1'.repeat(64) })] })
++    mockedVersions.mockRejectedValue(new ApiError('not found', 404, 'skill_not_found'))
++    const { findByRole } = render(() => <SkillsSection />)
++    fireEvent.click(await findByRole('button', { name: /Historikk for Utrulling|History of Utrulling/ }))
++    const alert = await findByRole('alert')
++    expect(alert.textContent).toMatch(/Historikken er ikke tilgjengelig|The history is not available/)
++  })
++})
++
++describe('diffSkillLines', () => {
++  it('marks_added_and_removed_lines_in_reading_order', () => {
++    expect(diffSkillLines('a\nb\nc', 'a\nc\nd')).toEqual([
++      { kind: 'same', text: 'a' },
++      { kind: 'removed', text: 'b' },
++      { kind: 'same', text: 'c' },
++      { kind: 'added', text: 'd' },
++    ])
++  })
++
++  it('an_unchanged_text_has_no_changes', () => {
++    expect(diffSkillLines('x\ny', 'x\ny').every((line) => line.kind === 'same')).toBe(true)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 78ba0135a..923abb960 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -727,6 +727,34 @@ const skillsSaveFromMessageInput = z.object({
+   enabled: z.boolean(),
+ })
+ 
++// One skill's history (EP-11 S2), paged as the server pages it. Who may read it is the server's
++// rule for reading the skill; nothing here names an org or a user.
++const skillsVersionsListInput = z.object({
++  skillId: z.string().min(1).max(200),
++  limit: z.number().int().min(1).max(100).optional(),
++  beforeVersion: z.number().int().min(0).optional(),
++})
++
++const skillsVersionsListOutput = z.object({
++  versions: z.array(
++    z.object({
++      version: z.number().int().min(1),
++      digest: z.string().regex(/^[0-9a-f]{64}$/),
++      name: z.string(),
++      description: z.string(),
++      content: z.string(),
++      trigger_keywords: z.array(z.string()),
++      trigger_file_patterns: z.array(z.string()),
++      tool_restrictions: z.array(z.string()),
++      bundle_sha256: z.string().optional(),
++      actor_kind: z.string(),
++      actor_id: z.string().optional(),
++      created_at: z.string(),
++    }),
++  ),
++  has_more: z.boolean(),
++})
++
+ const settingsUpdateMeInput = z.object({
+   name: z.string().trim().optional(),
+   displayName: z.string().trim().optional(),
+@@ -3408,6 +3436,17 @@ export const actionRegistry = [
+     inputSchema: skillsSaveFromMessageInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'skills.versions.list',
++    label: 'List skill versions',
++    description: 'Read the immutable versions of one skill, newest first, with each version\'s text, digest, who cut it and when, for the Skills page\'s history. Read only: a version is never edited, and a restore would be a new version. Whoever may read the skill may read its history; another person\'s private skill reads as not found. Answers not found while the server\'s version history is off. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillsVersionsListInput,
++    outputSchema: skillsVersionsListOutput,
++  },
+   {
+     id: 'settings.update_me',
+     label: 'Update profile',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts
+index 2688ead48..00302860f 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
+@@ -41,6 +41,31 @@ export interface Skill {
+   proposal_reason?: string
+   created_at?: string
+   updated_at?: string
++  /**
++   * EP-11 S2: the skill's newest immutable version (0 for a proposal never accepted) and its
++   * digest. Present only while the server's version history is on; absent, the page shows no
++   * version and never asks for a history.
++   */
++  version?: number
++  digest?: string
++}
++
++/** One immutable version of a skill, as the history lists it (EP-11 S2). */
++export interface SkillVersion {
++  version: number
++  /** Lowercase hex sha256 of the versioned fields. */
++  digest: string
++  name: string
++  description: string
++  content: string
++  trigger_keywords: string[]
++  trigger_file_patterns: string[]
++  tool_restrictions: string[]
++  bundle_sha256?: string
++  /** Who cut the version: `user`, `service`, `system` or `unattributed`. */
++  actor_kind: string
++  actor_id?: string
++  created_at: string
+ }
+ 
+ /** Mirrors model-gateway `MAX_REQUESTED_SKILLS`; the server caps again. */
+@@ -121,6 +146,28 @@ export function updateSkill(
+   })
+ }
+ 
++/**
++ * A skill's versions, newest first, with their text (EP-11 S2, action `skills.versions.list`).
++ * Read only; the server shows the history to whoever may read the skill and answers 404 for a
++ * skill the caller cannot see, or while the version history is off.
++ */
++export async function listSkillVersions(
++  orgId: string,
++  skillId: string,
++  options: { limit?: number; beforeVersion?: number } = {},
++): Promise<{ versions: SkillVersion[]; has_more: boolean }> {
++  const query = new URLSearchParams()
++  if (options.limit) query.set('limit', String(options.limit))
++  if (options.beforeVersion) query.set('before_version', String(options.beforeVersion))
++  const text = query.toString()
++  const suffix = text ? `?${text}` : ''
++  const payload = await requestJson<{ versions?: SkillVersion[]; has_more?: boolean } | null>(
++    `/api/v1/skills/${encodeURIComponent(skillId)}/versions${suffix}`,
++    { headers: { 'x-verevon-org-id': orgId } },
++  )
++  return { versions: payload?.versions ?? [], has_more: payload?.has_more === true }
++}
++
+ export function deleteSkill(orgId: string, skillId: string): Promise<void> {
+   return requestJson<void>(`/api/v1/skills/${encodeURIComponent(skillId)}`, {
+     method: 'DELETE',
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go
+index ae6d25a1c..638213b4c 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
+@@ -54,11 +54,14 @@ type SkillsHandler struct {
+ 	// lintMode is SKILL_LINT_MODE (EP-11 S4): off runs no lint and leaves every write and
+ 	// body as it was.
+ 	lintMode skilllint.Mode
++	// versionsAPI is SKILL_VERSIONS_API (EP-11 S2): on, skill reads carry version and digest and
++	// the history route is mounted; off, every body and route is as it was.
++	versionsAPI bool
+ }
+ 
+ // NewSkillsHandler constructs the handler.
+ func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
+-	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv)}
++	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv)}
+ }
+ 
+ // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
+@@ -83,6 +86,10 @@ func (h *SkillsHandler) Register(mux *http.ServeMux) {
+ 			http.NotFound(w, r)
+ 		}
+ 	})
++	// EP-11 S2: off, the path falls to the subtree above and answers 404 as before.
++	if h.versionsAPI {
++		mux.HandleFunc("/api/v1/skills/{id}/versions", h.versions)
++	}
+ }
+ 
+ type skillRow struct {
+@@ -115,6 +122,33 @@ type skillRow struct {
+ 	// skill an admin is copying into an org skill. The copy is a new row; the
+ 	// source is untouched, and the revision log records where it came from.
+ 	PromotedFrom string `json:"promoted_from,omitempty"`
++	// Version and Digest (EP-11 S2) are the skill's newest immutable version: 0 and "" for a
++	// proposal never accepted. A trigger sets them; a write never does. Read only, and present
++	// only while SKILL_VERSIONS_API is on, so with it off a body is as it was.
++	Version *int32 `json:"version,omitempty"`
++	Digest  string `json:"digest,omitempty"`
++}
++
++// skillScanTargets are the destinations of a skill read, in the order of the SELECTs in list and
++// get, with version and digest last while the versions API is on.
++func (h *SkillsHandler) skillScanTargets(s *skillRow) []any {
++	targets := []any{&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
++		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
++		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
++		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt}
++	if h.versionsAPI {
++		s.Version = new(int32)
++		targets = append(targets, s.Version, &s.Digest)
++	}
++	return targets
++}
++
++// skillVersionColumns are the columns a skill read adds while the versions API is on.
++func (h *SkillsHandler) skillVersionColumns() string {
++	if h.versionsAPI {
++		return ", version, digest"
++	}
++	return ""
+ }
+ 
+ func validSkillScope(value string) bool {
+@@ -314,7 +348,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 			SELECT id, org_id, name, description, content,
+ 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
+ 			       enabled, scope, owner_user_id, shared_with,
+-			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
++			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
+ 			FROM agent_skills
+ 			WHERE org_id = $1
+ 			  AND (scope = 'org' OR owner_user_id = $2
+@@ -331,11 +365,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 		var skills []skillRow
+ 		for rows.Next() {
+ 			var s skillRow
+-			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+-				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
+-				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+-				&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason,
+-				&s.CreatedAt, &s.UpdatedAt); err != nil {
++			if err := rows.Scan(h.skillScanTargets(&s)...); err != nil {
+ 				jsonErr(w, err.Error(), http.StatusInternalServerError)
+ 				return
+ 			}
+@@ -456,16 +486,13 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
+ 		SELECT id, org_id, name, description, content,
+ 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
+ 		       enabled, scope, owner_user_id, shared_with,
+-		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
++		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
+ 		FROM agent_skills
+ 		WHERE id = $1 AND org_id = $2
+ 		  AND (scope = 'org' OR owner_user_id = $3
+ 		       OR (review_state = 'accepted' AND (shared_with ? $3
+ 		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
+-	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+-		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
+-		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+-		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt)
++	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(h.skillScanTargets(&s)...)
+ 	if err != nil {
+ 		jsonErr(w, "not found", http.StatusNotFound)
+ 		return
+@@ -616,6 +643,164 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
+ 	w.WriteHeader(http.StatusNoContent)
+ }
+ 
++// ---------------------------------------------------------------------------
++// Skill versions  GET /api/v1/skills/{id}/versions (EP-11 S2)
++// ---------------------------------------------------------------------------
++
++const skillVersionsAPIEnv = "SKILL_VERSIONS_API"
++
++// SkillVersionsAPIFromLookup reads SKILL_VERSIONS_API strictly: only the literal "true" turns the
++// version reads on (the history route, version and digest on skill reads, and the bundle digest
++// stamp), so a typo or a stray "1" leaves everything as it was. session-core reads the same name
++// for its SkillVersionService.
++func SkillVersionsAPIFromLookup(lookup func(string) string) bool {
++	return lookup(skillVersionsAPIEnv) == "true"
++}
++
++// A history page when the caller names none, and the most one page returns.
++const (
++	defaultSkillVersionsPage = 20
++	maxSkillVersionsPage     = 100
++)
++
++// skillVisibleSQL is get's visibility rule as a yes/no: org skills, the caller's own, accepted
++// skills shared with the caller, and for an admin any shared accepted skill. Pinned to get's
++// statement by TestSkillVersionsRouteUsesTheGetVisibility.
++const skillVisibleSQL = `
++	SELECT EXISTS (SELECT 1 FROM agent_skills
++		WHERE id = $1 AND org_id = $2
++		  AND (scope = 'org' OR owner_user_id = $3
++		       OR (review_state = 'accepted' AND (shared_with ? $3
++		           OR ($4 AND jsonb_array_length(shared_with) > 0)))))
++`
++
++// skillVersionBody is the body a version row holds (session-core migration 0096,
++// agent_skill_version_body). kind and settings are not shown until EP-11 S6 gives them meaning.
++type skillVersionBody struct {
++	Name                string   `json:"name"`
++	Description         string   `json:"description"`
++	Content             string   `json:"content"`
++	TriggerKeywords     []string `json:"trigger_keywords"`
++	TriggerFilePatterns []string `json:"trigger_file_patterns"`
++	ToolRestrictions    []string `json:"tool_restrictions"`
++}
++
++type skillVersionView struct {
++	Version             int32     `json:"version"`
++	Digest              string    `json:"digest"`
++	Name                string    `json:"name"`
++	Description         string    `json:"description"`
++	Content             string    `json:"content"`
++	TriggerKeywords     []string  `json:"trigger_keywords"`
++	TriggerFilePatterns []string  `json:"trigger_file_patterns"`
++	ToolRestrictions    []string  `json:"tool_restrictions"`
++	BundleSHA256        string    `json:"bundle_sha256,omitempty"`
++	ActorKind           string    `json:"actor_kind"`
++	ActorID             string    `json:"actor_id,omitempty"`
++	CreatedAt           time.Time `json:"created_at"`
++}
++
++// writeSkillVersionsError answers with the typed envelope; details is always an object.
++func writeSkillVersionsError(w http.ResponseWriter, status int, code, message string) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(status)
++	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
++		"code": code, "message": message, "details": map[string]any{},
++	}})
++}
++
++// versions is GET /api/v1/skills/{id}/versions: the skill's immutable versions, newest first,
++// with their text, for the Skills page's history. Readable by whoever may read the skill (get's
++// rule); a skill the caller cannot see is a 404, as get answers. Versions are written only by
++// session-core's trigger (EP-11 D10), so this route never writes. Query: limit (default 20, at
++// most 100) and before_version (paging; 0 starts at the newest).
++func (h *SkillsHandler) versions(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		writeSkillVersionsError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET reads skill versions.")
++		return
++	}
++	id := r.PathValue("id")
++	if !mcpIdentifier.MatchString(id) {
++		writeSkillVersionsError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
++		return
++	}
++	limit, before := defaultSkillVersionsPage, 0
++	if raw := r.URL.Query().Get("limit"); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 1 {
++			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_limit", "limit must be a positive whole number.")
++			return
++		}
++		limit = min(parsed, maxSkillVersionsPage)
++	}
++	if raw := r.URL.Query().Get("before_version"); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 0 {
++			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_before_version", "before_version must be a whole number, 0 or more.")
++			return
++		}
++		before = parsed
++	}
++	orgID := verifiedOrganizationID(r)
++	var visible bool
++	if err := h.pool.QueryRow(r.Context(), skillVisibleSQL, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
++		slog.Error("read skill visibility failed", "error", err)
++		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
++		return
++	}
++	if !visible {
++		writeSkillVersionsError(w, http.StatusNotFound, "skill_not_found", "The skill was not found.")
++		return
++	}
++	// One more than the page, to say whether older versions remain.
++	rows, err := h.pool.Query(r.Context(), `
++		SELECT version, digest, body, bundle_sha256, actor_kind, actor_id, created_at
++		FROM agent_skill_versions
++		WHERE org_id = $1 AND skill_id = $2 AND ($3::int = 0 OR version < $3::int)
++		ORDER BY version DESC
++		LIMIT $4
++	`, orgID, id, before, limit+1)
++	if err != nil {
++		slog.Error("list skill versions failed", "error", err)
++		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
++		return
++	}
++	defer rows.Close()
++	versions := []skillVersionView{}
++	for rows.Next() {
++		var view skillVersionView
++		var body skillVersionBody
++		if err := rows.Scan(&view.Version, &view.Digest, &body, &view.BundleSHA256,
++			&view.ActorKind, &view.ActorID, &view.CreatedAt); err != nil {
++			slog.Error("scan skill version failed", "error", err)
++			writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
++			return
++		}
++		view.Name, view.Description, view.Content = body.Name, body.Description, body.Content
++		view.TriggerKeywords, view.TriggerFilePatterns, view.ToolRestrictions =
++			nonNilStrings(body.TriggerKeywords), nonNilStrings(body.TriggerFilePatterns), nonNilStrings(body.ToolRestrictions)
++		versions = append(versions, view)
++	}
++	if err := rows.Err(); err != nil {
++		slog.Error("list skill versions failed", "error", err)
++		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
++		return
++	}
++	hasMore := len(versions) > limit
++	if hasMore {
++		versions = versions[:limit]
++	}
++	writeJSON(w, map[string]any{"versions": versions, "has_more": hasMore})
++}
++
++// nonNilStrings keeps a list a JSON array, never null.
++func nonNilStrings(values []string) []string {
++	if values == nil {
++		return []string{}
++	}
++	return values
++}
++
+ // ---------------------------------------------------------------------------
+ // SkillBundlesHandler  /api/v1/skills/{id}/bundle (WS19-S6)
+ // ---------------------------------------------------------------------------
+@@ -647,7 +832,10 @@ type SkillBundlesHandler struct {
+ 
+ // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
+ func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
+-	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
++	// EP-11 S2: with the versions API on, an upload or a delete also stamps the skill's bundle
++	// digest, which cuts a new skill version.
++	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv))
++	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+ }
+ 
+ // Register mounts the bundle route. Its more specific pattern takes precedence over the
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skills_versions_test.go b/apps/Model Plane/go/services/capability-core/internal/api/skills_versions_test.go
+new file mode 100644
+index 000000000..ed278ec3c
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skills_versions_test.go	
+@@ -0,0 +1,211 @@
++package api
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++)
++
++// EP-11 S2: the skill history route and the version fields on skill reads.
++
++// skillVersionRows answers the history query with the given versions, newest first.
++type skillVersionRows struct {
++	emptyRows
++	versions []int32
++	next     int
++}
++
++func (rows *skillVersionRows) Next() bool {
++	rows.next++
++	return rows.next <= len(rows.versions)
++}
++
++func (rows *skillVersionRows) Scan(dest ...any) error {
++	if len(dest) != 7 {
++		return errors.New("skillVersionRows: want seven scan destinations")
++	}
++	version := rows.versions[rows.next-1]
++	*(dest[0].(*int32)) = version
++	*(dest[1].(*string)) = strings.Repeat("a", 64)
++	*(dest[2].(*skillVersionBody)) = skillVersionBody{Name: "deploy", Content: "step " + string(rune('0'+version))}
++	*(dest[3].(*string)) = ""
++	*(dest[4].(*string)) = "user"
++	*(dest[5].(*string)) = "user-a"
++	*(dest[6].(*time.Time)) = time.Unix(1_700_000_000, 0).UTC()
++	return nil
++}
++
++func skillVersionsMux(t *testing.T, database *recordingDatabase, on bool) (http.Handler, mcpTokenSigner) {
++	t.Helper()
++	if on {
++		t.Setenv(skillVersionsAPIEnv, "true")
++	} else {
++		t.Setenv(skillVersionsAPIEnv, "")
++	}
++	mux := http.NewServeMux()
++	NewSkillsHandler(database).Register(mux)
++	return mcpAuthenticatedHandlerWithSigner(t, mux)
++}
++
++func serveSkills(handler http.Handler, token, path string) *httptest.ResponseRecorder {
++	request := httptest.NewRequest(http.MethodGet, path, nil)
++	request.Header.Set("Authorization", "Bearer "+token)
++	response := httptest.NewRecorder()
++	handler.ServeHTTP(response, request)
++	return response
++}
++
++func TestSkillVersionsAPIReadsOnlyTheLiteralTrue(t *testing.T) {
++	for value, want := range map[string]bool{"true": true, "": false, "1": false, "TRUE": false, "on": false} {
++		if got := SkillVersionsAPIFromLookup(func(string) string { return value }); got != want {
++			t.Errorf("SKILL_VERSIONS_API=%q read as %v, want %v", value, got, want)
++		}
++	}
++}
++
++// Off, the history path is the skill subtree's GET as before: a skill id of "skill-1/versions"
++// that is not found, and nothing reads the version table.
++func TestSkillVersionsRouteIsAbsentWhileTheSwitchIsOff(t *testing.T) {
++	database := &recordingDatabase{}
++	handler, sign := skillVersionsMux(t, database, false)
++	nonZDR := false
++	response := serveSkills(handler, sign("user", nil, &nonZDR), "/api/v1/skills/skill-1/versions")
++	if response.Code != http.StatusNotFound {
++		t.Fatalf("status = %d, want 404", response.Code)
++	}
++	if len(database.queryRows) != 1 || database.queryRows[0].args[0] != "skill-1/versions" {
++		t.Fatalf("calls = %#v, want only the plain skill read", database.queryRows)
++	}
++	if strings.Contains(database.queryRows[0].query, "version, digest") || len(database.queries) != 0 {
++		t.Fatal("with the switch off no read names the version columns")
++	}
++}
++
++func TestSkillVersionsRouteVisibility(t *testing.T) {
++	for _, test := range []struct {
++		name      string
++		scopes    []string
++		visible   bool
++		wantAdmin bool
++		wantCode  int
++	}{
++		{name: "owner", visible: true, wantCode: http.StatusOK},
++		{name: "admin on a shared skill", scopes: []string{"admin"}, visible: true, wantAdmin: true, wantCode: http.StatusOK},
++		{name: "stranger", visible: false, wantCode: http.StatusNotFound},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			database := &recordingDatabase{rows: &skillVersionRows{versions: []int32{2, 1}}}
++			database.nextRows = append(database.nextRows, boolRow{value: test.visible})
++			handler, sign := skillVersionsMux(t, database, true)
++			nonZDR := false
++			response := serveSkills(handler, sign("user", test.scopes, &nonZDR), "/api/v1/skills/skill-1/versions")
++			if response.Code != test.wantCode {
++				t.Fatalf("status = %d, body=%s, want %d", response.Code, response.Body.String(), test.wantCode)
++			}
++			check := database.queryRows[0]
++			if check.query != skillVisibleSQL {
++				t.Fatalf("visibility query = %q", check.query)
++			}
++			if len(check.args) != 4 || check.args[0] != "skill-1" || check.args[1] != "org-a" ||
++				check.args[2] != "user-a" || check.args[3] != test.wantAdmin {
++				t.Fatalf("visibility args = %#v, want [skill-1 org-a user-a %v]", check.args, test.wantAdmin)
++			}
++			if !test.visible {
++				var body struct {
++					Error struct {
++						Code    string         `json:"code"`
++						Details map[string]any `json:"details"`
++					} `json:"error"`
++				}
++				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Error.Code != "skill_not_found" || body.Error.Details == nil {
++					t.Fatalf("refusal = %s, want the typed envelope with code skill_not_found", response.Body.String())
++				}
++				if len(database.queries) != 0 {
++					t.Fatal("a skill the caller cannot see must not have its versions read")
++				}
++				return
++			}
++			var body struct {
++				Versions []skillVersionView `json:"versions"`
++				HasMore  bool               `json:"has_more"`
++			}
++			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
++				t.Fatal(err)
++			}
++			if len(body.Versions) != 2 || body.Versions[0].Version != 2 || body.Versions[1].Content != "step 1" || body.HasMore {
++				t.Fatalf("versions = %+v, want v2 then v1 and no more", body)
++			}
++			if body.Versions[0].TriggerKeywords == nil {
++				t.Fatal("an empty list must be a JSON array")
++			}
++			list := database.queries[0]
++			if list.args[0] != "org-a" || list.args[1] != "skill-1" || list.args[2] != 0 || list.args[3] != defaultSkillVersionsPage+1 {
++				t.Fatalf("history args = %#v", list.args)
++			}
++		})
++	}
++}
++
++// The history route reads with exactly the rule get reads with, so it never shows a skill's text
++// to someone get would refuse.
++func TestSkillVersionsRouteUsesTheGetVisibility(t *testing.T) {
++	database := &recordingDatabase{}
++	handler, sign := skillVersionsMux(t, database, true)
++	nonZDR := false
++	serveSkills(handler, sign("user", nil, &nonZDR), "/api/v1/skills/skill-1")
++	normalize := func(sql string) string { return strings.Join(strings.Fields(sql), " ") }
++	get := normalize(database.queryRows[0].query)
++	predicate := get[strings.Index(get, "WHERE id = $1"):]
++	if !strings.Contains(normalize(skillVisibleSQL), predicate) {
++		t.Fatalf("history visibility %q does not hold get's predicate %q", normalize(skillVisibleSQL), predicate)
++	}
++}
++
++func TestSkillVersionsRouteBoundsItsPage(t *testing.T) {
++	for path, want := range map[string]int{
++		"/api/v1/skills/skill-1/versions?limit=0":           http.StatusBadRequest,
++		"/api/v1/skills/skill-1/versions?limit=x":           http.StatusBadRequest,
++		"/api/v1/skills/skill-1/versions?before_version=-1": http.StatusBadRequest,
++		"/api/v1/skills/skill-1/versions?limit=500":         http.StatusOK,
++	} {
++		database := &recordingDatabase{rows: &skillVersionRows{}}
++		database.nextRows = append(database.nextRows, boolRow{value: true})
++		handler, sign := skillVersionsMux(t, database, true)
++		nonZDR := false
++		response := serveSkills(handler, sign("user", nil, &nonZDR), path)
++		if response.Code != want {
++			t.Errorf("%s: status = %d, want %d", path, response.Code, want)
++		}
++		if want == http.StatusOK && database.queries[0].args[3] != maxSkillVersionsPage+1 {
++			t.Errorf("%s: limit = %v, want the cap", path, database.queries[0].args[3])
++		}
++	}
++}
++
++// On, list and get name version and digest; the writes never do (the trigger is their writer).
++func TestSkillReadsCarryVersionOnlyWithTheSwitchOn(t *testing.T) {
++	for _, on := range []bool{false, true} {
++		database := &recordingDatabase{}
++		handler, sign := skillVersionsMux(t, database, on)
++		nonZDR := false
++		serveSkills(handler, sign("user", nil, &nonZDR), "/api/v1/skills")
++		serveSkills(handler, sign("user", nil, &nonZDR), "/api/v1/skills/skill-1")
++		for _, query := range []string{database.queries[0].query, database.queryRows[0].query} {
++			if got := strings.Contains(query, "updated_at, version, digest"); got != on {
++				t.Errorf("switch %v: read names version and digest = %v\n%s", on, got, query)
++			}
++		}
++	}
++	var row skillRow
++	if err := json.Unmarshal([]byte(`{"name":"x","content":"y"}`), &row); err != nil {
++		t.Fatal(err)
++	}
++	encoded, _ := json.Marshal(row)
++	if strings.Contains(string(encoded), `"version"`) || strings.Contains(string(encoded), `"digest"`) {
++		t.Fatalf("a row read with the switch off carries no version fields: %s", encoded)
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go
+index 66669b163..e4a94a3b4 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go	
+@@ -27,6 +27,9 @@ type DB interface {
+ // addressed by org and digest, so one org never reads another org's bytes.
+ type Store struct {
+ 	db DB
++	// skillVersions is SKILL_VERSIONS_API (EP-11 S2): on, Put and Delete also write the skill's
++	// bundle_sha256 in the same transaction, so a bundle change is a new skill version.
++	skillVersions bool
+ }
+ 
+ // NewStore wraps the pool.
+@@ -34,6 +37,36 @@ func NewStore(db DB) *Store {
+ 	return &Store{db: db}
+ }
+ 
++// WithSkillVersions turns on the bundle digest stamp on agent_skills (EP-11 S2). Off, the store
++// writes only its own tables, as before.
++func (s *Store) WithSkillVersions(on bool) *Store {
++	s.skillVersions = on
++	return s
++}
++
++// stampSkillActorSQL names the uploader as the actor of the version the stamp cuts, with the
++// transaction-local settings session-core's skill triggers read (migration 0064 and 0096). An
++// upload or delete is always a person's (skillBundleWriter).
++const stampSkillActorSQL = `SELECT set_config('mp.actor_kind', 'user', true), set_config('mp.actor_id', $1, true)`
++
++// stampSkillBundleSQL writes the skill's bundle digest ('' when it has none). The column is
++// versioned, so session-core's trigger cuts a new version of an accepted skill whose digest moved.
++const stampSkillBundleSQL = `UPDATE agent_skills SET bundle_sha256 = $3 WHERE org_id = $1 AND id = $2 AND bundle_sha256 <> $3`
++
++// stampSkill records manifest as the skill's bundle digest inside tx, when the stamp is on.
++func (s *Store) stampSkill(ctx context.Context, tx pgx.Tx, orgID, skillID, actor, manifest string) error {
++	if !s.skillVersions {
++		return nil
++	}
++	if _, err := tx.Exec(ctx, stampSkillActorSQL, actor); err != nil {
++		return fmt.Errorf("name skill bundle actor: %w", err)
++	}
++	if _, err := tx.Exec(ctx, stampSkillBundleSQL, orgID, skillID, manifest); err != nil {
++		return fmt.Errorf("stamp skill bundle digest: %w", err)
++	}
++	return nil
++}
++
+ // Summary describes one stored bundle without its files.
+ type Summary struct {
+ 	SkillID        string
+@@ -134,6 +167,9 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
+ 		len(bundle.Files), bundle.TotalBytes); err != nil {
+ 		return PutResult{}, err
+ 	}
++	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256); err != nil {
++		return PutResult{}, err
++	}
+ 	if err := tx.Commit(ctx); err != nil {
+ 		return PutResult{}, fmt.Errorf("commit skill bundle write: %w", err)
+ 	}
+@@ -177,6 +213,9 @@ func (s *Store) Delete(ctx context.Context, orgID, skillID, actor string) error
+ 	if err := appendAudit(ctx, tx, "skill_bundle.deleted", orgID, skillID, actor, manifest, fileCount, totalBytes); err != nil {
+ 		return err
+ 	}
++	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, ""); err != nil {
++		return err
++	}
+ 	if err := tx.Commit(ctx); err != nil {
+ 		return fmt.Errorf("commit skill bundle delete: %w", err)
+ 	}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_skill_versions_test.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_skill_versions_test.go
+new file mode 100644
+index 000000000..6ec49eafe
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_skill_versions_test.go	
+@@ -0,0 +1,44 @@
++package skillbundle
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// EP-11 S2: with SKILL_VERSIONS_API off the store writes only its own tables. A nil transaction
++// proves the stamp touches nothing: any statement on it would panic.
++func TestSkillStampIsInertWhileTheSwitchIsOff(t *testing.T) {
++	store := NewStore(nil)
++	if err := store.stampSkill(context.Background(), nil, "org-a", "skill-1", "user-a", "abc"); err != nil {
++		t.Fatalf("stamp with the switch off = %v, want nil", err)
++	}
++	if !NewStore(nil).WithSkillVersions(true).skillVersions {
++		t.Fatal("WithSkillVersions(true) must turn the stamp on")
++	}
++}
++
++// The stamp names the uploader with the settings session-core's version trigger reads, and writes
++// only the bundle digest column, so the trigger stays the single writer of version and digest.
++func TestSkillStampNamesTheActorTheVersionTriggerReads(t *testing.T) {
++	migration, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "rust", "services", "session-core", "migrations", "0096_agent_skill_versions.sql"))
++	if err != nil {
++		t.Skipf("the session-core migration is not beside this module: %v", err)
++	}
++	for _, setting := range []string{"mp.actor_kind", "mp.actor_id"} {
++		if !strings.Contains(stampSkillActorSQL, "set_config('"+setting+"'") {
++			t.Errorf("stampSkillActorSQL does not set %s", setting)
++		}
++		if !strings.Contains(string(migration), "current_setting('"+setting+"', true)") {
++			t.Errorf("the version trigger does not read %s", setting)
++		}
++	}
++	if !strings.Contains(string(migration), "'bundle_sha256', s.bundle_sha256") {
++		t.Error("the version body must cover bundle_sha256, or a bundle change cuts no version")
++	}
++	if strings.Contains(stampSkillBundleSQL, "version") || strings.Contains(stampSkillBundleSQL, "digest =") {
++		t.Errorf("the stamp must not write version or digest: %s", stampSkillBundleSQL)
++	}
++}
+diff --git a/apps/Model Plane/proto/model_plane/v1/sessions.proto b/apps/Model Plane/proto/model_plane/v1/sessions.proto
+index c887e691e..b41e03279 100644
+--- a/apps/Model Plane/proto/model_plane/v1/sessions.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/sessions.proto	
+@@ -1194,6 +1194,14 @@ message AgentSkill {
+   string updated_at = 17;
+   // The skill's newest revision number in the revision log.
+   int64 revision = 18;
++  // EP-11 S2. The skill's newest immutable version: 0 for a proposal that was
++  // never accepted, then 1, 2, ... each time the digest of the accepted row
++  // changes. Set by a database trigger, never by a writer.
++  int32 version = 19;
++  // EP-11 S2. Lowercase hex sha256 of the versioned fields of `version`; empty
++  // while `version` is 0. SkillVersionService (skill_versions.proto) reads the
++  // body of any version.
++  string digest = 20;
+ }
+ 
+ message ListAgentSkillsResponse {
+diff --git a/apps/Model Plane/proto/model_plane/v1/skill_versions.proto b/apps/Model Plane/proto/model_plane/v1/skill_versions.proto
+new file mode 100644
+index 000000000..3799afc90
+--- /dev/null
++++ b/apps/Model Plane/proto/model_plane/v1/skill_versions.proto	
+@@ -0,0 +1,105 @@
++syntax = "proto3";
++
++package model_plane.v1;
++
++option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
++
++// Skill versions (Wave 3 EP-11 S2).
++//
++// Every accepted change to an agent skill is cut as a numbered, immutable
++// version with a digest, by a trigger on session-core's `agent_skills` table,
++// whichever service wrote the row. This service reads those versions; nothing
++// writes them through it. Visibility is the ListAgentSkills rule: org skills,
++// the caller's own, and accepted skills shared with the caller. A separate file
++// and service so that SessionCore and every implementation or test double of
++// it stay source-compatible (integration round B, C-B6).
++
++// EP-11 S2. One immutable version of one skill.
++message AgentSkillVersion {
++  // The skill the version belongs to.
++  string skill_id = 1;
++  // The version number, 1 for the first accepted text.
++  int32 version = 2;
++  // Lowercase hex sha256 of the versioned fields below (plus the skill kind
++  // and settings), as the database computed it.
++  string digest = 3;
++  // The skill's name at this version.
++  string name = 4;
++  // The description at this version.
++  string description = 5;
++  // The skill text at this version. Empty in a listing that asked for no content.
++  string content = 6;
++  // The trigger keywords at this version.
++  repeated string trigger_keywords = 7;
++  // The trigger file patterns at this version.
++  repeated string trigger_file_patterns = 8;
++  // The tool restrictions at this version.
++  repeated string tool_restrictions = 9;
++  // The manifest digest of the skill's bundle at this version; empty when it had none.
++  string bundle_sha256 = 10;
++  // Who cut the version: `user`, `service`, `system` or `unattributed`.
++  string actor_kind = 11;
++  // The verified principal that cut it; empty for the system and unattributed.
++  string actor_id = 12;
++  // When the version was cut, RFC 3339 UTC.
++  string created_at = 13;
++}
++
++// EP-11 S2. List one skill's versions, newest first.
++message ListAgentSkillVersionsRequest {
++  // The org the skill belongs to; must match the caller's org.
++  string org_id = 1;
++  // The skill to list.
++  string skill_id = 2;
++  // The most versions to return; 0 means 20, and more than 100 is read as 100.
++  int32 limit = 3;
++  // Return only versions below this one (paging); 0 starts at the newest.
++  int32 before_version = 4;
++  // A service caller reading on behalf of a user names that user here, as
++  // ListAgentSkillsRequest.for_user_id does. Ignored for a user caller, who
++  // always reads as itself.
++  string for_user_id = 5;
++  // Whether each version carries its text.
++  bool include_content = 6;
++}
++
++// EP-11 S2. One page of versions.
++message ListAgentSkillVersionsResponse {
++  // The versions, newest first.
++  repeated AgentSkillVersion versions = 1;
++  // Whether older versions exist past this page.
++  bool has_more = 2;
++}
++
++// EP-11 S2. Read one version of one skill.
++message GetAgentSkillVersionRequest {
++  // The org the skill belongs to; must match the caller's org.
++  string org_id = 1;
++  // The skill to read.
++  string skill_id = 2;
++  // The version to read; 0 reads the newest.
++  int32 version = 3;
++  // A service caller reading on behalf of a user names that user here, as
++  // ListAgentSkillVersionsRequest.for_user_id does.
++  string for_user_id = 4;
++}
++
++// EP-11 S2. The version, or `gone`.
++message GetAgentSkillVersionResponse {
++  // The version, content included; unset when `gone`.
++  AgentSkillVersion version = 1;
++  // True when the skill or the version no longer exists or is not visible to
++  // the caller (a run that pinned it reads it as gone).
++  bool gone = 2;
++}
++
++// EP-11 S2. Read-only access to immutable skill versions, hosted by
++// session-core. Off unless SKILL_VERSIONS_API is the literal `true`; while off
++// every RPC answers `unavailable` `skill_versions_disabled`.
++service SkillVersionService {
++  // List one skill's versions, newest first. A skill the caller cannot see is
++  // `not_found`.
++  rpc ListAgentSkillVersions(ListAgentSkillVersionsRequest) returns (ListAgentSkillVersionsResponse);
++  // Read one version, or the newest.
++  rpc GetAgentSkillVersion(GetAgentSkillVersionRequest) returns (GetAgentSkillVersionResponse);
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/build.rs b/apps/Model Plane/rust/crates/mp-contracts/build.rs
+index f9a52df47..8faf92de1 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/build.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/build.rs	
+@@ -71,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+         "model_plane/v1/artifact_revisions.proto",
+         // EP-7 S1: ThreadGoalService (session-core's thread goal store).
+         "model_plane/v1/thread_goals.proto",
++        // EP-11 S2: SkillVersionService (session-core's immutable skill versions).
++        "model_plane/v1/skill_versions.proto",
+     ];
+ 
+     let dp_protos = &[
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0096_agent_skill_versions.sql b/apps/Model Plane/rust/services/session-core/migrations/0096_agent_skill_versions.sql
+new file mode 100644
+index 000000000..da9349974
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0096_agent_skill_versions.sql	
+@@ -0,0 +1,172 @@
++-- 0096: immutable skill versions with digests (Wave 3 EP-11 S2).
++--
++-- Every accepted change to a skill's text gets a numbered version row that is never changed
++-- afterwards, so "an edit silently changes every run" becomes a visible new version, and a run can
++-- later pin the exact text it used (EP-11 S3). skill_revisions (0064) is not that store: it keeps
++-- only the newest 50 revisions, truncates large snapshots, and undo writes a snapshot back into the
++-- live row.
++--
++-- Semantics (EP-11 D2, owner 2026-11-04):
++--   * A version is cut when the digest of an ACCEPTED row changes. A proposal has version 0 until
++--     its owner accepts it (accept = v1). Toggling `enabled`, sharing, or a rejected row's edit cuts
++--     nothing; a rejected row that is accepted again with the same text keeps its version.
++--   * The digest is sha256 (lowercase hex) of the UTF-8 text of agent_skill_version_body(row):
++--     name, description, content, trigger_keywords, trigger_file_patterns, tool_restrictions,
++--     kind, settings and bundle_sha256. kind and settings are the constants 'skill' and '{}' until
++--     EP-11 S6 adds the columns and replaces the body function with the same defaults, so no
++--     existing digest changes. jsonb's text output orders keys deterministically.
++--   * Version rows are never updated. A delete is allowed only with the skill's own delete (this
++--     file's AFTER DELETE path) and in erasure (gdpr.rs), both under mp.version_erasure = 'on'.
++--   * A restore writes the old body as a NEW version; nothing re-points to an old one.
++--
++-- Writers (EP-11 D10): session-core's RPCs and capability-core's registry SQL both write
++-- agent_skills on this database, so the triggers are the single writer of version, digest and
++-- agent_skill_versions. Neither service names version or digest in a write; whatever a statement
++-- sets for them is overwritten by the BEFORE trigger. The actor comes from the same
++-- transaction-local settings the revision trigger reads (0064: mp.actor_kind, mp.actor_id).
++--
++-- Trigger order on agent_skills: BEFORE (bump) sets version and digest; the AFTER triggers
++-- (revision, version) then see the final row. The revision snapshot names its own fields and
++-- leaves out version, digest and bundle_sha256, so a bump does not write a second revision.
++--
++-- Content-bearing (skill text is in `body`), derived only from skills the org already keeps;
++-- erased with the skill, with the organization (gdpr.rs), and by owner through owner_user_id
++-- (register D1-643: the per-user path is not built here). Zero Data Retention: a skill is org
++-- configuration, not conversation content; ZDR credentials cannot write agent_skills at either
++-- writer.
++
++ALTER TABLE agent_skills
++    ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0,
++    ADD COLUMN IF NOT EXISTS digest TEXT NOT NULL DEFAULT '',
++    ADD COLUMN IF NOT EXISTS bundle_sha256 TEXT NOT NULL DEFAULT '';
++
++CREATE TABLE IF NOT EXISTS agent_skill_versions (
++    org_id         TEXT NOT NULL,
++    skill_id       TEXT NOT NULL,
++    version        INTEGER NOT NULL CHECK (version >= 1),
++    digest         TEXT NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
++    body           JSONB NOT NULL,
++    bundle_sha256  TEXT NOT NULL DEFAULT '',
++    scope          TEXT NOT NULL,
++    owner_user_id  TEXT NOT NULL DEFAULT '',
++    actor_kind     TEXT NOT NULL
++        CHECK (actor_kind IN ('user', 'service', 'system', 'unattributed')),
++    actor_id       TEXT NOT NULL DEFAULT '',
++    created_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
++    PRIMARY KEY (skill_id, version)
++);
++
++-- Erasure by owner (and the org purge) reads this.
++CREATE INDEX IF NOT EXISTS agent_skill_versions_org_owner_idx
++    ON agent_skill_versions (org_id, owner_user_id);
++
++-- The versioned fields of a skill, as one JSON object. The field list is pinned by the
++-- session-core test `digest_field_list_is_pinned`; change it only with a migration that says
++-- which digests move.
++CREATE OR REPLACE FUNCTION agent_skill_version_body(s agent_skills) RETURNS JSONB AS $$
++    SELECT jsonb_build_object(
++        'name', s.name,
++        'description', s.description,
++        'content', s.content,
++        'trigger_keywords', s.trigger_keywords,
++        'trigger_file_patterns', s.trigger_file_patterns,
++        'tool_restrictions', s.tool_restrictions,
++        'kind', 'skill'::text,
++        'settings', '{}'::jsonb,
++        'bundle_sha256', s.bundle_sha256
++    )
++$$ LANGUAGE sql STABLE;
++
++CREATE OR REPLACE FUNCTION agent_skill_digest(s agent_skills) RETURNS TEXT AS $$
++    SELECT encode(sha256(convert_to(agent_skill_version_body(s)::text, 'UTF8')), 'hex')
++$$ LANGUAGE sql STABLE;
++
++-- BEFORE: the only place version and digest are set. A writer's own values are discarded first,
++-- so neither writer can forge a version or skip one.
++CREATE OR REPLACE FUNCTION agent_skills_version_bump_fn() RETURNS TRIGGER AS $$
++DECLARE
++    next_digest TEXT;
++BEGIN
++    IF TG_OP = 'UPDATE' THEN
++        NEW.version := OLD.version;
++        NEW.digest := OLD.digest;
++    ELSE
++        NEW.version := 0;
++        NEW.digest := '';
++    END IF;
++    IF NEW.review_state = 'accepted' THEN
++        next_digest := agent_skill_digest(NEW);
++        IF next_digest IS DISTINCT FROM NEW.digest THEN
++            NEW.digest := next_digest;
++            NEW.version := NEW.version + 1;
++        END IF;
++    END IF;
++    RETURN NEW;
++END
++$$ LANGUAGE plpgsql;
++
++CREATE OR REPLACE TRIGGER agent_skills_version_bump_trg
++    BEFORE INSERT OR UPDATE ON agent_skills
++    FOR EACH ROW EXECUTE FUNCTION agent_skills_version_bump_fn();
++
++-- AFTER: write the version row the BEFORE trigger cut, or remove a deleted skill's versions.
++CREATE OR REPLACE FUNCTION agent_skills_version_fn() RETURNS TRIGGER AS $$
++DECLARE
++    kind        TEXT;
++    prior       TEXT;
++BEGIN
++    IF TG_OP = 'DELETE' THEN
++        -- The skill's own delete is one of the two deletes D2 allows. The setting is put back at
++        -- once, so the rest of the transaction cannot delete a version through it.
++        prior := COALESCE(current_setting('mp.version_erasure', true), '');
++        PERFORM set_config('mp.version_erasure', 'on', true);
++        DELETE FROM agent_skill_versions WHERE skill_id = OLD.id;
++        PERFORM set_config('mp.version_erasure', prior, true);
++        RETURN NULL;
++    END IF;
++
++    IF NEW.version <= (CASE WHEN TG_OP = 'UPDATE' THEN OLD.version ELSE 0 END) THEN
++        RETURN NULL;
++    END IF;
++
++    kind := nullif(current_setting('mp.actor_kind', true), '');
++    IF kind IS NULL OR kind NOT IN ('user', 'service', 'system') THEN
++        kind := 'unattributed';
++    END IF;
++
++    INSERT INTO agent_skill_versions
++        (org_id, skill_id, version, digest, body, bundle_sha256, scope, owner_user_id,
++         actor_kind, actor_id)
++    VALUES
++        (NEW.org_id, NEW.id, NEW.version, NEW.digest, agent_skill_version_body(NEW),
++         NEW.bundle_sha256, NEW.scope, NEW.owner_user_id, kind,
++         left(COALESCE(current_setting('mp.actor_id', true), ''), 128));
++    RETURN NULL;
++END
++$$ LANGUAGE plpgsql;
++
++CREATE OR REPLACE TRIGGER agent_skills_version_trg
++    AFTER INSERT OR UPDATE OR DELETE ON agent_skills
++    FOR EACH ROW EXECUTE FUNCTION agent_skills_version_fn();
++
++-- A version row is never updated, and deleted only under mp.version_erasure = 'on'.
++CREATE OR REPLACE FUNCTION agent_skill_versions_immutable_fn() RETURNS TRIGGER AS $$
++BEGIN
++    IF TG_OP = 'DELETE' AND current_setting('mp.version_erasure', true) = 'on' THEN
++        RETURN OLD;
++    END IF;
++    RAISE EXCEPTION 'skill_version_immutable: a skill version is never changed, and deleted only with its skill or in erasure'
++        USING ERRCODE = 'object_not_in_prerequisite_state';
++END
++$$ LANGUAGE plpgsql;
++
++CREATE OR REPLACE TRIGGER agent_skill_versions_immutable_trg
++    BEFORE UPDATE OR DELETE ON agent_skill_versions
++    FOR EACH ROW EXECUTE FUNCTION agent_skill_versions_immutable_fn();
++
++-- Backfill: every accepted skill gets v1, attributed to the system. Setting digest fires the BEFORE
++-- trigger, which computes the real digest; the revision trigger sees an unchanged snapshot and
++-- records nothing. sqlx runs this file once in one transaction; `version = 0` keeps a re-run inert.
++SELECT set_config('mp.actor_kind', 'system', true), set_config('mp.actor_id', 'migration:0096', true);
++UPDATE agent_skills SET digest = '' WHERE review_state = 'accepted' AND version = 0;
++SELECT set_config('mp.actor_kind', '', true), set_config('mp.actor_id', '', true);
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0096_agent_skill_versions.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0096_agent_skill_versions.down.sql
+new file mode 100644
+index 000000000..99af03b7b
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0096_agent_skill_versions.down.sql	
+@@ -0,0 +1,38 @@
++-- Reverses 0096_agent_skill_versions.sql.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate!
++-- reads only the top level of migrations/. Run it by hand, against the database
++-- only, inside one transaction.
++--
++-- DESTROYS every skill version (the numbered, immutable bodies and their digests)
++-- and the version, digest and bundle_sha256 columns of agent_skills. The skills
++-- themselves and their revision log are untouched. Runs that recorded a pin
++-- (skill_id, version, digest) keep it, and it then reads as gone. Export the
++-- versions first if they matter. Dropping the triggers first means no skill write
++-- can fail on a missing table while the file runs.
++--
++-- ORDER, all three steps:
++--   1. set SKILL_VERSIONS_API unset (or not `true`) for capability-core and
++--      session-core, and roll both back to builds that do not read the columns
++--      (session-core's ListAgentSkills selects version and digest);
++--   2. run this file;
++--   3. delete the 0096 row from _sqlx_migrations so the next boot re-applies it.
++--
++-- Safe to run twice (IF EXISTS).
++
++BEGIN;
++DROP TRIGGER IF EXISTS agent_skills_version_trg ON agent_skills;
++DROP TRIGGER IF EXISTS agent_skills_version_bump_trg ON agent_skills;
++DROP TRIGGER IF EXISTS agent_skill_versions_immutable_trg ON agent_skill_versions;
++DROP FUNCTION IF EXISTS agent_skills_version_fn();
++DROP FUNCTION IF EXISTS agent_skills_version_bump_fn();
++DROP FUNCTION IF EXISTS agent_skill_versions_immutable_fn();
++DROP FUNCTION IF EXISTS agent_skill_digest(agent_skills);
++DROP FUNCTION IF EXISTS agent_skill_version_body(agent_skills);
++DROP INDEX IF EXISTS agent_skill_versions_org_owner_idx;
++DROP TABLE IF EXISTS agent_skill_versions;
++ALTER TABLE agent_skills
++    DROP COLUMN IF EXISTS bundle_sha256,
++    DROP COLUMN IF EXISTS digest,
++    DROP COLUMN IF EXISTS version;
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/gdpr.rs b/apps/Model Plane/rust/services/session-core/src/gdpr.rs
+index ff8bbc328..a17b2dd19 100644
+--- a/apps/Model Plane/rust/services/session-core/src/gdpr.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/gdpr.rs	
+@@ -170,6 +170,9 @@ pub struct PurgeSummary {
+     pub hook_configs: u64,
+     pub agent_skills: u64,
+     pub skill_revisions: u64,
++    /// Immutable skill versions and their bodies (EP-11 S2). A skill's delete also removes them;
++    /// they are purged before the skills so the erasure proof counts them.
++    pub agent_skill_versions: u64,
+     pub agent_memory: u64,
+     pub user_memory_controls: u64,
+     /// Standing user profiles (EP-8 S4).
+@@ -222,6 +225,7 @@ impl PurgeSummary {
+             + self.hook_configs
+             + self.agent_skills
+             + self.skill_revisions
++            + self.agent_skill_versions
+             + self.agent_memory
+             + self.user_memory_controls
+             + self.user_profiles
+@@ -724,6 +728,22 @@ pub async fn purge_organization_data(
+         .await?
+         .rows_affected();
+ 
++    // Before the skills, so the count is the purge's own rather than the skill delete trigger's.
++    // A version row refuses any delete outside erasure (migration 0096); the setting is put back
++    // at once so nothing else in this transaction deletes a version through it.
++    sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
++        .execute(&mut *tx)
++        .await?;
++    summary.agent_skill_versions =
++        sqlx::query("DELETE FROM agent_skill_versions WHERE org_id = $1")
++            .bind(org_id)
++            .execute(&mut *tx)
++            .await?
++            .rows_affected();
++    sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
++        .execute(&mut *tx)
++        .await?;
++
+     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
+         .bind(org_id)
+         .execute(&mut *tx)
+@@ -1201,6 +1221,7 @@ mod tests {
+             hook_configs: 1,
+             agent_skills: 1,
+             skill_revisions: 1,
++            agent_skill_versions: 1,
+             agent_memory: 1,
+             user_memory_controls: 1,
+             user_profiles: 1,
+@@ -1222,7 +1243,7 @@ mod tests {
+         };
+         assert_eq!(
+             summary.total(),
+-            35,
++            36,
+             "total() must count only Postgres rows; semantic-tier counts belong \
+              to erasure_is_complete(), not to this sum"
+         );
+@@ -1349,6 +1370,19 @@ mod tests {
+                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
+             "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
+         );
++        // EP-11 S2: the versions are purged under the erasure setting, before the skills, and the
++        // setting is put back before anything else runs.
++        let erasure_on = pos("set_config('mp.version_erasure', 'on', true)");
++        let versions = pos("DELETE FROM agent_skill_versions WHERE org_id = $1");
++        let erasure_off = pos("set_config('mp.version_erasure', '', true)");
++        assert!(
++            erasure_on < versions && versions < erasure_off,
++            "the version delete runs inside the erasure setting"
++        );
++        assert!(
++            erasure_off < pos("DELETE FROM agent_skills WHERE org_id = $1"),
++            "skill versions are purged before the skills"
++        );
+     }
+ 
+     /// WS02-S1: the org erasure switches the Space event triggers off before any delete that
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index d5a708456..24175453d 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -31,6 +31,7 @@ use mp_contracts::model_plane::v1::{
+     run_service_server::RunServiceServer,
+     session_core_server::{SessionCore, SessionCoreServer},
+     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
++    skill_version_service_server::SkillVersionServiceServer,
+     space_attention_server::SpaceAttentionServer,
+     space_events_server::SpaceEventsServer,
+     space_history_service_server::SpaceHistoryServiceServer,
+@@ -10028,6 +10029,8 @@ impl SessionCore for SessionService {
+             proposal_reason: String,
+             updated_at: DateTime<Utc>,
+             revision: i64,
++            version: i32,
++            digest: String,
+         }
+ 
+         let started = Instant::now();
+@@ -10069,7 +10072,8 @@ impl SessionCore for SessionService {
+                         scope, owner_user_id, shared_with, review_state,
+                         source_run_id, source_thread_id, proposal_reason, updated_at,
+                         (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
+-                         WHERE r.skill_id = agent_skills.id) AS revision
++                         WHERE r.skill_id = agent_skills.id) AS revision,
++                        version, digest
+                  FROM agent_skills
+                  WHERE org_id = $1 AND (NOT $2 OR enabled)
+                    AND (scope = 'org' OR owner_user_id = $3
+@@ -10106,6 +10110,9 @@ impl SessionCore for SessionService {
+                     proposal_reason: row.proposal_reason,
+                     updated_at: row.updated_at.to_rfc3339(),
+                     revision: row.revision,
++                    // EP-11 S2: set by migration 0096's trigger, never by a writer.
++                    version: row.version,
++                    digest: row.digest,
+                 })
+                 .collect();
+             Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
+@@ -12405,6 +12412,7 @@ pub async fn serve(
+     let artifact_revision_pool = pool.clone();
+     let thread_reference_pool = pool.clone();
+     let thread_goal_pool = pool.clone();
++    let skill_version_pool = pool.clone();
+ 
+     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
+     let space_events = crate::space_stream_grpc::SpaceEventsGrpc::new(pool.clone(), space_wakes);
+@@ -12495,6 +12503,11 @@ pub async fn serve(
+             crate::thread_goals::ThreadGoalGrpc { pool: thread_goal_pool },
+             auth.clone(),
+         ))
++        // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.
++        .add_service(SkillVersionServiceServer::with_interceptor(
++            crate::skill_versions::SkillVersionGrpc { pool: skill_version_pool },
++            auth.clone(),
++        ))
+         .add_service(LearningGovernanceServiceServer::with_interceptor(
+             learning_governance,
+             auth.clone(),
+diff --git a/apps/Model Plane/rust/services/session-core/src/main.rs b/apps/Model Plane/rust/services/session-core/src/main.rs
+index 7ad294a67..10e997321 100644
+--- a/apps/Model Plane/rust/services/session-core/src/main.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/main.rs	
+@@ -54,6 +54,7 @@ mod run_ledger_grpc;
+ mod run_phase;
+ mod run_service_grpc;
+ mod service_token;
++mod skill_versions;
+ mod space;
+ mod space_memory;
+ mod space_deletion_reconciler;
+diff --git a/apps/Model Plane/rust/services/session-core/src/skill_versions.rs b/apps/Model Plane/rust/services/session-core/src/skill_versions.rs
+new file mode 100644
+index 000000000..cab5db06d
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/src/skill_versions.rs	
+@@ -0,0 +1,806 @@
++//! `SkillVersionService`: reads of immutable skill versions (Wave 3 EP-11 S2).
++//!
++//! Migration 0096 cuts a numbered version with a digest every time the digest of an accepted
++//! `agent_skills` row changes, by trigger, so session-core's RPCs and capability-core's registry SQL
++//! are covered alike and neither writes a version itself (EP-11 D10). This module only reads them:
++//! the gateway asks for the body of a version a run pinned (EP-11 S3), and capability-core serves
++//! the Skills page's history from the same table over HTTP.
++//!
++//! Visibility is `list_agent_skills`'s rule: org skills, the reader's own, and accepted skills
++//! shared with the reader. A service caller reads as the user it names in `for_user_id`, and as no
++//! user otherwise; a user caller always reads as itself. Skill text is org configuration, not
++//! conversation content, so a zero-retention credential may read it as it may list skills. The
++//! switch is [`ENABLED_ENV`], default off; while it is off every RPC answers `unavailable`
++//! `skill_versions_disabled`.
++
++use chrono::{DateTime, Utc};
++use mp_contracts::model_plane::v1::{self as pb, skill_version_service_server::SkillVersionService};
++use serde::Deserialize;
++use sqlx::PgPool;
++use std::time::Instant;
++use tonic::{Request, Response, Status};
++
++use crate::auth::{authorize_operation, identity, VerifiedIdentity};
++use crate::grpc::record_metrics;
++
++/// The environment switch. capability-core reads the same name for its HTTP history route, so one
++/// setting turns the version reads on for both. Default off, read by the strict parser the other
++/// switches share, so only the literal `true` turns it on.
++pub(crate) const ENABLED_ENV: &str = "SKILL_VERSIONS_API";
++
++const DISABLED: &str = "skill_versions_disabled";
++/// A listing's page when the caller names none, and the most one page returns.
++const DEFAULT_LIST_LIMIT: i32 = 20;
++const MAX_LIST_LIMIT: i32 = 100;
++/// The longest skill id accepted; capability-core's ids are `skill_` and a UUID.
++const MAX_SKILL_ID_CHARS: usize = 128;
++
++/// The visibility predicate of `list_agent_skills`, over `agent_skills` with `$1` the org, `$2` the
++/// skill and `$3` the reader. A proposal stays private to its owner even if a share was written on it.
++const VISIBLE_SKILL_SQL: &str = "SELECT EXISTS (
++        SELECT 1 FROM agent_skills
++        WHERE id = $2 AND org_id = $1
++          AND (scope = 'org' OR owner_user_id = $3
++               OR (shared_with ? $3 AND review_state = 'accepted')))";
++
++/// Read where it is used: the RPCs hold no switch of their own.
++pub(crate) fn skill_versions_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// The version RPCs. They hold the pool and nothing else.
++pub struct SkillVersionGrpc {
++    pub(crate) pool: PgPool,
++}
++
++#[tonic::async_trait]
++impl SkillVersionService for SkillVersionGrpc {
++    async fn list_agent_skill_versions(
++        &self,
++        request: Request<pb::ListAgentSkillVersionsRequest>,
++    ) -> Result<Response<pb::ListAgentSkillVersionsResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:read")?;
++            if !skill_versions_enabled() {
++                return Err(Status::unavailable(DISABLED));
++            }
++            list_versions(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("list_agent_skill_versions", started, result.is_ok());
++        result
++    }
++
++    async fn get_agent_skill_version(
++        &self,
++        request: Request<pb::GetAgentSkillVersionRequest>,
++    ) -> Result<Response<pb::GetAgentSkillVersionResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:read")?;
++            if !skill_versions_enabled() {
++                return Err(Status::unavailable(DISABLED));
++            }
++            get_version(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("get_agent_skill_version", started, result.is_ok());
++        result
++    }
++}
++
++/// Who the read is for: a service caller reads as the user it names, a user caller as itself, so
++/// `for_user_id` can never be used to read another person's private skill.
++fn reader_id(caller: &VerifiedIdentity, for_user_id: &str) -> String {
++    if caller.is_service() && !for_user_id.trim().is_empty() {
++        for_user_id.trim().to_owned()
++    } else {
++        caller.user_id().unwrap_or_default().to_owned()
++    }
++}
++
++#[allow(clippy::result_large_err)]
++fn check_skill_ref(caller: &VerifiedIdentity, org_id: &str, skill_id: &str) -> Result<(), Status> {
++    caller.authorize_org(org_id)?;
++    let skill_id = skill_id.trim();
++    if skill_id.is_empty() || skill_id.chars().count() > MAX_SKILL_ID_CHARS {
++        return Err(Status::invalid_argument("skill_id is required"));
++    }
++    Ok(())
++}
++
++async fn skill_visible(pool: &PgPool, org_id: &str, skill_id: &str, reader: &str) -> Result<bool, Status> {
++    sqlx::query_scalar(VISIBLE_SKILL_SQL)
++        .bind(org_id)
++        .bind(skill_id)
++        .bind(reader)
++        .fetch_one(pool)
++        .await
++        .map_err(internal)
++}
++
++/// The versioned fields as migration 0096's `agent_skill_version_body` writes them. Every field
++/// defaults, so a body written before a later migration adds a field still reads.
++#[derive(Debug, Default, Deserialize)]
++#[serde(default)]
++struct VersionBody {
++    name: String,
++    description: String,
++    content: String,
++    trigger_keywords: Vec<String>,
++    trigger_file_patterns: Vec<String>,
++    tool_restrictions: Vec<String>,
++}
++
++#[derive(sqlx::FromRow)]
++struct VersionRow {
++    skill_id: String,
++    version: i32,
++    digest: String,
++    body: sqlx::types::Json<VersionBody>,
++    bundle_sha256: String,
++    actor_kind: String,
++    actor_id: String,
++    created_at: DateTime<Utc>,
++}
++
++impl From<VersionRow> for pb::AgentSkillVersion {
++    fn from(row: VersionRow) -> Self {
++        let body = row.body.0;
++        Self {
++            skill_id: row.skill_id,
++            version: row.version,
++            digest: row.digest,
++            name: body.name,
++            description: body.description,
++            content: body.content,
++            trigger_keywords: body.trigger_keywords,
++            trigger_file_patterns: body.trigger_file_patterns,
++            tool_restrictions: body.tool_restrictions,
++            bundle_sha256: row.bundle_sha256,
++            actor_kind: row.actor_kind,
++            actor_id: row.actor_id,
++            created_at: row.created_at.to_rfc3339(),
++        }
++    }
++}
++
++/// The columns every read returns. `$4` says whether the body keeps its text.
++const VERSION_COLUMNS: &str = "skill_id, version, digest,
++        CASE WHEN $4 THEN body ELSE body - 'content' END AS body,
++        bundle_sha256, actor_kind, actor_id, created_at";
++
++pub(crate) async fn list_versions(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    request: pb::ListAgentSkillVersionsRequest,
++) -> Result<pb::ListAgentSkillVersionsResponse, Status> {
++    check_skill_ref(caller, &request.org_id, &request.skill_id)?;
++    if request.limit < 0 || request.before_version < 0 {
++        return Err(Status::invalid_argument(
++            "limit and before_version must not be negative",
++        ));
++    }
++    let skill_id = request.skill_id.trim();
++    let reader = reader_id(caller, &request.for_user_id);
++    if !skill_visible(pool, &request.org_id, skill_id, &reader).await? {
++        return Err(Status::not_found("skill not found"));
++    }
++    let limit = match request.limit {
++        0 => DEFAULT_LIST_LIMIT,
++        n => n.min(MAX_LIST_LIMIT),
++    };
++    // One more than the page, to say whether older versions remain.
++    let mut rows: Vec<VersionRow> = sqlx::query_as(&format!(
++        "SELECT {VERSION_COLUMNS}
++         FROM agent_skill_versions
++         WHERE org_id = $1 AND skill_id = $2 AND ($3 = 0 OR version < $3)
++         ORDER BY version DESC
++         LIMIT $5"
++    ))
++    .bind(&request.org_id)
++    .bind(skill_id)
++    .bind(request.before_version)
++    .bind(request.include_content)
++    .bind(i64::from(limit) + 1)
++    .fetch_all(pool)
++    .await
++    .map_err(internal)?;
++    let has_more = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
++    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
++    Ok(pb::ListAgentSkillVersionsResponse {
++        versions: rows.into_iter().map(Into::into).collect(),
++        has_more,
++    })
++}
++
++pub(crate) async fn get_version(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    request: pb::GetAgentSkillVersionRequest,
++) -> Result<pb::GetAgentSkillVersionResponse, Status> {
++    check_skill_ref(caller, &request.org_id, &request.skill_id)?;
++    if request.version < 0 {
++        return Err(Status::invalid_argument("version must not be negative"));
++    }
++    let skill_id = request.skill_id.trim();
++    let reader = reader_id(caller, &request.for_user_id);
++    // A skill the reader cannot see reads exactly as one that is gone, so the answer says nothing
++    // about another person's private skill.
++    if !skill_visible(pool, &request.org_id, skill_id, &reader).await? {
++        return Ok(gone());
++    }
++    let row: Option<VersionRow> = sqlx::query_as(&format!(
++        "SELECT {VERSION_COLUMNS}
++         FROM agent_skill_versions
++         WHERE org_id = $1 AND skill_id = $2 AND ($3 = 0 OR version = $3)
++         ORDER BY version DESC
++         LIMIT 1"
++    ))
++    .bind(&request.org_id)
++    .bind(skill_id)
++    .bind(request.version)
++    .bind(true)
++    .fetch_optional(pool)
++    .await
++    .map_err(internal)?;
++    Ok(row.map_or_else(gone, |row| pb::GetAgentSkillVersionResponse {
++        version: Some(row.into()),
++        gone: false,
++    }))
++}
++
++fn gone() -> pb::GetAgentSkillVersionResponse {
++    pb::GetAgentSkillVersionResponse {
++        version: None,
++        gone: true,
++    }
++}
++
++fn internal(error: sqlx::Error) -> Status {
++    tracing::warn!(%error, "skill version read failed");
++    Status::internal("skill version read failed")
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use mp_ids::new_ulid;
++
++    const OWNER: &str = "user-skv-owner";
++    const SHAREE: &str = "user-skv-sharee";
++    const STRANGER: &str = "user-skv-stranger";
++
++    #[test]
++    fn the_switch_is_off_unless_it_reads_true() {
++        assert!(!mp_contracts::loop_fold::switch_from(None));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++    }
++
++    #[test]
++    fn reader_is_the_caller_unless_a_service_names_a_user() {
++        let user = VerifiedIdentity::user_for_test("org-1", OWNER);
++        assert_eq!(reader_id(&user, STRANGER), OWNER, "a user never reads as someone else");
++        let service = VerifiedIdentity::service_for_test("org-1", &["session:read"], false);
++        assert_eq!(reader_id(&service, &format!(" {SHAREE} ")), SHAREE);
++        assert_eq!(reader_id(&service, ""), "", "a service naming no one sees only org skills");
++    }
++
++    /// EP-11 D2: the digest covers exactly these fields, in this order. A change here moves every
++    /// digest, so it must come with a migration that replaces `agent_skill_version_body` and says so.
++    #[test]
++    fn digest_field_list_is_pinned() {
++        let migration = include_str!("../migrations/0096_agent_skill_versions.sql");
++        let start = migration
++            .find("CREATE OR REPLACE FUNCTION agent_skill_version_body(s agent_skills)")
++            .expect("the body function");
++        let end = start
++            + migration[start..]
++                .find("$$ LANGUAGE sql")
++                .expect("the body function's end");
++        let keys: Vec<&str> = migration[start..end]
++            .lines()
++            .filter_map(|line| line.trim().strip_prefix('\''))
++            .filter_map(|line| line.split('\'').next())
++            .collect();
++        assert_eq!(
++            keys,
++            [
++                "name",
++                "description",
++                "content",
++                "trigger_keywords",
++                "trigger_file_patterns",
++                "tool_restrictions",
++                "kind",
++                "settings",
++                "bundle_sha256",
++            ]
++        );
++        assert!(
++            migration.contains("encode(sha256(convert_to(agent_skill_version_body(s)::text, 'UTF8')), 'hex')"),
++            "the digest is lowercase hex sha256 of the body's UTF-8 text"
++        );
++    }
++
++    /// The version store has no writer here: a write path would be a second writer beside the trigger.
++    #[test]
++    fn this_module_never_writes_versions() {
++        let source = include_str!("skill_versions.rs");
++        let code = &source[..source.find("#[cfg(test)]").expect("test module")];
++        for verb in ["INSERT INTO agent_skill_versions", "UPDATE agent_skill_versions", "DELETE FROM agent_skill_versions"] {
++            assert!(!code.contains(verb), "skill_versions.rs must not {verb}");
++        }
++    }
++
++    // The database tests below run with `--ignored` against a disposable Postgres, as the other
++    // session-core database tests do (scripts/tests/session-core-db-tests.sh, one thread). They call
++    // the store functions and plain SQL directly, so the switch is not needed;
++    // `rpc_is_refused_while_the_switch_is_off` tests the switch.
++
++    async fn connect() -> PgPool {
++        let pool =
++            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
++                .await
++                .unwrap();
++        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
++        pool
++    }
++
++    fn new_org() -> String {
++        format!("skv-org-{}", new_ulid())
++    }
++
++    /// One skill row with `first text` as its content, written with no actor named.
++    async fn seed_skill(
++        pool: &PgPool,
++        org: &str,
++        scope: &str,
++        owner: &str,
++        review_state: &str,
++        shared_with: &[&str],
++    ) -> String {
++        let id = format!("skill_{}", new_ulid());
++        sqlx::query(
++            "INSERT INTO agent_skills
++                (id, org_id, name, description, content, trigger_keywords, trigger_file_patterns,
++                 tool_restrictions, enabled, origin, scope, owner_user_id, shared_with, review_state)
++             VALUES ($1, $2, $3, 'd', 'first text', '[\"deploy\"]', '[]', '[]', true, 'user',
++                     $4, $5, $6, $7)",
++        )
++        .bind(&id)
++        .bind(org)
++        .bind(format!("skill {id}"))
++        .bind(scope)
++        .bind(owner)
++        .bind(sqlx::types::Json(shared_with))
++        .bind(review_state)
++        .execute(pool)
++        .await
++        .unwrap();
++        id
++    }
++
++    /// Run `sql` (binding the skill id as `$1`) in a transaction that names `actor` the way both
++    /// writers do (0064's settings), or no actor for `None`.
++    async fn write_as(pool: &PgPool, actor: Option<(&str, &str)>, sql: &str, skill_id: &str) {
++        let mut tx = pool.begin().await.unwrap();
++        if let Some((kind, id)) = actor {
++            sqlx::query("SELECT set_config('mp.actor_kind', $1, true), set_config('mp.actor_id', $2, true)")
++                .bind(kind)
++                .bind(id)
++                .execute(&mut *tx)
++                .await
++                .unwrap();
++        }
++        sqlx::query(sql).bind(skill_id).execute(&mut *tx).await.unwrap();
++        tx.commit().await.unwrap();
++    }
++
++    async fn live(pool: &PgPool, skill_id: &str) -> (i32, String) {
++        sqlx::query_as("SELECT version, digest FROM agent_skills WHERE id = $1")
++            .bind(skill_id)
++            .fetch_one(pool)
++            .await
++            .unwrap()
++    }
++
++    async fn version_rows(pool: &PgPool, skill_id: &str) -> Vec<(i32, String, String, String)> {
++        sqlx::query_as(
++            "SELECT version, digest, actor_kind, actor_id FROM agent_skill_versions
++             WHERE skill_id = $1 ORDER BY version",
++        )
++        .bind(skill_id)
++        .fetch_all(pool)
++        .await
++        .unwrap()
++    }
++
++    fn owner() -> VerifiedIdentity {
++        VerifiedIdentity::user_for_test("org-placeholder", OWNER)
++    }
++
++    fn user(org: &str, id: &str) -> VerifiedIdentity {
++        VerifiedIdentity::user_for_test(org, id)
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn version_increments_only_when_digest_changes() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        let (v1, d1) = live(&pool, &skill).await;
++        assert_eq!(v1, 1, "an accepted insert is v1");
++        assert_eq!(d1.len(), 64);
++
++        // The same text written again is no change.
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'first text' WHERE id = $1", &skill).await;
++        assert_eq!(live(&pool, &skill).await, (1, d1.clone()));
++
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'second text' WHERE id = $1", &skill).await;
++        let (v2, d2) = live(&pool, &skill).await;
++        assert_eq!(v2, 2);
++        assert_ne!(d2, d1);
++
++        // A restore writes the old body as a new version (D2); its digest is the old one's.
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'first text' WHERE id = $1", &skill).await;
++        let (v3, d3) = live(&pool, &skill).await;
++        assert_eq!(v3, 3);
++        assert_eq!(d3, d1);
++
++        // A writer cannot set the columns: the trigger owns them.
++        write_as(&pool, None, "UPDATE agent_skills SET version = 99, digest = 'x' WHERE id = $1", &skill).await;
++        assert_eq!(live(&pool, &skill).await, (3, d1));
++        let versions: Vec<i32> = version_rows(&pool, &skill).await.iter().map(|row| row.0).collect();
++        assert_eq!(versions, [1, 2, 3]);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn toggling_enabled_does_not_cut_a_version() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "user", OWNER, "accepted", &[]).await;
++        write_as(&pool, None, "UPDATE agent_skills SET enabled = false WHERE id = $1", &skill).await;
++        write_as(&pool, None, "UPDATE agent_skills SET enabled = true, shared_with = '[\"x\"]' WHERE id = $1", &skill).await;
++        assert_eq!(live(&pool, &skill).await.0, 1);
++        assert_eq!(version_rows(&pool, &skill).await.len(), 1);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn proposal_has_no_version_until_accepted() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "user", OWNER, "proposed", &[]).await;
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'refreshed proposal' WHERE id = $1", &skill).await;
++        assert_eq!(live(&pool, &skill).await, (0, String::new()));
++        assert!(version_rows(&pool, &skill).await.is_empty());
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn accepting_a_proposal_cuts_v1() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "user", OWNER, "proposed", &[]).await;
++        write_as(
++            &pool,
++            Some(("user", OWNER)),
++            "UPDATE agent_skills SET review_state = 'accepted', enabled = true WHERE id = $1",
++            &skill,
++        )
++        .await;
++        let rows = version_rows(&pool, &skill).await;
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0].0, 1);
++        assert_eq!((rows[0].2.as_str(), rows[0].3.as_str()), ("user", OWNER));
++
++        // Rejected and accepted again with the same text: the text is version 1 already.
++        write_as(&pool, None, "UPDATE agent_skills SET review_state = 'rejected' WHERE id = $1", &skill).await;
++        write_as(&pool, None, "UPDATE agent_skills SET review_state = 'accepted' WHERE id = $1", &skill).await;
++        assert_eq!(live(&pool, &skill).await.0, 1);
++    }
++
++    /// capability-core's PATCH is plain SQL in a transaction that set mp.actor_kind = 'user'.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn capability_core_patch_cuts_a_version_with_actor() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        write_as(
++            &pool,
++            Some(("user", "user-admin")),
++            "UPDATE agent_skills SET description = 'patched', updated_at = now() WHERE id = $1",
++            &skill,
++        )
++        .await;
++        let rows = version_rows(&pool, &skill).await;
++        assert_eq!(rows.len(), 2);
++        assert_eq!((rows[1].2.as_str(), rows[1].3.as_str()), ("user", "user-admin"));
++        assert_eq!(
++            (rows[0].2.as_str(), rows[0].3.as_str()),
++            ("unattributed", ""),
++            "a write that names no actor is still a version, marked unattributed"
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn bundle_sha256_change_cuts_a_version() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        let manifest = "a".repeat(64);
++        write_as(
++            &pool,
++            Some(("user", "user-admin")),
++            &format!("UPDATE agent_skills SET bundle_sha256 = '{manifest}' WHERE id = $1"),
++            &skill,
++        )
++        .await;
++        assert_eq!(live(&pool, &skill).await.0, 2);
++        let bundle: String = sqlx::query_scalar(
++            "SELECT bundle_sha256 FROM agent_skill_versions WHERE skill_id = $1 AND version = 2",
++        )
++        .bind(&skill)
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++        assert_eq!(bundle, manifest);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn versions_are_immutable() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        for sql in [
++            "UPDATE agent_skill_versions SET body = '{}' WHERE skill_id = $1",
++            "DELETE FROM agent_skill_versions WHERE skill_id = $1",
++        ] {
++            let error = sqlx::query(sql).bind(&skill).execute(&pool).await.unwrap_err();
++            assert!(error.to_string().contains("skill_version_immutable"), "{sql}: {error}");
++        }
++        // Even under the erasure setting an update is refused: only a delete is allowed there.
++        let mut tx = pool.begin().await.unwrap();
++        sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
++            .execute(&mut *tx)
++            .await
++            .unwrap();
++        let error = sqlx::query("UPDATE agent_skill_versions SET actor_id = 'x' WHERE skill_id = $1")
++            .bind(&skill)
++            .execute(&mut *tx)
++            .await
++            .unwrap_err();
++        assert!(error.to_string().contains("skill_version_immutable"));
++        drop(tx);
++        assert_eq!(version_rows(&pool, &skill).await.len(), 1);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn skill_delete_removes_its_versions() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        let kept = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'v2' WHERE id = $1", &skill).await;
++        let mut tx = pool.begin().await.unwrap();
++        sqlx::query("DELETE FROM agent_skills WHERE id = $1")
++            .bind(&skill)
++            .execute(&mut *tx)
++            .await
++            .unwrap();
++        // The skill's delete put the erasure setting back: the rest of the transaction cannot
++        // delete another skill's version through it.
++        let error = sqlx::query("DELETE FROM agent_skill_versions WHERE skill_id = $1")
++            .bind(&kept)
++            .execute(&mut *tx)
++            .await
++            .unwrap_err();
++        assert!(error.to_string().contains("skill_version_immutable"));
++        drop(tx);
++        sqlx::query("DELETE FROM agent_skills WHERE id = $1")
++            .bind(&skill)
++            .execute(&pool)
++            .await
++            .unwrap();
++        assert!(version_rows(&pool, &skill).await.is_empty());
++        assert_eq!(version_rows(&pool, &kept).await.len(), 1);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn org_purge_removes_versions() {
++        let pool = connect().await;
++        let org = new_org();
++        let other = new_org();
++        let skill = seed_skill(&pool, &org, "user", OWNER, "accepted", &[]).await;
++        let kept = seed_skill(&pool, &other, "org", "", "accepted", &[]).await;
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'v2' WHERE id = $1", &skill).await;
++        let summary = crate::gdpr::purge_organization_data(&pool, &org, None)
++            .await
++            .expect("purge");
++        assert_eq!(summary.agent_skill_versions, 2, "the purge counts the versions it erased");
++        assert!(version_rows(&pool, &skill).await.is_empty());
++        assert_eq!(version_rows(&pool, &kept).await.len(), 1, "another org keeps its versions");
++        crate::gdpr::purge_organization_data(&pool, &other, None)
++            .await
++            .expect("cleanup");
++    }
++
++    /// The backfill statements of 0096, run against a row written while the triggers were off
++    /// (as every accepted row was before the migration).
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn backfill_gives_every_accepted_skill_v1() {
++        let pool = connect().await;
++        let org = new_org();
++        let mut tx = pool.begin().await.unwrap();
++        // Replica mode skips ordinary triggers: the row looks as it did before 0096.
++        sqlx::query("SET LOCAL session_replication_role = replica")
++            .execute(&mut *tx)
++            .await
++            .unwrap();
++        let mut ids = Vec::new();
++        for state in ["accepted", "proposed"] {
++            let id = format!("skill_{}", new_ulid());
++            sqlx::query(
++                "INSERT INTO agent_skills (id, org_id, name, content, review_state, scope, owner_user_id)
++                 VALUES ($1, $2, $1, 'old text', $3, 'user', $4)",
++            )
++            .bind(&id)
++            .bind(&org)
++            .bind(state)
++            .bind(OWNER)
++            .execute(&mut *tx)
++            .await
++            .unwrap();
++            ids.push(id);
++        }
++        tx.commit().await.unwrap();
++        let revisions_before: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM skill_revisions WHERE org_id = $1")
++                .bind(&org)
++                .fetch_one(&pool)
++                .await
++                .unwrap();
++
++        let migration = include_str!("../migrations/0096_agent_skill_versions.sql");
++        let backfill = &migration[migration
++            .find("SELECT set_config('mp.actor_kind', 'system'")
++            .expect("the backfill")..];
++        let mut tx = pool.begin().await.unwrap();
++        for statement in backfill.split(";\n").map(str::trim).filter(|s| !s.is_empty()) {
++            sqlx::query(statement).execute(&mut *tx).await.unwrap();
++        }
++        tx.commit().await.unwrap();
++
++        let accepted = version_rows(&pool, &ids[0]).await;
++        assert_eq!(accepted.len(), 1);
++        assert_eq!(accepted[0].0, 1);
++        assert_eq!((accepted[0].2.as_str(), accepted[0].3.as_str()), ("system", "migration:0096"));
++        assert!(version_rows(&pool, &ids[1]).await.is_empty(), "a proposal gets no version");
++        let revisions_after: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM skill_revisions WHERE org_id = $1")
++                .bind(&org)
++                .fetch_one(&pool)
++                .await
++                .unwrap();
++        assert_eq!(revisions_after, revisions_before, "the backfill writes no revision");
++    }
++
++    /// Regression for 0064: the revision log still records every mutation beside the versions.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn revision_trigger_still_records_every_mutation() {
++        let pool = connect().await;
++        let org = new_org();
++        let skill = seed_skill(&pool, &org, "org", "", "accepted", &[]).await;
++        write_as(&pool, Some(("user", "user-admin")), "UPDATE agent_skills SET content = 'edited' WHERE id = $1", &skill).await;
++        write_as(&pool, Some(("user", "user-admin")), "UPDATE agent_skills SET enabled = false WHERE id = $1", &skill).await;
++        write_as(&pool, Some(("user", "user-admin")), "DELETE FROM agent_skills WHERE id = $1", &skill).await;
++        let actions: Vec<String> = sqlx::query_scalar(
++            "SELECT action FROM skill_revisions WHERE skill_id = $1 ORDER BY revision",
++        )
++        .bind(&skill)
++        .fetch_all(&pool)
++        .await
++        .unwrap();
++        assert_eq!(actions, ["created", "edited", "disabled", "deleted"]);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn list_and_get_follow_the_list_agent_skills_visibility() {
++        let pool = connect().await;
++        let org = new_org();
++        let shared = seed_skill(&pool, &org, "user", OWNER, "accepted", &[SHAREE]).await;
++        write_as(&pool, None, "UPDATE agent_skills SET content = 'v2' WHERE id = $1", &shared).await;
++
++        let request = |reader: &str| pb::ListAgentSkillVersionsRequest {
++            org_id: org.clone(),
++            skill_id: shared.clone(),
++            for_user_id: reader.to_owned(),
++            ..Default::default()
++        };
++        let listed = list_versions(&pool, &user(&org, OWNER), request("")).await.unwrap();
++        assert_eq!(listed.versions.iter().map(|v| v.version).collect::<Vec<_>>(), [2, 1]);
++        assert!(listed.versions[0].content.is_empty(), "a listing omits the text unless asked");
++        assert_eq!(listed.versions[0].name, format!("skill {shared}"));
++        assert!(list_versions(&pool, &user(&org, SHAREE), request("")).await.is_ok());
++
++        let refused = list_versions(&pool, &user(&org, STRANGER), request(OWNER)).await.unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::NotFound, "for_user_id is ignored for a user caller");
++        let service = VerifiedIdentity::service_for_test(&org, &["session:read"], false);
++        assert!(list_versions(&pool, &service, request(SHAREE)).await.is_ok());
++
++        let mut paged = request("");
++        paged.limit = 1;
++        let page = list_versions(&pool, &user(&org, OWNER), paged).await.unwrap();
++        assert_eq!(page.versions.len(), 1);
++        assert!(page.has_more);
++
++        let first = get_as(&pool, &user(&org, OWNER), &org, &shared, 1).await.unwrap();
++        assert_eq!(first.version.unwrap().content, "first text");
++        let newest = get_as(&pool, &user(&org, OWNER), &org, &shared, 0).await.unwrap();
++        assert_eq!(newest.version.unwrap().version, 2);
++        assert!(get_as(&pool, &user(&org, OWNER), &org, &shared, 7).await.unwrap().gone);
++        let hidden = get_as(&pool, &user(&org, STRANGER), &org, &shared, 1).await.unwrap();
++        assert!(hidden.gone, "a skill the reader cannot see reads as gone");
++        let other_org = get_as(&pool, &owner(), &org, &shared, 1).await.unwrap_err();
++        assert_eq!(other_org.code(), tonic::Code::PermissionDenied);
++    }
++
++    async fn get_as(
++        pool: &PgPool,
++        reader: &VerifiedIdentity,
++        org: &str,
++        skill: &str,
++        version: i32,
++    ) -> Result<pb::GetAgentSkillVersionResponse, Status> {
++        get_version(
++            pool,
++            reader,
++            pb::GetAgentSkillVersionRequest {
++                org_id: org.to_owned(),
++                skill_id: skill.to_owned(),
++                version,
++                for_user_id: String::new(),
++            },
++        )
++        .await
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn rpc_is_refused_while_the_switch_is_off() {
++        let pool = connect().await;
++        // The suite runs with the switch unset, which is the default this test proves.
++        let mut request = Request::new(pb::GetAgentSkillVersionRequest {
++            org_id: "org-placeholder".to_owned(),
++            skill_id: "skill_x".to_owned(),
++            ..Default::default()
++        });
++        request.extensions_mut().insert(owner());
++        let refused = SkillVersionGrpc { pool }
++            .get_agent_skill_version(request)
++            .await
++            .unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::Unavailable);
++        assert_eq!(refused.message(), DISABLED);
++    }
++}

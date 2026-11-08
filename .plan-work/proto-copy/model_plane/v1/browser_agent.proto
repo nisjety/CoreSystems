@@ -1,0 +1,236 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// BrowserAgentService — action/observation loop between Model Plane (planner) and Quarry (executor).
+// Owns: plan lifecycle, action dispatch, observation ingestion, agent state queries.
+service BrowserAgentService {
+  // PlanAction dispatches the next browser action for a running agent plan.
+  rpc PlanAction(PlanActionRequest) returns (PlanActionResponse);
+
+  // ReportObservation records the result of an executed browser action.
+  rpc ReportObservation(ReportObservationRequest) returns (ReportObservationResponse);
+
+  // GetAgentState returns the current state of an agent plan.
+  rpc GetAgentState(GetAgentStateRequest) returns (GetAgentStateResponse);
+}
+
+// ActionType enumerates the browser actions an agent can dispatch.
+enum ActionType {
+  // Unspecified action.
+  ACTION_TYPE_UNSPECIFIED = 0;
+
+  // Navigate to a URL.
+  ACTION_TYPE_GOTO = 1;
+
+  // Click an element identified by selector.
+  ACTION_TYPE_CLICK = 2;
+
+  // Type text into an element identified by selector.
+  ACTION_TYPE_TYPE = 3;
+
+  // Extract text content from elements matching a selector.
+  ACTION_TYPE_EXTRACT = 4;
+
+  // Observe the current page state (screenshot + DOM snapshot).
+  ACTION_TYPE_OBSERVE = 5;
+
+  // Scroll the page or an element.
+  ACTION_TYPE_SCROLL = 6;
+
+  // Wait for a condition or a fixed duration.
+  ACTION_TYPE_WAIT = 7;
+}
+
+// ObservationStatus captures the outcome of an executed browser action.
+enum ObservationStatus {
+  // Unspecified status.
+  OBSERVATION_STATUS_UNSPECIFIED = 0;
+
+  // Action executed successfully.
+  OBSERVATION_STATUS_SUCCESS = 1;
+
+  // Action execution failed.
+  OBSERVATION_STATUS_FAILED = 2;
+
+  // Action timed out before completing.
+  OBSERVATION_STATUS_TIMEOUT = 3;
+
+  // Action was blocked by policy or page state.
+  OBSERVATION_STATUS_BLOCKED = 4;
+}
+
+// AgentPlanStatus tracks the lifecycle of an agent plan.
+enum AgentPlanStatus {
+  // Unspecified status.
+  AGENT_PLAN_STATUS_UNSPECIFIED = 0;
+
+  // Planner is computing the next action.
+  AGENT_PLAN_STATUS_PLANNING = 1;
+
+  // An action is being executed by Quarry.
+  AGENT_PLAN_STATUS_EXECUTING = 2;
+
+  // Plan is paused awaiting human approval.
+  AGENT_PLAN_STATUS_WAITING_APPROVAL = 3;
+
+  // Plan completed all steps or reached stop criteria.
+  AGENT_PLAN_STATUS_COMPLETED = 4;
+
+  // Plan failed due to an unrecoverable error.
+  AGENT_PLAN_STATUS_FAILED = 5;
+
+  // Plan was explicitly aborted.
+  AGENT_PLAN_STATUS_ABORTED = 6;
+}
+
+// BrowserAction describes a single browser action to be executed by Quarry.
+message BrowserAction {
+  // Unique action identifier (ULID).
+  string action_id = 1;
+
+  // Browser grant authorizing this action.
+  string grant_id = 2;
+
+  // The type of browser action to perform.
+  ActionType action_type = 3;
+
+  // CSS or XPath selector for the target element (CLICK, TYPE, EXTRACT, SCROLL).
+  string selector = 4;
+
+  // Value payload — text to type (TYPE), scroll direction/amount (SCROLL),
+  // or wait condition expression (WAIT).
+  string value = 5;
+
+  // Target URL for GOTO actions.
+  string url = 6;
+
+  // Maximum time in milliseconds to wait for the action to complete.
+  // Zero means use the executor's default timeout.
+  int32 max_wait_ms = 7;
+}
+
+// BrowserObservation records the result of executing a BrowserAction.
+message BrowserObservation {
+  // Unique observation identifier (ULID).
+  string observation_id = 1;
+
+  // The action this observation corresponds to.
+  string action_id = 2;
+
+  // Browser grant under which the action was executed.
+  string grant_id = 3;
+
+  // Outcome of the action execution.
+  ObservationStatus status = 4;
+
+  // Current page URL after action execution.
+  string page_url = 5;
+
+  // Current page title after action execution.
+  string page_title = 6;
+
+  // Text content extracted from the page (EXTRACT actions or page snapshots).
+  string extracted_text = 7;
+
+  // Reference to a stored screenshot (object-store key or URI).
+  string screenshot_ref = 8;
+
+  // Reference to a stored DOM snapshot (object-store key or URI).
+  string dom_snapshot_ref = 9;
+
+  // Human-readable error description when status is not SUCCESS.
+  string error_message = 10;
+}
+
+// AgentPlan represents the full configuration and runtime state of an agent plan.
+message AgentPlan {
+  // Unique plan identifier (ULID).
+  string plan_id = 1;
+
+  // Browser grant authorizing actions within this plan.
+  string grant_id = 2;
+
+  // Run identifier linking this plan to an orchestration run.
+  string run_id = 3;
+
+  // Tenant identifier.
+  string org_id = 4;
+
+  // System prompt governing the agent's behaviour.
+  string system_prompt = 5;
+
+  // Maximum number of action/observation steps before auto-termination.
+  int32 max_steps = 6;
+
+  // Maximum total runtime in seconds before auto-termination.
+  int32 max_runtime_s = 7;
+
+  // Allowlist of domains the agent may navigate to. Empty means unrestricted.
+  repeated string allowed_domains = 8;
+
+  // Expression evaluated after each observation to decide if the plan is complete.
+  string stop_criteria = 9;
+
+  // When true, the agent pauses before executing each action for human approval.
+  bool require_approval = 10;
+
+  // Zero-based index of the current step in the plan.
+  int32 current_step = 11;
+
+  // Current lifecycle status of the plan.
+  AgentPlanStatus status = 12;
+
+  // Wall-clock time when the plan was created.
+  google.protobuf.Timestamp created_at = 13;
+
+  // Wall-clock time of the most recent status transition.
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+// PlanActionRequest asks the planner to dispatch the next action.
+message PlanActionRequest {
+  // Plan to advance.
+  string plan_id = 1;
+
+  // Most recent observation feeding the planner's next decision.
+  // Omit on the first step of a new plan.
+  BrowserObservation last_observation = 2;
+}
+
+// PlanActionResponse returns the next action to execute, or signals completion.
+message PlanActionResponse {
+  // The next action to execute. Nil when the plan has reached a terminal status.
+  BrowserAction action = 1;
+
+  // Updated plan state after the planning step.
+  AgentPlan plan = 2;
+}
+
+// ReportObservationRequest submits an observation from Quarry back to Model Plane.
+message ReportObservationRequest {
+  // The observation to record.
+  BrowserObservation observation = 1;
+}
+
+// ReportObservationResponse acknowledges the observation and returns updated plan state.
+message ReportObservationResponse {
+  // Updated plan state after incorporating the observation.
+  AgentPlan plan = 1;
+}
+
+// GetAgentStateRequest queries the current state of an agent plan.
+message GetAgentStateRequest {
+  // Plan to query.
+  string plan_id = 1;
+}
+
+// GetAgentStateResponse returns the current agent plan state.
+message GetAgentStateResponse {
+  // Current plan state.
+  AgentPlan plan = 1;
+}

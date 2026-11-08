@@ -1,0 +1,363 @@
+{
+  "ws": "WS19",
+  "header_decisions": [
+    "DEC-37 (OD18 fonts and caps) gates only the S4 font list; the S4 row's D1 is the same decision. Ship on the recommended default (not a ruling); caps belong to WS08 S7.",
+    "DEC-22: no SandboxBackend trait; LibreOffice runs in the sandbox image, not a sidecar. This is the D5 outcome.",
+    "D2 gates only the enforce half of S3; the advisory half is free.",
+    "D3 gates S6 and S8 (bundle blobs in Postgres bytea, deviating from the card's workspace_cas.rs reuse).",
+    "D6 gates S6 (admin-only zip upload, no import). D7 is the image-baked builtin skills choice for S9 (no migration).",
+    "D8 is cited by the S6 row but is not defined in the WS19 header; treated as a gating decision for S6.",
+    "DEC-39: the header says ExecuteStepRequest.skill_mounts=13, but Appendix B N4 and the section 4.3 final say 14; S8 uses 14. The skill_bundles migration is 0021 per the section 4.4 reservation.",
+    "Header 'Free now' (not decision-gated): S0-S3, S7, S9 text."
+  ],
+  "notes": "Source: docs/plans/model-plane-chat-build-plan-2026-10-14.md, WS19 section lines 1091-1134 and Appendix B lines 2253-2322 (B.1 standing notes N1-N8, B.2, B.3, B.4), all read in full. Eleven slice rows extracted (S0-S10); S10 is deferred and unsized. Paths are normalised to repo-relative with forward slashes. APPENDIX B AMENDMENTS APPLIED: (1) N4 is binding: ExecuteStepRequest.skill_mounts is field 14, not 13; the section 4.3 final is 14 (line 1832) and thread_id is 13. In execution.proto, ExecuteStepRequest has no tags 12 to 19 today (space_id = 11 at line 388), so 12 to 14 are free. (2) N2: S6 and S8 edit protos, so WS12-S2 is in their depends_on. buf breaking is vacuous at HEAD (proto/baseline.binpb is 0 bytes), so the proto DoD must use the tag-number diff against git show HEAD; buf breaking is left out of test_commands. S2 and S4 state no proto change. (3) N5 does not name WS19, but S2 (office_verification.rs) and S7 (skill_bundle.rs) are new mp-contracts modules; if they derive serde they need the integrator Cargo.toml PR. The table does not state this, so it is flagged only. (4) N6 and N7: no session-core migration in WS19; S6 is capability-core with 0021 up and down files. Plan line 2150 asks for confirmation at S6 that the skill bundle store holds no conversation content. (5) N1: no WS19 runtime slice is exempt from rebuilt-image evidence; S0, S1 and S9 text are the only non-runtime parts. (6) No other B.2, B.3 or B.4 row names WS19. DEPENDENCIES: depends_on is the Deps column converted to slice ids, plus WS01-S0 on every slice (plan line 332: it precedes everything); the header Depends-on items mapped by their stated reasons (WS05 to S7; WS06 to S6; WS07 to S6, S7, S9; WS08-S5 to S8; WS12 to S1, S3, S5); N2 adds WS12-S2 to S6 and S8; WS09 is a dependency of S5 and, by the Provides edit-order rule (transcript edits precede S3 and S5), of S3, but not of S1, which is the first panel edit; S2 has a soft dependency on WS19-S0 for the corpus; S10 adds WS19-S7 because its Change column uses the S7 contract. BUILT STATUS: none of S0 to S10 is built in this repository. git log --oneline afb83928..HEAD lists the model-plane commits since the baseline (WS01 to WS03, WS14, ZDR and park work) and no subject mentions WS19 work. Glob and Grep found none of the NEW files (artifact-renderers.ts, ArtifactOfficePreview.tsx, office-deliverables.spec.ts, verify-office-render.sh, tests/fixtures/office, office_verify.rs, office_verify/check.py, skill_mounts.rs, office_verification.rs, skill_bundle.rs, capability-core internal/skillbundle, builtin_skills.rs, apps/Model Plane/skills, migration 0021). No skill_file, skill_mounts, SkillMount, ListSkillBundles, GetSkillBundleManifest, GetSkillBlob or skill_bundles identifier exists; the only SkillBundle hit is the pre-existing ValidateSkillBundle RPC that the S6 handlers sit beside. The header labels S1 FINISH-BUILT-BUT-DARK, but artifact-renderers.ts is absent here and in the canonical checkout C:/dev/CoresSystem (six WS19 files checked there), and chat-artifacts.ts still uses the set-based artifactRenderKind; S1 is therefore treated as unbuilt and its built-but-dark claim is unverified. PRE-EXISTING SEAMS (not WS19 work): extra_ro_binds at sandbox.rs:112 (no production caller; S8 uses it); execute_sandboxed_in_dir at executor.rs:250; struct Workspace at code_interpreter.rs:305 (S2 makes it pub(crate)); validate_input_name at code_interpreter.rs:227 (S8 adds the reserved names); replace_learned at skills.rs:102; format_skill_block at skills.rs:306; fetch_skill_context at sse.rs:5687; code_interpreter_events at tool_loop.rs:503; the '~30s' tool text at tool_loop.rs:4323; cross_service_loop_contract.rs lives under execution-core/tests, not model-gateway/tests. LINE NUMBERS: the table's line references are stale (for example sse.rs:5530 is now 5687, the tool_loop.rs block cited as 479-571 now starts at 503, and the description cited as 4307 is at 4323). Paths were resolved; re-grep the symbols before editing. PATH RESOLUTION: MP = apps/Model Plane; services are apps/Model Plane/rust/services/<crate>; MG and EC map to the src folder for src paths and to the service root for tests and Dockerfile paths (EC/tests/fixtures/office becomes execution-core/tests/fixtures/office; MG/tests/builtin_skills_contract.rs becomes model-gateway/tests/...); FE means apps/Frontend Plane/verevonv3, with FE/features mapping to src/features; FP/tests means apps/Frontend Plane/verevonv3/tests; GO/capability-core is apps/Model Plane/go/services/capability-core. chat-client.ts is under src/shared/api; the other chat files are under src/features/chat/components. ArtifactOfficePreview.tsx has no directory in the table and is placed beside ChatArtifactPanel.tsx (inferred). Migration 0021 follows the section 4.4 reservation: capability-core migrations at HEAD end at 0015_background_process_capability; 0016 to 0020 are reserved for WS05, WS24 and WS25 and are not present yet. NAMED OUTSIDE THE CHANGE COLUMN (so not in files; the implementer must still touch or create them): S1 artifact-renderers.test.ts (NEW). S2 apps/Model Plane/scripts/tests/office-verify-compose-contract-test.sh (NEW, flag column), apps/Model Plane/deploy/docker-compose.yml (flag wiring after proof), and model-gateway/tests/zdr_feature_table.rs. S3 the generated-file card (component not named; likely ChatMessages.tsx), ChatMessages.generated-files.test.tsx and chat-client.test.ts (both exist), and the WS12 SSE golden. S5 apps/Frontend Plane/verevonv3/tests/e2e/office-deliverables.spec.ts (NEW; product-office-outputs.spec.ts already exists, check overlap). S6 and S8 regenerated bindings for the new RPCs and fields (go/gen/model_plane/v1, FE src/lib/model-plane/gen, python _gen). S7 a pub mod skill_bundle line in mp-contracts/src/lib.rs. S8 a test in sandbox.rs (skill_mount_follows_the_writable_root_in_argv), the grpc.rs read of skill_mounts when present, and the execution-core cross_service_loop_contract.rs extension. S9 the builtin registration call site (not named). S4 and S9 both edit execution-core/Dockerfile; follow the one-new-RUN-per-stream edit order. TESTS: test_commands hold only the commands literally in the Tests column; bare cargo commands get the plan's cd apps/Model Plane/rust prefix. Named test functions are in plan lines 1106 to 1115 and are not duplicated here. The S4 cargo run is for Linux-gated tests in a rust:1 container. S7, S8, S9 and S10 have no command in the Tests column, so their test_commands are empty. EFFORT: the per-row ranges are used (S0 3; S1 2-3; S2 6-8; S3 5-6; S4 9-11; S5 5-6; S6 8-10; S7 5-6; S8 8-10; S9 5-6). Row sums are 56 low and 69 high, but the header says about 58-70 (its midpoints sum to 62.5); the header total is flagged, not changed. S10 is unsized: 0 and 0 with optional true is a placeholder, not an estimate. RISKS: S8 and WS08 both touch executor.rs and code_interpreter.rs (merge order); S2's false-failed rate gates the S3 enforce flip; LibreOffice image size, cold start and OOM gate S4; under ZDR, ExecuteStep refuses callers, so S2 to S5 and S8 are unreachable (plan ZDR clause); evidence follows N1 (rebuilt images and running stacks).",
+  "slices": [
+    {
+      "id": "WS19-S0",
+      "title": "LibreOffice-under-bwrap spike and fidelity corpus",
+      "tag": "BUILD",
+      "summary": "Spike whether LibreOffice converts Office files under the execution-core bwrap argv within budget (cold start <= 25 s, RSS <= 1 GiB), using a throwaway read-only /skills bind, and add the 4 good and 6 broken Office fidelity corpus files (each <= 30 KB). The result decides D5: LibreOffice in the image versus a sidecar.",
+      "files": [
+        "apps/Model Plane/scripts/verify-office-render.sh",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/office"
+      ],
+      "depends_on": ["WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority"],
+      "effort_days_low": 3,
+      "effort_days_high": 3,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "bash \"apps/Model Plane/scripts/verify-office-render.sh\"",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core sandbox"
+      ],
+      "new_files": [
+        "apps/Model Plane/scripts/verify-office-render.sh",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/office"
+      ],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S1",
+      "title": "FE artifact renderer registry",
+      "tag": "FINISH",
+      "summary": "Add a pure artifact renderer registry (ArtifactRenderer with id, match and priority; built-ins for image, html, document, code, pdf, binary and text), turn artifactRenderKind into a thin wrapper over it, and add a Dynamic slot in ChatArtifactPanel for registered extra kinds. No behaviour change for existing kinds.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx"
+      ],
+      "depends_on": ["WS01-S0", "WS12"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Frontend Plane"],
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/chat-artifacts.test.ts src/features/chat/components/ChatArtifactPanel.test.tsx src/features/chat/components/artifact-renderers.test.ts && pnpm typecheck"
+      ],
+      "new_files": ["apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.ts"],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S2",
+      "title": "Structural Office verifier, report contract and model-facing report",
+      "tag": "BUILD",
+      "summary": "Add a hermetic structural checker for docx, xlsx, pptx and pdf that runs sandboxed on a second per-file workspace with no network and returns a typed OfficeVerification report (passed, warnings, failed, skipped). The report rides the existing ExecuteStepResponse.output and its text is copied into the model's summary and repair sentence; the check is advisory and sits behind an off, structural or render switch.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/office_verification.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify.rs",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify/check.py",
+        "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+      ],
+      "depends_on": ["WS19-S0", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "zdr"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "decisions": [],
+      "flag": "CODE_INTERPRETER_OFFICE_VERIFY=off|structural|render (default off in code; structural in the dev compose only after proof); OFFICE_VERIFY_MAX_FILES; OFFICE_VERIFY_TIMEOUT_SECS (default 60); OFFICE_VERIFY_MAX_CONCURRENCY (default 2); an unknown value means off with a warning",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --all-targets && cargo test -q -p mp-contracts && cargo test -q -p model-gateway --all-targets"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/office_verification.rs",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify.rs",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify/check.py"
+      ],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S3",
+      "title": "Verification reaches the user (chip and enforce)",
+      "tag": "BUILD",
+      "summary": "Carry the report on the attachment SSE event as an optional check key (no new event name) and show a generated-file chip (Kontrollert, Advarsler, Feil funnet, via i18n.tr) that never claims the file was verified in Office. In enforce mode a failed file is withheld once per turn per name so the model can repair it.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+      ],
+      "depends_on": ["WS19-S2", "WS01-S0", "WS12", "WS09"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["policy", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 6,
+      "decisions": ["D2"],
+      "flag": "CODE_INTERPRETER_VERIFY_ENFORCE (gateway, opt-in, default off; enable only after the corpus shows under 2 percent false failed)",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --all-targets",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/chat-artifacts.test.ts src/features/chat/components/ChatArtifactPanel.test.tsx src/features/chat/components/artifact-renderers.test.ts && pnpm typecheck"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S4",
+      "title": "LibreOffice and fonts image layer: render, recalc, thumbnails",
+      "tag": "BUILD",
+      "summary": "Add a separate LibreOffice, poppler and fonts RUN to the execution-core image, and a render path in check.py (conversion, page count, recalculated copy for formula errors, font substitution, thumbnails) that returns capped previews. A missing soffice is a warning, never a failure; the shipped file is never replaced by the recalculated copy; the probe stays out of sandbox capability health.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/Dockerfile",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify/check.py",
+        "apps/Model Plane/rust/services/execution-core/src/office_verify.rs",
+        "apps/Model Plane/rust/services/execution-core/src/health_attest.rs",
+        "apps/Model Plane/scripts/verify-sandbox-isolation.sh",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+      ],
+      "depends_on": ["WS19-S0", "WS19-S2", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "data-loss", "zdr"],
+      "effort_days_low": 9,
+      "effort_days_high": 11,
+      "decisions": ["DEC-37", "D1", "D5", "DEC-22"],
+      "flag": "CODE_INTERPRETER_OFFICE_VERIFY=render (rollback to structural; the layer is inert when off); OFFICE_PREVIEW_MAX_BYTES (2 MiB PDF preview cap); thumbnails at most 3 and 150 KB each",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --all-targets",
+        "bash \"apps/Model Plane/scripts/verify-office-render.sh\""
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S5",
+      "title": "Office previewer in the artifact panel",
+      "tag": "BUILD",
+      "summary": "Attach an optional transient PDF preview (page count, substitution flag, thumbnails) to the attachment event and render it in a new office-pdf renderer as a sandboxed PDF frame with a page strip and a font-substitution notice, falling back to the file card. The download still returns the byte-identical sandbox output.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactOfficePreview.tsx"
+      ],
+      "depends_on": ["WS19-S1", "WS19-S3", "WS19-S4", "WS09", "WS12", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "data-loss"],
+      "effort_days_low": 5,
+      "effort_days_high": 6,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Frontend Plane", "Model Plane"],
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm test:e2e -- office-deliverables.spec.ts"
+      ],
+      "new_files": ["apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactOfficePreview.tsx"],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S6",
+      "title": "Skill bundle store and API in capability-core",
+      "tag": "BUILD",
+      "summary": "Add an org-scoped skill bundle store in capability-core (manifest, per-file rows, digest-addressed blobs in Postgres, never global) with admin-only, flag-gated PUT, GET and DELETE routes, three read RPCs (ListSkillBundles, GetSkillBundleManifest, GetSkillBlob) and audit events. Caps are 256 files, 8 MiB total and 1 MiB per file, with SKILL.md required; bundles do not touch agent_skills.",
+      "files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/manifest.go",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+        "apps/Model Plane/go/services/capability-core/internal/server/server.go"
+      ],
+      "depends_on": ["WS06", "WS07", "WS12-S2", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "auth", "audit", "zdr"],
+      "effort_days_low": 8,
+      "effort_days_high": 10,
+      "decisions": ["D3", "D6", "D8", "DEC-39"],
+      "flag": "SKILL_BUNDLES_ENABLED (capability-core, default off; upload returns 404 when off; tables remain on rollback)",
+      "migration": true,
+      "proto_change": true,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/go/services/capability-core\" && go test ./... && go vet ./..."
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/manifest.go",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go",
+        "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go"
+      ],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S7",
+      "title": "skill_file tool and three-stage disclosure",
+      "tag": "BUILD",
+      "summary": "Add a read-only skill_file tool, offered only when a matched skill has a bundle, that returns one path from this org's bundle with a 32 KiB read cap and paging marker, and refuses traversal and binary content. The skill block gets a bundle footer inside the existing 8,000-character budget, with bundles fetched via ListSkillBundles.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/skill_bundle.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/skill_budget_contract.rs"
+      ],
+      "depends_on": ["WS19-S6", "WS01-S0", "WS05", "WS07"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["auth", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 6,
+      "decisions": [],
+      "flag": "SKILL_FILE_TOOL_ENABLED (gateway, default off); offered only when a matched skill has a bundle",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [],
+      "new_files": ["apps/Model Plane/rust/crates/mp-contracts/src/skill_bundle.rs"],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S8",
+      "title": "Read-only /skills mount in the sandbox",
+      "tag": "BUILD",
+      "summary": "Add SkillMount as ExecuteStepRequest field 14 (Appendix B N4 supersedes the table's 13) and derive mounts server-side from skills matched this turn (at most 3; the model cannot name a bundle). execution-core digest-verifies each bundle and materialises a read-only /skills tree through LaunchOptions.extra_ro_binds, so scripts can read but not write it, with no network.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tools.rs",
+        "apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs",
+        "apps/Model Plane/rust/services/execution-core/src/executor.rs",
+        "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs"
+      ],
+      "depends_on": ["WS19-S6", "WS19-S7", "WS19-S4", "WS08-S5", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "auth", "zdr"],
+      "effort_days_low": 8,
+      "effort_days_high": 10,
+      "decisions": ["D3", "DEC-39"],
+      "flag": "SKILL_BUNDLE_MOUNT_ENABLED (gateway, default off); execution-core honours skill_mounts only when the field is present",
+      "migration": false,
+      "proto_change": true,
+      "planes": ["Model Plane"],
+      "test_commands": [],
+      "new_files": ["apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs"],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S9",
+      "title": "Four first-party Office bundles",
+      "tag": "BUILD",
+      "summary": "Write SKILL.md bundles for docx, xlsx, pptx and pdf under apps/Model Plane/skills/office, copy them into the execution-core image at /opt/verevon/skills/office, and register them per org as builtin skills with trigger keywords that survive learned refreshes. A contract test checks that the embedded text matches the copied file.",
+      "files": [
+        "apps/Model Plane/skills/office/docx/SKILL.md",
+        "apps/Model Plane/skills/office/xlsx/SKILL.md",
+        "apps/Model Plane/skills/office/pptx/SKILL.md",
+        "apps/Model Plane/skills/office/pdf/SKILL.md",
+        "apps/Model Plane/rust/services/execution-core/Dockerfile",
+        "apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/builtin_skills_contract.rs"
+      ],
+      "depends_on": ["WS19-S4", "WS19-S7", "WS07", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 6,
+      "decisions": ["D7"],
+      "flag": "BUILTIN_OFFICE_SKILLS_ENABLED (gateway, default off)",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [],
+      "new_files": [
+        "apps/Model Plane/skills/office/docx/SKILL.md",
+        "apps/Model Plane/skills/office/xlsx/SKILL.md",
+        "apps/Model Plane/skills/office/pptx/SKILL.md",
+        "apps/Model Plane/skills/office/pdf/SKILL.md",
+        "apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/builtin_skills_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "optional": false
+    },
+    {
+      "id": "WS19-S10",
+      "title": "Do-loop parity and Do file delivery (deferred outline)",
+      "tag": "BUILD",
+      "summary": "Deferred outline, not sized: give the Do loop a skill_file tool beside reattach_skill using the S7 contract, and decide how Do runs deliver files to the user, which needs the WS24/WS03 delivery path and a persistence and ZDR decision. Do tool results already carry the S2 report through execute_code_interpreter.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+      ],
+      "depends_on": ["WS24", "WS03", "WS02", "WS19-S7", "WS01-S0"],
+      "needs_live_stack": false,
+      "needs_external": "a persistence and ZDR decision for Do file delivery, owned by the WS24/WS03 delivery path",
+      "risk": ["zdr"],
+      "effort_days_low": 0,
+      "effort_days_high": 0,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "planes": ["Model Plane"],
+      "test_commands": [],
+      "new_files": [],
+      "new_files_already_present": [],
+      "optional": true
+    }
+  ]
+}

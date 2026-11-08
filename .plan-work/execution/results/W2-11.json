@@ -1,0 +1,475 @@
+{
+ "batchId": "W2-11",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS20-S5",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/scripts/tests/scheduled-step-config-contract-test.sh",
+    "apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher.go",
+    "apps/Model Plane/go/services/capability-core/internal/taskexec/contract_fire_test.go",
+    "apps/Model Plane/proto/model_plane/v1/runs.proto",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/runs.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Control Plane/user-core/internal/spaces/scheduled_step_decision.go",
+    "apps/Control Plane/user-core/internal/spaces/scheduled_step_decision_test.go",
+    "apps/Control Plane/user-core/internal/spaces/scheduled_run_decision.go",
+    "apps/Control Plane/user-core/internal/spaces/scheduled_run_decision_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go",
+    "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/startworkflow_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/step_loop.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/integration_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_run_authorizer.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_run_authorizer_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_step_authorizer.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/scheduled_step_authorizer_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "go test -count=1 ./internal/spaces/ (apps/Control Plane/user-core), after the step/run contract edits and gofmt",
+     "outcome": "ok. Includes new TestIssueScheduledRunExecutionDecisionBindsContractDigestAndExpiry, TestIssueScheduledRunDecisionsRefuseExpiredContract, TestIssueScheduledRunPreparationDoesNotBindContract"
+    },
+    {
+     "command": "go vet ./internal/spaces/ (user-core)",
+     "outcome": "ok, no output"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib scheduled_step_decision",
+     "outcome": "ok, 5 passed (includes new contract_required_switch_refuses_a_decision_without_a_contract)"
+    },
+    {
+     "command": "go vet ./... and go test -count=1 ./... (apps/Model Plane/go/services/orchestrator-core)",
+     "outcome": "ok, every package passes, including new TestScheduledRunInputCarriesContractFromDigestBoundTemplate, TestScheduledRunContractForgeryAndExpiryAreRefused, TestControlScheduledRunExecutionAuthorizerVerifiesContractBoundDecisionOnly, TestControlScheduledStepAuthorizerVerifiesContractBoundStepOnly"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p session-core --bin session-core --tests",
+     "outcome": "FAILS only on the two E0063 literals in run_service_grpc.rs (lines ~302 and ~623, not owned). No error in grpc.rs (checked with --message-format short). session-core tests were NOT run because the crate does not link until the shared edit lands."
+    },
+    {
+     "command": "PATH=<scratch shim mapping rg to grep> bash apps/Model Plane/scripts/tests/scheduled-step-config-contract-test.sh",
+     "outcome": "ok (rg is not on this shell PATH, so a grep shim was used; the script's new v2 checks pass)"
+    },
+    {
+     "command": "scheduled-step-proof.sh",
+     "outcome": "not run (live proof, lead)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs: in the ResolveScheduledStepAuthorityResponse literal (about line 302) add `contract_digest: String::new(), contract_expires_at: String::new(),` after `run_status: row.run_status,`; in the ScheduledStepContext literal (about line 623) add `contract_json: String::new(), contract_digest: String::new(), contract_expires_at: String::new(),`. Without this session-core does not compile, so no session-core test can run. Once the field values are read from run metadata (contract_digest/contract_expires_at keys written by StartScheduledRun), this literal should carry those values instead of empty strings.",
+    "shared-edit apps/Control Plane/user-core/internal/spaces/decision.go: the ContractDigest (string, json contract_digest,omitempty) and ContractExpiresAt (*time.Time, json contract_expires_at,omitempty) fields on Decision, with the comment above ZeroDataRetention. Already present in the working tree; keep them in the commit alongside WS21-S8 hunks.",
+    "shared-edit Control user-core HTTP handler for POST /api/v1/internal/spaces/scheduled-run-execution-decision and /api/v1/internal/spaces/scheduled-step-decision (locate with grep for those route strings; the file was not in this slice's owned list): decode intent.contract_digest and intent.contract_expires_at (strings) into ScheduledRunIntent.ContractDigest/ContractExpiresAt (time.Parse RFC3339) and ScheduledStepIntent.ContractDigest/ContractExpiresAt, so Control issues v2 decisions. Until this lands, Control issues v1 decisions and orchestrator refuses contract-bound intents (fail closed).",
+    "Commit apps/Model Plane/go/gen/model_plane/v1/runs.pb.go and sessions.pb.go with the proto change (unchanged from the first report).",
+    "Rollout order when enabling (mandatory, unchanged): execution-core verifier first, then session-core, then user-core, then orchestrator-core, then capability-core. Do not let user-core emit v2 claims before execution-core is deployed (deny_unknown_fields on the older verifier).",
+    "Before enabling EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED, confirm the intended semantics (see notes): it refuses every v1 step decision while on.",
+    "Run scheduled-step-config-contract-test.sh where ripgrep is installed (it passed here via a grep shim), and scheduled-step-proof.sh live after the rebuilds (not run here)."
+   ],
+   "deviations": [
+    "Preparation decision (schedule:run) is not contract-bound: it only re-checks ContractExpiresAt. Binding happens at execution because StartScheduledRunRequest is the only proto carrying the contract, and PrepareScheduledRunThreadRequest has no contract fields.",
+    "Execution-core switch applies to all step decisions when on (no run context in the verifier), not only contract-bearing runs as the flag description says.",
+    "Execution-core does not recompute the digest from contract_json. Session Core re-hashes the body received (sha256(contract_json) == contract_digest), which closes the body-vs-digest gap at the hop, but the step verifier still checks only signed claims.",
+    "Session Core StartScheduledRun now stores contract body under metadata.contract (the plan puts it under metadata.contract). Not a deviation from the plan, noted for review.",
+    "ScheduledStepContext origin = 9 not added (WS20-S2)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs (two literals, plus ResolveScheduledStepAuthority field values)",
+    "apps/Control Plane/user-core/internal/spaces/decision.go (Decision fields, already present, shared with WS21-S8)",
+    "Control user-core HTTP handler for the scheduled-run-execution-decision and scheduled-step-decision internal routes (path not located in this slice; grep the route string)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs (wire ScheduledStepContext contract fields if a run-level switch check is wanted)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs (not owned; lead shared-edit): add `contract_digest: String::new(), contract_expires_at: String::new(),` to the ResolveScheduledStepAuthorityResponse literal near line 302, and `contract_json: String::new(), contract_digest: String::new(), contract_expires_at: String::new(),` to the ScheduledStepContext literal near line 623. Why: the new runs.proto tags 15/16 and 6-8 make session-core fail to compile (cargo check -p session-core --bin session-core --tests gives E0063 at 302 and 623), so no session-core test or deploy can run.",
+     "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go, function scheduledTemplateContract (plus fixture scheduledContractTemplate and assertions in startworkflow_test.go around lines 452-490): read approval_contract as a JSON TEXT value, not an object. ContractJSON must be the text, ContractDigest must be sha256 of the exact UTF-8 bytes of that text (\"sha256:\"+hex), and ContractExpiresAt must be parsed from the parsed text. Why: WS20-S4 stores approval_contract as text (capability-core api/workplane_apis.go createIntentFor rejects a non-string, cron/contract.go ContractDigest hashes the text, mp-contracts scheduled_contract::digest does the same, and schedule-from-chat.ts says it is text). The current code json.Marshal-s a string and then unmarshals it into a struct, which fails with 'approval contract is not an object', so every contract-bound run is refused, and the digest it would send does not match the one Control signs. The current tests pass only because their fixture uses an object.",
+     "apps/Model Plane/rust/services/execution-core/src/scheduled_step_decision.rs (owned) plus the call site (execution-core src/grpc.rs near line 1443, outside the owned set; lead shared-edit) and ScheduledStepContext population in run_service_grpc.rs: the verifier must take the contract body and check `mp_contracts::scheduled_contract::digest(contract_json) == claims.contract_digest`, refusing a mismatch with `scheduled_contract_invalid`; add the two tests the row names, scheduled_step_contract_rejects_digest_mismatch and scheduled_step_contract_rejects_expired. Why: the row's verifier deliverable is absent. Today the verifier checks only the signed claim, and verify() runs before GetScheduledStepContext, so the body never reaches it. The call must move after the context fetch.",
+     "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/step_loop.go is modified (+14 lines carrying ContractDigest/ContractExpiresAt into ExecuteScheduledStepActivity) but is not in this slice's files or new_files. The lead must either add it to the owned set or record it as a shared-edit, since the step intent cannot carry the contract without it. The implementer must not extend the edit further."
+    ],
+    "dod_gaps": [
+     "Live proof: rebuild the five services in the mandated order (execution-core, session-core, user-core, orchestrator-core, capability-core) and run scheduled-step-proof.sh. The fire-with-2-minute-contract then expired-fire evidence (cron_fires failed contract_expired) is not obtainable from code review.",
+     "The lead must apply the shared edits: run_service_grpc.rs literals, the execution-core grpc.rs call-site move, and the Control HTTP decode of contract_digest and contract_expires_at in the scheduled-run-execution-decision and scheduled-step-decision handlers (the route file was not located in this slice).",
+     "scheduled-step-config-contract-test.sh must be re-run where ripgrep is installed; it passed here only through a grep shim.",
+     "Rollout order (execution-core, session-core, user-core, orchestrator, capability-core) must be enforced before any v2 claim is emitted; deny_unknown_fields on the older verifier would refuse v2 tokens.",
+     "The working tree also holds other slices' changes (browser-broker, model-gateway, org-core, frontend chat-nodes, migrations 032, sitepolicy, model_access.rs). They are outside this slice and were not reviewed; the lead must stage only this slice's hunks when committing decision.go alongside WS21-S8."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "session-core run_service_grpc.rs fails to compile (E0063 on ResolveScheduledStepAuthorityResponse ~302 and ScheduledStepContext ~623). Shared-edit required before any session-core test runs or deploys."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Control HTTP handler does not decode contract fields from the intent yet, so Control issues v1 decisions and orchestrator refuses contract-bound intents. Fail-closed, but the DoD path is not live until the shared Control edit lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No cross-language vector pins the Go step/run digests (user-core, orchestrator-core) to the Rust digests (execution-core, session-core) for the v2 contract fields. Add one shared vector before enabling a contract-bound step."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No Temporal replay test for the new StartScheduledRunActivity args and ScheduledRunInput fields (pre-S5 histories). GetVersion guard not added; add a replay test before enabling."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "session-core new test module (scheduled_contract_binding_tests) and the StartScheduledRun binding are compiled but not run; they run once the shared literal edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Execution-core still does not recompute the contract digest from the body; session-core re-hashes contract_json but execution-core only checks signed claims. Forged body with genuine claim digest would be caught at session-core, not at the step."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Digest definition sha256(compact bytes of approval_contract) must match Control S4 signing exactly; agree the canonicalisation with S4 before any Control v2 emission."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Audit rows schedule.contract.* and the K3-4 audit sink are not built (unchanged)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "A few new Rust test lines in grpc.rs exceed rustfmt width (scheduled_contract_binding_tests); not run through rustfmt because the file is CRLF. Format only the new lines when committing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED, when set to true, refuses every v1 step decision, not only decisions for contract-created runs as the batch flag description says, so enabling it would break all existing schedules; gate it on run context in grpc.rs before the switch is ever turned on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No Temporal replay test or workflow.GetVersion guard covers the new StartScheduledRunActivity arguments and the new ScheduledRunInput fields for pre-S5 histories."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No shared cross-language vector pins the v2 step and run digests across user-core, orchestrator-core, execution-core and session-core; the field order and encodings match on inspection only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The Control HTTP handler does not decode intent.contract_digest and intent.contract_expires_at, so Control issues v1 decisions and every contract-bound intent is refused; the path is fail-closed but not live until the lead's shared edit lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "session-core's new scheduled_contract_binding_tests and the StartScheduledRun binding are compiled-in but not run, because the crate does not build until the shared literal fix lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestScheduledRunContractForgeryAndExpiryAreRefused refuses the forged body on the template digest, not on the contract digest, so it does not exercise the contract binding it is named for."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ScheduledStepContext origin=9 was not added (the implementer defers it to WS20-S2); the row lists it, so record the deviation at review."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Audit rows schedule.contract.* and the K3-4 audit sink are not built; they must exist before SCHEDULE_CONTRACT_ENABLED or EXECUTION_SCHEDULED_AGENT_ENABLED are enabled outside dev."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new checks in scheduled-step-config-contract-test.sh are string-presence greps that would pass on a literal sitting in a comment, so they do not prove the binding."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In workflow_dispatcher.go, refuseExpiredContract was inserted between the taskConfigJSON doc comment and canonicalScheduledTemplate, which now has no doc comment and whose comment text now describes the wrong function."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new scheduled_contract_binding_tests lines in session-core grpc.rs exceed rustfmt width (the file is CRLF, so rustfmt was not run on it); format only the new lines when committing."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "zdr"
+   ],
+   "notes": "Round 2 fixes. Built: (1) orchestrator-core carries approval_contract from the digest-verified template (verifyScheduledTemplate refactor; scheduledTemplateContract returns json, sha256 of the compact bytes, and RFC3339 expiry, refusing an expired contract) into ScheduledRunInput, StartScheduledRunActivity (args appended), StartScheduledRunRequest 14-16, ScheduledStepExecutionIntent (via step_loop), and both Control intents; both Control authorizers verify v2 schema, contract digest/expiry match and liveness, and digest with contract fields. v1 bodies and digests unchanged when no contract. (2) user-core: ScheduledRunIntent carries ContractDigest/ContractExpiresAt; execution decision binds them (schema execute-v2); preparation decision only re-checks expiry and stays v1; shared helpers hasScheduledContract/validateScheduledContract/writeScheduledContractBinding in scheduled_step_decision.go. (3) session-core grpc.rs: scheduled_run_contract() checks sha256(contract_json)==contract_digest, RFC3339 expiry and liveness (scheduled_contract_expired), contract fields on ControlSpaceDecisionClaims (serde default), execution decision verifies schema v2 and digest with contract fields and claim match, persist binds contract_digest/contract_expires_at/contract body into immutable run metadata and the exact-match list. (4) execution-core: EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED read by strict Some(\\\"true\\\") parser (default off); when on, a step decision without contract claims is refused with scheduled_contract_required.\n\nNot built, or built only partly (see depth_findings and lead_todo): ResolveScheduledStepAuthority field values (shared file), the Control HTTP decode of contract fields (unowned file), execution-core wiring of ScheduledStepContext (unowned), session-core tests (cannot link yet), and a Temporal replay test for the new activity args.\n\nFlag semantics deviation: the step verifier has no run-level context, so the switch applies to every step decision (refuse any v1 step decision when on) instead of only contract-bearing runs. Default off, so off-behaviour is byte-identical. The lead must confirm before enabling.\n\nDigest definition: contract digest = sha256 of the compact JSON bytes of the approval_contract value as it sits in the digest-verified template. Control (S4) must sign the same definition or the chain refuses.\n\nWithout the shared Control decode edit, Control ignores contract fields and issues v1 step/run decisions, so orchestrator refuses contract-bound intents. Fail-closed, not silent."
+  },
+  {
+   "id": "WS21-S4",
+   "outcome": "needs-attention",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/browser.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/browser.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/cmd/main.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/grant/grant_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/server/server.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/telemetry/metrics.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/sitepolicy/client.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/sitepolicy/client_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/server/site_policy_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/cmd/site_options_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/go/services/browser-broker && go vet ./...",
+     "outcome": "clean, no output (GOFLAGS unset)"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/browser-broker && go test -count=1 ./...",
+     "outcome": "ok: cmd, internal/authz, internal/grant, internal/server, internal/sitepolicy; telemetry has no test files"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/browser-broker && go test -count=1 ./internal/grant/ -run 'SensitiveApproval|Derive|Revoke' -v",
+     "outcome": "PASS, including the new TestSensitiveApproval_RefusesAReadOnlyParent"
+    },
+    {
+     "command": "gofmt -l on LF-normalised copies of grant.go and grant_test.go",
+     "outcome": "clean (raw gofmt -l on the CRLF working files lists them because of CRLF, as it does for untouched files too)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Carried from the previous report (still open): shared-edit apps/Model Plane/deploy/docker-compose.yml under the browser-broker environment block after BROWSER_BROKER_GRANT_TTL_SECONDS: BROWSER_GRANT_MAX_TTL, BROWSER_BROKER_SITE_POLICY (default off), ORG_CORE_URL, BROWSER_BROKER_ORG_CORE_TOKEN (empty default, never a value in the file).",
+    "Carried: provision the broker's org-core service credential for scope org:browser-site:read:any; no secret was read or written here.",
+    "Carried: append the R-6 proto tag allocation to apps/Model Plane/docs/decisions/ledger.md (AcquireGrantRequest space_id=11, read_only=12, ttl_seconds=13; AcquireGrantResponse read_only=12, denied_domains=13; ValidateGrantResponse read_only=13), reconciled with the QRY Grant v2 note when it lands.",
+    "Carried: durable read_only needs a migration plus postgres.go changes, and the same parent.ReadOnly guard in PgStore.CreateScopedSensitiveApproval."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/go/services/browser-broker/internal/server/server.go: the sensitive-approval branch of AcquireGrant now takes the caller's ttl_seconds (line 173 `TTL: ttl`). The row says sensitive-approval child grants (lines 79-90 of the old file) are unchanged. Fix: set that `TTL:` back to `s.cfg.TTL`, and move the `ttl, err := s.requestTTL(req.GetTtlSeconds())` call (line 135) into the run-grant branch (`if len(allowedActions) == 0`), so ttl_seconds is read only for run grants. Why: today a caller can set ttl_seconds on a single-action approval and extend it from the 15 min default to 30 min, and an approval with ttl_seconds under 30 s is now refused where it was accepted. When moving it, do not write `ttl, err :=` inside the branch: that shadows the outer err, and the CreateSession error check after the branch would then miss errors. Use `ttl, ttlErr :=` or declare `var ttl time.Duration` first. Add one assertion (server test beside site_policy_test.go) that an approval with ttl_seconds=1800 keeps the cfg.TTL expiry."
+    ],
+    "dod_gaps": [
+     "Live proof for the lead (docker and org-core running): grpcurl allowed, blocked and read-only mints with a user bearer, plus the org-core resolve log. Needs quarryv2 merged first for the Quarry-side identity and issuance.",
+     "Lead applies the shared-edit to apps/Model Plane/deploy/docker-compose.yml: BROWSER_BROKER_SITE_POLICY (default off), BROWSER_GRANT_MAX_TTL, ORG_CORE_URL, BROWSER_BROKER_ORG_CORE_TOKEN (empty default). Not applied by this slice.",
+     "Lead provisions the broker's org-core service credential for scope org:browser-site:read:any. Not read or written here.",
+     "Lead records the R-6 allocation (request space_id=11, read_only=12, ttl_seconds=13; response read_only=12, denied_domains=13; validate read_only=13) in apps/Model Plane/docs/decisions/ledger.md and reconciles it with the QRY Grant v2 note.",
+     "Not run: buf breaking against proto/baseline.binpb, cargo check of mp-contracts (its build.rs compiles browser.proto), the e2e harness (build tag e2e, needs docker; only go vet -tags e2e was run), and the -race build (cgo unavailable). Python and TypeScript generated trees are stale by design (ledger).",
+     "git status shows many modified files outside this slice's ownership set (inference-core, model-gateway, mp-contracts, execution-core, org-core resolve.go, user-core, capability-core workflow_dispatcher, inference.proto, runs.proto, sessions.proto and others). They belong to other slices in the worktree and were not evaluated. The WS21-S4 owned set matches exactly, and docker-compose.yml and ledger.md are not modified."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "PgStore.CreateScopedSensitiveApproval (internal/grant/postgres.go, around line 328-365) has no parent.ReadOnly guard, the same gap the memory store had. It is not reachable with a read-only parent today (no read_only column, non-ZDR read-only refused, ZDR read-only grants are in-memory only), but the guard must be added in the same change that adds the read_only column and migration, or a durable read-only parent could mint a non-read-only approval."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Mutation check of the new guard was not run as a live mutation; the test is expected to fail without the guard by reading the code (the approval would be accepted), not by running the mutated tree."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "space_id is accepted on AcquireGrantRequest (browser.proto tag 11) but never read: grep finds no GetSpaceId use outside tests, grant.go has no SpaceID field (the row lists one), and the proto comment says 'The site policy reads the Space floor from it', which is false in this slice. org-core Service.Resolve takes no space input and does not call ApplySpaceFloor, and the WS21-S8 file list names no broker file, so no slice owns the pass-through. Before any Space run is enforced, the broker must pass space_id into the resolve call or the Space floor is silently bypassed; correct the proto comment now."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "PgStore.CreateScopedSensitiveApproval (internal/grant/postgres.go) has no parent.ReadOnly guard, unlike the memory store. It is unreachable today (non-ZDR read-only is refused and ZDR grants stay in memory), but the guard must land in the same change that adds a durable read_only column and migration."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The row's 'golden' test is missing: api/contracts/browser-domain-canonical.json says its consumers in WS21 S4, S5a and S10 must match the broker normalizer, and no Go test in browser-broker reads that fixture (git grep finds only the fixture and ledger.md)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The proto tags differ from the section 4.3 table (request space_id 10, read_only 11, ttl 12; response read_only 10, denied_domains 11; validate read_only 10). Those numbers collide with existing fields (request zdr=10, response kind=10, validate kind=10), so the implementer used the first free tags (11-13, 12-13, 13), which match the R-6 allocation in ledger.md. The R-6 entry and the QRY Grant v2 reconciliation still need recording."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Site policy is read only at mint. An admin block does not revoke live grants (up to 30 min), and the 30 s positive cache can keep serving an allow during an org-core outage or after a block. This is by design but must be stated for the S10 flip."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The mutation check of the new read-only parent guard in CreateScopedSensitiveApproval was not run. By reading the code the new test would fail without the guard, but this is unconfirmed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "reportedDenied truncates the alphabetically sorted denied list to nine entries, so the start host is not guaranteed to be among them, unlike the row's 'start host plus 8'."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The proto comment on AcquireGrantRequest.space_id and the grant.go doc should be corrected to say the broker does not consume the field yet (see the P1 risk above)."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges"
+   ],
+   "notes": "Required fix 1 applied. MemoryRepository.CreateScopedSensitiveApproval (grant.go, the parent-kind/session/action guard) now also refuses when parent.ReadOnly is true, returning ErrApprovalParentInvalid, with a short why-comment. New test TestSensitiveApproval_RefusesAReadOnlyParent in grant_test.go (CRLF kept) creates a ZDR read-only session and asserts an approval under it returns ErrApprovalParentInvalid. server.go unchanged. Files_changed is the full slice list from the previous report plus grant_test.go. Line endings: grant.go 835 CRLF/835 LF, grant_test.go 325/325. No docker, no DB harness, no commit, no git state changes. Scratch script under the scratchpad (ws21s4_fix.py) left in place; the LF check copies were removed. Carried forward from the previous report, still open: postgres.go and migration for read_only (non-ZDR read-only refused until then); docker-compose.yml shared-edit lines; ledger R-6 entry; QRY tag reconciliation; go.mod cosmetic; live proof for the lead."
+  },
+  {
+   "id": "WS21-S8",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/user-core/migrations/032_space_browser_entitlement.up.sql (new; space_effect_policies.browser_entitled BOOLEAN NOT NULL DEFAULT FALSE)",
+    "apps/Control Plane/user-core/migrations/032_space_browser_entitlement.down.sql (new, revert)",
+    "apps/Control Plane/user-core/internal/spaces/decision.go (round 2: removed spaceBrowserUsePermission and withBrowserPermission, both unreferenced; the ContractDigest/ContractExpiresAt fields from another agent are untouched and still present)",
+    "apps/Control Plane/user-core/internal/spaces/decision_test.go (round 2: removed TestBrowserPermissionIsAssertedOnlyByTheFloor with the helper)",
+    "apps/Control Plane/org-core/internal/browsersites/resolve.go (SourceSpaceFloor + ApplySpaceFloor; unchanged in round 2, still has no caller)",
+    "apps/Control Plane/org-core/internal/browsersites/resolve_test.go (TestApplySpaceFloorRefusesEveryHostForAnUnentitledSpace, TestApplySpaceFloorOnlyNarrows; unchanged in round 2)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go test -p 1 ./internal/spaces/",
+     "outcome": "ok after the round-2 deletion"
+    },
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go vet ./internal/spaces/",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -p 1 ./...",
+     "outcome": "exit 0; 11 packages ok, no FAIL lines"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -count=1 -p 1 ./internal/browsersites/",
+     "outcome": "ok (uncached)"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go test -p 1 ./...",
+     "outcome": "started in the background, did not finish in this session; not claimed as passing"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Expand ownership to the files in needs_other_files (handler, service or not, authority.go, repository.go, both matrix copies). Then re-run this slice to wire fix 1, fix 2 and fix 3; the owned-file work for them is ready to follow once those files are in scope.",
+    "Record explicitly as a deferral to WS21-S4 and the exec-core slice: exec-core passing req.space_id and the broker forwarding space_id. Do NOT mark WS21-S8 complete until both land. Before any space_id is forwarded, the broker cache key in apps/Model Plane/go/services/browser-broker/internal/sitepolicy/client.go must include space_id (P0).",
+    "Decide the verified source of the org-core floor bit before any switch goes on: a Control-signed Space decision envelope carrying space:browser:use, verified with the public key, or an internal user-core call. A caller-supplied boolean must not be trusted. The browser permission constant and withBrowserPermission were removed in this round and should return with the issuer that uses them.",
+    "Apply migration apps/Control Plane/user-core/migrations/032_space_browser_entitlement.up.sql through the user-core deploy recipe, and confirm the runner ignores *.down.sql as it does for 014-016 (lead only; no docker run here).",
+    "Live proof (lead only, after the wiring lands): a Space Do run that cannot browse while browser_entitled is false, and can once the floor is set and org-core allows the host.",
+    "Lead to confirm the owner of the ContractDigest/ContractExpiresAt edits in user-core decision.go (another agent). They are still present and the spaces tests pass with them."
+   ],
+   "deviations": [
+    "Round 2 did not edit any file outside the owned set. The reviewer's required fixes that need the handler, service, authority.go, repository.go, the two matrix JSON copies, or the broker client are listed in needs_other_files, not edited.",
+    "Fix 2 was closed by deletion (reviewer's allowed option) rather than wiring, because the personal-thread issuer is not in scope. The decision-exposure deliverable is therefore still open.",
+    "The implementer's earlier claim that every space-scoped resolve is refused was incorrect and is withdrawn: no space-scoped resolve path exists in the code, so the floor is inert, not fail-closed."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/org-core/internal/http/browser_sites_handlers.go (fix 1): in getBrowserSitesInternal read space_id; present-but-blank is 400, the same rule as user_id; after Resolve call ApplySpaceFloor(resolution, true, entitled) with entitled=false until a verified source exists; handler tests for blank space_id (400) and an unentitled Space (every host denied, source space_floor).",
+    "apps/Control Plane/org-core/internal/browsersites/service.go (fix 1): alternative place to call ApplySpaceFloor inside Service.Resolve, if the lead prefers the service over the handler.",
+    "apps/Control Plane/user-core/internal/spaces/authority.go (fix 2): add BrowserEntitled bool `json:\"browser_entitled\"` to EffectPolicy beside ProcessRegistryEntitled.",
+    "apps/Control Plane/user-core/internal/spaces/repository.go (fix 2): read and write browser_entitled mirroring process_registry_entitled (about lines 1120-1143, 1247-1298, 1336-1343, change check near 1372); add a repository test that a new row defaults to false.",
+    "apps/Control Plane/org-core/internal/browsersites/testdata/browser-site-policy-matrix.json and apps/Model Plane/api/contracts/browser-site-policy-matrix.json (fix 3, identical copies, must change in lockstep): line 11 `\"sources\": \"org_block, org_cap, user_pref, default\"` becomes `\"sources\": \"org_block, org_cap, user_pref, space_floor, default\"`, and add floor rows in the rows array with the same shape as the existing rows (id, mode, rules, user, prefs, now, host, expect{effective, cap, source}). The cap for a floor row comes from Decide's output for that host.",
+    "apps/Control Plane/org-core/internal/browsersites/resolve_test.go (fix 3, owned, but depends on the JSON): once floor rows exist, TestDecideMatchesTheSharedMatrix needs a per-row space and entitled flag that applies ApplySpaceFloor. Not written yet, because it would be dead code until the rows exist.",
+    "apps/Model Plane/go/services/browser-broker/internal/sitepolicy/client.go (fix 4, WS21-S4 file, not this slice): the cacheKey must include space_id before any space_id is forwarded from the broker. Exec-core passing req.space_id belongs to the exec-core slice."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Control Plane/org-core/internal/http/browser_sites_handlers.go (or browsersites/service.go): nothing calls ApplySpaceFloor, so the row's deliverable 'org-core resolve takes space_id, denies when false' is not met. Read space_id in getBrowserSitesInternal (present-but-blank = 400, same rule as user_id), call ApplySpaceFloor(resolution, true, entitled) after Resolve with entitled fail-closed (false) until a verified source exists, and add handler tests for blank space_id (400) and an unentitled Space (every host denied, source space_floor). This needs the handler file added to the ownership set.",
+     "apps/Control Plane/user-core/internal/spaces/authority.go and repository.go, and decision.go: the row's deliverable 'user-core decision exposes it' is not met. Add BrowserEntitled bool `json:\"browser_entitled\"` to EffectPolicy, read and write the column in repository.go mirroring process_registry_entitled, carry browser_entitled on the decision, and add a repository test that a new space_effect_policies row defaults to false. Only the migration exists today, so the column is never read.",
+     "apps/Control Plane/org-core/internal/browsersites/testdata/browser-site-policy-matrix.json and apps/Model Plane/api/contracts/browser-site-policy-matrix.json (identical copies, change in lockstep): add space_floor to the sources string and add floor rows in the existing row shape. Then extend resolve_test.go so TestDecideMatchesTheSharedMatrix applies ApplySpaceFloor per row. The row's test deliverable 'org-core space_floor rows' is absent; there are no floor rows in either copy.",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs: this file is in the slice's own files list and the row names GW/domains/spaces.rs, but it is unchanged and the implementer report does not mention it. Either carry browser_entitled through it (typed envelope, no caller-supplied trust) or record in the ledger that it is deferred to the Space session with the lead's sign-off.",
+     "Re-scope or split the exec-core and broker half of the row: exec-core passing req.space_id (apps/Model Plane/rust/services/execution-core) and the broker forwarding space_id. The broker cache key in apps/Model Plane/go/services/browser-broker/internal/sitepolicy/client.go must include space_id before any space_id is forwarded (P0). Until one of these is in scope or a named slice takes it, WS21-S8 cannot be marked complete."
+    ],
+    "dod_gaps": [
+     "Live proof (lead only, needs Docker and a rebuilt stack): Space Do run refused while browser_entitled is false, allowed after the floor is set and org-core allows the host.",
+     "Apply migration 032_space_browser_entitlement.up.sql through the user-core deploy recipe (lead only; not run here).",
+     "The user-core full suite (go test -p 1 ./...) was not run to completion here; only ./internal/spaces/ was run and it passed. It is not an S8 test_commands entry."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The S8 deliverable 'org-core resolve takes space_id, denies when false' is not met. ApplySpaceFloor has no caller, and the route that would read space_id is outside the owned files. Until the handler is wired, the floor is inert, which is fail-open for the Space gate."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The decision-exposure deliverable is not met: no EffectPolicy.BrowserEntitled, no repository read or write, and no decision carries browser_entitled. The browser_entitled column exists in the migration only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The org-core floor bit has no verified source. A caller-supplied boolean would let a caller widen access, so it must come from a Control-signed decision or an internal user-core call before enforcement is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No handler test for blank space_id (400) and no org-core space_floor row in the shared matrix. Both need the owned-file expansion above."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No repository test that a new space_effect_policies row defaults browser_entitled to false. Needs repository.go in scope."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Broker and exec-core space_id forwarding is deferred to WS21-S4 and the exec-core slice. The broker cache key must include space_id before forwarding (P0)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ApplySpaceFloor and SourceSpaceFloor in org-core resolve.go have no non-test caller, so the floor is dead code and enforces nothing; it must not be switched on until the handler wires it (today this is inert rather than fail-open because no space-scoped resolve path exists)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The org-core floor bit has no verified source; a caller-supplied entitled boolean would let a caller widen access, so the source (a Control-signed Space decision envelope verified with the public key, or an internal user-core call) must be decided before enforcement is enabled."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P1",
+     "text": "decision.go, an S8-owned file, carries uncommitted ContractDigest and ContractExpiresAt edits and a struct realignment from another slice, so any S8 commit would sweep them in; split the hunks before committing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Owned tests cover only ApplySpaceFloor in isolation (refuses all hosts when unentitled, narrows only); no test proves the floor is applied on the request path or that a blank space_id is rejected."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The row's live evidence (a Space Do run refused while browser_entitled is false and allowed once it is set and org-core allows the host) cannot be produced until the handler, the decision exposure and the exec-core pass-through land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Migration 032 is the planned number in plan section 4.4 (user-core 032 WS21.S8) and carries a CRLF file ending like its neighbours; the runner reads only *.up.sql, so the down file is ignored as intended."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority"
+   ],
+   "notes": "Round 2 closes only what sits inside the owned files. Fix 2 (dead code) is closed by deleting withBrowserPermission, spaceBrowserUsePermission and its test, which the reviewer allowed. The decision-exposure deliverable is therefore NOT done: no EffectPolicy field, no repository read or write, and no decision carries browser_entitled. Fix 1 is NOT done: ApplySpaceFloor still has no caller. The handler, service, and the org-core route that reads space_id all sit outside the owned files. The earlier claim that every space-scoped resolve is refused was wrong: no space-scoped resolve path exists, so the floor is inert. Fix 3 is NOT done: the matrix JSON files are not owned, so space_floor is not in the sources rule and has no floor rows in either copy. Fix 4 is recorded as a deferral to WS21-S4 and the exec-core slice: nothing forwards space_id, and no broker code was touched. Nothing was committed, staged or pushed. The migration is still unapplied (lead). The org-core floor bit has no verified source yet."
+  }
+ ]
+}

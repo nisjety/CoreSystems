@@ -1,0 +1,880 @@
+{
+ "outcomes": [
+  {
+   "unit": "s7b-2",
+   "failed": "implementer stage 2 returned nothing",
+   "impls": [
+    {
+     "summary": "Stage A of S7b is built: the step-0 writer-agreement fix, steps 6, 7 and 8, and Build 3a review items 4a to 4e. All new behaviour sits behind the default-off switches. With the ledger off nothing new reserves, and the only change reachable with every switch off is one warn line on a path that already refuses. All four VERIFY commands pass with no count dropped: execution-core lib 1040 -> 1058, durable_loop_contract 17 (unchanged; its guards gained mutation rows inside existing tests), every other execution-core suite unchanged, mp-contracts 114 (unchanged), `cargo check --workspace --all-targets --keep-going` clean (only pre-existing warnings, none from my files). I wrote no DB-backed tests, so there is nothing for the lead to rerun from this unit.\n\nITEM 0 DONE. FoldWriter::seeded now forces resumed=false itself, so resume::in_place_writer_off and the seeded writer agree by construction (the helper still forces it too). The fold tests that pinned ResumedSegment for seeded moved to FoldWriter::new (refusing_gates lost its resumed row; new test only_a_fresh_writer_honours_the_stage_one_segment_flag pins both constructors). The agreement test now walks all 384 combinations (64 gate bit patterns x depth 0/1/2 x bearer some/none) and passes the SAME unmodified candidate gate, resumed included, to in_place_writer_off and to FoldWriter::seeded, comparing off_reason() and is_active(). Mutation proof, both restored with cmp clean: removing the force in seeded turned the new fold test and the agreement test red; removing it in in_place_writer_off turned the agreement test red.\n\nSTEP 6 DONE (pure refactor). prepare_resume is split into consume_for_resume (still the one ConsumeApprovalRequest literal; returns resume::Consumed), released_call and build_segment. A thin prepare_resume composes consume_for_resume then build_segment, so the run_agent_with_route call site is unchanged (step 9 replaces it). Added the content-free warn line continue_replay_refused_ledger_off {run_id}, logged only on the already-refusing same-claim replay with the ledger off. Status and message unchanged. New test a_same_claim_replay_with_the_ledger_off_logs_and_refuses_as_before (red first for the right reason: no line; it also asserts the line is absent for a won consume, a fenced replay and a foreign claim, and that its only field is run_id). The three Recorder.order assertions did not change. Consumed no longer needs any dead_code allow.\n\nSTEP 7 DONE. reserve_release is the one pre-reserve of the segment's first (seeded) round, before phase 2, in stage 1, whatever the release class, ledger on only. Created with the release dispatching sets prereserved and phase 2 skips the reserve for that action id but still finalizes. Created with the release rejected in phase 1 finalizes not_run at once. AlreadyReserved ends Err failed_precondition continuation_already_consumed before any dispatch, for every class. Err holds the release back (it is never run) with today's text, and the loop continues. The phase-2 entry predicate is now effectful-or-covered-by-release, the effects hold keeps class.is_effectful(), and BOTH the pre-reserve and phase 2 build their entry through effect::entry_for_call / LedgerEntry::new. The tool name is trimmed inside LedgerEntry::new, so one identity per action. Reserve errors, decided per case with evidence: session-core answers already_exists when the row is bound to different immutable input (checked in grpc.rs reserve_tool_action). effect::reserve now maps that to the new ReserveOutcome::IdentityConflict via the pure reserve_result. For the release that is a refusal with the closed token continuation_already_consumed and nothing dispatched. For an ordinary phase-2 call it keeps today's held-back behaviour. A reserve that errors or times out after it committed (reserve_commit_then_fail_for) is treated as an ambiguous transport error: in stage 1 the release is held back, never run, today's text, and the next attempt meets the committed row and ends continuation_already_consumed. In the in-place stage a failed pre-reserve is Refusal::CheckpointUnavailable, which is step 9 wiring: the Err arm in run_rounds is marked for it and there is no in-place branch yet. Tests (10): read release pre-reserved with class read and ordered reserve < dispatch < finalize; effectful release reserved once not twice; ledger off reserves nothing; same-claim replay with a read release runs ONE model loop (shared tier recorder, later-round effect reserved once, INV-02); phase-1-rejected release reserved then not_run, replay refused with no model loop; consent-gated (Ask) release fenced too; failed and commit-then-fail pre-reserve for a read and an effect keep the held-back text and the loop continues; identity conflict on the release refuses with nothing dispatched and nothing terminalized; identity conflict on an ordinary call still held back; the_release_and_the_dispatch_reserve_one_identity_for_the_same_call drives the REAL continuation path and the REAL phase-2 path and requires the recorded ReserveToolActionRequests equal field for field (only the action id differs, by the segment prefix). Effect tests: a_reserve_answer_tells_a_replay_an_identity_conflict_and_an_outage_apart and the trim case in a_ledger_entry_is_built_one_way_whoever_asks. Mutation proof, restored cmp-clean after each batch: dropping the prereserved skip, the pause writer's step_seq, and the identity-conflict mapping turned an_effectful_release_is_reserved_once_not_twice, the round-trip test and the identity-conflict tests red; removing the pre-reserve turned 8 release tests red; dropping the release from the phase-2 predicate, the not_run finalize and the held-back flag turned a_read_release_is_pre_reserved..., a_release_rejected_in_phase_one... and a_failed_release_pre_reserve... red.\n\nSTEP 8 DONE. enum RoundSeed { Segment(InferResponse), InPlace(Box<Restored>) }; run_rounds takes Option<RoundSeed>; only Segment is built (identical behaviour). The in-place seed is refused with Err internal in_place_seed_not_wired through the small segment_seed helper until step 9 (a test constructs both variants and pins the refusal).\n\nREVIEW ITEMS (Build 3a). (a) DONE: Consumed, ClaimedFold, Restored and SeedSlot no longer derive Debug; each has a manual content-free Debug (ids, counts, digests, closed tokens). SeedSlot was added because it carries tool output. The test the_content_bearing_types_debug_without_content shows no history, arguments, outputs or tool definitions reach a {:?}, which is the proof that no test or log prints content through them. (b) DONE: every dead_code allow in my files is cfg_attr(not(test), allow(dead_code)) with a comment naming the removing step (restore_in_place, resumed_step_id, the effect.rs rows and list functions, the closers module, RoundSeed::InPlace, the ApprovedRelease accessors still unread). dangling_slot got a defensive empty-step_id fallback with a test, and restore_in_place got a test through its no-credential downgrade so it is live in test builds. (c) DONE in durable_loop_contract.rs: the consume guard flags EVERY mention of omit_call that is not exactly `omit_call: false` followed by the end of the field (value, negation, shorthand, assignment, `false || x`, `( true )`). The segment_no guard is an exact whitelist (fold.segment_no x2, response.segment_no x1, by expression and count, not by receiver name) and also rejects destructuring or building an AgentResume by pattern, any bare segment_no, and any resume.<field> other than claim_token and action_fingerprint. The strict-parser check is factored into resume_parser_strictness_violations (the one body must be a single switch_from call) with two in-memory mutation proofs. Every guard keeps in-memory mutation rows. (d) DONE: the compose comments now say a continue switch off is REFUSED (continue_disabled) after the gateway has spent the click, that AGENT_CONTINUE_AFTER_APPROVAL_ENABLED belongs to both services, what each mismatch does, and that the gateway reader arrives with S7c-B (the mp-contracts doc and the switch_table description say the same). (e) DONE: a_pause_fold_the_production_writer_saved_restores_in_place drives the real loop to a pause (build_fold, fold_calls, fold_rejected, fold_completed, the pause save's bytes, the approval's own descriptor and the mock-recorded ledger rows), rebuilds Consumed from the descriptor, recomputes the prompt digest from the snapshot tools alone and restores with the pure restore. The writer and reader agree today. The mutation changing the writer's pause step_seq to 0 turned it red.\n\nNOT DONE / DEFERRED (by design): step 9 and 10 (the wiring, in_place_writer_violations, the in-place pre-reserve error mapping, the fence, removal of the dead_code allows) belong to stage B.",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/effect.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/closers.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+     ],
+     "tests_added": [
+      "fold: only_a_fresh_writer_honours_the_stage_one_segment_flag; resume: the_seeded_writers_activity_is_decided_by_the_one_gate_before_any_claim (rewritten: 384 candidates, same unmodified gate)",
+      "resume: the_production_restore_downgrades_without_a_credential_before_any_rpc; the_content_bearing_types_debug_without_content; a_call_with_no_step_id_is_never_a_dangling_slot",
+      "effect: a_reserve_answer_tells_a_replay_an_identity_conflict_and_an_outage_apart; a_ledger_entry_is_built_one_way_whoever_asks (extended: trim)",
+      "agent: a_same_claim_replay_with_the_ledger_off_logs_and_refuses_as_before",
+      "agent: a_round_seed_is_a_segment_call_or_a_restored_round",
+      "agent: a_read_release_is_pre_reserved_with_its_own_class_in_stage_one; an_effectful_release_is_reserved_once_not_twice; a_release_is_not_reserved_while_the_ledger_is_off",
+      "agent: a_same_claim_replay_with_a_read_release_runs_one_model_loop; a_release_rejected_in_phase_one_is_still_reserved_and_closed_not_run; a_consent_gated_release_is_fenced_too",
+      "agent: a_failed_release_pre_reserve_in_stage_one_keeps_todays_held_back_text_and_the_loop_continues (read and effect, plain failure and commit-then-fail)",
+      "agent: an_identity_conflict_on_the_release_is_a_refusal_and_dispatches_nothing; an_identity_conflict_on_an_ordinary_call_is_still_held_back",
+      "agent: the_release_and_the_dispatch_reserve_one_identity_for_the_same_call (real continuation path vs real phase-2 path)",
+      "agent: a_pause_fold_the_production_writer_saved_restores_in_place (writer to reader round trip)",
+      "durable_loop_contract (no new test fns, 17 stays 17): the_executor_consumes_through_one_literal_and_never_omits_the_call and the_resume_module_never_reads_the_clients_segment_no strengthened; the_resume_switch_has_one_parser now calls resume_parser_strictness_violations; every_guard_goes_red_when_the_code_it_guards_regresses gained rows for omit_call values, destructuring, renamed bindings, resume field reads and two strict-parser mutations"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -p execution-core --lib (baseline, before edits)",
+       "outcome": "1040 passed, 0 failed (300 s, dominated by executor::a_hung_child_is_killed_at_the_timeout, a pre-existing slow test)"
+      },
+      {
+       "command": "cargo test -p mp-contracts (baseline)",
+       "outcome": "lib 114; grounding_replay 1; loop_fold_golden 11; proto_wire_parity 3; proto_wire_parity_execution 5; run_context_posture 1; zdr_retention_matrix 5; doc-tests 2; 0 failed"
+      },
+      {
+       "command": "cargo test -p execution-core --lib -- only_a_fresh_writer the_seeded_writers_activity (tests written, before the fix)",
+       "outcome": "red for the right reason: seeded writer was Off(ResumedSegment) for the resumed=true gate; green after the force in FoldWriter::seeded"
+      },
+      {
+       "command": "step 0 mutation proofs (remove the force in fold.rs seeded; remove it in resume.rs in_place_writer_off), restored with cp and cmp",
+       "outcome": "both turned the agreement test red; fold mutation also turned the new fold test red; RESTORED cmp-clean"
+      },
+      {
+       "command": "cargo test -p execution-core --lib -- a_same_claim_replay (new log test before implementing)",
+       "outcome": "red for the right reason: no continue_replay_refused_ledger_off line; green after"
+      },
+      {
+       "command": "cargo test -p execution-core --lib -- a_read_release an_effectful_release ... (step 7 tests before production code)",
+       "outcome": "did not compile (non-exhaustive ReserveOutcome); after implementation 8 passed, then a deadlock in my own test (policy.dispatches() under a held mutex) was fixed and a held-back text assertion was corrected for the data_category prefix that record_tool_step adds; the hung test process was killed by pid"
+      },
+      {
+       "command": "step 7 mutation batches A, B, C/D on agent.rs and effect.rs, each restored with cp and cmp",
+       "outcome": "batch A (drop prereserved skip, pause step_seq 0, identity conflict mapped to Created): 5 tests red; batch B (no pre-reserve): 8 release tests red; batch C/D (drop is_release from phase-2 predicate, not_run finalize, held-back flag): 3 tests red; all RESTORED cmp-clean"
+      },
+      {
+       "command": "cargo test -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout (after step 8, after the guards)",
+       "outcome": "1056 then 1057 passed, 0 failed"
+      },
+      {
+       "command": "cargo test -p execution-core --test durable_loop_contract (after step 6, after the guard changes, final)",
+       "outcome": "17 passed each time"
+      },
+      {
+       "command": "cargo test -p execution-core --tests (final)",
+       "outcome": "lib 1058; main 0; autonomy_ladder_contract 4; browser_agent_e2e 11 (2 ignored); compaction_parity_contract 11; cross_service_loop_contract 3; durable_loop_contract 17; loop_fold_zdr_matrix 7; runtime_loop_test 9; scrub_checkpoint_test 8; slo 4; subscription_refusal_contract 4; zdr_refusal_inventory 2; 0 failed"
+      },
+      {
+       "command": "cargo test -p mp-contracts (final)",
+       "outcome": "lib 114; grounding_replay 1; loop_fold_golden 11; proto_wire_parity 3; proto_wire_parity_execution 5; run_context_posture 1; zdr_retention_matrix 5; doc-tests 2; 0 failed; counts unchanged"
+      },
+      {
+       "command": "cargo check --workspace --all-targets --keep-going",
+       "outcome": "Finished with no errors; warnings are the pre-existing ones (session-core auth.rs and terminalization.rs, execution-core capability_policy.rs, approval_delivery_worker.rs, resume.rs decision_closer, which is unused at HEAD too); none from this unit's changes"
+      }
+     ],
+     "deviations": [
+      "prepare_resume is kept as a thin composition of consume_for_resume and build_segment instead of being removed, so the run_agent_with_route call site is unchanged in this stage; step 9 replaces it.",
+      "ReserveOutcome gained a variant, IdentityConflict, and effect::reserve now returns it for session-core's already_exists (a pure reserve_result function carries the mapping). The design left this to the unit. Phase 2 still holds an ordinary call back for it exactly as it did when it was an Err.",
+      "LedgerEntry::new trims the tool name (reviewer suggestion: one identity, decided in the builder). The allow(dead_code) on LedgerEntry::new and entry_for_call is removed because production now calls both.",
+      "Debug was made content-free for SeedSlot as well as the three requested types, because SeedSlot::Resolved holds tool output and is printed inside Restored.",
+      "The in-place branch of the pre-reserve error mapping (Err gives Refusal::CheckpointUnavailable) is NOT built: it is step 9 wiring and no in-place round exists yet. release_held_back and the Err arm are written so step 9 branches there.",
+      "RoundSeed::InPlace is refused through a small segment_seed helper with Err internal in_place_seed_not_wired (a closed token) rather than unreachable!, so production has no panic path before step 9.",
+      "The segment_no guard is stricter than the review asked: besides the exact fold x2 / response x1 whitelist it rejects any bare segment_no and any resume.<field> other than claim_token and action_fingerprint. A future legitimate local named segment_no in resume.rs must be renamed.",
+      "Edit-tool rule: two non-mutation edits were made with python str.replace on exact unique matches (the ApprovedRelease accessor comment hunk in resume.rs, and the rewrite of one new test block in agent.rs); all other edits used the Edit tool. All touched files are i/lf w/lf (git ls-files --eol), LF preserved. Mutation checks also used python on copies-first files and were restored with cp and verified with cmp. grep -c with a dollar-quoted CR gives false positives in this shell; the real check was git ls-files --eol and a byte count.",
+      "Build waits: cargo serialised behind other units several times (the baseline lib run took about 8 minutes of wall time, one run waited behind another unit's test executable). One of my own runs hung on a test deadlock (policy.dispatches() called while holding the recorder mutex); I killed that test process by pid and fixed the test. No LNK1104 occurred.",
+      "The design tests a_same_claim_replay_with_a_read_release_runs_one_model_loop etc. use the existing run_agent_with_tools harness; the step-9 MockSession knobs claim_response, ledger_rows, list_failure and list_calls are not added (stage B). I added reserve_already_for as the design names it, plus reserve_conflict_for, reserve_fail_for and reserve_commit_then_fail_for."
+     ],
+     "blockers": [],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md",
+       "content": "APPEND under the 2026-10-18 S7b v3 in-place resume rules entry (unit s7b-2, stage A: writer agreement, steps 6 to 8 and the Build 3a closeouts).\n\n(2b) The two writer decisions agree by construction. FoldWriter::seeded forces gate.resumed to false itself (an in-place resume is never a stage-1 segment), and resume::in_place_writer_off does the same, so the pre-claim decision and the seeded writer cannot disagree whatever a caller put in resumed. The agreement test passes one unmodified gate to both over 384 combinations. A won claim followed by a fence the writer cannot write is therefore not reachable from the gate.\n\n(3a) The release pre-reserve (reserve_release) runs in the segment's first round, before phase 2, ledger on only, in stage 1 now and in place at step 9. It is built by the same builder as a dispatch reservation (effect::LedgerEntry::new through entry_for_call and ApprovedRelease::ledger_entry; the tool name is trimmed in the builder). Phase 2 skips the reserve for the pre-reserved action and still finalizes it. A release the pre-pass rejected is reserved and finalized not_run at once.\n\n(3b) Reserve answers, decided per case. Evidence: session-core reserve_tool_action answers created:false for an exact replay, already_exists when the action is bound to different immutable input, and any transport error may hide a commit.\n- created:false: Err failed_precondition continuation_already_consumed before any dispatch, every class.\n- already_exists (ReserveOutcome::IdentityConflict): the same refusal and token, nothing dispatched and no model loop; whatever holds the row is another attempt of this approval under another identity. For an ordinary phase-2 call it stays held back in today's words (it was an Err before).\n- any other error or timeout, including one that committed: in stage 1 the release is held back and never run, with today's held-back text, and the loop continues; the next attempt meets the committed row and ends continuation_already_consumed. In place (step 9) it is a refusal, resume_checkpoint_unavailable, with nothing of the round dispatched.\nThe 'at most one model loop per approval' invariant holds for a read release too once the executor image that pre-reserves is deployed first (D10).\n\n(3c) Operator signature for mismatch M1 (gateway resume on, executor ledger off): the executor warn line continue_replay_refused_ledger_off {run_id}, one per refused replay, ids only. It is the only change reachable with every switch off, and it is a log line on a path that already refuses with the same status.\n\n(8) Content-bearing resume types (Consumed, ClaimedFold, Restored, SeedSlot) have a manual Debug that prints ids, counts, digests and closed tokens only, pinned by a test, so a {:?} of them can never put a call's arguments, a history or an outcome in a log or a failed assertion.\n\n(9) Compose comments corrected: with AGENT_CONTINUE_AFTER_APPROVAL_ENABLED off the executor REFUSES a continue (continue_disabled) after the gateway has spent the click; it is not downgraded to a segment. A resume switch, ledger or fold writer off downgrades; the continue switch off loses the click. The model-gateway reader of EXECUTION_LOOP_RESUME_ENABLED arrives with S7c-B.\n\nBuilt in unit s7b-2 stage A: items above, the pre-reserve and RoundSeed in agent.rs, the strengthened contract guards. Still to build: step 9 (the wiring, the fence, the in-place pre-reserve error mapping) and step 10 (in_place_writer_violations)."
+      },
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+       "content": "Build ledger S7 row, S7b executor half, unit s7b-2 stage A (steps 6, 7, 8 and the Build 3a closeouts built; the in-place wiring not started).\n\n- Step 0: FoldWriter::seeded forces resumed=false; in_place_writer_off and the seeded writer agree by construction (384-combination test, mutation proof both ways).\n- Step 6: prepare_resume split into consume_for_resume (the one ConsumeApprovalRequest literal), released_call and build_segment; warn line continue_replay_refused_ledger_off.\n- Step 7: reserve_release, the release pre-reserve in stage 1 whatever the class (a read, a consent-gated release and a phase-1-rejected release included, the last finalized not_run); the phase-2 reserve skipped for the pre-reserved action; one entry builder for both reservations; ReserveOutcome::IdentityConflict; a failed or lost pre-reserve in stage 1 holds the call back in today's words.\n- Step 8: RoundSeed with only Segment used.\n- Review closeouts: content-free Debug for Consumed, ClaimedFold, Restored, SeedSlot; every dead_code allow narrowed to cfg_attr(not(test)); omit_call, segment_no and strict-parser guards strengthened with mutation rows; compose comments corrected; a writer-to-reader round-trip test of the pause fold.\n\nTest counts: execution-core lib 1040 -> 1058; durable_loop_contract 17 -> 17; mp-contracts 114 -> 114; every other suite unchanged. No DB-backed test written or changed.\n\nStill to build: step 9 (select_stage, in_place_scope, restore_in_place wiring, the seeded writer, the pre_effect fence, the in-place pre-reserve error mapping, MockSession claim and list knobs, removal of the dead_code allows) and step 10 (in_place_writer_violations)."
+      }
+     ],
+     "names_for_later_units": [
+      "agent.rs: consume_for_resume(session_channel, session_bearer, req, resume) -> Result<resume::Consumed, Status>; released_call(&Consumed) -> Result<(pb::ToolCall, String release step id, ApprovedRelease), Status>; build_segment(Consumed, req, resume) -> Result<ResumedSegment, Status>; prepare_resume is the thin composition run_agent_with_route still calls (step 9 replaces the call and deletes it).",
+      "agent.rs: enum RoundSeed { Segment(pb::InferResponse), InPlace(Box<resume::Restored>) }; run_rounds(ctx, goal, max_rounds, seed: Option<RoundSeed>); segment_seed(RoundSeed) -> Result<InferResponse, Status> refuses InPlace with internal in_place_seed_not_wired (step 9 replaces that arm with the restored-round init).",
+      "agent.rs run_rounds locals for step 9: first_of_segment (the seeded round), release_prereserved: Option<&str>, release_held_back: bool. The pre-reserve block sits between the pre_effect save block and the Phase 2 comment. Step 9's fence must go BEFORE that block, and the Err arm of reserve_release is where the in-place branch returns Refusal::CheckpointUnavailable.status(); the AlreadyReserved | IdentityConflict arm already returns continuation_already_consumed for both stages.",
+      "agent.rs: reserve_release(ctx, &ApprovedRelease) -> Result<effect::ReserveOutcome, String>; unrecorded_effect_outcome(run_id, tool, reason) -> StepOutcome (the one held-back text, byte-identical to before).",
+      "effect.rs: ReserveOutcome::IdentityConflict; effect::reserve_result(answer) -> Result<ReserveOutcome, String> (pure, tested); LedgerEntry::new trims the tool name; entry_for_call and LedgerEntry::new have no dead_code allow now.",
+      "fold.rs: FoldWriter::seeded ignores gate.resumed (forces false). Step 9 builds the in-place WriterGate with resumed: ctx.release.is_some() && !in_place for FoldWriter::new only if a segment writer is built; the seeded writer is immune. Step 10's guard should still require the seeded writer to be built from the same gate passed to restore_in_place.",
+      "resume.rs: Consumed, ClaimedFold, Restored, SeedSlot have manual content-free Debug (do not derive Debug on them again). Consumed has no dead_code allow; its snapshot_digest is printed by Debug. restore_in_place is covered by a no-credential test, so its allow is cfg_attr(not(test)) and step 9 removes it. Remaining step-9 allows: loop_resume_enabled, Refusal variants, Downgrade, Stage, select_stage, RestoreFailure, RestoreOrRefuse, in_place_scope, in_place_writer_off, classify_claim, fence_refusal, ClaimedFold, SeedSlot, Restored, ledger_action_ids, restore, restore_in_place_with, resumed_step_id, ApprovedRelease::{step_id, class, args_digest} (drop these three if still unread), effect.rs LedgerRow, row_from_state, rows_from_states, list_actions, list_actions_with, fold.rs save_fence, SeqTracker::seeded, FoldWriter::seeded and expected_seq, the closers module-level allow, RoundSeed::InPlace.",
+      "agent.rs test mocks for stage B: Recorder.reserve_already_for: BTreeSet<String>, reserve_conflict_for, reserve_fail_for, reserve_commit_then_fail_for (action-id keyed); test helpers OrderingPolicy (pushes dispatch:<tool> into Recorder.order; ask=true answers Ask), release_consume(tool, input, mode, consumed, same_claim), continue_with_ledger, RELEASE_ACTION = s2.tool_1_approved, position_of. The existing Recorder.order assertions are unchanged; claim and list entries are still to be added by step 9.",
+      "durable_loop_contract.rs: resume_module_segment_violations (exact whitelist fold x2 / response x1, no AgentResume pattern, only resume.claim_token and resume.action_fingerprint), resume_parser_strictness_violations(loop_fold_source), consume_request_violations (every omit_call must be exactly `omit_call: false`). Step 10's in_place_writer_violations is still to write."
+     ],
+     "tests_written_not_run": []
+    }
+   ]
+  },
+  {
+   "unit": "s7c-a4",
+   "impl": {
+    "summary": "S7c-A4 (gateway pure pieces) is built in model-gateway src/sse.rs, all before continue_run and unwired. continue_run, continue_resume and agentic_run_stream are untouched (git diff shows 1656 added and 0 removed lines in sse.rs). Verified: continue_run_tests 16 -> 40 passed; model-gateway lib 1821 -> 1846 passed (4 ignored, unchanged); zdr_posture_matrix 6 passed; durable_loop_contract 17 passed; cargo check --workspace --all-targets --keep-going exit 0. I added, hunk by hunk with the continue_run tests run after each hunk (red first for the right reason, then green): (1) CONTINUE_HTTP_REFUSALS (10, shape &[(&str, StatusCode)]), CONTINUE_EXECUTOR_MESSAGE_TOKENS (17), CONTINUE_FRAME_REFUSALS (22, one literal per line, identical to the SPA tuple, checked by script), PRECONSUME_TIMEOUT (10 s), resume_mode_for, ApprovalSpend with is_spent, and approval_spend_for. (2) trait ApprovalConsumer: Send + Sync, consume_within_bound, GrpcApprovalConsumer, preconsume_request (the one ConsumeApprovalRequest literal, omit_call true), PreconsumeRefusal and preconsume_refusal. (3) consume_then_launch and spawn_consume_then_launch (the only tokio::spawn of the flow, oneshot result). (4) ContinueDispatchFailure, classify_continue_dispatch_failure, continue_refusal_event, continue_failure_event, dispatch_unknown_event, connected_payload. Plus the test-only run_detail_value hunk in http_routes.rs. Mutation checks on sse.rs (owned): 15 production breaks each turned the intended tests red and were restored byte for byte (cmp identical, sha256 baed1fdb...). Dropping Sync from the trait fails to compile with exactly the review finding (&C not Send). Nothing was run against docker or a database.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+    ],
+    "tests_added": [
+     "sse::continue_run_tests::resume_mode_for_picks_loop_only_when_enabled_and_resumable",
+     "sse::continue_run_tests::approval_spend_for_is_spent_only_on_the_pre_consume_path",
+     "sse::continue_run_tests::the_continue_vocabularies_have_the_designed_shape",
+     "sse::continue_run_tests::the_http_refusals_carry_the_statuses_the_route_sends",
+     "sse::continue_run_tests::the_continue_vocabularies_are_closed",
+     "sse::continue_run_tests::the_preconsume_request_spends_without_reading_the_call",
+     "sse::continue_run_tests::a_consume_that_did_not_win_is_a_409_before_any_stream_opens",
+     "sse::continue_run_tests::a_consume_refusal_maps_to_its_closed_http_code",
+     "sse::continue_run_tests::a_consume_failure_echoes_nothing_but_closed_codes",
+     "sse::continue_run_tests::the_gateway_reads_only_the_won_flag_of_a_consume",
+     "sse::continue_run_tests::the_consumer_trait_declares_send_and_sync",
+     "sse::continue_run_tests::an_approval_consumer_satisfies_the_spawn_bounds (plus the never-called compile-time fn the_real_consumer_can_be_spawned)",
+     "sse::continue_run_tests::a_launch_follows_its_consume_and_never_precedes_it",
+     "sse::continue_run_tests::two_parallel_continues_with_distinct_tokens_get_one_proceed_and_one_409",
+     "sse::continue_run_tests::two_parallel_continues_with_the_same_token_get_one_proceed_and_one_409",
+     "sse::continue_run_tests::a_dropped_receiver_cannot_spend_an_approval_without_dispatching",
+     "sse::continue_run_tests::a_launch_that_never_follows_a_lost_consume_does_not_run",
+     "sse::continue_run_tests::a_hung_consume_ends_ambiguous_within_the_bound",
+     "sse::continue_run_tests::the_pre_consume_flow_is_spawned_in_exactly_one_place",
+     "sse::continue_run_tests::a_refused_continuation_is_classified_without_terminalizing",
+     "sse::continue_run_tests::every_frame_token_is_in_the_closed_vocabulary_and_all_of_it_is_reachable",
+     "sse::continue_run_tests::a_refusal_frame_is_not_retryable_and_names_the_run",
+     "sse::continue_run_tests::connected_payload_adds_only_the_spend_flag",
+     "sse::continue_run_tests::the_grpc_consumer_asks_for_the_spend_only_and_reads_only_the_won_flag (real tonic transport, hand-rolled ConsumeApproval server, checks the Bearer header and the request bytes)",
+     "http_routes::run_detail_value_tests::run_detail_value_never_carries_resumable_or_park_reason"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -p model-gateway --lib continue_run_tests (baseline, then after every hunk, then final)",
+      "outcome": "baseline 16 passed; after hunk 1: 21; hunk 2: 27; hunk 3: 35; hunk 4: 39; real-transport test: 40 passed. Each new hunk's tests were first run without the implementation and failed to compile on the missing symbols only (E0425/E0433)."
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "outcome": "baseline 1821 passed, 4 ignored; final 1846 passed, 4 ignored (+24 sse.rs, +1 http_routes.rs)"
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_posture_matrix",
+      "outcome": "6 passed before and after"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "17 passed before and after (s7b-2 files were mid-edit in the worktree; no transient failure hit me)"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "exit 0 in 2m10s; only pre-existing dead_code warnings elsewhere (provider, start_managed_run_inner, verification_result_for, decision_closer); none from the new items"
+     },
+     {
+      "command": "cargo check -p model-gateway --lib",
+      "outcome": "no warnings (every new item carries #[allow(dead_code)] with a wired-by-S7c-B1 note)"
+     },
+     {
+      "command": "cargo clippy -p model-gateway --lib --tests --message-format=short",
+      "outcome": "no warnings left in the new production block; three pedantic test nits (map/unwrap_or_else, by-value helper, item after statement) fixed by hand and re-verified green; remaining clippy warnings in sse.rs are pre-existing items"
+     },
+     {
+      "command": "mutation group A (10 breaks: launch before consume, Ok(false) proceeds, omit_call false, NotFound arm removed in classify, approval_not_found listed as 409, continue_run code typo, catch-all passes the status through, connected_payload always flags spend, continue_refusal_event always flags spend, PRECONSUME_TIMEOUT 30 s)",
+      "outcome": "17 tests red, each mutation caught by its intended tests; restored from copy, cmp identical"
+     },
+     {
+      "command": "mutation group B (tokio::spawn replaced by drop(async move), continue_run code typo alone, closed-token typo in classify, ZDR trailer branch disabled)",
+      "outcome": "9 tests red including a_dropped_receiver..., the two races, the_pre_consume_flow_is_spawned_in_exactly_one_place, the_continue_vocabularies_are_closed, every_frame_token..., a_refused_continuation_is_classified...; restored, cmp identical"
+     },
+     {
+      "command": "mutation M1: trait ApprovalConsumer: Send (Sync dropped)",
+      "outcome": "does not compile: future cannot be sent between threads safely, &C is not Send because C is not Sync (the design review finding); restored, cmp identical, final sha256 baed1fdbf5f8e04cd3eff1b4b6ed78b0b0289800521f4ff7dfb00e0b3a1b9e95"
+     },
+     {
+      "command": "python3 parse of the two vocabulary consts in sse.rs and of the SPA tuple in chat-run-continue-contract.ts",
+      "outcome": "10 HTTP pairs and 22 frame codes parse the way the deferred BFF parity test expects; the frame set equals CHAT_RUN_CONTINUE_FRAME_REFUSALS exactly"
+     }
+    ],
+    "deviations": [
+     "http_routes.rs is not in this unit's ownership list, but the design's step 5 names the run_detail_value test and no other unit touches that file. I added one test-only hunk (a new mod run_detail_value_tests right after run_detail_value, 33 lines, no production change). It cannot be mutation-checked by me because I may not break a file I do not own, so it is proven only by passing (it would fail if resumable or park_reason were added to the allowlist; not demonstrated).",
+     "resume_mode_for keeps the design's two-bool signature (resume_enabled, resumable). The task text mentions the checkpoint too: the session-core checkpoint switch is not readable by the gateway, with it off no fold exists and RunDetail.resumable is false, so it reaches the function through that flag. The doc comment says so.",
+     "The 10 s bound is a free function consume_within_bound(rpc) (used by GrpcApprovalConsumer::consume) instead of code inline in consume, so the bound can be proven with a never-answering fake on a paused clock without a socket; behaviour is as the design states (Elapsed becomes Status::deadline_exceeded, only .consumed is read). GrpcApprovalConsumer also has a new() constructor for the wiring.",
+     "All new tests live inside the existing continue_run_tests module (so the VERIFY filter runs them) and use the module's own production_text()/item_text() helpers: scans cut the production text before the test module and name the item (fn name to its closing brace), never the whole file. PRECONSUME_TIMEOUT stays private to sse.rs; the two vocabularies are pub(crate) as asked.",
+     "Not in the design: a hand-rolled tonic unary server (tower::service_fn plus tonic::server::Grpc, no 25-method trait mock) to test GrpcApprovalConsumer over a real transport, and a classification-coverage test that proves every one of the 22 frame tokens is producible. Both are test-only.",
+     "The mutations ran for a few minutes each against the shared worktree file sse.rs, which execution-core's durable_loop_contract reads as text. None touched continue_resume, segment_no or the mode literals those scans anchor on, but a concurrent s7b-2 run in that window could in principle have seen a mutated sse.rs; the file is restored and verified identical.",
+     "Line endings: sse.rs and http_routes.rs are LF in the worktree (0 CR bytes before and after); the design's CRLF note does not apply and every new line is LF. New scan tests still normalise \\r\\n."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "model-gateway sse.rs (all private except the two vocab consts, all #[allow(dead_code)] until B1 removes the attributes as it wires them): pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] (code first, StatusCode::X second, one entry per line, no quotes or parentheses in comments inside the list), pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] (one literal per line), const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] (pub(crate)), const PRECONSUME_TIMEOUT.",
+     "fn resume_mode_for(resume_enabled: bool, resumable: bool) -> &'static str; enum ApprovalSpend { NotSpent, SpentByGateway } with const fn is_spent(self); fn approval_spend_for(resume_enabled: bool) -> ApprovalSpend. B1 reads loop_resume_enabled() once and passes the bool to both.",
+     "trait ApprovalConsumer: Send + Sync { fn consume(&self, ConsumeApprovalRequest) -> impl Future<Output = Result<bool, tonic::Status>> + Send }; GrpcApprovalConsumer::new(state.orchestration_client.clone(), model_bearer.clone()); fn consume_within_bound(rpc) (the 10 s bound); fn preconsume_request(org_id, run_id, approval_id, claim_token) (the only ConsumeApprovalRequest literal); enum PreconsumeRefusal { Closed(StatusCode, &'static str), Status(tonic::Status) } (derives Debug); fn preconsume_refusal(Result<bool, Status>) -> Result<(), PreconsumeRefusal>.",
+     "async fn consume_then_launch<C, T>(&C, request, impl FnOnce() -> T) -> Result<T, PreconsumeRefusal>; fn spawn_consume_then_launch<C, T>(C, request, impl FnOnce() -> T + Send + 'static) -> tokio::sync::oneshot::Receiver<Result<T, PreconsumeRefusal>> (the only tokio::spawn of the flow; its body contains consume_then_launch(&consumer). B1: handle Ok(Ok(sse)), Ok(Err(Closed(s, c))) via continue_error(s, c), Ok(Err(Status(st))) via grpc_status_to_http(&st), Err(_) via continue_error(503, continue_unavailable). Compile proof: the_real_consumer_can_be_spawned plus assert_send_and_static for AppState, SessionRun, VerifiedModelBearer, VerifiedExecutionBearer, VerifiedBearer, VerifiedInferenceBearer in an_approval_consumer_satisfies_the_spawn_bounds.",
+     "enum ContinueDispatchFailure { Refused(&'static str), Unreachable, Unknown } (Debug, Clone, Copy, PartialEq, Eq); fn classify_continue_dispatch_failure(&tonic::Status); fn continue_refusal_event(request_id, run_id, token: &'static str, spend) -> Event (debug_asserts the token is in CONTINUE_FRAME_REFUSALS; B1 uses it with continue_refused for a local request-construction failure after a pre-consume); fn continue_failure_event(request_id, run_id, &ContinueDispatchFailure) -> Event (spent regime only); fn dispatch_unknown_event(spend, request_id, run_id) -> Event; fn connected_payload(run_id, thread_id, request_id, spend) -> Value (argument order: run_id, thread_id, request_id).",
+     "Test helpers in continue_run_tests B1 can reuse: production_text(), item_text(header, terminator), frame_of(Event) -> (event name, JSON), closed(), EVERY_CODE, REFUSAL_CARRIERS, CasConsumer, ScriptedConsumer, ParkedConsumer, ConsumeOnlyServer/consumer_over_grpc. B1 scans must keep continue_run's body free of the words segment_no and of consume_then_launch( (the guard counts consume_then_launch(& once in production, in the spawner).",
+     "For the BFF parity tests (A5 deferred text in build3a.json): the vocabulary shapes match what its parser assumes (verified with an equivalent Python parse: 10 HTTP pairs, 22 frame codes, frame set equal to the SPA tuple); the Rust test text itself was not compiled by me. Its status_of map covers BAD_REQUEST, UNAUTHORIZED, NOT_FOUND, CONFLICT, SERVICE_UNAVAILABLE, which are exactly the statuses used."
+    ],
+    "deferred_files": [
+     {
+      "path": "plan Build ledger row for S7c-A4 (text for the lead to add; I did not edit the plan doc)",
+      "content": "WS03 S7c-A4 (gateway pure pieces), built 2026-10-18, uncommitted. model-gateway sse.rs only, all before continue_run and unwired (continue_run, continue_resume and agentic_run_stream untouched; with every switch off or on the route is byte-for-byte what S7c-A5 left): CONTINUE_HTTP_REFUSALS (10), CONTINUE_EXECUTOR_MESSAGE_TOKENS (17), CONTINUE_FRAME_REFUSALS (22), PRECONSUME_TIMEOUT 10 s, resume_mode_for(resume_enabled, resumable), ApprovalSpend and approval_spend_for, trait ApprovalConsumer: Send + Sync, GrpcApprovalConsumer, consume_within_bound, preconsume_request (omit_call true), PreconsumeRefusal and preconsume_refusal, consume_then_launch, spawn_consume_then_launch (the only tokio::spawn of the flow), ContinueDispatchFailure with classify_continue_dispatch_failure, continue_refusal_event, continue_failure_event, dispatch_unknown_event, connected_payload; plus a test-only run_detail_value_never_carries_resumable_or_park_reason in http_routes.rs. Verified: continue_run_tests 16 -> 40, model-gateway lib 1821 -> 1846 (4 ignored unchanged), zdr_posture_matrix 6, durable_loop_contract 17, cargo check --workspace --all-targets --keep-going exit 0. The Sync supertrait is compile-proven (dropping it fails with &C not Send), the detach is behaviour-proven (a receiver dropped mid-RPC still sees the commit and exactly one launch; replacing the spawn turns 6 tests red), the real consumer is exercised over a real tonic transport (Bearer header, spend-only request bytes, only .consumed read, a same-claim replay carrying the call is not a win). 25 mutations restored byte for byte. Not covered here: continue_resume arity, continue_run wiring, agentic_run_stream arms and the typed-refusal arm, the BFF gateway-parity tests (deferred text from A5, shapes verified), the B2 contract guards (S7c-B1, B2). The run_detail_value hunk is proven by passing only (file outside the unit's ownership, no mutation run)."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S7c-A4 (gateway pure pieces) is built in model-gateway src/sse.rs, all before continue_run and unwired. continue_run, continue_resume and agentic_run_stream are untouched (git diff shows 1656 added and 0 removed lines in sse.rs). Verified: continue_run_tests 16 -> 40 passed; model-gateway lib 1821 -> 1846 passed (4 ignored, unchanged); zdr_posture_matrix 6 passed; durable_loop_contract 17 passed; cargo check --workspace --all-targets --keep-going exit 0. I added, hunk by hunk with the continue_run tests run after each hunk (red first for the right reason, then green): (1) CONTINUE_HTTP_REFUSALS (10, shape &[(&str, StatusCode)]), CONTINUE_EXECUTOR_MESSAGE_TOKENS (17), CONTINUE_FRAME_REFUSALS (22, one literal per line, identical to the SPA tuple, checked by script), PRECONSUME_TIMEOUT (10 s), resume_mode_for, ApprovalSpend with is_spent, and approval_spend_for. (2) trait ApprovalConsumer: Send + Sync, consume_within_bound, GrpcApprovalConsumer, preconsume_request (the one ConsumeApprovalRequest literal, omit_call true), PreconsumeRefusal and preconsume_refusal. (3) consume_then_launch and spawn_consume_then_launch (the only tokio::spawn of the flow, oneshot result). (4) ContinueDispatchFailure, classify_continue_dispatch_failure, continue_refusal_event, continue_failure_event, dispatch_unknown_event, connected_payload. Plus the test-only run_detail_value hunk in http_routes.rs. Mutation checks on sse.rs (owned): 15 production breaks each turned the intended tests red and were restored byte for byte (cmp identical, sha256 baed1fdb...). Dropping Sync from the trait fails to compile with exactly the review finding (&C not Send). Nothing was run against docker or a database.",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+     ],
+     "tests_added": [
+      "sse::continue_run_tests::resume_mode_for_picks_loop_only_when_enabled_and_resumable",
+      "sse::continue_run_tests::approval_spend_for_is_spent_only_on_the_pre_consume_path",
+      "sse::continue_run_tests::the_continue_vocabularies_have_the_designed_shape",
+      "sse::continue_run_tests::the_http_refusals_carry_the_statuses_the_route_sends",
+      "sse::continue_run_tests::the_continue_vocabularies_are_closed",
+      "sse::continue_run_tests::the_preconsume_request_spends_without_reading_the_call",
+      "sse::continue_run_tests::a_consume_that_did_not_win_is_a_409_before_any_stream_opens",
+      "sse::continue_run_tests::a_consume_refusal_maps_to_its_closed_http_code",
+      "sse::continue_run_tests::a_consume_failure_echoes_nothing_but_closed_codes",
+      "sse::continue_run_tests::the_gateway_reads_only_the_won_flag_of_a_consume",
+      "sse::continue_run_tests::the_consumer_trait_declares_send_and_sync",
+      "sse::continue_run_tests::an_approval_consumer_satisfies_the_spawn_bounds (plus the never-called compile-time fn the_real_consumer_can_be_spawned)",
+      "sse::continue_run_tests::a_launch_follows_its_consume_and_never_precedes_it",
+      "sse::continue_run_tests::two_parallel_continues_with_distinct_tokens_get_one_proceed_and_one_409",
+      "sse::continue_run_tests::two_parallel_continues_with_the_same_token_get_one_proceed_and_one_409",
+      "sse::continue_run_tests::a_dropped_receiver_cannot_spend_an_approval_without_dispatching",
+      "sse::continue_run_tests::a_launch_that_never_follows_a_lost_consume_does_not_run",
+      "sse::continue_run_tests::a_hung_consume_ends_ambiguous_within_the_bound",
+      "sse::continue_run_tests::the_pre_consume_flow_is_spawned_in_exactly_one_place",
+      "sse::continue_run_tests::a_refused_continuation_is_classified_without_terminalizing",
+      "sse::continue_run_tests::every_frame_token_is_in_the_closed_vocabulary_and_all_of_it_is_reachable",
+      "sse::continue_run_tests::a_refusal_frame_is_not_retryable_and_names_the_run",
+      "sse::continue_run_tests::connected_payload_adds_only_the_spend_flag",
+      "sse::continue_run_tests::the_grpc_consumer_asks_for_the_spend_only_and_reads_only_the_won_flag (real tonic transport, hand-rolled ConsumeApproval server, checks the Bearer header and the request bytes)",
+      "http_routes::run_detail_value_tests::run_detail_value_never_carries_resumable_or_park_reason"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -p model-gateway --lib continue_run_tests (baseline, then after every hunk, then final)",
+       "outcome": "baseline 16 passed; after hunk 1: 21; hunk 2: 27; hunk 3: 35; hunk 4: 39; real-transport test: 40 passed. Each new hunk's tests were first run without the implementation and failed to compile on the missing symbols only (E0425/E0433)."
+      },
+      {
+       "command": "cargo test -p model-gateway --lib",
+       "outcome": "baseline 1821 passed, 4 ignored; final 1846 passed, 4 ignored (+24 sse.rs, +1 http_routes.rs)"
+      },
+      {
+       "command": "cargo test -p model-gateway --test zdr_posture_matrix",
+       "outcome": "6 passed before and after"
+      },
+      {
+       "command": "cargo test -p execution-core --test durable_loop_contract",
+       "outcome": "17 passed before and after (s7b-2 files were mid-edit in the worktree; no transient failure hit me)"
+      },
+      {
+       "command": "cargo check --workspace --all-targets --keep-going",
+       "outcome": "exit 0 in 2m10s; only pre-existing dead_code warnings elsewhere (provider, start_managed_run_inner, verification_result_for, decision_closer); none from the new items"
+      },
+      {
+       "command": "cargo check -p model-gateway --lib",
+       "outcome": "no warnings (every new item carries #[allow(dead_code)] with a wired-by-S7c-B1 note)"
+      },
+      {
+       "command": "cargo clippy -p model-gateway --lib --tests --message-format=short",
+       "outcome": "no warnings left in the new production block; three pedantic test nits (map/unwrap_or_else, by-value helper, item after statement) fixed by hand and re-verified green; remaining clippy warnings in sse.rs are pre-existing items"
+      },
+      {
+       "command": "mutation group A (10 breaks: launch before consume, Ok(false) proceeds, omit_call false, NotFound arm removed in classify, approval_not_found listed as 409, continue_run code typo, catch-all passes the status through, connected_payload always flags spend, continue_refusal_event always flags spend, PRECONSUME_TIMEOUT 30 s)",
+       "outcome": "17 tests red, each mutation caught by its intended tests; restored from copy, cmp identical"
+      },
+      {
+       "command": "mutation group B (tokio::spawn replaced by drop(async move), continue_run code typo alone, closed-token typo in classify, ZDR trailer branch disabled)",
+       "outcome": "9 tests red including a_dropped_receiver..., the two races, the_pre_consume_flow_is_spawned_in_exactly_one_place, the_continue_vocabularies_are_closed, every_frame_token..., a_refused_continuation_is_classified...; restored, cmp identical"
+      },
+      {
+       "command": "mutation M1: trait ApprovalConsumer: Send (Sync dropped)",
+       "outcome": "does not compile: future cannot be sent between threads safely, &C is not Send because C is not Sync (the design review finding); restored, cmp identical, final sha256 baed1fdbf5f8e04cd3eff1b4b6ed78b0b0289800521f4ff7dfb00e0b3a1b9e95"
+      },
+      {
+       "command": "python3 parse of the two vocabulary consts in sse.rs and of the SPA tuple in chat-run-continue-contract.ts",
+       "outcome": "10 HTTP pairs and 22 frame codes parse the way the deferred BFF parity test expects; the frame set equals CHAT_RUN_CONTINUE_FRAME_REFUSALS exactly"
+      }
+     ],
+     "deviations": [
+      "http_routes.rs is not in this unit's ownership list, but the design's step 5 names the run_detail_value test and no other unit touches that file. I added one test-only hunk (a new mod run_detail_value_tests right after run_detail_value, 33 lines, no production change). It cannot be mutation-checked by me because I may not break a file I do not own, so it is proven only by passing (it would fail if resumable or park_reason were added to the allowlist; not demonstrated).",
+      "resume_mode_for keeps the design's two-bool signature (resume_enabled, resumable). The task text mentions the checkpoint too: the session-core checkpoint switch is not readable by the gateway, with it off no fold exists and RunDetail.resumable is false, so it reaches the function through that flag. The doc comment says so.",
+      "The 10 s bound is a free function consume_within_bound(rpc) (used by GrpcApprovalConsumer::consume) instead of code inline in consume, so the bound can be proven with a never-answering fake on a paused clock without a socket; behaviour is as the design states (Elapsed becomes Status::deadline_exceeded, only .consumed is read). GrpcApprovalConsumer also has a new() constructor for the wiring.",
+      "All new tests live inside the existing continue_run_tests module (so the VERIFY filter runs them) and use the module's own production_text()/item_text() helpers: scans cut the production text before the test module and name the item (fn name to its closing brace), never the whole file. PRECONSUME_TIMEOUT stays private to sse.rs; the two vocabularies are pub(crate) as asked.",
+      "Not in the design: a hand-rolled tonic unary server (tower::service_fn plus tonic::server::Grpc, no 25-method trait mock) to test GrpcApprovalConsumer over a real transport, and a classification-coverage test that proves every one of the 22 frame tokens is producible. Both are test-only.",
+      "The mutations ran for a few minutes each against the shared worktree file sse.rs, which execution-core's durable_loop_contract reads as text. None touched continue_resume, segment_no or the mode literals those scans anchor on, but a concurrent s7b-2 run in that window could in principle have seen a mutated sse.rs; the file is restored and verified identical.",
+      "Line endings: sse.rs and http_routes.rs are LF in the worktree (0 CR bytes before and after); the design's CRLF note does not apply and every new line is LF. New scan tests still normalise \\r\\n."
+     ],
+     "blockers": [],
+     "names_for_later_units": [
+      "model-gateway sse.rs (all private except the two vocab consts, all #[allow(dead_code)] until B1 removes the attributes as it wires them): pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] (code first, StatusCode::X second, one entry per line, no quotes or parentheses in comments inside the list), pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] (one literal per line), const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] (pub(crate)), const PRECONSUME_TIMEOUT.",
+      "fn resume_mode_for(resume_enabled: bool, resumable: bool) -> &'static str; enum ApprovalSpend { NotSpent, SpentByGateway } with const fn is_spent(self); fn approval_spend_for(resume_enabled: bool) -> ApprovalSpend. B1 reads loop_resume_enabled() once and passes the bool to both.",
+      "trait ApprovalConsumer: Send + Sync { fn consume(&self, ConsumeApprovalRequest) -> impl Future<Output = Result<bool, tonic::Status>> + Send }; GrpcApprovalConsumer::new(state.orchestration_client.clone(), model_bearer.clone()); fn consume_within_bound(rpc) (the 10 s bound); fn preconsume_request(org_id, run_id, approval_id, claim_token) (the only ConsumeApprovalRequest literal); enum PreconsumeRefusal { Closed(StatusCode, &'static str), Status(tonic::Status) } (derives Debug); fn preconsume_refusal(Result<bool, Status>) -> Result<(), PreconsumeRefusal>.",
+      "async fn consume_then_launch<C, T>(&C, request, impl FnOnce() -> T) -> Result<T, PreconsumeRefusal>; fn spawn_consume_then_launch<C, T>(C, request, impl FnOnce() -> T + Send + 'static) -> tokio::sync::oneshot::Receiver<Result<T, PreconsumeRefusal>> (the only tokio::spawn of the flow; its body contains consume_then_launch(&consumer). B1: handle Ok(Ok(sse)), Ok(Err(Closed(s, c))) via continue_error(s, c), Ok(Err(Status(st))) via grpc_status_to_http(&st), Err(_) via continue_error(503, continue_unavailable). Compile proof: the_real_consumer_can_be_spawned plus assert_send_and_static for AppState, SessionRun, VerifiedModelBearer, VerifiedExecutionBearer, VerifiedBearer, VerifiedInferenceBearer in an_approval_consumer_satisfies_the_spawn_bounds.",
+      "enum ContinueDispatchFailure { Refused(&'static str), Unreachable, Unknown } (Debug, Clone, Copy, PartialEq, Eq); fn classify_continue_dispatch_failure(&tonic::Status); fn continue_refusal_event(request_id, run_id, token: &'static str, spend) -> Event (debug_asserts the token is in CONTINUE_FRAME_REFUSALS; B1 uses it with continue_refused for a local request-construction failure after a pre-consume); fn continue_failure_event(request_id, run_id, &ContinueDispatchFailure) -> Event (spent regime only); fn dispatch_unknown_event(spend, request_id, run_id) -> Event; fn connected_payload(run_id, thread_id, request_id, spend) -> Value (argument order: run_id, thread_id, request_id).",
+      "Test helpers in continue_run_tests B1 can reuse: production_text(), item_text(header, terminator), frame_of(Event) -> (event name, JSON), closed(), EVERY_CODE, REFUSAL_CARRIERS, CasConsumer, ScriptedConsumer, ParkedConsumer, ConsumeOnlyServer/consumer_over_grpc. B1 scans must keep continue_run's body free of the words segment_no and of consume_then_launch( (the guard counts consume_then_launch(& once in production, in the spawner).",
+      "For the BFF parity tests (A5 deferred text in build3a.json): the vocabulary shapes match what its parser assumes (verified with an equivalent Python parse: 10 HTTP pairs, 22 frame codes, frame set equal to the SPA tuple); the Rust test text itself was not compiled by me. Its status_of map covers BAD_REQUEST, UNAUTHORIZED, NOT_FOUND, CONFLICT, SERVICE_UNAVAILABLE, which are exactly the statuses used."
+     ],
+     "deferred_files": [
+      {
+       "path": "plan Build ledger row for S7c-A4 (text for the lead to add; I did not edit the plan doc)",
+       "content": "WS03 S7c-A4 (gateway pure pieces), built 2026-10-18, uncommitted. model-gateway sse.rs only, all before continue_run and unwired (continue_run, continue_resume and agentic_run_stream untouched; with every switch off or on the route is byte-for-byte what S7c-A5 left): CONTINUE_HTTP_REFUSALS (10), CONTINUE_EXECUTOR_MESSAGE_TOKENS (17), CONTINUE_FRAME_REFUSALS (22), PRECONSUME_TIMEOUT 10 s, resume_mode_for(resume_enabled, resumable), ApprovalSpend and approval_spend_for, trait ApprovalConsumer: Send + Sync, GrpcApprovalConsumer, consume_within_bound, preconsume_request (omit_call true), PreconsumeRefusal and preconsume_refusal, consume_then_launch, spawn_consume_then_launch (the only tokio::spawn of the flow), ContinueDispatchFailure with classify_continue_dispatch_failure, continue_refusal_event, continue_failure_event, dispatch_unknown_event, connected_payload; plus a test-only run_detail_value_never_carries_resumable_or_park_reason in http_routes.rs. Verified: continue_run_tests 16 -> 40, model-gateway lib 1821 -> 1846 (4 ignored unchanged), zdr_posture_matrix 6, durable_loop_contract 17, cargo check --workspace --all-targets --keep-going exit 0. The Sync supertrait is compile-proven (dropping it fails with &C not Send), the detach is behaviour-proven (a receiver dropped mid-RPC still sees the commit and exactly one launch; replacing the spawn turns 6 tests red), the real consumer is exercised over a real tonic transport (Bearer header, spend-only request bytes, only .consumed read, a same-claim replay carrying the call is not a win). 25 mutations restored byte for byte. Not covered here: continue_resume arity, continue_run wiring, agentic_run_stream arms and the typed-refusal arm, the BFF gateway-parity tests (deferred text from A5, shapes verified), the B2 contract guards (S7c-B1, B2). The run_detail_value hunk is proven by passing only (file outside the unit's ownership, no mutation run)."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "classify_continue_dispatch_failure is spend-agnostic and its doc does not say so. It returns Refused for InvalidArgument, Unauthenticated and PermissionDenied from RunAgent. The design (regime 3) requires a continuation the gateway did NOT pre-consume to keep the committed terminalizing agent_dispatch_rejected arm for exactly those three codes. Nothing in this unit encodes or tests that split.",
+       "evidence": "The classify match arm groups FailedPrecondition | Aborted | InvalidArgument | PermissionDenied | Unauthenticated into Refused. The tests a_refused_continuation_is_classified_without_terminalizing and the REFUSAL_CARRIERS constant treat all five as refusals. The design's interfaces section says an unspent continuation refused with InvalidArgument, Unauthenticated or PermissionDenied takes the committed arm and terminalizes, and the 'switches off means byte-identical' rule depends on it. S7c-B1 must apply the split itself.",
+       "suggested_fix": "Add a sentence to the classify doc that the caller must send InvalidArgument, Unauthenticated and PermissionDenied from an unspent (NotSpent) continuation to the committed rejection arm. Preferably add a small pure helper, for example classify_for(spend, &Status) -> Option<ContinueDispatchFailure>, plus a test, so B1 cannot get it wrong. At minimum, make B1's byte-identical-switch-off test cover an unspent InvalidArgument."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "continue_refusal_event does not guard its own contract. The CONTINUE_FRAME_REFUSALS doc says continue_unreachable and continue_outcome_unknown exist only with approval_spent, and the SPA treats them as spent-only. The function accepts those tokens with ApprovalSpend::NotSpent and emits them without the flag. Its debug_assert checks only vocabulary membership.",
+       "evidence": "continue_refusal_event(\"r\",\"run\",\"continue_outcome_unknown\", ApprovalSpend::NotSpent) is accepted, and no test covers it. Only the spent-only wrappers (continue_failure_event, dispatch_unknown_event) pass SpentByGateway. The SPA contract CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS says there is no unflagged form of these codes.",
+       "suggested_fix": "Add debug_assert!(spend.is_spent() || !matches!(token, \"continue_unreachable\" | \"continue_outcome_unknown\")). Add a should_panic test or a scan, and put the same list in a named const the BFF parity test can read."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "approval_spend_for(resume_enabled) returns SpentByGateway from the switch alone, while the ApprovalSpend doc and the design invariant say the value is set only after a won consume, inside the launch closure. If B1 computes it before the consume and uses it for a frame on a path where the consume was lost or refused, the gateway would claim approval_spent when it spent nothing.",
+       "evidence": "The ApprovalSpend doc says 'set only after a consume that was won'. approval_spend_for contains `if resume_enabled { SpentByGateway }`, and its test pins only that mapping. No pure-piece test ties SpentByGateway to the won-consume path.",
+       "suggested_fix": "Reword the docs to say approval_spend_for names the regime and a frame may carry the flag only on the launch path after consume_then_launch returned Ok. B1 needs a test that a 409 or 503 before the stream carries no approval_spent. No code change is needed in this unit."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "A zero-retention catalogue refusal on the consume (session-core refuse_zdr_continuation returns FailedPrecondition with the ZDR trailer) is mapped by preconsume_refusal to 409 not_resumable. The typed refusal is lost, and the design's text 'possibly the typed ZDR body' covers only PermissionDenied. This is not a leak. The gateway's persistent gate refuses ZDR and waived turns before any consume, so it is defence in depth only.",
+       "evidence": "preconsume_refusal matches on code only, and FailedPrecondition falls to `_ => not_resumable` unless the message is one of three tokens. It never calls Refusal::from_status. refuse_zdr_continuation in session-core retention_receipt.rs returns Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(Code::FailedPrecondition).",
+       "suggested_fix": "Optional: add a pre-match arm for Refusal::from_status(&status).is_some() returning Status(status) so it reads like the owner check's body, with a test. Otherwise document it as intended."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "The closed-vocabulary scan the_continue_vocabularies_are_closed only finds literal `StatusCode::X, \"code\"` pairs in continue_turn_gate, continue_preflight and the continue_run text. It misses a code built through a variable or a differently shaped call, and 'continue_run body' is everything after the fn header up to the test module. Its scope is stated, but it is weaker than its name.",
+       "evidence": "The pairs() closure requires 'StatusCode::' then an uppercase name, a comma, then a quoted string. continue_persistent_gate is not scanned, and `scanned.len() >= 8` is the only floor.",
+       "suggested_fix": "Also scan continue_persistent_gate by name. Have B1 route every new refusal through continue_error and extend the scan to its new helpers."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+       "issue": "The new run_detail_value_never_carries_resumable_or_park_reason test is in a file outside the unit's ownership and is proven only by passing. The implementer could not mutation-check it. It guards the D5 invariant that resumable and park_reason never reach the browser.",
+       "evidence": "The diff is a test-only hunk of 33 added lines and no production change. It asserts the keys 'resumable', 'park_reason' and 'parkReason' are absent and that the text has no 'resumable' substring. It would stay green if the projection renamed the field, for example to 'is_resumable', but that would contain the substring and fail, so the check is reasonable. It was not shown red.",
+       "suggested_fix": "The lead can do a one-line mutation (add \"resumable\": run.resumable to run_detail_value), confirm red, and restore."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+       "issue": "Cross-unit note, A5-fix owns this file. The BFF-owned message for continue_unavailable says 'The same request can be sent again.' After an ambiguous pre-consume that actually committed, the same-token retry is a 409 continuation_already_consumed, which is the 'click spent for nothing' path in the failure matrix. A5's own test comment says so.",
+       "evidence": "CONTINUE_RELAYED_ERRORS entry: (\"continue_unavailable\", 503, \"The continuation could not be confirmed. The same request can be sent again.\"). The failure matrix says: 'if it committed the click is spent, a same-token retry is 409'.",
+       "suggested_fix": "For the A5 owner: reword to something like 'The continuation could not be confirmed. Check the run before trying again.' Not a defect of the s7c-a4 code."
+      }
+     ],
+     "checked": [
+      "Read the full git diff of sse.rs (1656 added, 0 removed lines, all before continue_run and in the test module) and http_routes.rs (33 added lines, test only). Confirmed LF line endings with 0 CR bytes, and no Cargo.toml change (regex, tower and tokio-stream are already dependencies).",
+      "Ran the unit's verification commands. cargo test -p model-gateway --lib continue_run_tests: 40 passed. cargo test -p model-gateway --lib: 1846 passed, 4 ignored. zdr_posture_matrix: 6 passed. execution-core durable_loop_contract: 17 passed. No transient LNK1104 hit. I did not rerun the workspace cargo check and relied on the implementer's report. No file was edited and no docker or DB test was run. I wrote one scratch diff file into the scratchpad directory only.",
+      "Switches off byte-identical: every new production item carries #[allow(dead_code)] and nothing is called from continue_run, continue_resume or agentic_run_stream. The new production block has no env read, no segment_no and no logging, so the claim token and bearer are never logged or persisted in it. The existing continue_run tests pass unchanged.",
+      "INV-02 and claim races: the consume-before-launch ordering is proven. Only Ok(true) launches, and Ok(false), including a same-claim replay that carries the call, is a 409. Parallel runs with distinct and with identical tokens each get exactly one launch. The detach via the single tokio::spawn is behaviour-tested by the dropped-receiver test. Send + Sync on the trait is compile-proven. A hung consume ends in 503 within the 10 s bound with no launch. The real consumer over a real tonic transport sends the session Bearer header and the omit_call request, and reads only .consumed.",
+      "Information disclosure: every consume failure maps to a closed code except PermissionDenied and Unauthenticated, which use grpc_status_to_http, the same body the owner check returns. A test with a secret message shows no echo. Executor tokens are matched exactly and an unlisted message becomes continue_refused. I cross-checked the 17 executor message tokens against execution-core (resume.rs Refusal::as_str and status codes, agent.rs, grpc.rs). The codes match: FailedPrecondition, Aborted for continue_in_progress, InvalidArgument for resume_incomplete, PermissionDenied for resume_forbidden. The ZDR trailer is keyed on its catalogue code, not the message.",
+      "ZDR and waived: the new pieces do not gate on retention. continue_persistent_gate already refuses ZDR and waived turns before any read, and session-core refuse_zdr_continuation refuses a ZDR credential on the consume. The vocabularies equal the SPA tuple of 22 and the BFF relayed list of 8 (10 minus continue_incomplete and missing_bearer). There is no fold, park or continue persistence in this unit.",
+      "Design conformance against s7c-v3 step 5 and the interfaces section: all named items exist with the stated signatures. The consume request is built in one literal with omit_call true and empty step and fingerprint. Session-core's spend-only path ignores an empty fingerprint, as before. Deviations (consume_within_bound as a free function, GrpcApprovalConsumer::new, http_routes test hunk) are benign and declared."
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "No test checks the 10 s bound on the real consumer. a_hung_consume_ends_ambiguous_within_the_bound tests a fake (Hung) that calls consume_within_bound itself, so it proves only the free function. If GrpcApprovalConsumer::consume stopped using the bound, every test would still pass. Design test T16 and file_changes 8 ask for the timeout inside the real consumer's consume.",
+       "evidence": "GrpcApprovalConsumer::consume is the only production caller: `consume_within_bound(client.consume_approval(request)).await`. Try the mutation `client.consume_approval(request).await.map(|r| r.into_inner().consumed)`. the_gateway_reads_only_the_won_flag_of_a_consume still finds `.consumed` in the impl text, the_grpc_consumer_asks_for_the_spend_only_and_reads_only_the_won_flag still passes because its server answers, and the Hung test never touches GrpcApprovalConsumer. The implementer's PRECONSUME_TIMEOUT mutation (30 s) is caught only by the assert_eq on the const. Removing the bound is a different mutation and nothing catches it. Without the bound, a hung session-core keeps the /continue handler waiting indefinitely, past the 503 continue_unavailable the design promises.",
+       "suggested_fix": "Run GrpcApprovalConsumer over the existing ConsumeOnlyServer with a handler that never answers, under #[tokio::test(start_paused = true)]. Real sockets auto-advance the paused clock when the runtime is idle. Assert Err(DeadlineExceeded) and then 503 continue_unavailable with no launch. A minimum alternative is a scoped scan that requires `consume_within_bound(` in the body of `impl ApprovalConsumer for GrpcApprovalConsumer`, plus a mutation that removes it."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "production_text() is documented as the production text, with the note 'Test items that quote a name cannot stand in for it'. It actually takes everything before `mod continue_run_tests`, and that includes six other #[cfg(test)] modules: subscription_route_tests, agent_route_tests, fallback_tests, tests, agentic_follow_tests and zdr_provenance_tests. Several count and contains guards depend on it, so test text in those modules can satisfy or break them.",
+       "evidence": "In sse.rs, #[cfg(test)] modules start at lines 595, 667, 7139, 10808, 12567 and 13083. continue_run_tests starts at 14202, and production_text splits on \"\\n#[cfg(test)]\\nmod continue_run_tests {\". These guards scan that text: the_consumer_trait_declares_send_and_sync (contains `trait ApprovalConsumer: Send + Sync {`), the_gateway_reads_only_the_won_flag_of_a_consume (exactly one ConsumeApprovalRequest literal) and the_pre_consume_flow_is_spawned_in_exactly_one_place (exactly one `consume_then_launch(&`). A ConsumeApprovalRequest literal added to the large `mod tests` would break the count, and a quoted trait line there would satisfy the contains check. The implementer's report says the scans 'cut the production text before the test module', which overstates what they do.",
+       "suggested_fix": "Strip every `#[cfg(test)]` item from the text, for example by removing each `\\n#[cfg(test)]\\nmod ` block up to its closing `\\n}\\n`. Or rename the helper and its doc to say what it scans. The item_text scans scoped by name are fine."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "The same-token race test exercises the same code path as the distinct-token one, so it adds no evidence for the 'new behaviour' it is named for. CasConsumer ignores the token and returns Ok(false) to whichever call loses, so the two tests differ only in a string the fake never compares. The real same-claim shape (consumed false, already_consumed true, same_claim true) reaches the gateway only in the gRPC test. Both 'race' tests mostly prove the fake's mutex.",
+       "evidence": "CasConsumer::consume sets the winner if none is set and otherwise returns Ok(false), whatever request.claim_token is. two_parallel_continues_with_the_same_token_get_one_proceed_and_one_409 and the distinct-token test have identical assertions.",
+       "suggested_fix": "Let the fake return the session-core outcome it models, a ConsumeApprovalResponse-like (consumed, already_consumed, same_claim), and drive it through consume_within_bound or the response read. Then the same-token test pins that same_claim true with consumed false is still a 409. Or merge the two tests and state honestly what they prove."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "preconsume_refusal maps a ZDR-catalogue refusal from the consume to 409 not_resumable and drops its typed body. session-core's refuse_zdr_continuation returns DURABLE_MUTATION_FORBIDDEN on FailedPrecondition with a trailer. The interface text says 'ZDR typed refusals keep grpc_status_to_http's body'. classify_continue_dispatch_failure checks the trailer first, but the consume map does not.",
+       "evidence": "preconsume_refusal: `tonic::Code::FailedPrecondition => Closed(CONFLICT, match status.message() { ..., _ => \"not_resumable\" })`, with no check of Refusal::from_status. session-core consume_approval calls `retention_receipt::refuse_zdr_continuation(&caller)?` first. In practice continue_persistent_gate refuses ZDR and waived turns before the consume, so this is reachable only if the posture drifts between the gateway and session-core.",
+       "suggested_fix": "Before the code match, return PreconsumeRefusal::Status(status) when Refusal::from_status(&status).is_some(), as the other gateway reads do. Add a test case with Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(FailedPrecondition). Or record in the design that this collapse is intended."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "Two of the new tests check how the code is written, not what it does. the_consumer_trait_declares_send_and_sync greps for the trait header, which the compile-time proof the_real_consumer_can_be_spawned already enforces. the_http_refusals_carry_the_statuses_the_route_sends restates the const literal by literal.",
+       "evidence": "the_consumer_trait_declares_send_and_sync asserts that production.contains(\"trait ApprovalConsumer: Send + Sync {\"). Reformatting the header, for example `trait ApprovalConsumer: Sync + Send {`, turns it red with no change in behaviour. the_http_refusals_carry_the_statuses_the_route_sends repeats the ten pairs of CONTINUE_HTTP_REFUSALS. The real route-to-list check is the_continue_vocabularies_are_closed.",
+       "suggested_fix": "Keep the compile proof and drop the text grep, or leave the grep to the planned B2 durable_loop_contract guard with its Sync mutation. The duplicated status table can stay as documentation but is not a guard."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+       "issue": "The implementer report says sse.rs and http_routes.rs are both LF with 0 CR bytes. http_routes.rs is CRLF: `git ls-files --eol` reports w/crlf and the file has 11724 CR bytes in 11724 lines. The new test hunk is CRLF too, so the file stays consistent and nothing is broken, but the report's line-ending claim is wrong for this file. This test hunk sits in a file outside the unit's ownership. The report declares it, and it has not been mutation-checked.",
+       "evidence": "`git ls-files --eol`: i/lf w/crlf for http_routes.rs and i/lf w/lf for sse.rs. `tr -cd '\\r' | wc -c` gives 11724 for http_routes.rs and 0 for sse.rs. Lines 6080-6112 contain 48 CR bytes.",
+       "suggested_fix": "Correct the report. When the lead commits, check that the mutation the implementer could not run is acceptable: adding `\"resumable\"` to run_detail_value's allowlist would turn run_detail_value_never_carries_resumable_or_park_reason red."
+      }
+     ],
+     "checked": [
+      "git diff of sse.rs: additions only (0 removed lines). continue_run, continue_resume and agentic_run_stream are byte-unchanged, so with every switch off or on the route behaves as committed. Every new item sits before continue_run, and none contains segment_no.",
+      "git diff of http_routes.rs: one test-only module (run_detail_value_tests), no production change. It is CRLF, consistent with the file.",
+      "Each piece against s7c-v3 steps[5], interfaces, file_changes 8/9, tests 8-21 and invariants: vocabularies 10/17/22 with the frame set equal to executor tokens + 2 + 3, resume_mode_for(bool, bool), ApprovalSpend and approval_spend_for, trait ApprovalConsumer: Send + Sync, GrpcApprovalConsumer, preconsume_request (the single literal, omit_call true, step and fingerprint empty), the preconsume_refusal map, consume_then_launch, spawn_consume_then_launch (the single tokio::spawn, oneshot), classify order (ZDR trailer, NotFound, the 5 carriers with exact token or continue_refused, connect-refused Unreachable, else Unknown), continue_refusal_event, continue_failure_event, dispatch_unknown_event, connected_payload.",
+      "session-core consume_approval handler and consume_approval_with: the refusal messages are exactly approval_not_granted, approval_expired, approval_not_resumable and approval_action_mismatch; NotFound and InvalidArgument texts; a same-claim replay returns consumed=false, so the gateway's 409 for the same token is correct; every non-ambiguous refusal path leaves the approval unconsumed.",
+      "agentic_run_stream spawns its dispatch eagerly and ignores a closed tx, so the doc claim holds that a launch dispatches even when the receiver is dropped.",
+      "The GrpcApprovalConsumer bearer is VerifiedSessionBearer (Arc<str>, aliased as VerifiedModelBearer), the same one spawn_run_dispatch gives the executor as its session bearer. No Debug impl exposes it, and nothing new logs a claim token or bearer.",
+      "The executor refusal tokens currently in resume.rs Refusal::as_str and the agent.rs failed_precondition, aborted and invalid_argument literals are all in CONTINUE_EXECUTOR_MESSAGE_TOKENS or reach the gateway through the ZDR trailer. The loop_checkpoint_* tokens would collapse to continue_refused, which is safe.",
+      "Gateway CONTINUE_FRAME_REFUSALS is set-equal to the SPA CHAT_RUN_CONTINUE_FRAME_REFUSALS (Python parse); the HTTP list has 10 pairs and the SPA HTTP list has the 8 relayed codes.",
+      "The scans' scope: continue_run is the last production item before continue_run_tests, so the continue_run body slice is correct. production_text includes six earlier test modules (finding).",
+      "cargo test -p model-gateway --lib -- continue_run_tests run_detail_value_tests: 41 passed.",
+      "cargo test -p model-gateway --lib: 1846 passed, 4 ignored.",
+      "cargo test -p model-gateway --test zdr_posture_matrix: 6 passed.",
+      "cargo test -p execution-core --test durable_loop_contract: 17 passed (s7b-2 files mid-edit, no transient failure).",
+      "No docker run, no DB-backed test run, no file edited by this reviewer."
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --lib continue_run_tests (cwd apps/Model Plane/rust)",
+      "outcome": "EXIT 0. Filter matched 40 tests, all in the mod continue_run_tests block of services/model-gateway/src/sse.rs (line 14202). Test run finished in 2.07s. Log: v1-continue_run_tests.log",
+      "passed": "40 passed, 0 failed, 0 ignored (1810 filtered out)"
+     },
+     {
+      "command": "cargo test -p model-gateway --lib",
+      "outcome": "EXIT 0. 1850 tests run. The 4 ignored are pre-existing and none is in the continue path: stream_buffer.rs:832, :1016 and :1051 (need REDIS_URL, some also a phase or flag path) and source_validation.rs:4438 (A/B helper, VEREVON_AB_CASES). None needs DATABASE_URL. Finished in 14.57s. Log: v2-gateway-lib.log",
+      "passed": "1846 passed, 0 failed, 4 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_posture_matrix",
+      "outcome": "EXIT 0. Test run finished in 0.02s. Log: v3-zdr-posture.log",
+      "passed": "6 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "EXIT 0. Test run finished in 10.99s. Ran against the working tree as it was, including s7b-2's uncommitted runtime_loop edits. Log: v4-durable-loop-contract.log",
+      "passed": "17 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "EXIT 0, finished in 31.55s, zero errors, no LNK1104. Five warnings, none in model-gateway: execution-core lib 3 (capability_policy.rs:181 unreachable else; approval_delivery_worker.rs:744 verification_result_for never used; runtime_loop/resume.rs:552 decision_closer never used); session-core bin 2 (auth.rs:73 ZdrWaiver::provider never used; terminalization.rs:691 start_managed_run_inner never used). Each is defined the same way at HEAD 30e0cee6 and its HEAD call sites look test-only, so they look pre-existing (not confirmed by a HEAD build). The Windows-only target failures noted in memory did not reproduce. Log: v5-workspace-check.log",
+      "passed": "check only: 0 errors, 5 warnings"
+     },
+     {
+      "command": "Read-only checks: git status, git ls-files --eol, git grep at HEAD, git diff stat, file mtimes, grep for ignore attributes and the continue_run_tests module",
+      "outcome": "Edited nothing; no git write commands; tests written or changed by me: none; no retries needed. Tree is not clean: HEAD 30e0cee6 plus uncommitted edits in 15 files: this unit's services/model-gateway/src/sse.rs (+1656, 0 deleted) and http_routes.rs (+33, 0 deleted); s7b-2's execution-core runtime_loop agent.rs, closers.rs, effect.rs, fold.rs, resume.rs; 8 frontend files (s7c-a5-fix); untracked .plan-work/. The task text said the tree was clean at round start, so these results cover the combined working tree. Verify logs were written 19:08:26 to 19:10:01, after the last source writes (sse.rs 18:49:55, http_routes.rs 18:34:04, runtime_loop files 18:19 to 18:46). Line endings: sse.rs is LF only (0 CR lines) and http_routes.rs is CRLF only (the autocrlf working-copy form); neither shows whole-file churn in the diff. The source-scan helper production_text() in sse.rs normalises CRLF, so it is safe on CRLF checkouts. Logs directory: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ (v1 to v5 .log files).",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s7c-a5-fix",
+   "impl": {
+    "summary": "All seven S7c-A5 review fixes are built and verified (item 8 was a \"do not build\"). Items 1 to 6 were tests first; I saw the new ones fail for the right reason, then they passed. Item 7 is a pinning test that passed straight away, because it records behaviour that already exists. Gateway: 647 passed, 1 ignored (was 642/1), plus 2+3+1 integration, exit 0. SPA: 105 tests pass in src/shared/actions and the client test. The full vitest run has the same 7 failing tests in 5 files as before. tsc has the same 34 errors, and eslint has the same 1 error and 191 warnings. DB-backed tests: this unit has none.\n\n1. approvalSpent honesty (done). `approvalSpent` was already a no/yes/unknown type, so I reclassified rows rather than changing the type.\n   - `continue_disabled`, `not_resumable` and `approval_not_found` are now `unknown`, retryable false, followRun true. The gateway checks the switch, the run state and the pairing before the consumed flag, and the consume answers a replay on an ended run as not found, so all three can answer a spent approval.\n   - `approval_not_granted`, `approval_expired` and `approval_not_resumable` stay `no`. They are only produced for an unconsumed approval: approvals update only `WHERE status='requested'`, and the consume checks `consumed_at` before the grant, expiry and descriptor. They are exported as CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS and pinned.\n   - `continuation_already_consumed` is `yes`; `continue_unavailable` is `unknown` with a same-token retry.\n   - The guards, the registry description and tests follow, and a row-by-row table test pins all of it.\n\n2. Re-read instruction removed (done) from the contract text, the 502 wording, the registry description and the client doc comment. The `reread` field is gone from the effect type. The replacement is exported as CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE: do not assume either way, follow the run by its id with the existing run read, and resend with the same claim token (409 continuation_already_consumed means the click was spent, otherwise it continues). Tests assert the strings and that no text matches /re-?read the approval/i, including the raw sources via `?raw`.\n\n3. Transport failure class (done): `chatRunContinueTransportFailureOf`, CHAT_RUN_CONTINUE_TRANSPORT_EFFECT and the reasons upstream_unavailable | gateway_timeout | network | unlisted. The effect is spent unknown, retryable true, followRun true. It reads 502 upstream_unavailable, any 504, an error with no status, any other failed status, a listed code under a wrong status, and the BFF's mid-stream `{error:{code:'upstream_unavailable'}}` envelope. It returns null for the 8 listed pairs, for statuses below 400 and for non-objects, so exactly one of the two guards reads each failed request (tested). It is re-exported from the client.\n\n4. `read_error_body` (done): it now matches Ok(Some), Ok(None) and Err explicitly, so a read error returns None, as its doc says. Two tests use a server that sends a complete listed error object, promises 500 more bytes and closes: one on the function, one end to end (409 model_error, not the listed code).\n\n5. Flat upstream body (done): `{\"error\": message}` is added under 401 and 403 in the upstream.rs test (8 cases, including messages equal to listed codes) and as a new handler-level test in orchestration.rs (11 cases, plus the same flat body under 409, 404 and 503). The two stale comments now say the real body is flat. These tests passed straight away because the code was already safe; a mutation that accepts a flat string as a code turns the handler-level one red.\n\n6. followRun honesty (done): CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE and the doc on the `followRun` field say it means read the run by its id, not that a run is live. They also say that after `continue_unavailable` a same-token 409 can mean spent with no run launched, and the run may be recovered within about 15 minutes of the consume (CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES = 15). Tests pin it, including that the note sits on the field's own doc comment. The BFF message for continuation_already_consumed no longer claims the run continued (\"This approval has already been used. Check the run to see what became of it.\"), and a test pins that.\n\n7. BFF relay without a switch (done): kept. A test, the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off, pins that 409 continue_disabled is relayed by its closed code, not model_error. It also scans that `continue_run` passes CONTINUE_RELAYED_ERRORS exactly once, never `&[]`, and reads no env var. The doc comment now says it is an accepted change, and the ledger text is in deferred_files.\n\n8. Gateway-parity half of the vocabulary test: not written, as instructed. The deferred text from the previous report is still where it was and still waits for the S7c-A4 constants. I also softened the two comments that claimed a pin that does not exist: the SPA test header and the CONTINUE_RELAYED_ERRORS doc. The 22 stream tokens are unpinned until A4 lands.\n\nMutation checks, all on files this unit owns, restored and verified byte for byte with the restore script and sha256. Every one turned the intended tests red:\n- not_resumable back to UNSPENT.\n- The status < 400 guard removed.\n- The mid-stream envelope read removed.\n- The pre-consume-only tuple emptied.\n- relayed_error accepting a flat string error as a code.\n- continue_run passing `&[]`.\n\nI did not run the revert of read_error_body as a mutation, since the new tests were already seen red against the original code. Cargo contention did not occur (the BFF has its own target dir), so there were no LNK1104 retries. Line endings are preserved: upstream.rs and action-registry.test.ts are CRLF, the rest LF.",
+    "files_changed": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.test.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
+    ],
+    "tests_added": [
+     "chat-run-continue-contract.test.ts: pins the whole effect table row by row with no re-read field",
+     "chat-run-continue-contract.test.ts: claims not spent only for the three refusals that cannot follow a consume",
+     "chat-run-continue-contract.test.ts: does not call not_resumable or continue_disabled unspent",
+     "chat-run-continue-contract.test.ts: eight chatRunContinueTransportFailureOf tests covering 502, 504, network, mid-stream envelope, unlisted body, null cases and exactly-one-guard",
+     "chat-run-continue-contract.test.ts: four wording tests (guidance, no re-read of an approval, followRun honesty and recovery window, followRun caveat on the field)",
+     "orchestration-client.test.ts: continueRun 502 read as a transport failure, 504/500/401 read as transport, a network TypeError, not_resumable read as unknown, and the continueRun doc comment wording",
+     "action-registry.test.ts: the description has no re-read instruction and states the ambiguous-failure guidance and the recovery window",
+     "upstream.rs: a_body_that_errors_mid_read_is_given_up_on_even_when_what_arrived_parses",
+     "upstream.rs: a_listed_code_in_a_body_that_was_cut_off_is_not_relayed",
+     "upstream.rs: a_permission_or_auth_refusal_never_echoes_the_upstream_message extended with 8 flat-body cases",
+     "orchestration.rs: a_flat_grpc_status_body_is_never_echoed_for_a_permission_or_auth_refusal",
+     "orchestration.rs: the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off",
+     "orchestration.rs: the_already_used_message_does_not_claim_a_run_was_continued"
+    ],
+    "commands_run": [
+     {
+      "command": "BASELINE before edits: cargo test --manifest-path apps/gateway/Cargo.toml --all-targets; tsc -b; eslint . -f json; vitest run (full, json)",
+      "outcome": "cargo 642 passed/1 ignored + 2 + 3 + 1, exit 0; tsc 34 errors (RemoteSupportPage 12, quarry-client 21, chat-client 1); eslint 838 files, 1 error (chat-client.ts:945), 191 warnings; vitest 3490 tests, 7 failed in 5 files (zdr-refusal x3 files, SupportPage and quarry-client files failed to run)"
+     },
+     {
+      "command": "vitest run src/shared/actions/chat-run-continue-contract.test.ts src/shared/actions/action-registry.test.ts src/shared/api/orchestration-client.test.ts (after writing the SPA tests, before the code)",
+      "outcome": "RED: 29 failed (missing exports, reread field still present, old description), as intended"
+     },
+     {
+      "command": "vitest run src/shared/actions src/shared/api/orchestration-client.test.ts (after the contract, registry and client changes)",
+      "outcome": "9 files, 105 tests passed (one test-side fix for line-wrapped doc text; one guard fix so a jsdom DOMException is read as a network error)"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --bin verevon-gateway-rs relayed_error_tests (new Rust tests, before the read_error_body fix)",
+      "outcome": "RED for the right reason: 2 failed (read_error_body returned Some(partial body); a cut-off listed code was relayed as continuation_already_consumed), 7 passed"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (after)",
+      "outcome": "exit 0: 647 passed/1 ignored (+5), continue_error_vocabulary 2, sse_relay_no_allowlist 3, ssrf_forward_not_fetch 1; rerun after the mutation checks, same"
+     },
+     {
+      "command": "Mutation checks: six on the SPA contract and the BFF (listed in the summary)",
+      "outcome": "each turned the intended tests red; every file restored and verified identical by cmp and sha256sum; no .orig-mut files left"
+     },
+     {
+      "command": "tsc -b, eslint . -f json, vitest run full (after)",
+      "outcome": "tsc 34 errors, sorted set identical to baseline; eslint 1 error and 191 warnings, set identical; vitest 3508 tests (+18), the 7 failing tests in 5 files are the identical set"
+     },
+     {
+      "command": "git diff --check and a CRLF/LF count of the 8 files",
+      "outcome": "upstream.rs and action-registry.test.ts uniformly CRLF as before; the other six uniformly LF as before; only the CRLF/LF normalisation warnings git always prints in this worktree"
+     }
+    ],
+    "deviations": [
+     "effect type: approvalSpent was already the three-state no|yes|unknown, so item 1 reclassified rows instead of changing the type. The `reread` field is removed from ChatRunContinueEffect (it encoded the removed instruction); callers that matched on it must stop. Regime-2 (unflagged executor refusal) followRun changed from false to true, because the new guidance for any ambiguous failure is to follow the run by its id.",
+     "approval_not_found is also unknown, which the task did not name: the consume reports a replay on an already-ended run as NotFound (session-core orchestration_store.rs consume_approval_with), so a spent approval can get it. The pre-consume-only reasoning for approval_expired and approval_not_resumable relies on the consume answering a consumed approval before expiry and descriptor checks (verified in committed session-core) and on the s7c-v3 design's mapping of consume refusals to those codes; the gateway side (A4) is not in the tree yet.",
+     "Added beyond the list: the transport guard also reads the BFF's mid-stream `{error:{code:'upstream_unavailable'}}` envelope, because sse_transport_error_event emits exactly that; the guard recognises an error by shape as well as by instanceof, because a jsdom DOMException is not instanceof Error.",
+     "Added beyond the list: the BFF message for continuation_already_consumed changed from 'This approval has already been used to continue the run.' to 'This approval has already been used. Check the run to see what became of it.', so it does not claim a run was launched. The two comments that claimed a pin that does not exist (SPA test header, CONTINUE_RELAYED_ERRORS doc) were softened.",
+     "The 'existing run read' is not named by function: the SPA has no run-detail read in orchestration-client, only the run-events replay and stream in run-console-client, so the text says 'the existing run read' as the task worded it. Naming a function is left to the UI wiring step.",
+     "Item 5's flat-body tests and item 7's pin test passed on first run: item 5 is coverage for already-safe code and item 7 pins existing behaviour, so there was no red phase for them. A mutation on relayed_error shows the handler-level flat test has teeth; the 401/403 flat cases alone cannot catch that particular mutation because the status check protects them.",
+     "No Edit-tool rule violation. Files existing before this unit were edited only with Edit. The temporary mutation helpers (fix-mutate.py, fix-restore.py) lived in the scratchpad and restored byte for byte."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (APPEND to the 2026-10-18 entry; I may not edit the ledger)",
+      "content": "Accepted change (WS03 S7c-A5 fix): the BFF's /api/v1/orchestration/runs/{run_id}/continue relay has no switch. With every Model Plane switch off the route answers the eight closed codes (continue_disabled, not_resumable, approval_not_found, approval_not_granted, approval_expired, approval_not_resumable, continuation_already_consumed, continue_unavailable) under the upstream status with the BFF's own fixed messages, where it used to answer model_error. A committed model-gateway with its continue switch off answers 409 continue_disabled, which the BFF now relays by that code. Accepted because no UI calls the route yet; pinned by orchestration.rs the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off, which also scans that continue_run passes the list unconditionally. The relay also reads up to 4096 bytes of the error body, with a 5 s timeout, before answering; a read error, an oversized body or a stall means model_error. Unlike the other switches this one cannot be rolled back by flipping it: reverting it means passing &[] from continue_run.\n\nWhat the SPA contract says about the spend (chat-run-continue-contract.ts): `no` is claimed only for approval_not_granted, approval_expired and approval_not_resumable, which are produced only for an unconsumed approval. continue_disabled, not_resumable and approval_not_found can answer a retry for a spent approval and are `unknown`; a transport failure (502 upstream_unavailable, 504, a network error, an unlisted body) is `unknown` and same-token-retryable. No read the SPA has shows whether an approval was spent, so the contract never asks a client to look at the approval: it says follow the run by its id with the existing run read, and a retry with the same token answers 409 continuation_already_consumed if the click was spent. After continue_unavailable that 409 can mean spent with no run launched; the run may be recovered inside the recovery window, about 15 minutes from the consume."
+     },
+     {
+      "path": "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs (UNCHANGED by this unit)",
+      "content": "The gateway-parity half of the vocabulary test is still NOT written, as instructed. The deferred text from the previous report (build3a.json, unit s7c-a5, deferred_files) still applies unchanged and lands in the same commit as the S7c-A4 constants CONTINUE_HTTP_REFUSALS and CONTINUE_FRAME_REFUSALS. Until then the 22 stream tokens are pinned to no Rust source, and the SPA test header and the CONTINUE_RELAYED_ERRORS doc comment now say so."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "All seven S7c-A5 review fixes are built and verified (item 8 was a \"do not build\"). Items 1 to 6 were tests first; I saw the new ones fail for the right reason, then they passed. Item 7 is a pinning test that passed straight away, because it records behaviour that already exists. Gateway: 647 passed, 1 ignored (was 642/1), plus 2+3+1 integration, exit 0. SPA: 105 tests pass in src/shared/actions and the client test. The full vitest run has the same 7 failing tests in 5 files as before. tsc has the same 34 errors, and eslint has the same 1 error and 191 warnings. DB-backed tests: this unit has none.\n\n1. approvalSpent honesty (done). `approvalSpent` was already a no/yes/unknown type, so I reclassified rows rather than changing the type.\n   - `continue_disabled`, `not_resumable` and `approval_not_found` are now `unknown`, retryable false, followRun true. The gateway checks the switch, the run state and the pairing before the consumed flag, and the consume answers a replay on an ended run as not found, so all three can answer a spent approval.\n   - `approval_not_granted`, `approval_expired` and `approval_not_resumable` stay `no`. They are only produced for an unconsumed approval: approvals update only `WHERE status='requested'`, and the consume checks `consumed_at` before the grant, expiry and descriptor. They are exported as CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS and pinned.\n   - `continuation_already_consumed` is `yes`; `continue_unavailable` is `unknown` with a same-token retry.\n   - The guards, the registry description and tests follow, and a row-by-row table test pins all of it.\n\n2. Re-read instruction removed (done) from the contract text, the 502 wording, the registry description and the client doc comment. The `reread` field is gone from the effect type. The replacement is exported as CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE: do not assume either way, follow the run by its id with the existing run read, and resend with the same claim token (409 continuation_already_consumed means the click was spent, otherwise it continues). Tests assert the strings and that no text matches /re-?read the approval/i, including the raw sources via `?raw`.\n\n3. Transport failure class (done): `chatRunContinueTransportFailureOf`, CHAT_RUN_CONTINUE_TRANSPORT_EFFECT and the reasons upstream_unavailable | gateway_timeout | network | unlisted. The effect is spent unknown, retryable true, followRun true. It reads 502 upstream_unavailable, any 504, an error with no status, any other failed status, a listed code under a wrong status, and the BFF's mid-stream `{error:{code:'upstream_unavailable'}}` envelope. It returns null for the 8 listed pairs, for statuses below 400 and for non-objects, so exactly one of the two guards reads each failed request (tested). It is re-exported from the client.\n\n4. `read_error_body` (done): it now matches Ok(Some), Ok(None) and Err explicitly, so a read error returns None, as its doc says. Two tests use a server that sends a complete listed error object, promises 500 more bytes and closes: one on the function, one end to end (409 model_error, not the listed code).\n\n5. Flat upstream body (done): `{\"error\": message}` is added under 401 and 403 in the upstream.rs test (8 cases, including messages equal to listed codes) and as a new handler-level test in orchestration.rs (11 cases, plus the same flat body under 409, 404 and 503). The two stale comments now say the real body is flat. These tests passed straight away because the code was already safe; a mutation that accepts a flat string as a code turns the handler-level one red.\n\n6. followRun honesty (done): CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE and the doc on the `followRun` field say it means read the run by its id, not that a run is live. They also say that after `continue_unavailable` a same-token 409 can mean spent with no run launched, and the run may be recovered within about 15 minutes of the consume (CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES = 15). Tests pin it, including that the note sits on the field's own doc comment. The BFF message for continuation_already_consumed no longer claims the run continued (\"This approval has already been used. Check the run to see what became of it.\"), and a test pins that.\n\n7. BFF relay without a switch (done): kept. A test, the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off, pins that 409 continue_disabled is relayed by its closed code, not model_error. It also scans that `continue_run` passes CONTINUE_RELAYED_ERRORS exactly once, never `&[]`, and reads no env var. The doc comment now says it is an accepted change, and the ledger text is in deferred_files.\n\n8. Gateway-parity half of the vocabulary test: not written, as instructed. The deferred text from the previous report is still where it was and still waits for the S7c-A4 constants. I also softened the two comments that claimed a pin that does not exist: the SPA test header and the CONTINUE_RELAYED_ERRORS doc. The 22 stream tokens are unpinned until A4 lands.\n\nMutation checks, all on files this unit owns, restored and verified byte for byte with the restore script and sha256. Every one turned the intended tests red:\n- not_resumable back to UNSPENT.\n- The status < 400 guard removed.\n- The mid-stream envelope read removed.\n- The pre-consume-only tuple emptied.\n- relayed_error accepting a flat string error as a code.\n- continue_run passing `&[]`.\n\nI did not run the revert of read_error_body as a mutation, since the new tests were already seen red against the original code. Cargo contention did not occur (the BFF has its own target dir), so there were no LNK1104 retries. Line endings are preserved: upstream.rs and action-registry.test.ts are CRLF, the rest LF.",
+     "files_changed": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.test.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
+     ],
+     "tests_added": [
+      "chat-run-continue-contract.test.ts: pins the whole effect table row by row with no re-read field",
+      "chat-run-continue-contract.test.ts: claims not spent only for the three refusals that cannot follow a consume",
+      "chat-run-continue-contract.test.ts: does not call not_resumable or continue_disabled unspent",
+      "chat-run-continue-contract.test.ts: eight chatRunContinueTransportFailureOf tests covering 502, 504, network, mid-stream envelope, unlisted body, null cases and exactly-one-guard",
+      "chat-run-continue-contract.test.ts: four wording tests (guidance, no re-read of an approval, followRun honesty and recovery window, followRun caveat on the field)",
+      "orchestration-client.test.ts: continueRun 502 read as a transport failure, 504/500/401 read as transport, a network TypeError, not_resumable read as unknown, and the continueRun doc comment wording",
+      "action-registry.test.ts: the description has no re-read instruction and states the ambiguous-failure guidance and the recovery window",
+      "upstream.rs: a_body_that_errors_mid_read_is_given_up_on_even_when_what_arrived_parses",
+      "upstream.rs: a_listed_code_in_a_body_that_was_cut_off_is_not_relayed",
+      "upstream.rs: a_permission_or_auth_refusal_never_echoes_the_upstream_message extended with 8 flat-body cases",
+      "orchestration.rs: a_flat_grpc_status_body_is_never_echoed_for_a_permission_or_auth_refusal",
+      "orchestration.rs: the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off",
+      "orchestration.rs: the_already_used_message_does_not_claim_a_run_was_continued"
+     ],
+     "commands_run": [
+      {
+       "command": "BASELINE before edits: cargo test --manifest-path apps/gateway/Cargo.toml --all-targets; tsc -b; eslint . -f json; vitest run (full, json)",
+       "outcome": "cargo 642 passed/1 ignored + 2 + 3 + 1, exit 0; tsc 34 errors (RemoteSupportPage 12, quarry-client 21, chat-client 1); eslint 838 files, 1 error (chat-client.ts:945), 191 warnings; vitest 3490 tests, 7 failed in 5 files (zdr-refusal x3 files, SupportPage and quarry-client files failed to run)"
+      },
+      {
+       "command": "vitest run src/shared/actions/chat-run-continue-contract.test.ts src/shared/actions/action-registry.test.ts src/shared/api/orchestration-client.test.ts (after writing the SPA tests, before the code)",
+       "outcome": "RED: 29 failed (missing exports, reread field still present, old description), as intended"
+      },
+      {
+       "command": "vitest run src/shared/actions src/shared/api/orchestration-client.test.ts (after the contract, registry and client changes)",
+       "outcome": "9 files, 105 tests passed (one test-side fix for line-wrapped doc text; one guard fix so a jsdom DOMException is read as a network error)"
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --bin verevon-gateway-rs relayed_error_tests (new Rust tests, before the read_error_body fix)",
+       "outcome": "RED for the right reason: 2 failed (read_error_body returned Some(partial body); a cut-off listed code was relayed as continuation_already_consumed), 7 passed"
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (after)",
+       "outcome": "exit 0: 647 passed/1 ignored (+5), continue_error_vocabulary 2, sse_relay_no_allowlist 3, ssrf_forward_not_fetch 1; rerun after the mutation checks, same"
+      },
+      {
+       "command": "Mutation checks: six on the SPA contract and the BFF (listed in the summary)",
+       "outcome": "each turned the intended tests red; every file restored and verified identical by cmp and sha256sum; no .orig-mut files left"
+      },
+      {
+       "command": "tsc -b, eslint . -f json, vitest run full (after)",
+       "outcome": "tsc 34 errors, sorted set identical to baseline; eslint 1 error and 191 warnings, set identical; vitest 3508 tests (+18), the 7 failing tests in 5 files are the identical set"
+      },
+      {
+       "command": "git diff --check and a CRLF/LF count of the 8 files",
+       "outcome": "upstream.rs and action-registry.test.ts uniformly CRLF as before; the other six uniformly LF as before; only the CRLF/LF normalisation warnings git always prints in this worktree"
+      }
+     ],
+     "deviations": [
+      "effect type: approvalSpent was already the three-state no|yes|unknown, so item 1 reclassified rows instead of changing the type. The `reread` field is removed from ChatRunContinueEffect (it encoded the removed instruction); callers that matched on it must stop. Regime-2 (unflagged executor refusal) followRun changed from false to true, because the new guidance for any ambiguous failure is to follow the run by its id.",
+      "approval_not_found is also unknown, which the task did not name: the consume reports a replay on an already-ended run as NotFound (session-core orchestration_store.rs consume_approval_with), so a spent approval can get it. The pre-consume-only reasoning for approval_expired and approval_not_resumable relies on the consume answering a consumed approval before expiry and descriptor checks (verified in committed session-core) and on the s7c-v3 design's mapping of consume refusals to those codes; the gateway side (A4) is not in the tree yet.",
+      "Added beyond the list: the transport guard also reads the BFF's mid-stream `{error:{code:'upstream_unavailable'}}` envelope, because sse_transport_error_event emits exactly that; the guard recognises an error by shape as well as by instanceof, because a jsdom DOMException is not instanceof Error.",
+      "Added beyond the list: the BFF message for continuation_already_consumed changed from 'This approval has already been used to continue the run.' to 'This approval has already been used. Check the run to see what became of it.', so it does not claim a run was launched. The two comments that claimed a pin that does not exist (SPA test header, CONTINUE_RELAYED_ERRORS doc) were softened.",
+      "The 'existing run read' is not named by function: the SPA has no run-detail read in orchestration-client, only the run-events replay and stream in run-console-client, so the text says 'the existing run read' as the task worded it. Naming a function is left to the UI wiring step.",
+      "Item 5's flat-body tests and item 7's pin test passed on first run: item 5 is coverage for already-safe code and item 7 pins existing behaviour, so there was no red phase for them. A mutation on relayed_error shows the handler-level flat test has teeth; the 401/403 flat cases alone cannot catch that particular mutation because the status check protects them.",
+      "No Edit-tool rule violation. Files existing before this unit were edited only with Edit. The temporary mutation helpers (fix-mutate.py, fix-restore.py) lived in the scratchpad and restored byte for byte."
+     ],
+     "blockers": [],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (APPEND to the 2026-10-18 entry; I may not edit the ledger)",
+       "content": "Accepted change (WS03 S7c-A5 fix): the BFF's /api/v1/orchestration/runs/{run_id}/continue relay has no switch. With every Model Plane switch off the route answers the eight closed codes (continue_disabled, not_resumable, approval_not_found, approval_not_granted, approval_expired, approval_not_resumable, continuation_already_consumed, continue_unavailable) under the upstream status with the BFF's own fixed messages, where it used to answer model_error. A committed model-gateway with its continue switch off answers 409 continue_disabled, which the BFF now relays by that code. Accepted because no UI calls the route yet; pinned by orchestration.rs the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off, which also scans that continue_run passes the list unconditionally. The relay also reads up to 4096 bytes of the error body, with a 5 s timeout, before answering; a read error, an oversized body or a stall means model_error. Unlike the other switches this one cannot be rolled back by flipping it: reverting it means passing &[] from continue_run.\n\nWhat the SPA contract says about the spend (chat-run-continue-contract.ts): `no` is claimed only for approval_not_granted, approval_expired and approval_not_resumable, which are produced only for an unconsumed approval. continue_disabled, not_resumable and approval_not_found can answer a retry for a spent approval and are `unknown`; a transport failure (502 upstream_unavailable, 504, a network error, an unlisted body) is `unknown` and same-token-retryable. No read the SPA has shows whether an approval was spent, so the contract never asks a client to look at the approval: it says follow the run by its id with the existing run read, and a retry with the same token answers 409 continuation_already_consumed if the click was spent. After continue_unavailable that 409 can mean spent with no run launched; the run may be recovered inside the recovery window, about 15 minutes from the consume."
+      },
+      {
+       "path": "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs (UNCHANGED by this unit)",
+       "content": "The gateway-parity half of the vocabulary test is still NOT written, as instructed. The deferred text from the previous report (build3a.json, unit s7c-a5, deferred_files) still applies unchanged and lands in the same commit as the S7c-A4 constants CONTINUE_HTTP_REFUSALS and CONTINUE_FRAME_REFUSALS. Until then the 22 stream tokens are pinned to no Rust source, and the SPA test header and the CONTINUE_RELAYED_ERRORS doc comment now say so."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "high",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The new ambiguous-failure guidance contradicts the unit's own effect table. It says that resending with the same token, if the click was spent, \"is answered 409 continuation_already_consumed, and otherwise it continues the run\". The same unit reclassified not_resumable, continue_disabled and approval_not_found as unknown precisely because they can answer a retry for a SPENT approval. A client that follows the guidance literally, treating 409 continuation_already_consumed as spent and anything else as unspent and continuing, will misclassify a spent approval whose run has since ended. The registry description and the client doc repeat the loose version.",
+       "evidence": "CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE is pinned verbatim by the test 'tells a client what it CAN do...'. continue_preflight in model-gateway sse.rs checks run status (not_resumable), then pairing (approval_not_found), then granted, and only then consumed. session-core consume_approval_with answers NotFound for a replay on an ended run (orchestration_store.rs, `mode.is_empty() || !run_keeps_state`). So after a spend plus a finished run, the retry answers 409 not_resumable or 404 approval_not_found, not continuation_already_consumed. 'Otherwise it continues' is also false: the retry can be refused approval_not_granted, approval_expired and so on.",
+       "suggested_fix": "Reword the guidance and the registry/client text. A retry with the same token is answered either with the continuation or with a refusal. continuation_already_consumed means spent. not_resumable, approval_not_found and continue_disabled leave the spend unknown, and the run read is the arbiter. Update the pinned strings in the three tests to match."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The transport effect is retryable: true for every unlisted failure, including deterministic refusals that no retry can fix. That covers a 400 continue_incomplete or invalid_chat_request, 401 and 403 (a consume PermissionDenied, ZDR durable_mutation_forbidden) and 413/422. The class bundles genuinely transient failures (502 upstream_unavailable, 504, network, mid-stream envelope) with permanent ones under one retryable flag. A caller that trusts the flag can loop on a refusal that will never succeed. The spent value is also unknown for failures that provably happened before any consume.",
+       "evidence": "chatRunContinueTransportFailureOf returns transport('unlisted') for any status >= 400 that is not a 504. CHAT_RUN_CONTINUE_TRANSPORT_EFFECT has retryable: true. The tests pin { code: 'continue_incomplete', status: 400 }, { code: 'unauthorized', status: 401 } and { code: 'missing_bearer', status: 401 } as retryable. model-gateway continuation_gate refuses ZDR with DURABLE_MUTATION_FORBIDDEN, which the BFF turns into model_error under the same status. For a ZDR caller 'retry the same token, follow the run' can never succeed.",
+       "suggested_fix": "Make retryable true only for the reasons upstream_unavailable, gateway_timeout and network. Give 'unlisted' retryable false, keep spent unknown, and keep followRun true. Alternatively set retryable false for 400/401/403/413/422 and add tests."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+       "issue": "The dropped-stream case that motivated the unit is read by no guard. continueRun resolves normally when the stream ends without a terminal frame, and also on a user abort, because readSseStream swallows AbortError. The contract says that between the two guards they read every failed request, which is not true for these cases. Nothing in the contract tells a caller that a clean close with no terminal frame, or an abort after the consume, is an ambiguous outcome (spent unknown, follow the run).",
+       "evidence": "sse.ts readSseStream: `if (done) break`, then the finally runs onDone and the promise resolves with no connError. `catch (err) { if (err instanceof DOMException && err.name === 'AbortError') return ... }`. continueRun only throws connError. The new tests cover thrown errors only, and the doc comment says 'a dropped connection' without covering a normal EOF.",
+       "suggested_fix": "Document in the contract and in the continueRun doc that a stream that ends with no terminal frame, or is aborted after send, is the ambiguous case with the same effect as the transport failure. Better, add a typed guard or sentinel the caller can use, such as an 'ended without a terminal frame' result, with a test. Either way, drop the claim that the two guards read every failed request."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The 'existing run read' is left unnamed because the implementer reported that the SPA has no run-detail read. That is wrong. runs-client.ts exports getRun(runId), which calls GET /api/v1/agents/runs/{run_id}. The BFF route exists in agents_runs.rs, and RunDetail carries status and resumable. The guidance and the pinned tests keep the phrase 'the existing run read', which a client author cannot map to a function. A zero-retention or waived run, which gets not_resumable, has no readable run.",
+       "evidence": "grep of src/shared/api/runs-client.ts line ~175 'export async function getRun'. The deviation text in the report says 'The SPA has no run-detail read in orchestration-client, only the run-events replay'.",
+       "suggested_fix": "Name getRun in runs-client in the guidance and the registry description, and say a run that was never persisted cannot be read. Update the pinned strings and the stated deviation."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "chatRunContinueTransportFailureOf classifies any object that has no numeric status and no error-like shape as a transport failure ('unlisted'), for example {} or an SSE frame object. Its own doc and the file header say a null from both guards means 'not a failed request at all', so a caller passing a non-error object gets a false 'failed request, spent unknown'.",
+       "evidence": "The function returns transport(errorLike ? 'network' : 'unlisted') after the status branch with no check that the object looks like a failure. The tests cover only non-objects, arrays and status < 400 for null.",
+       "suggested_fix": "Return null when there is no numeric status, no error.code envelope and no error-like shape, and add a test for {} and a frame-shaped object."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The followRun/recovery-window note is narrower and vaguer than the states it must cover. It attaches the 'no run launched, may be recovered in about 15 minutes' caveat only to continue_unavailable. The same spent-with-no-launch state follows a spent connect-refused (the continue_unreachable frame, per D9). The word 'recovered' reads as 'the run resumes', but recovery of an abandoned obligation terminalizes or parks the run and does not continue it.",
+       "evidence": "CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE, the registry description and the followRun doc all say 'after continue_unavailable ... may still be recovered inside the recovery window'. sse.rs documents continue_unreachable as spent and never launched, 'left to the run's recovery deadline'. RENEW_RECOVERY_SQL only reopens the deadline for the recovery worker.",
+       "suggested_fix": "Say that a spent approval can leave no live run (continue_unavailable then 409, or an unreachable frame), and that platform recovery within about 15 minutes of the consume ends or parks the run. It does not resume it, and the user needs a new approval or a restart. Pin that wording."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "continue_disabled and not_resumable are now unknown with followRun true. In the normal never-spent flow with the switch off, or for a zero-retention or waived caller, the SPA contract tells the UI the approval may have been spent and to follow a run. The honest class is accepted, but nothing lets a caller tell the two situations apart, so the click looks spent when it was not. This was acknowledged but not mitigated.",
+       "evidence": "HTTP_EFFECT_TABLE row continue_disabled ['unknown', false, true], and continue_turn_gate answers continue_disabled or not_resumable before any consume for a disabled switch or a non-persistent caller.",
+       "suggested_fix": "Optional: add a note on the field that continue_disabled for a caller that has never sent a click is unspent in fact, and keep UI wiring responsible for not presenting 'maybe spent' for a first-attempt continue_disabled."
+      }
+     ],
+     "checked": [
+      "Read the full git diff of all 8 files and the untracked state (clean apart from the other units' files).",
+      "Ran vitest on src/shared/actions and orchestration-client.test.ts: 9 files, 105 tests pass.",
+      "Ran eslint on the six touched TS files: clean.",
+      "Ran cargo test --manifest-path apps/gateway/Cargo.toml --all-targets: 647 passed, 1 ignored, plus 2, 3 and 1 integration tests, all ok. No LNK1104 contention.",
+      "Verified line endings of the 8 files against the working copy: upstream.rs and action-registry.test.ts are uniformly CRLF, the others LF. HEAD blobs are LF through git normalisation, so the preservation claim is plausible.",
+      "Confirmed the pre-consume-only claim for approval_not_granted, approval_expired and approval_not_resumable in session-core consume_approval_with. The consumed branch returns before the grant, expiry and descriptor checks, and approval status never changes after a grant (DECIDE only updates status='requested'). Also confirmed the model-gateway preconsume_refusal map, in which any unknown FailedPrecondition becomes not_resumable and an ambiguous gRPC code becomes continue_unavailable.",
+      "Confirmed that not_resumable, approval_not_found and continue_disabled really can answer a retry for a spent approval (continue_preflight order, and the NotFound on an ended run). So the unknown reclassification is correct, and the contradiction with the guidance text is real.",
+      "Checked the read_error_body fix: Err(_) returns None, the timeout path is unchanged, the doc matches, and the cut-body test fails for the right reason. relayed_error accepts only a nested string code under the listed status, so a flat {error: message} body is never echoed or relayed as a code.",
+      "Checked the BFF relay: fixed messages only, no upstream text, no logging of the read body, and no env var read. The no-switch pin test passes. The relay changing vocabulary with all switches off is the accepted change, now pinned and ledgered.",
+      "Checked the SSE reader: readSseStream swallows AbortError and resolves on a clean EOF, so no thrown value reaches the transport guard for a dropped or aborted stream.",
+      "Checked the executor and gateway fences behind the 'same token retry is safe' claim: the committed preflight refuses a consumed approval with 409, the executor refuses a same-claim replay when the ledger is off, and reserve now returns a ReserveOutcome. I found no double-execution path introduced by this unit. It adds no new persisted or logged data, no claim-token logging, and no ZDR or waived leakage; it touches only SPA contract text and BFF error relaying.",
+      "Did not run tsc -b or the full eslint and vitest baseline comparison myself. I relied on the implementer's report for the failing-set equality."
+     ]
+    }
+   ],
+   "blocking": [
+    {
+     "severity": "high",
+     "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+     "issue": "The new ambiguous-failure guidance contradicts the unit's own effect table. It says that resending with the same token, if the click was spent, \"is answered 409 continuation_already_consumed, and otherwise it continues the run\". The same unit reclassified not_resumable, continue_disabled and approval_not_found as unknown precisely because they can answer a retry for a SPENT approval. A client that follows the guidance literally, treating 409 continuation_already_consumed as spent and anything else as unspent and continuing, will misclassify a spent approval whose run has since ended. The registry description and the client doc repeat the loose version.",
+     "evidence": "CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE is pinned verbatim by the test 'tells a client what it CAN do...'. continue_preflight in model-gateway sse.rs checks run status (not_resumable), then pairing (approval_not_found), then granted, and only then consumed. session-core consume_approval_with answers NotFound for a replay on an ended run (orchestration_store.rs, `mode.is_empty() || !run_keeps_state`). So after a spend plus a finished run, the retry answers 409 not_resumable or 404 approval_not_found, not continuation_already_consumed. 'Otherwise it continues' is also false: the retry can be refused approval_not_granted, approval_expired and so on.",
+     "suggested_fix": "Reword the guidance and the registry/client text. A retry with the same token is answered either with the continuation or with a refusal. continuation_already_consumed means spent. not_resumable, approval_not_found and continue_disabled leave the spend unknown, and the run read is the arbiter. Update the pinned strings in the three tests to match."
+    }
+   ],
+   "fix": {
+    "summary": "The one finding is fixed. I checked it first and it was real. The old guidance said a same-token retry is answered \"409 continuation_already_consumed, and otherwise it continues the run\". The unit's own table says that is false for three codes:\n- A spent approval whose run has ended can answer a retry with 409 not_resumable or 404 approval_not_found. A flipped-off switch gives 409 continue_disabled.\n- A retry can also be refused approval_not_granted or approval_expired, so \"otherwise it continues\" was wrong in general.\n\nThe wording now says:\n- A retry with the same token is \"answered either with the continuation or with a refusal\".\n- \"Only 409 continuation_already_consumed means the click was spent\".\n- not_resumable, approval_not_found and continue_disabled \"leave the spend unknown\", because a spent approval whose run has ended, or whose switch is off, gets them too.\n- \"The run read is the arbiter.\"\n\nThe same correction went into the following places:\n- The pinned CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE string.\n- The chat.run.continue registry description, which now also lists approval_not_found among the codes a spent approval can get.\n- The continueRun doc comment in the client.\n- Three comments in the contract that carried the same loose \"either the continuation or 409\" claim: the `retryable` field doc, the continue_unavailable table row and the transport-effect doc.\n\nMethod:\n- Tests first, in all three test files: the pinned strings were replaced, and new assertions were added to the contract and client tests. A contract test asserts that the loose phrasings (\"otherwise it continues\", \"either the continuation or 409\", \"the retry is the continuation, or 409\", \"either wins, or gets a 409\") appear nowhere in the guidance, the follow-run note or the contract source. The client test asserts the doc has no \"answers 409 `continuation_already_consumed`\" or \"otherwise it continues\" wording. The registry test asserts the description no longer says \"answers 409 if the click was spent\".\n- Run before the code change, 4 tests failed for the right reason (missing new text or old text still present).\n- After the fix, one test failed on my own wording (\"treat the run read as the arbiter\" against the pinned \"the run read is the arbiter\"). I changed the production text to match the pin.\n\nVerification, run from apps/Frontend Plane/verevonv3:\n- Vitest on src/shared/actions and the client test: 9 files, 107 tests pass. That is 105 plus the two new contract tests.\n- Full vitest: 3510 tests, 7 failed in 5 files, the identical pre-existing set (zdr-refusal in three files, SupportPage and quarry-client failing to load).\n- `tsc -b`: 34 errors, the same split as baseline (12 RemoteSupportPage, 21 quarry-client, 1 chat-client).\n- eslint on the whole project: 838 files, 1 error (chat-client.ts) and 191 warnings, identical to baseline. Clean on the six touched files.\n- `cargo test --manifest-path apps/gateway/Cargo.toml --all-targets`: exit 0, 647 passed and 1 ignored, plus 2, 3 and 1 in the integration tests. No Rust file was touched this round and the counts are unchanged.\n- Line endings are unchanged. action-registry.test.ts is uniformly CRLF (140 of 140). The other five files are LF with no CR.\n\nNo mutation checks this round, because the change is wording only and the new tests were seen red against the old text. No DB-backed tests exist in this unit, and I wrote none. Cargo contention (LNK1104) did not occur.",
+    "files_changed": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.test.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+     "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts"
+    ],
+    "tests_added": [
+     "chat-run-continue-contract.test.ts: says a retry is answered with the continuation or with a refusal, and only 409 continuation_already_consumed means spent",
+     "chat-run-continue-contract.test.ts: never claims that a retry that is not a 409 continues the run, or that a refusal other than the 409 shows the approval unspent",
+     "action-registry.test.ts: the continuation description pins the new retry wording (extended existing test)",
+     "orchestration-client.test.ts: the continueRun doc comment pins the new retry wording and rejects the old wording (extended existing test)"
+    ],
+    "commands_run": [
+     {
+      "command": "vitest run chat-run-continue-contract.test.ts action-registry.test.ts orchestration-client.test.ts (after the test edits, before the code)",
+      "outcome": "RED for the right reason: 4 failed, 68 passed"
+     },
+     {
+      "command": "vitest run src/shared/actions src/shared/api/orchestration-client.test.ts (after the fix)",
+      "outcome": "first run 1 failed (my wording differed from the pinned phrase), fixed, then 9 files and 107 tests passed"
+     },
+     {
+      "command": "tsc -b",
+      "outcome": "34 errors, same split as baseline (RemoteSupportPage 12, quarry-client 21, chat-client 1)"
+     },
+     {
+      "command": "eslint . -f json",
+      "outcome": "838 files, 1 error (chat-client.ts), 191 warnings, same as baseline; touched files clean"
+     },
+     {
+      "command": "vitest run (full)",
+      "outcome": "3510 tests, 7 failed in 5 files, identical pre-existing set"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+      "outcome": "exit 0: 647 passed, 1 ignored, plus 2, 3 and 1 in the integration tests"
+     },
+     {
+      "command": "file and a python CRLF count on the six files",
+      "outcome": "line endings unchanged: the registry test is uniformly CRLF, the other five are LF"
+     }
+    ],
+    "deviations": [
+     "The finding named three tests to update; I pinned the new strings in those three and also added two new contract tests asserting the loose phrasings are gone, because the old loose claim also lived in three comments (the retryable field doc, the continue_unavailable row comment, the transport-effect doc), which I corrected.",
+     "The registry description now lists approval_not_found as well, next to not_resumable and continue_disabled, matching the effect table (approval_not_found is already unknown there).",
+     "No mutation checks run: the change is wording only, and the new tests were seen red against the old text.",
+     "The deferred ledger text from the previous report (the A5 fix paragraph under the 2026-10-18 entry) still says a same-token retry 'answers 409 continuation_already_consumed if the click was spent'. A replacement is in deferred_files."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (REPLACE the last sentence of the previous 'What the SPA contract says about the spend' paragraph of the 2026-10-18 entry; I may not edit the ledger)",
+      "content": "After an ambiguous failure the SPA contract does not assume either way and says: follow the run by its id with the existing run read, which is the arbiter. A retry with the same claim token is answered either with the continuation or with a refusal. Only 409 continuation_already_consumed means the click was spent. not_resumable, approval_not_found and continue_disabled leave the spend unknown, because the gateway checks the switch, the run's state and the approval's pairing before it asks whether the approval was consumed, and the consume reports a replay on an ended run as not found. A client that treated 'not a 409 continuation_already_consumed' as 'unspent, so it continues' would misclassify a spent approval whose run had ended. After continue_unavailable a same-token 409 can mean spent with no run launched; the run may be recovered inside the recovery window, about 15 minutes from the consume."
+     }
+    ]
+   },
+   "rereview": {
+    "verdict": "approve",
+    "findings": [
+     {
+      "severity": "low",
+      "file": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+      "issue": "Nit, not blocking. The fixed BFF message for continue_unavailable says 'The same request can be sent again.' That matches retryable: true. It does not repeat the contract's rule that a retry may be answered with 409 continuation_already_consumed, which means spent. The contract and registry state that rule, and no UI is wired yet.",
+      "evidence": "CONTINUE_RELAYED_ERRORS: (\"continue_unavailable\", 503, \"The continuation could not be confirmed. The same request can be sent again.\")",
+      "suggested_fix": "Optional. When the UI is wired, show the 409 outcome as 'spent, check the run' rather than as a failure."
+     }
+    ],
+    "checked": [
+     "Read the whole of chat-run-continue-contract.ts. The ambiguous-failure guidance now says a same-token retry is answered either with the continuation or with a refusal, only 409 continuation_already_consumed means spent, and not_resumable, approval_not_found and continue_disabled leave the spend unknown. The run read is the arbiter. This matches the effect table: those three codes are UNKNOWN_FOLLOW and continuation_already_consumed is 'yes'.",
+     "Confirmed against model-gateway sse.rs continue_preflight that the finding was real. The order is switch, run status (not_resumable), pairing (approval_not_found), granted, consumed. The new wording is consistent with that order. approval_not_granted stays 'no' because a consumed approval was necessarily granted.",
+     "The same correction is in the pinned guidance string, the chat.run.continue registry description, the continueRun doc comment in orchestration-client.ts, and the retryable, continue_unavailable-row and transport-effect comments. grep found no 're-read the approval', 'otherwise it continues' or 'either the continuation or 409' wording left in the contract, registry, client or BFF sources.",
+     "The tests pin the new strings and assert the loose phrasings are absent. Ran vitest on src/shared/actions plus orchestration-client.test.ts: 9 files, 107 tests pass.",
+     "Ran cargo test --manifest-path apps/gateway/Cargo.toml --all-targets: 647 passed and 1 ignored, plus 2, 3 and 1 in the integration tests, 0 failures.",
+     "Checked the new transport-failure guard for a new high or critical problem. It returns null for the eight listed pairs, so exactly one guard reads a failed request. It maps 502 upstream_unavailable and 504 to transport, and every other failed status and every error object to transport or unlisted. No new problem found.",
+     "The BFF relay messages for the eight codes do not contradict the updated guidance. I did not re-run the typecheck or lint baselines. I relied on the fix report for those, since the changes were wording only and the vitest and cargo results are green."
+    ]
+   },
+   "verify": {
+    "all_green": false,
+    "results": [
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (cwd apps/Frontend Plane/verevonv3)",
+      "outcome": "EXIT=0 on the first run; no LNK1104 or mid-edit retry; no compiler warnings in the log. src/main.rs unit tests: 647 passed, 1 ignored (642 at S7c-A5). tests/continue_error_vocabulary.rs: 2 passed. tests/sse_relay_no_allowlist.rs: 3 passed. tests/ssrf_forward_not_fetch.rs: 1 passed. The only ignored test is onboarding::crawl_preview::stream_e2e::dump_crawl_preview_stream, a diagnostic dump, not a DB test. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-verify-1-gateway-cargo.log",
+      "passed": "653 passed, 0 failed, 1 ignored"
+     },
+     {
+      "command": "node_modules/.bin/vitest run src/shared/actions/action-registry.test.ts src/shared/actions/chat-run-continue-contract.test.ts src/shared/api/orchestration-client.test.ts",
+      "outcome": "EXIT=0; all three touched test files pass (52 tests at S7c-A5). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-verify-2-vitest-touched.log",
+      "passed": "3 files, 72 tests passed, 0 failed"
+     },
+     {
+      "command": "node_modules/.bin/vitest run src/shared/actions src/shared/api/orchestration-client.test.ts (the spec gate)",
+      "outcome": "EXIT=0; all pass (87 tests at S7c-A5). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-verify-3-vitest-gate.log",
+      "passed": "9 files, 107 tests passed, 0 failed"
+     },
+     {
+      "command": "node_modules/.bin/tsc -b (the package typecheck script; pnpm not run, the S7c-A5 implementer noted it prunes pnpm-lock.yaml in worktrees)",
+      "outcome": "EXIT=1 with 34 error lines, none in a unit file. The failing set is identical to the S7c-A5 baseline: the same 34 file, line, column and code entries (RemoteSupportPage.tsx 12, quarry-client.ts 21, chat-client.ts 1 at 945,10). Cause: unresolved @verevon/remote-core and @quarry/client on this Windows host. Compared by the script C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-compare.py. Log: .../scratchpad/s7c-a5-fix-verify-4-tsc.log",
+      "passed": "34 errors, all baseline-identical; 0 in unit files"
+     },
+     {
+      "command": "node_modules/.bin/eslint . -f json (the package lint script; pnpm not run)",
+      "outcome": "EXIT=1 with 1 error and 191 warnings in 43 files. Per-file counts are identical to the S7c-A5 baseline (0 differences) and the error set is identical. The error is chat-client.ts 945:10, @typescript-eslint/no-unused-vars (failureFeature), pre-existing. No messages in unit TS files. Output: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-verify-5-eslint.json",
+      "passed": "1 error, 191 warnings; baseline-identical"
+     },
+     {
+      "command": "node_modules/.bin/vitest run (full suite; extra beyond the listed commands, read-only)",
+      "outcome": "EXIT=1. Test Files 5 failed, 316 passed (321); Tests 7 failed, 3503 passed (3510). Failing: quarry-client.test.ts and SupportPage.test.tsx (unresolved @quarry/client and @verevon/remote-core imports); chat-client.zdr-refusal.test.ts (4 tests), http.zdr-refusal.test.ts (2) and use-chat-controller.zdr-refusal.test.ts (1), all on ZDR feature-name assertions. Count equals the S7c-A5 baseline (7 failed in 5 files). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s7c-a5-fix-verify-6-vitest-full.log",
+      "passed": "3503 passed, 7 failed"
+     },
+     {
+      "command": "git status --short for apps/Frontend Plane/verevonv3 before and after the runs, plus LF/CRLF counts of the 8 modified unit files (read-only)",
+      "outcome": "Unchanged: the same 8 modified files and no new files; the verify runs changed nothing tracked and no file in the tree was edited. Each unit file is uniform in line endings (LF: orchestration.rs, action-registry.ts, orchestration-client.ts and .test.ts, chat-run-continue-contract.ts and .test.ts; CRLF: upstream.rs, action-registry.test.ts). HEAD blobs are LF, so the CRLF working copies are a checkout state that git normalises; the diff shows no whole-file churn. The earlier S7c-A5 verify note that every file was CRLF is not accurate for the current tree.",
+      "passed": "8 modified files, no new files, no mixed endings within a file"
+     }
+    ],
+    "failures": [
+     "PRE-EXISTING, baseline-identical, not caused by this unit: node_modules/.bin/tsc -b exits 1 with 34 errors (RemoteSupportPage.tsx 12, quarry-client.ts 21, chat-client.ts 1). The set equals the S7c-A5 baseline entry for entry and none is in a unit file. Environment cause: unresolved @verevon/remote-core and @quarry/client on this Windows host.",
+     "PRE-EXISTING, baseline-identical, not caused by this unit: eslint . exits 1 with 1 error (chat-client.ts 945:10, unused failureFeature) and 191 warnings in 43 files. Per-file counts equal the S7c-A5 baseline and no unit TS file has a message.",
+     "PRE-EXISTING per count, not proven per name: the full vitest run (not in the listed commands) has 7 failed tests in 5 files, equal in count to the S7c-A5 baseline. The baseline recorded no test names, so name-level equality is not proven. Two files fail on unresolved modules. The other three fail on ZDR feature-name assertions. chat-client.ts and use-chat-controller.ts import orchestration-client.ts or the contract module, but this unit's change to orchestration-client.ts adds re-exports and doc comments only and chat-run-continue-contract.ts has no imports, so the unit does not appear to be the cause.",
+     "BASELINE SOURCE GAP: no s7c-a5-fix implementer report exists in .plan-work or in the task text. The baseline used is the S7c-A5 implementer report in .plan-work/build3a.json (outcome s7c-a5: tsc 34 errors, eslint 1 error, vitest 7 failed tests in 5 files) plus the S7c-A5 typecheck and lint error lists in the scratchpad logs. If the s7c-a5-fix implementer recorded a different baseline, compare against that one. Tests written or changed by me: none. Tests not run by me: none of the DB-backed kind exist in the targets run."
+    ]
+   }
+  }
+ ],
+ "failedUnits": []
+}

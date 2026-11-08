@@ -1,0 +1,31 @@
+# TEST-ONLY contract overlay for the production-mode browser grant check
+# (plan 6.4 A, SC1 L2). Apply it LAST, on top of the production overlay:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.production.yml \
+#                  -f docker-compose.grant-contract.yml ...
+#
+# The point of the L2 run is to prove the PRODUCTION posture, so this file may
+# only set environment variables and add volumes. It must never remove or weaken
+# a production hardening key: `read_only`, `cap_drop`, `security_opt`, `tmpfs`
+# (including the Chromium profile mount), `init`, `ports: !reset []`,
+# `ENVIRONMENT: production`, `QUARRY_BROWSER_NO_SANDBOX: "0"`, both dev bypasses
+# at "0", the artifact root on a named volume, the durable-history flag. It
+# sets none of those, and it uses no `!reset` or `!override` tag.
+# scripts/tests/grant-contract-overlay.test.mjs renders the base, the
+# production overlay and this overlay with `docker compose config` and fails
+# when the result has lost any hardening key of the production render.
+#
+# Not for a deployment: nothing here is needed by, or safe to assume in, a real
+# environment. The wrapper that uses it is scripts/tests/browser-grant-prod-contract.sh.
+services:
+  quarry-edge:
+    environment:
+      # Where the L2 stack's BrowserBroker listens (its gRPC port on
+      # inter-plane-bus, see apps/Model Plane/deploy/docker-compose.yml). The
+      # production overlay requires this key to be set; stating it here pins the
+      # stack the contract is run against to the broker it was written for.
+      QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: http://browser-broker:9095
+      # Production implies this (crates/quarry-edge/src/main.rs); saying it makes
+      # the contract independent of that default. A run that starts without a
+      # grant_id must be refused, and the wrapper proves it.
+      QUARRY_EDGE__REQUIRE_BROWSER_GRANTS: "1"

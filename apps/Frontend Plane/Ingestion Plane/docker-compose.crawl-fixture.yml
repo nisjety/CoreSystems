@@ -1,0 +1,64 @@
+# TEST-ONLY overlay: the hermetic crawl fixture (plan WS14.S1).
+#
+# NEVER reference this file from a production compose file. CI guards that:
+#   ! grep -r crawl-fixture "apps/Ingestion Plane/docker-compose.yml" \
+#     "apps/Ingestion Plane/docker-compose.production.yml" \
+#     "apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml"
+#
+# Usage: as the LAST -f, on top of the root stack and its env-file chain
+# (see the Ingestion deploy recipe):
+#   docker compose --env-file ../../.env --env-file .env \
+#     -f docker-compose.yml -f docker-compose.crawl-fixture.yml up -d
+#
+# Compose resolves the relative paths below against the directory of the first
+# -f file (this directory), which is why they start with ./Quarry-v2.
+#
+# The fixture hosts answer only on the crawl-fixture network. quarry-edge joins
+# it so a crawl can reach them. No host port is published. The subnet is the
+# 6to4 relay anycast block 192.88.99.0/24 (RFC 7526), chosen because the edge's
+# blocked-address table does not list it. This is unverified on Windows Docker
+# Desktop (see the WS14.S1 risks in the plan).
+#
+# Content: Quarry-v2/deploy/compose/crawl-fixture/{a,b}. The same content is
+# mirrored in Rust by tests/support/fixture_site.rs (standard_site).
+
+services:
+  crawl-fixture-a:
+    image: nginx:alpine
+    container_name: crawl-fixture-a
+    volumes:
+      - ./Quarry-v2/deploy/compose/crawl-fixture/a:/usr/share/nginx/html:ro
+      - ./Quarry-v2/deploy/compose/crawl-fixture/a/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      crawl-fixture:
+        aliases:
+          - fixture-a.crawl.test
+          - docs.fixture-a.crawl.test
+
+  crawl-fixture-b:
+    image: nginx:alpine
+    container_name: crawl-fixture-b
+    volumes:
+      - ./Quarry-v2/deploy/compose/crawl-fixture/b:/usr/share/nginx/html:ro
+      - ./Quarry-v2/deploy/compose/crawl-fixture/b/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      crawl-fixture:
+        aliases:
+          - fixture-b.crawl.test
+
+  # Lists every network the base file gives quarry-edge, plus crawl-fixture.
+  # Compose merges network lists, but naming all three keeps the result
+  # independent of that merge rule.
+  quarry-edge:
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+      - crawl-fixture
+
+networks:
+  crawl-fixture:
+    name: crawl-fixture
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.88.99.0/24

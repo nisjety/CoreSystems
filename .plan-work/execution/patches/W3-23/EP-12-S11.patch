@@ -1,0 +1,451 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs
+index e3071bc0c..a429008ff 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs	
+@@ -83,6 +83,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+                 .put(history::set_thread_goal)
+                 .patch(history::update_thread_goal),
+         )
++        // The owner's export of one conversation (Wave 3 EP-12 S11): Model Gateway's file, relayed
++        // unchanged. 404 `thread_export_disabled` from Model Gateway while its switch is off.
++        .route(
++            "/api/v1/chat/threads/{thread_id}/export",
++            get(history::export_thread),
++        )
+         .route(
+             "/api/v1/chat/stream/resume/{request_id}",
+             get(streams::resume_stream),
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs
+index 3a7112ee8..854e113b9 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs	
+@@ -1,11 +1,11 @@
+ use axum::{
+     extract::{Extension, Path, Query, State},
+-    http::{HeaderMap, StatusCode},
++    http::{header, HeaderMap, HeaderValue, StatusCode},
+     response::{IntoResponse, Response},
+     Json,
+ };
+ use chrono::{DateTime, Utc};
+-use reqwest::Method;
++use reqwest::{Method, RequestBuilder};
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ 
+@@ -593,6 +593,166 @@ pub(super) async fn fork_thread(
+     }
+ }
+ 
++/// The query of `GET /api/v1/chat/threads/{thread_id}/export`: the two choices the owner made. Both
++/// are optional here on purpose: Model Gateway owns the closed sets and answers a missing or
++/// unknown choice with its own typed `invalid_request`, so the browser hears one authority.
++#[derive(Debug, Deserialize)]
++pub(super) struct ThreadExportQuery {
++    format: Option<String>,
++    profile: Option<String>,
++}
++
++/// Export one of the caller's own conversations (Wave 3 EP-12 S11). The BFF adds only the org scope
++/// and the owner's own bearers. Model Gateway and Session Core decide whether the thread is the
++/// caller's and may leave the platform: a zero-retention or waived caller, a Space thread and a
++/// thread with a run kept outside retention are refused there, and that refusal reaches the browser
++/// as the gateway wrote it. The file comes back unchanged.
++pub(super) async fn export_thread(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(thread_id): Path<String>,
++    Query(query): Query<ThreadExportQuery>,
++) -> Response {
++    if let Err(response) = scope_for(&state, &user).await {
++        return response;
++    }
++    let thread_id = normalize_id(&thread_id);
++    if thread_id.is_empty() {
++        return bad_request("thread_id is required.");
++    }
++    let url = thread_export_url(&state.model_gateway_url, &thread_id, &query);
++    let model_token = shared::model_token(&state, &user, &headers).await;
++    let session_token = match shared::required_session_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
++    };
++    relay_thread_export(&state, &user, &url, model_token.as_deref(), &session_token).await
++}
++
++/// The upstream export URL. Each choice the owner made is passed on encoded, and a choice the owner
++/// left out is left out, so Model Gateway names the missing parameter itself.
++fn thread_export_url(base: &str, thread_id: &str, query: &ThreadExportQuery) -> String {
++    let mut params = Vec::new();
++    if let Some(format) = &query.format {
++        params.push(format!("format={}", urlencoding::encode(format)));
++    }
++    if let Some(profile) = &query.profile {
++        params.push(format!("profile={}", urlencoding::encode(profile)));
++    }
++    let mut url = format!("{base}/v1/threads/{}/export", urlencoding::encode(thread_id));
++    if !params.is_empty() {
++        url.push('?');
++        url.push_str(&params.join("&"));
++    }
++    url
++}
++
++/// Attach the owner's own credentials to one export call: the model bearer, the session bearer and
++/// the verified user's identity. No other audience's credential rides on it, and none of the
++/// client's headers are copied.
++fn owner_export_request(
++    request: RequestBuilder,
++    user_id: &str,
++    org_id: &str,
++    model_token: Option<&str>,
++    session_token: &str,
++) -> RequestBuilder {
++    let mut request = request.header("x-user-id", user_id);
++    if !org_id.is_empty() {
++        request = request.header("x-org-id", org_id);
++    }
++    if let Some(token) = model_token {
++        request = request.bearer_auth(token);
++    }
++    if let Some(value) = shared::data_plane_authorization_value(session_token) {
++        request = request.header("x-session-authorization", value);
++    }
++    request
++}
++
++/// One call to Model Gateway's export route, relayed as the file it is. The body is never parsed:
++/// an export is not a JSON answer, so a JSON proxy would lose it. A refusal keeps its typed JSON
++/// body; any other upstream failure becomes the gateway's own unavailable envelope.
++async fn relay_thread_export(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    url: &str,
++    model_token: Option<&str>,
++    session_token: &str,
++) -> Response {
++    let org_id = authorized_org_id(state, user).await;
++    let request = owner_export_request(
++        state.client.get(url),
++        &user.user_id,
++        org_id.trim(),
++        model_token,
++        session_token,
++    );
++    let response = match crate::request_id::apply(request).send().await {
++        Ok(response) => response,
++        Err(_) => return export_unavailable(),
++    };
++    let status =
++        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
++    let content_type = response
++        .headers()
++        .get(header::CONTENT_TYPE)
++        .and_then(|value| value.to_str().ok())
++        .map(str::to_owned);
++    let disposition = response
++        .headers()
++        .get(header::CONTENT_DISPOSITION)
++        .and_then(|value| value.to_str().ok())
++        .map(str::to_owned);
++    let body = match response.bytes().await {
++        Ok(body) => body,
++        Err(_) => return export_unavailable(),
++    };
++    if !status.is_success() {
++        let is_json = content_type
++            .as_deref()
++            .is_some_and(|value| value.starts_with("application/json"));
++        return if is_json {
++            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
++        } else {
++            (status, Json(crate::envelope::upstream_unavailable())).into_response()
++        };
++    }
++    (
++        status,
++        export_answer_headers(content_type.as_deref(), disposition.as_deref()),
++        body,
++    )
++        .into_response()
++}
++
++fn export_unavailable() -> Response {
++    (
++        StatusCode::BAD_GATEWAY,
++        Json(crate::envelope::upstream_unavailable()),
++    )
++        .into_response()
++}
++
++/// The owner's copy's headers: the media type and download name Model Gateway gave the file,
++/// `nosniff` so the browser never guesses another type, and no-store, because the body is the
++/// owner's conversation. Nothing else from the upstream answer is passed on.
++fn export_answer_headers(content_type: Option<&str>, disposition: Option<&str>) -> HeaderMap {
++    let mut headers = HeaderMap::new();
++    let media_type = content_type
++        .and_then(|value| HeaderValue::from_str(value).ok())
++        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
++    headers.insert(header::CONTENT_TYPE, media_type);
++    let download = disposition
++        .and_then(|value| HeaderValue::from_str(value).ok())
++        .unwrap_or_else(|| HeaderValue::from_static("attachment"));
++    headers.insert(header::CONTENT_DISPOSITION, download);
++    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
++    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
++    headers
++}
++
+ /// The body of `PUT /api/v1/chat/threads/{id}/goal` (Wave 3 EP-7 S1). Only these fields are
+ /// relayed; the owner, org and thread come from the session and the path, never from the body.
+ #[derive(Debug, Deserialize)]
+@@ -2344,6 +2504,80 @@ mod thread_goal_handler_tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod thread_export_handler_tests {
++    use super::*;
++
++    #[test]
++    fn export_url_names_the_thread_and_passes_each_choice_once_encoded() {
++        let query = ThreadExportQuery {
++            format: Some("json".to_owned()),
++            profile: Some("redacted".to_owned()),
++        };
++        assert_eq!(
++            thread_export_url("http://model-gateway", "thread/9", &query),
++            "http://model-gateway/v1/threads/thread%2F9/export?format=json&profile=redacted"
++        );
++        // A choice the owner left out is left out, and a value cannot add a second parameter.
++        let partial = ThreadExportQuery {
++            format: None,
++            profile: Some("full&format=json".to_owned()),
++        };
++        assert_eq!(
++            thread_export_url("http://model-gateway", "thread-9", &partial),
++            "http://model-gateway/v1/threads/thread-9/export?profile=full%26format%3Djson"
++        );
++    }
++
++    #[test]
++    fn export_proxies_owner_bearer_only() {
++        let request = owner_export_request(
++            reqwest::Client::new().get("http://model-gateway/v1/threads/thread-9/export"),
++            "user-1",
++            "org-1",
++            Some("model-token"),
++            "session-token",
++        )
++        .build()
++        .expect("the export request builds");
++        let headers = request.headers();
++        assert_eq!(headers[header::AUTHORIZATION], "Bearer model-token");
++        assert_eq!(headers["x-session-authorization"], "Bearer session-token");
++        assert_eq!(headers["x-user-id"], "user-1");
++        assert_eq!(headers["x-org-id"], "org-1");
++        // No other audience's credential rides on this call.
++        for name in [
++            "x-data-plane-authorization",
++            "x-capability-authorization",
++            "x-inference-authorization",
++            "x-execution-authorization",
++            "x-cost-authorization",
++            "x-sandbox-authorization",
++        ] {
++            assert!(headers.get(name).is_none(), "{name}");
++        }
++    }
++
++    #[test]
++    fn export_preserves_content_disposition() {
++        let headers = export_answer_headers(
++            Some("text/markdown; charset=utf-8"),
++            Some("attachment; filename=\"verevon-thread-thread-9.md\""),
++        );
++        assert_eq!(headers[header::CONTENT_TYPE], "text/markdown; charset=utf-8");
++        assert_eq!(
++            headers[header::CONTENT_DISPOSITION],
++            "attachment; filename=\"verevon-thread-thread-9.md\""
++        );
++        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
++        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
++        // Without an upstream name the copy is still a download, never a page.
++        let unnamed = export_answer_headers(None, None);
++        assert_eq!(unnamed[header::CONTENT_DISPOSITION], "attachment");
++        assert_eq!(unnamed[header::CONTENT_TYPE], "application/octet-stream");
++    }
++}
++
+ #[cfg(test)]
+ mod fork_handler_tests {
+     use super::*;
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index cafa880ac..c01cea951 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -846,6 +846,35 @@ describe('action registry', () => {
+     expect(schema?.safeParse({ runId: 'run_1', callSeq: 1, userId: 'user_x' }).success).toBe(false)
+   })
+ 
++  it('registers the thread export as a low-risk, owner-only model-plane read the model cannot execute (EP-12-S11)', () => {
++    const exportThread = getActionDescriptor('thread.export')
++
++    expect(exportThread).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('thread.export')).toBe(false)
++    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain('thread.export')
++    expect(MODEL_ACCESS['thread.export']).toMatchObject({ access: 'none', eligible: false, sideEffectClass: 'read' })
++    expect(exportThread?.description ?? '').toContain('Never model-executable')
++    expect(exportThread?.description ?? '').toContain('redacted')
++
++    // Both choices are named, the thread is named, and nothing else: the owner is the session's.
++    const schema = exportThread?.inputSchema
++    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full' }).success).toBe(true)
++    expect(schema?.safeParse({ threadId: 'thread-1', format: 'markdown', profile: 'redacted' }).success).toBe(true)
++    expect(schema?.safeParse({ threadId: 'thread-1', format: 'json' }).success).toBe(false)
++    expect(schema?.safeParse({ threadId: 'thread-1', format: 'csv', profile: 'full' }).success).toBe(false)
++    expect(schema?.safeParse({ threadId: '', format: 'json', profile: 'full' }).success).toBe(false)
++    for (const forged of [{ userId: 'user_x' }, { orgId: 'org_x' }]) {
++      expect(schema?.safeParse({ threadId: 'thread-1', format: 'json', profile: 'full', ...forged }).success).toBe(false)
++    }
++
++    // The answer is the file: its media type and download name, not a JSON envelope.
++    expect(exportThread?.outputSchema.safeParse({
++      contentType: 'text/markdown; charset=utf-8',
++      filename: 'verevon-thread-thread-1.md',
++    }).success).toBe(true)
++    expect(exportThread?.outputSchema.safeParse({ status: 'ok' }).success).toBe(false)
++  })
++
+   it('registers the thread goal actions as person-only writes with the server bounds (EP-7-S1)', () => {
+     for (const id of ['chat.set_goal', 'chat.update_goal', 'chat.clear_goal'] as const) {
+       expect(getActionDescriptor(id)).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false })
+@@ -1679,7 +1708,8 @@ describe('action registry', () => {
+     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+     // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
+     // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
+-    expect(ids).toHaveLength(316)
++    // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
++    expect(ids).toHaveLength(317)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 97d334e2e..97e2134c7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1,6 +1,7 @@
+ import { z } from 'zod'
+ import type { ActionDescriptor } from '@/shared/actions/types'
+ import { spaceActions } from '@/shared/actions/domains/spaces'
++import { threadExportInput } from '@/shared/actions/chat-history'
+ import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
+ 
+ const sourceInput = z.object({
+@@ -1973,6 +1974,13 @@ const chatSaveThreadSnapshotInput = z.object({
+   preview: z.string().trim().optional(),
+ })
+ 
++// The export's answer is the file itself, which the browser saves: the contract names its media
++// type and the name it carries, not a JSON envelope (EP-12 S11).
++const threadExportOutput = z.object({
++  contentType: z.string().min(1),
++  filename: z.string().min(1),
++})
++
+ const chatUploadDocumentInput = z.object({
+   title: z.string().trim().min(1),
+   content: z.string().trim().min(1),
+@@ -4636,6 +4644,17 @@ export const actionRegistry = [
+     inputSchema: chatSaveThreadSnapshotInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'thread.export',
++    label: 'Export chat thread',
++    description: 'Download one of the caller\'s own chat conversations as a file, JSON (verevon.thread-export.v1) or Markdown, in full or redacted; redacted leaves out tool payloads, connector data and attachment names. Owner only, and read only: nothing is changed or stored. Refused under zero data retention, for a thread with a run kept outside retention, and for a Space conversation; the route answers 404 while the export is off. Never model-executable: a model does not take a copy of a person\'s conversation off the platform.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: threadExportInput,
++    outputSchema: threadExportOutput,
++  },
+   {
+     id: 'chat.save_artifact_revision',
+     label: 'Save an edit of an artifact',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts
+index e8089575e..9887189dd 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts	
+@@ -31,4 +31,22 @@ describe('chat history action contract', () => {
+       parseChatHistoryAction({ type: 'thread.rewind', threadId: 'thread-1', messageId: 'message-4', confirm: true }).type,
+     ).toBe('thread.rewind')
+   })
++
++  it('accepts an export of one thread in either format and profile, with the id trimmed', () => {
++    expect(
++      parseChatHistoryAction({ type: 'thread.export', threadId: ' thread-1 ', format: 'markdown', profile: 'redacted' }),
++    ).toEqual({ type: 'thread.export', threadId: 'thread-1', format: 'markdown', profile: 'redacted' })
++    expect(parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json', profile: 'full' }).type).toBe(
++      'thread.export',
++    )
++  })
++
++  it('refuses an export with a choice missing, an unknown format or profile, or a blank thread', () => {
++    // Neither choice has a default, so a caller that leaves one out is refused.
++    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json' })).toThrow()
++    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', profile: 'full' })).toThrow()
++    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'pdf', profile: 'full' })).toThrow()
++    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: 'thread-1', format: 'json', profile: 'everything' })).toThrow()
++    expect(() => parseChatHistoryAction({ type: 'thread.export', threadId: '   ', format: 'json', profile: 'full' })).toThrow()
++  })
+ })
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts
+index 41723ce18..26c018e5e 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts	
+@@ -3,12 +3,21 @@ import { z } from 'zod'
+ // The client action contract for chat history (WS17). Each action names one
+ // change to a conversation the server owns, so the browser parses the request
+ // here before it sends anything. The archive pair and `thread.search` are wired;
+-// the other actions are declared so the later history slices extend this union
+-// instead of inventing parallel names. `thread.search` only reads; every other
+-// action here changes server state, so none of them is a local presentation toggle.
++// `thread.export` is declared for the export surface (EP-12 S11); the other actions
++// are declared so the later history slices extend this union instead of inventing
++// parallel names. `thread.search` and `thread.export` only read; every other action
++// here changes server state, so none of them is a local presentation toggle.
+ const threadId = z.string().trim().min(1).max(200)
+ const messageId = z.string().trim().min(1).max(200)
+ 
++// The owner's copy of one conversation (EP-12 S11). Neither choice has a default: the person
++// picks the format, and `redacted` leaves out tool payloads, connector data and attachment names.
++const threadExportFields = {
++  threadId,
++  format: z.enum(['json', 'markdown']),
++  profile: z.enum(['full', 'redacted']),
++}
++
+ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
+   z.object({ type: z.literal('thread.archive'), threadId }),
+   z.object({ type: z.literal('thread.unarchive'), threadId }),
+@@ -17,12 +26,17 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
+   z.object({ type: z.literal('thread.mark_unread'), threadId }),
+   z.object({ type: z.literal('thread.mark_read'), threadId }),
+   z.object({ type: z.literal('thread.search'), query: z.string().trim().min(1).max(200), threadId: threadId.optional() }),
++  z.object({ type: z.literal('thread.export'), ...threadExportFields }),
+   z.object({ type: z.literal('message.switch_version'), threadId, messageId, index: z.number().int().min(0).max(100) }),
+   // A rewind moves the active leaf and deletes nothing, but it still changes
+   // which answer the next turn sees, so the caller must confirm it explicitly.
+   z.object({ type: z.literal('thread.rewind'), threadId, messageId, confirm: z.literal(true) }),
+ ])
+ 
++// The registry's input for the same export: the three fields and nothing else. The owner is the
++// session's, so a body that names an owner or an organisation is refused rather than dropped.
++export const threadExportInput = z.object(threadExportFields).strict()
++
+ export type ChatHistoryAction = z.infer<typeof chatHistoryActionSchema>
+ 
+ export function parseChatHistoryAction(input: unknown): ChatHistoryAction {

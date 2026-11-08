@@ -1,0 +1,671 @@
+{
+ "batchId": "W3-03",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S3",
+   "outcome": "failed",
+   "reason": "an agent died or the slice returned nothing"
+  },
+  {
+   "id": "EP-13-S6",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\vertex_auth.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\gemini.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\fallback.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\config.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\effort.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\model_record.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\tests\\fallback_test.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib gemini",
+     "outcome": "13 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib vertex_auth",
+     "outcome": "5 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib config",
+     "outcome": "15 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p inference-core --test fallback_test",
+     "outcome": "23 passed, 0 failed (9 new)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib",
+     "outcome": "607 passed, 0 failed (run after the final edits)"
+    },
+    {
+     "command": "cargo check --workspace --all-targets",
+     "outcome": "red only in model-gateway/tests/replay_sessions.rs (untracked EP-14-S9 work, not owned): unresolved mp_inference_replay at :68 and :1461, DelegatedUserTokens lacks Clone at :1164. Every inference-core target and the other crates type-check"
+    },
+    {
+     "command": "cargo clippy -p inference-core --lib --tests",
+     "outcome": "no warnings in the touched files; three pedantic Duration lints in vertex_auth.rs fixed"
+    },
+    {
+     "command": "rustfmt --check on gemini.rs, vertex_auth.rs, fallback_test.rs, config.rs",
+     "outcome": "clean. Pre-existing rustfmt diffs in fallback.rs, mod.rs and effort.rs are outside my hunks and were left alone"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the newest-first entry 'Vertex Gemini (EP-13-S6) is built dark: it registers only with VERTEX_GEMINI_ENABLED=true, an EU location and a credentials file; Auto requests never reach it; supports_zdr is a constant false, so ZDR turns never reach it; tools, images and structured output are refused until S7.'",
+    "Workspace is red in a file no slice of mine owns: apps/Model Plane/rust/services/model-gateway/tests/replay_sessions.rs:68 and :1461 (mp_inference_replay is not a model-gateway dev-dependency yet) and :1164 (DelegatedUserTokens, declared at :1099, lacks Clone). This is EP-14-S9 work in progress; cargo check --workspace --all-targets stays red until it lands. I did not edit it.",
+    "Parallel edits in this worktree: apps/Model Plane/rust/services/inference-core/src/metrics.rs shows 128 changed lines from another slice (EP-13-S3). My test results were measured with that state present; I did not touch the file.",
+    "S8 owns compose wiring (VERTEX_GEMINI_* deliberately absent from compose) and the enablement gate: owner ruling D1, sourced prices D2, and the owner-funded live run D3. The S8 run must also confirm the eu multi-region path segment and per-region Gemini availability.",
+    "Regression proof for the live phase: boot with VERTEX_GEMINI_ENABLED unset on the Anthropic-only stack and confirm the provider is absent from /v1/models. The unit fallback tests cover registration only.",
+    "No docker, compose or live proof was run by this slice; nothing was committed, staged or pushed."
+   ],
+   "deviations": [
+    "Vertex settings live in a new VertexGeminiConfig read by FallbackChain::from_config (which now wraps from_config_with_gemini), not as InferenceConfig fields: src/grpc/real_rules_tests.rs and src/grpc/zdr_waiver_route_tests.rs (not owned) build InferenceConfig with full literals, so a new field would break them.",
+    "Switch parsing is stricter than the repo's truthy_env: only the literal true enables (truthy_env also accepts 1).",
+    "Registration requires an allowlisted EU location (per the batch summary) rather than registering a Global provider as D12 describes. vertex_residency still classifies other locations Global, reachable only from tests.",
+    "A unary safety block is typed as RequestRejected with detail safety_blocked: <reason>, not a new ProviderError variant, to avoid touching exhaustive matches elsewhere. A stream safety block ends with stop_reason content_filter (the OpenAI stream precedent), because the chunk channel has no error path.",
+    "Added an Auto-request exclusion in provider_serves_model (not in the design text): the unspecified-model early return would let Auto prompts reach Vertex, since default_model_for falls through to the OpenAI default id.",
+    "Added a typed refusal of tools (not in the design text): the chain does not gate on supports_tools, so tools would otherwise be dropped silently.",
+    "Thought tokens are counted into output_tokens (billing), which the design did not specify.",
+    "The EU allowlist is the eu multi-region plus the ten europe-* regions Google's locations page lists; the page's per-region support cells are blank, so per-model availability is unconfirmed."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof (S8, owner-funded): token exchange, the generateContent/streamGenerateContent body and SSE framing, and the eu multi-region path segment (locations/eu on aiplatform.eu.rep.googleapis.com) are all unverified against Google.",
+     "Switch-off regression on the Anthropic-only docker stack: boot with VERTEX_GEMINI_ENABLED unset and confirm vertex-gemini is absent from /v1/models. Only the lead can run this.",
+     "shared-edit apps/Model Plane/docs/decisions/ledger.md: the Vertex Gemini built-dark entry from the implementer's lead_todo still needs applying by the lead.",
+     "cargo check --workspace --all-targets is red only in untracked services/model-gateway/tests/replay_sessions.rs (:68, :1164, :1461; EP-14-S9 in progress, with crates/mp-inference-replay untracked and the root Cargo.toml member line belonging to it). It turns green only when that slice lands."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A unary Gemini safety block is RequestRejected, so the chain walks on and another provider can answer a prompt Gemini refused, while a stream safety block ends as stop_reason content_filter; the owner must choose one policy and align both paths before enablement."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "No thinkingConfig or maxOutputTokens/thinking interaction is verified: Gemini 2.5 models think by default, thoughtsTokenCount is billed into output_tokens, and S7/S8 must confirm the budget and price it with a live call."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "No safetySettings are sent, so Vertex default thresholds apply to every Gemini call; the owner must accept or set thresholds before S8."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The endpoint shape, the eu multi-region path segment (Google's page confirms only the host aiplatform.eu.rep.googleapis.com), the token exchange, the generateContent body and the SSE framing are unverified against Google; the S8 owner-funded run must prove them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gemini-2.5-pro and gemini-2.5-flash pages announce retirement on 2026-10-20, already past on 2026-11-03, so S8 must choose currently served model ids and source their rows before enablement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Google's locations page leaves the per-region Gemini support cells blank, so S8 must confirm availability in each allowlisted europe-* region before any location is enabled."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A non-EU VERTEX_GEMINI_LOCATION refuses registration, while D12 says such a location classifies Global; the Global branch of vertex_residency is reachable only from tests, so reconcile with D12 at S8."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On 401 or 403 from generateContent the cached Vertex token is kept until its expiry; dropping it on those statuses stops a revoked key from failing for up to an hour."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Not tested: the 429 retry-after path, a mid-stream safety block (content_filter), a multi-byte character split across network chunks (the decoder buffers bytes to the newline), and a stream that errors mid-body."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch off, an OpenAI-shaped deployment whose id starts with gemini no longer routes there; every other id keeps its route and no such Azure deployment is known, so confirm before enablement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "is_deployed checks the OpenAI deployed catalog for non-Claude ids, so a Gemini rung in a tool_fallback_ladder is skipped whenever Azure OpenAI is configured; decide when ladders carry Gemini."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The chain never gates on supports_tools (pre-existing), so a tool request reaches a provider that silently ignores tools; the Gemini adapter refuses them, but that guard depends on the chain's ordering."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Thought signatures are ignored per D5; reopen with S7 when tool-call replay is built, since a multi-round Gemini tool turn might need them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Credentials-file permissions are not checked at registration; the S8 secret mount should be read-only and owner-only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Switch-off regression on the Anthropic-only stack (provider absent from /v1/models, boot clean) is a live proof for the lead; the unit fallback tests cover registration only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "classify_failure and refuses_request duplicate the private helpers in anthropic.rs; hoist them to one shared place in a cleanup slice."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "FallbackChain::from_config reads the VERTEX_GEMINI_* environment on every build; that is boot-only today, but a per-request rebuild would re-read the key file."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A unary safety block becomes RequestRejected (gemini.rs parse_response), so the chain may let another provider answer a prompt Gemini refused, while a stream safety block ends as stop_reason content_filter. One policy must be chosen and both paths aligned before enablement."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "No safetySettings and no thinkingConfig are sent. Vertex default thresholds apply, and Gemini 2.5 thinks by default, with thoughtsTokenCount billed into output_tokens. Both need owner sign-off and live pricing before S8."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The model_record rows for gemini-2.5-pro and gemini-2.5-flash carry an announced retirement date of 2026-10-20, which has already passed. S8 must source rows for model ids Google still serves before enablement."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A non-EU VERTEX_GEMINI_LOCATION refuses registration, while D12 says it should classify as Global. vertex_residency's Global branch is reachable only from tests; reconcile with D12 at S8."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Behaviour changes with the switch off: provider_serves_model now excludes any gemini* id from the OpenAiCompatible family, so an Azure/OpenAI-shaped deployment named gemini* would stop routing even with VERTEX_GEMINI_ENABLED unset. No such deployment is known."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "VertexTokenProvider keeps a cached token after a 401/403 from generateContent until it expires. A revoked key can therefore fail calls for up to an hour; the cache should be invalidated on those statuses."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "FallbackChain::is_deployed checks the OpenAI deployed catalogue for any non-Claude id, so a Gemini rung in a tool_fallback_ladder is pruned whenever Azure OpenAI declares a catalogue."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No tests cover: the 429 Retry-After path (only integer seconds are parsed, otherwise 1s), a mid-stream safety block that yields content_filter, a UTF-8 character split across network chunks, or a body error mid-stream."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The credentials file's permissions are not checked, and the key file's token_uri is trusted as the exchange endpoint. The S8 secret mount must be read-only and owner-only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "classify_failure and refuses_request in gemini.rs duplicate the private helpers in anthropic.rs; hoist them into one shared place."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "FallbackChain::from_config re-reads the VERTEX_GEMINI_* environment and the key file on every build. That is fine while it runs at boot only, but a rebuild per request would re-read the secret."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p inference-core --lib gemini",
+      "outcome": "13 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib vertex_auth",
+      "outcome": "5 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib config",
+      "outcome": "15 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --test fallback_test",
+      "outcome": "23 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib (full)",
+      "outcome": "607 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check --workspace --all-targets",
+      "outcome": "FAILED: 3 errors in model-gateway test replay_sessions (services/model-gateway/tests/replay_sessions.rs:68 unresolved import mp_inference_replay; :1164 DelegatedUserTokens has no clone; :1461 mp_inference_replay not found). The file is not owned by this slice (EP-14-S9 work in progress). No error in inference-core or any file this slice touched; only warnings elsewhere.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "auth",
+    "policy"
+   ],
+   "notes": "Built in wave mode, dark. vertex_auth.rs: service-account JWT exchange, one-hour token cached and refreshed five minutes early, single-flight via a tokio mutex held across the exchange, Debug redacts the key, a refused credentials file refuses registration and never boot. gemini.rs: GeminiProvider over generateContent and streamGenerateContent (SSE, decoded by byte buffer to the newline), system to systemInstruction, usage and cachedContentTokenCount mapping, thought tokens counted as output, typed safety refusals, tools/images/structured output refused before any call, supports_zdr constant false, EU residency from the location allowlist. fallback.rs: ModelFamily::Gemini; Gemini ids excluded from the OpenAI family; registration arm \"vertex-gemini\" | \"gemini\" gated by VERTEX_GEMINI_ENABLED (literal true only) plus project, EU location, credentials file and model list. Gemini rows (gemini-2.5-pro and gemini-2.5-flash, 1,048,576 in and 65,536 out, Deprecated) sourced from Google's pages on 2026-11-03. No proto, no migration, no compose change, no live proof."
+  },
+  {
+   "id": "EP-14-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-ledger.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-ledger.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/RunLedger.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/RunLedger.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/LedgerInspector.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.run-ledger.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/chat/lib/run-ledger.test.ts src/features/chat/components/RunLedger.test.tsx src/features/chat/components/ChatPanels.run-ledger.test.tsx src/features/chat/components/ChatPanels.test.tsx (verevonv3, final code)",
+     "outcome": "4 files, 127 tests passed. Covers grouping, pairing, unmatched results, unattributed group, recorded-time ordering, outcomes, switch parsing, keyboard, copy, inspector, cap notice, Inspect selection without focus, switch-off Trace and tool cards, switch-on Trace and Inspect action."
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/shared/chat src/shared/chat-nodes src/shared/activity (verevonv3; run after the controller edits, before one final dead-field removal)",
+     "outcome": "135 files, 1902 tests passed, exit 0."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3, final code)",
+     "outcome": "One error, the known baseline src/shared/api/schedule-contract.test.ts(28,16) TS2352. None in this slice's files."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on the 11 edited and new files",
+     "outcome": "0 errors, 24 warnings. The warnings are pre-existing reactive-code warnings in ChatMessages.tsx and use-chat-controller.ts, none on lines this slice adds."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js -c eslint.ui-gates.config.js on the edited hot files and the new ledger modules",
+     "outcome": "exit 0. UI copy and colour gate clean."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (1 of 3): in the useChatController() destructure, next to 'uiEvents,' (about line 125), add 'ledgerInspect,' and 'inspectLedgerCall,'.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (2 of 3): on the <StepsPanel> mount (about line 937, after 'onStopTask={handleStop}') add 'onInspectCall={inspectLedgerCall}'.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (3 of 3): change the Trace mount (about line 956) to <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} />. Apply all three together; line 3 reads ledgerInspect from line 1. Props are optional, so the ledger still works without them, but Inspect is absent and the Trace opens unselected.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: append these rules after '.verevon-chat-trace-log__empty' (about line 23829):",
+    "/* EP-14 S4 run ledger (VITE_CHAT_RUN_LEDGER). Trace's own rules still reach its headings, times and codes. */",
+    ".verevon-chat-ledger { display: grid; gap: 10px; min-width: 0; }",
+    ".verevon-chat-ledger p { margin: 0; color: var(--verevon-e-subtle); font-size: 11px; }",
+    ".verevon-chat-ledger__layout { display: grid; gap: 12px; align-items: start; }",
+    "@media (min-width: 900px) { .verevon-chat-ledger__layout { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); } }",
+    ".verevon-chat-ledger__turns, .verevon-chat-ledger__turn, .verevon-chat-ledger__records { display: grid; gap: 4px; min-width: 0; }",
+    ".verevon-chat-ledger__turn { gap: 6px; }",
+    ".verevon-chat-ledger__records { padding-left: 10px; }",
+    ".verevon-chat-ledger__turn-head, .verevon-chat-ledger__row { display: flex; width: 100%; min-width: 0; align-items: baseline; gap: 8px; border: 0; border-radius: var(--chat-r-sm, 8px); background: transparent; padding: 6px 8px; color: var(--verevon-e-muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }",
+    ".verevon-chat-ledger__turn-head:hover, .verevon-chat-ledger__row:hover, .verevon-chat-ledger__row[aria-current='true'] { background: var(--verevon-surface-soft); }",
+    ".verevon-chat-ledger__row[aria-current='true'] { box-shadow: inset 2px 0 0 var(--verevon-chat-fjord); }",
+    ".verevon-chat-ledger__turn-head strong { color: var(--verevon-e-strong); font-family: var(--font-mono); font-size: 11px; }",
+    ".verevon-chat-ledger__turn-head em, .verevon-chat-ledger__row em { margin-left: auto; color: var(--verevon-e-subtle); font-size: 11px; font-style: normal; }",
+    ".verevon-chat-ledger__row-title { min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }",
+    ".verevon-chat-ledger__turn-head time, .verevon-chat-ledger__row time { flex: 0 0 auto; color: var(--verevon-e-subtle); font-size: 10px; }",
+    ".verevon-chat-ledger__inspector { display: grid; gap: 8px; align-content: start; min-width: 0; border-radius: var(--chat-r-sm, 8px); background: var(--verevon-surface-soft); padding: 12px; }",
+    ".verevon-chat-ledger__inspector > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }",
+    ".verevon-chat-ledger__inspector h3 { margin: 0; color: var(--verevon-e-strong); font-size: 12px; }",
+    ".verevon-chat-ledger__inspector h4 { margin: 4px 0 0; color: var(--verevon-e-muted); font-size: 11px; }",
+    ".verevon-chat-ledger__id { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }",
+    ".verevon-chat-ledger__id code { overflow: hidden; max-width: 100%; color: var(--verevon-e-subtle); font-family: var(--font-mono); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }",
+    ".verevon-chat-ledger__close, .verevon-chat-ledger__id button { border: 0; background: transparent; padding: 2px 4px; color: var(--verevon-e-muted); font-size: 11px; text-decoration: underline; cursor: pointer; }",
+    ".verevon-chat-ledger button:focus-visible, .verevon-chat-tool-call__inspect:focus-visible { outline: 2px solid var(--verevon-chat-fjord); outline-offset: 2px; }",
+    ".verevon-chat-tool-call > .verevon-chat-tool-call__inspect { width: auto; margin: 0 16px 12px; padding: 0; border: 0; background: transparent; color: var(--verevon-e-muted); font-size: 11px; text-decoration: underline; cursor: pointer; }",
+    "No compose or .env change. VITE_CHAT_RUN_LEDGER is a build-time flag that defaults off; enabling it means building the SPA with the variable set, which only the owner's switch flip should do.",
+    "Live proof, depth phase, not run here: a second dev server (the main checkout owns :5173) with VITE_CHAT_RUN_LEDGER=true. Check an Ask turn and a Do run: rows, durations, copy buttons, Inspect from the Steps tab, and a reload that shows the unattributed group. Take 1280 and 375 px screenshots and do a keyboard-only pass."
+   ],
+   "deviations": [
+    "Rounds from turn_timing phases are not built (depth finding 2). The Trace receives UI events only; the timing sits on the controller's turn, and passing it in needs ChatPage or a timing projection.",
+    "The WS09 window planner is not used and the list is not virtualised. Every record is mounted, like the flat list it replaces, bounded by the 5,000-event cap (depth finding 3).",
+    "buildLedger takes events only, not (events, turns, timing?). The Trace component cannot reach turns or timing without a ChatPage change, so outcomes come from the events.",
+    "Inspect is wired through StepsPanel in ChatPanels.tsx, not ChatMessages' steps rows: the tool cards are rendered there. ToolCallCard takes an optional onInspect, StepsPanel takes onInspectCall, and the controller holds ledgerInspect and inspectLedgerCall.",
+    ":resume segments fold into their turn in the pure module, not the controller, which keeps its per-segment dedup keys.",
+    "The cap notice renders inside the ledger; the flat list keeps its own. buildLedger does not see the cap, so the cap test lives in RunLedger.test.tsx, not run-ledger.test.ts.",
+    "A pending Inspect request is cleared when the reader leaves the Trace (setActiveTab) and when a thread's surface is restored (restoreSurfaceTab). This is a small addition to the design.",
+    "VerevonUiEvent is now VerevonUiEventBody & { turnId?: string }; the union was renamed to VerevonUiEventBody. Additive, and no existing narrowing changes.",
+    "No stylesheet is in the owned list, so the CSS goes to global.css as a lead shared edit, the same convention as S3.",
+    "Rows are div and button elements, not ol and li, so the generic .verevon-chat-trace-log li rules do not apply to them."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared edits are not applied: ChatPage.tsx must destructure ledgerInspect and inspectLedgerCall, pass onInspectCall to StepsPanel and inspectRequest to TracePanel. Until then the Inspect action never renders and the Trace opens with nothing selected.",
+     "Lead shared edit to global.css (the .verevon-chat-ledger* and .verevon-chat-tool-call__inspect rules) is not applied, so the ledger rows are unstyled when the switch is on.",
+     "Live proof (depth phase): a second dev server with VITE_CHAT_RUN_LEDGER=true. Check an Ask turn and a Do run, copy to the real clipboard, Inspect from the Steps tab, and the reload view (unattributed group). Take 1280 and 375 px screenshots and do a keyboard-only pass.",
+     "Rounds from turn_timing are absent, so the design's 'Ask turn shows 3 rounds' DoD check cannot pass until ChatPage passes turn timing or the timing is projected as a UI event."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Every ledger record is mounted and buildLedger returns new record objects on each event, so each append re-creates every row; measure a reloaded 5,000-event replay (one unattributed group) before VITE_CHAT_RUN_LEDGER is ever turned on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Rounds from turn_timing phases (span.round on tool_decision, generation and dispatch) are not shown; the design's '3 rounds on an Ask turn' check cannot pass until ChatPage passes turn timing in or the timing frame is projected as a UI event."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "planTranscriptWindow (WS09) is not used for the ledger; it plans turns, so it cannot bound the unattributed group, and row-level windowing is the fix for the P1 measurement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The stop path's run.cancelled event in use-chat-controller.ts is recorded without a turn id, so a stopped turn that never got a stream terminal frame reads 'no end recorded'; passing the assistant turn id there is a one-line fix."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "After reload the durable replay events carry no turn id, so the reloaded Trace is one 'Not tied to a turn' group with no outcome; attributing them needs the replay to carry turn or run identity (S5 territory) or an owner call."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The inspector shows ids, status, recorded times and receipts only, as the flat Trace did; showing tool arguments or outputs in the trace would be an owner decision about content."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller test covers the live turnId stamp in appendUiEvent, the Inspect path that sets the request and switches the tab, or the request being cleared in setActiveTab and restoreSurfaceTab; the :resume folding is tested only in the pure module."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Focus is asserted only for an Inspect request; no test proves that live event updates leave focus where it is."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Live checks are depth-phase work: a second dev server with VITE_CHAT_RUN_LEDGER=true on an Ask turn and a Do run, copy to the real clipboard, reload survival, 1280 and 375 px screenshots, a keyboard-only pass and a screen-reader pass on the list and inspector."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Selecting a record from Inspect does not scroll the row into view, so a call far down a long turn needs a manual scroll."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Every row is its own tab stop (no roving tabindex); arrow keys move focus, but reaching the inspector from a long list takes many Tab presses."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "formatClock (seconds, run-ledger.ts) and formatTime (minutes, chat-media-markdown.tsx) are two clock formatters; unify them when S5's waterfall lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The new Norwegian and English strings (Åpne i Trace, the inspector labels, the cap notice and the not-recorded notes) have had no native-speaker review."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "RunLedger mounts every record with no virtualisation (the design asks for reuse of the WS09 window planner), and buildLedger rebuilds every record object on each appended event, so each event re-renders all rows. A 5,000-event replay must be measured before VITE_CHAT_RUN_LEDGER is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "buildLedger groups by turn and tool call only. The design's 'rounds from turn_timing phases when present' level is not built, because TracePanel receives UI events only and no UI event carries span rounds."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Durable replay events carry no turnId, so after a reload the whole ledger is one 'Not tied to a turn' group with no outcome. Live and reloaded views differ until S5, or until the replay carries turn or run identity."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The stop path's run.cancelled event in use-chat-controller.ts is appended without a turnId. If a stopped turn received no stream terminal frame, it reads 'no end recorded' and its cancel receipt lands in the unattributed group."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no controller test for the turnId stamp in appendUiEvent, for inspectLedgerCall switching to the trace tab, or for ledgerInspect being cleared in setActiveTab and restoreSurfaceTab."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves that live event appends leave focus and the reader's own selection unchanged. The untracked-turns effect is the only guard."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The plan's full 'pnpm lint' and 'pnpm typecheck' (tsc -b with prebuilds) were not run as whole scripts. Verified instead: eslint on the 11 slice files gives 0 errors and 24 pre-existing warnings, and tsc6 -p tsconfig.app.json shows only the baseline schedule-contract.test.ts TS2352. The chat folders' other lint errors are in files this slice did not touch."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "An Inspect selection does not scroll the selected row into view in a long turn."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Every ledger row is its own tab stop (no roving tabindex), so it takes many Tab presses to get past a long list to the inspector."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "run-ledger.ts settle() has a formatting slip, 'call.status =result.error', missing a space."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The new Norwegian strings (Åpne i Trace, inspector labels, notes) have had no native-speaker review."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads run-ledger.test.ts RunLedger.test.tsx ChatPanels.test.tsx ChatPanels.run-ledger.test.tsx (verevonv3)",
+      "outcome": "4 files passed, 127 tests passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (typecheck, verevonv3)",
+      "outcome": "Only the known baseline error src/shared/api/schedule-contract.test.ts(28,16) TS2352. No errors in slice files.",
+      "passed": true
+     },
+     {
+      "command": "eslint on the 11 edited/new slice files (lint)",
+      "outcome": "Exit 0, 0 errors, 24 warnings (solid/reactivity, in the pre-existing controller/ChatMessages code).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built: the controller stores the turn id on live UI events (appendUiEvent, one line); a pure buildLedger in run-ledger.ts groups events by turn (a resumed ':resume' segment folds into its turn), pairs tool.call with tool.result by id (duration from recorded times only), keeps unmatched results and turnless events in an unattributed group, orders by recorded time, and reads each turn's outcome from its last terminal event; RunLedger.tsx is the list (collapsible turns, arrow/Home/End focus movement, Escape closes, cap notice, no focus taken); LedgerInspector.tsx is the drawer (request and run id with copy buttons, call status, start/end/duration or 'not recorded', receipts, lifecycle notices); TracePanel renders the ledger only when VITE_CHAT_RUN_LEDGER is the literal 'true' (default off, flat list unchanged otherwise); tool cards in the Steps tab get an 'Open in Trace' action when a handler is passed (controller ledgerInspect/inspectLedgerCall). No server, proto, migration, storage or egress change; the ledger reads in-memory events only, so ZDR and temporary chats behave as today. Not built: turn-timing rounds (the Trace receives UI events only) and the WS09 window planner. Wiring the Inspect action and the styling needs two lead shared edits (ChatPage.tsx and global.css), listed in lead_todo; without them the ledger works but Inspect is absent and the rows are unstyled. Other uncommitted edits in this worktree (Rust, proto, eval-lab, Cargo) belong to parallel batch slices; this slice did not touch them. No docker, no live stack, no commits."
+  },
+  {
+   "id": "EP-14-S9",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/replay_sessions.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/Cargo.toml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/Cargo.lock",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/Cargo.toml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/src/lib.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/tests/cassette_lint.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/01-plain-answer.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/04-honest-refusal.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/07-approval-pause.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/10-two-tool-loop.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/13-compaction-survivor.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-inference-replay/cassettes/15-do-run-with-plan.jsonl",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/eval-lab.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-inference-replay",
+     "outcome": "exit 0 (re-run this round; crate unchanged this round). Lib 7 passed, 0 failed. Integration cassette_lint 3 passed, 0 failed."
+    },
+    {
+     "command": "rustfmt --edition 2021 apps/Model Plane/rust/services/model-gateway/tests/replay_sessions.rs",
+     "outcome": "ran on the new LF file; parse OK; 1508 lines; 0 CR bytes. Syntax only, no type check."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test replay_sessions",
+     "outcome": "NOT RUN. services/model-gateway/Cargo.toml has no mp-inference-replay dev-dependency (checked by grep and by reading [dev-dependencies]). Blocked on lead_todo item 1."
+    },
+    {
+     "command": "cargo test -q -p execution-core --test replay_sessions",
+     "outcome": "NOT RUN. The test file is not written: see notes (seam). Also no dev-dependency line in execution-core/Cargo.toml."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/Cargo.toml: under [dev-dependencies] add `mp-inference-replay = { path = \"../../crates/mp-inference-replay\" }`. Apply before running the gateway suite.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/Cargo.toml: under [dev-dependencies] add `mp-inference-replay = { path = \"../../crates/mp-inference-replay\" }`.",
+    "After item 1: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test replay_sessions. If the replay refuses the request, the error carries the manifest diff (tools offered, last role, message digests). First check whether the gateway offers tools on a plain stream or makes an extra infer call before the stream, since the cassette expects neither.",
+    "Commit apps/Model Plane/rust/Cargo.lock with items 1 and 2 (cargo rewrites the model-gateway and execution-core dependency lists on the next build).",
+    "Owner or lead decision, not applied: execution-core seam. (a) runtime_loop/agent.rs:770 run_agent pub(crate) -> pub. (b) session_terminal_auth.rs:93 ManagedRunTokenProvider and its error type -> pub. (c) lib.rs:46 mod session_terminal_auth -> pub mod. (d) knowledge_tools.rs:48 SpaceRetrieval -> pub enum. (e) a no-environment constructor for SandboxManagerTokenProvider (sandbox_lease.rs). (f) a CapabilityPolicy double or the GrpcCapabilityPolicy constructor. After these, the execution-core suite can be written with cassettes 01, 10, 07, 13 and 15, using the same copy-by-generator approach.",
+    "Ledger, not in this slice's notes: record the mp-replay-v1 choices in apps/Model Plane/docs/decisions/ledger.md (tokenised_ids as objects, deltas must equal content, purpose as a label until EP-13-S3 lands). Lead applies.",
+    "Owner decision D8 (repository setting): make the eval-lab check required once both suites are green."
+   ],
+   "deviations": [
+    "The gateway suite copies the e2e doubles (about 1,300 lines) rather than sharing them, because model-gateway/tests/support has no session-core double and the e2e file is not owned. The copy is mechanical and the header says to keep it in step until it moves to tests/support.",
+    "The file carries #![allow(dead_code, unused_imports)] because the copied blocks leave items unused.",
+    "The gateway suite covers cassette 01 only, as the lead's notes named. Cassettes 10, 07, 13 and 15 are for the execution-core suite, which is not written.",
+    "The design's SSE payload golden (WS12-S7) is not asserted; the suite asserts done-last, the streamed text and the terminal receipt."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/Cargo.toml: add the dev-dependency line (lead_todo 1). Needed before the gateway suite compiles.",
+    "apps/Model Plane/rust/services/execution-core/Cargo.toml: add the dev-dependency line (lead_todo 2).",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: run_agent pub(crate) -> pub (line 770); needed for the execution-core suite.",
+    "apps/Model Plane/rust/services/execution-core/src/session_terminal_auth.rs: ManagedRunTokenProvider and its error type pub(crate) -> pub (line 93).",
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs: mod session_terminal_auth -> pub mod (line 46).",
+    "apps/Model Plane/rust/services/execution-core/src/knowledge_tools.rs: SpaceRetrieval pub(crate) enum -> pub enum (line 48).",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs: a constructor for SandboxManagerTokenProvider that takes no environment (only from_env exists, lines 359-412).",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs: a CapabilityPolicy implementor or the GrpcCapabilityPolicy constructor (lines 142-201), if the test does not use a double."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/tests/replay_sessions.rs:1099: `struct DelegatedUserTokens` lost its `#[derive(Clone)]` (e2e_invoke_chain_test.rs:2796 has it; the generator copied from line 2797). This gives E0599 at line 1164 (`tokens.clone()`), a real compile error that is separate from the missing dev-dependency. Add the derive back.",
+     "lead shared-edit apps/Model Plane/rust/services/model-gateway/Cargo.toml [dev-dependencies]: add `mp-inference-replay = { path = \"../../crates/mp-inference-replay\" }`. Without it the new test target fails with E0432 and E0433. model-plane-rust-ci.yml runs `cargo check --workspace --all-targets` and `cargo test --workspace`, so as the tree stands this untracked file breaks the workspace CI. Then run `cargo test -q -p model-gateway --test replay_sessions` until it is green.",
+     "apps/Model Plane/rust/services/execution-core/tests/replay_sessions.rs: missing. It is a row deliverable, and its plan test command fails with 'no test target named replay_sessions'. Cassettes 10, 07, 13 and 15 have no consuming suite. It needs the run_agent seam decision (visibility of run_agent, ManagedRunTokenProvider, SpaceRetrieval, and a no-env SandboxManagerTokenProvider constructor) and the execution-core dev-dependency line, both in lead_todo, before the suite can be written."
+    ],
+    "dod_gaps": [
+     "The execution-core seam (visibility changes in agent.rs, session_terminal_auth.rs, lib.rs, knowledge_tools.rs, plus a sandbox_lease.rs constructor) is outside the slice's ownership. An owner or lead decision is needed.",
+     "Dev-dependency lines in services/model-gateway/Cargo.toml and services/execution-core/Cargo.toml are shared edits, and Cargo.lock must be committed with them.",
+     "D8 repository setting: make the replay or eval-lab check required once both suites are green.",
+     "Record the mp-replay-v1 format choices in apps/Model Plane/docs/decisions/ledger.md (lead)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core replay suite is not written. It needs the run_agent seam (four visibility edits plus a no-environment sandbox token constructor) before cassettes 01, 10, 07, 13 and 15 can drive the Do loop."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway suite has never compiled or run. First-run risks: a plain chat may offer default tools (cassette 01 expects none), an auxiliary infer may precede the stream (the replay would refuse it), and the copied harness may need small fixes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway suite does not assert the WS12-S7 SSE payload golden the design names; it asserts done-last, the streamed text and the terminal receipt."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The copied doubles (about 1,300 lines) duplicate e2e_invoke_chain_test.rs. Move them to tests/support/ once the lead agrees to touch the e2e file."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The copied harness includes e2e's test credential fixture string (not a real secret). The CI secret scanner reads the new file, so a finding there would be expected, not a leak."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway replay suite has never run. Cassette 01 expects no tools offered and exactly one streamed ANSWER call, so if a plain /v1/invoke/stream offers default tools or makes an auxiliary infer call first, the replay will refuse it and either the cassette or the harness must change."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway suite asserts that done is the last event, the text PONG and a Completed receipt, but not the WS12-S7 SSE event-name or payload golden the design names."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "replay_sessions.rs copies about 1,300 lines of doubles from e2e_invoke_chain_test.rs under #![allow(dead_code, unused_imports)]. The copy has already drifted (the derive dropped from DelegatedUserTokens), so move it to tests/support/ once the e2e file can be touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "CI wiring adds `cargo test -q -p mp-inference-replay` to eval-lab.yml only. The gateway and execution-core suites are picked up implicitly by `cargo test --workspace` in model-plane-rust-ci.yml, which is not edited, so nothing names them as a required gate."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The ZDR guards are sound. Cassette::parse checks the raw header (synthetic must be literally true and zdr must not be true), unit tests cover both refusals, cassette_lint checks every shipped cassette, and a runtime-dependency scan keeps the crate out of every service's [dependencies]."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-inference-replay",
+      "outcome": "Lib 7 passed, 0 failed. Integration test cassette_lint 3 passed, 0 failed. Doc tests 0.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test replay_sessions",
+      "outcome": "Compile failed with 3 errors. E0432 and E0433: crate mp_inference_replay is unresolved (replay_sessions.rs:1461). E0599: .clone() on the replay value. Cause: services/model-gateway/Cargo.toml has no mp-inference-replay dev-dependency. The test never ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p execution-core --test replay_sessions",
+      "outcome": "error: no test target named replay_sessions in execution-core. The suite file is not written and the dev-dependency is missing.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Review fix 1 (gateway suite): written, not compiled or run. services/model-gateway/tests/replay_sessions.rs has one test, plain_answer_streams_its_cassette_and_completes_the_run. It drives POST /v1/invoke/stream through build_router, with the InferenceCore channel from mp_inference_replay::serve over cassette 01 (plain answer, no tools). It asserts the SSE event sequence ends with done, the streamed text is PONG, replay.finish() is Ok, and the run's terminal receipt is Completed (gateway-direct, scoped workload token, heartbeats) via assert_direct_terminal_for_prepared_run. Dev auth uses MODEL_GATEWAY_AUTH_DEV_BYPASS as e2e does. The session-core, managed-run and JWT doubles are verbatim blocks copied by a generator script from e2e_invoke_chain_test.rs (read only): imports 1-100; aliases 1124-1128; doubles 1130-2005; JWT helpers 2677-2760; delegated tokens 2797-2881 and 2913-2922; session spawn and mock_turns 2978-3028; MockMessageTree 3032-3063; make_state and assertion helpers 3247-3383; sse_frames 4301-4319. The RSA test key is generated at run time, so no key text was copied. Checks: no file-level use lines in e2e after line 100 were missed, and a textual check of free-function calls found nothing obviously undefined. The compiler is the real check. Review fix 2 (execution-core suite): NOT written. run_agent (runtime_loop/agent.rs:770) is pub(crate), and so are the types it takes: ManagedRunTokenProvider (session_terminal_auth.rs:93, a pub(crate) trait in a private module, lib.rs:46) and SpaceRetrieval (knowledge_tools.rs:48, pub(crate) enum). SandboxManagerTokenProvider (sandbox_lease.rs:359) has only from_env, which reads the environment. CapabilityPolicy is pub but needs an implementor. Writing the test against these unverified constructors would not compile reliably, so I stopped and listed the seam in lead_todo for an owner decision. Cassettes 10, 07, 13 and 15 have no suite yet."
+  }
+ ]
+}

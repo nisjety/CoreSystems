@@ -1,0 +1,445 @@
+{
+ "batchId": "W2-45",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS14-S5",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0071_run_question_consume.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0071_run_question_consume.down.sql"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "exit 0 (55 s). Warnings shown are pre-existing dead-code and irrefutable-let warnings in files this slice does not touch, including decision_closer in resume.rs."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib",
+     "outcome": "exit 0."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core terminalization",
+     "outcome": "18 passed, 0 failed, 16 ignored (the two resume_question DB tests are among the ignored)."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "731 passed, 0 failed, 294 ignored."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core -- question_expired_is_written_by_recovery_only migration_0071 a_resume_question_holds_the_run",
+     "outcome": "3 passed, 0 failed."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core -- --list --ignored (filtered to resume_question)",
+     "outcome": "Both terminalization::resume_question_db_tests tests are registered as ignored. Not run: they need the Postgres harness, which the lead runs."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- runtime_loop::resume runtime_loop::park",
+     "outcome": "78 passed, 0 failed, 0 ignored."
+    },
+    {
+     "command": "python3 tag check of AgentResume, HEAD against the working copy (scratchpad tagdiff.py); git diff --stat on the proto",
+     "outcome": "Tags 1-8 unchanged; 9 reserved and not a field; 10 question_id and 11 answer_json new. Diff is 7 insertions, 0 deletions. CRLF 651 of 651 lines."
+    }
+   ],
+   "db_tests_written": [
+    "terminalization::resume_question_db_tests::a_resume_question_the_owner_may_still_answer_holds_its_run",
+    "terminalization::resume_question_db_tests::a_resume_question_that_lapsed_ends_its_run_as_question_expired"
+   ],
+   "lead_todo": [
+    "1. Decide the migration number: 0071 (batch) or 0063 (plan 4.4 and the inflight lock). If 0063, rename both files, the include_str! paths and the migration_0071 test names, and update the batch file list.",
+    "2. Land ConsumeRunQuestion in orchestration.proto. Suggested shape: request question_id, run_id, org_id, user_id, claim_hash; response question, consumed, already_consumed. Store rule: UPDATE run_questions SET consumed_at = now() WHERE id, org_id, user_id, run_id, delivery = 'resume', state = 'answered' AND consumed_at IS NULL, with a same-claim replay as ConsumeApproval does.",
+    "3. Run buf generate for apps/Model Plane/proto so the Go and Python bindings get AgentResume 10 and 11 and the new RPC. Then run buf lint and buf breaking against main. Expect breaking to pass, since reserved 9 is kept and only additions were made.",
+    "4. shared-edit docs/plans/model-plane-depth-register.md: append to the Wave 2 findings table as the next free D2-nnn row: | D2-nnn | WS14-S5 | decision | P1 | DEC-39 deviation: AgentResume question_id is tag 10 and answer_json tag 11 (plan 4.3 Final was 9 and 10). Tag 9 once carried the approved call's arguments (tool_input at 34bd4574e; reserved at bf60cbc16, both ancestors of HEAD). Reusing it would decode a stale peer's arguments as question_id, and buf breaking RESERVED_MESSAGE_NO_DELETE would fail. reserved 9 kept, additive. | open |",
+    "5. shared-edit docs/plans/model-plane-chat-build-plan-2026-10-14.md: section 4.3 AgentResume row (about line 1827) change '9, 10' to 'reserved 9; 10, 11'. Add ConsumeRunQuestion to the orchestration New RPCs row (about line 1882).",
+    "6. After items 1 to 2 and the needs_other_files edits land, re-dispatch WS14-S5 to write the owned parts: the consume store CAS and handler (writes consumed_at); the executor park for delivery resume in agent.rs and resume.rs (PendingPause kind input, pause_ref question_id, the answer as the stage-2 tool result or the stage-1 brief); the gateway continue branch in sse.rs (409 continuation_already_consumed); the FE answerQuestion branch and its test; and the AGENT_ASK_USER_RESUME_ENABLED reader (strict parser, default off, gated on AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and EXECUTION_LOOP_RESUME_ENABLED).",
+    "7. Keep create_run_question's refusal of delivery resume until the consume RPC, the park and the continue branch all exist. Flipping it earlier creates answerable questions that nothing continues.",
+    "8. DB harness (lead): scripts/tests/session-core-db-tests.sh with filter terminalization, which covers the two ignored tests. Apply 0071 on a scratch database, then run its revert once, after confirming no outbox row says question_expired.",
+    "9. Live proof (lead, later): an ambiguous Do ask with AGENT_ASK_USER_RESUME_ENABLED and the WS03 switches on, then a continue with the answer."
+   ],
+   "deviations": [
+    "AgentResume question_id is tag 10 and answer_json is tag 11, not the DEC-39 default of 9 and 10 (plan 4.3 Final column). Tag 9 was the approved call's arguments: tool_input = 9 at commit 34bd4574e, reserved at bf60cbc16, and both are ancestors of this branch's HEAD. Reusing 9 would decode a stale peer's arguments as question_id, and buf breaking (FILE, RESERVED_MESSAGE_NO_DELETE) would fail on the removed reserved statement. reserved 9 is kept, so the change is additive. Record it against DEC-39 (see lead_todo 4).",
+    "The migration stays 0071 because the batch names it. Plan section 4.4 and the inflight lock reserve 0063, and 0063 is absent from the migrations directory. The always-apply rule says migrations take the section 4.4 number, so this is a conflict the lead must resolve. I did not rename, because the reviewer listed the number as the lead's decision.",
+    "Fix 1 is not closed. Items (a) to (e) need unowned changes first (needs_other_files 1 to 6), and the owned parts would be unused until those land, so none were written."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto: add ConsumeRunQuestion and its messages, appended to OrchestrationCoreService. Plan 4.3 lists no such RPC, so it must be added there too.",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: execute_ask_user (about line 3760) hard-codes DELIVERY_NEXT_TURN. It must create a resume question when the run is eligible. Its output already carries question_id.",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs: add the RunPausedForInput variant and the awaiting_input status. ChatEvent::RunParked (about line 494) is the pattern.",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts: continueRun (about line 276) posts only approval_id and claim_token. It needs the question form, either as options or a sibling function.",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts: closed vocabulary for question_id and answer.",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs: BFF continue body mapping (ContinueRunBody, continue_upstream_body). The body rejects unknown fields.",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs: the park and segment validators must refuse question_id and answer_json until a reader ships (depth finding).",
+    "apps/Model Plane/deploy/docker-compose.yml: AGENT_ASK_USER_RESUME_ENABLED with ${...:-false} in the execution-core and model-gateway blocks.",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json and its .sha256: rows for the consume RPC, once it exists.",
+    "apps/Model Plane/docs/sse-event-taxonomy.md: regenerate with python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py after the sse_events.rs change.",
+    "docs/plans/model-plane-depth-register.md: the DEC-39 row (exact text in lead_todo 4).",
+    "docs/plans/model-plane-chat-build-plan-2026-10-14.md: section 4.3 AgentResume row (about line 1827) reads 9, 10 and should read reserved 9, then 10 and 11. The orchestration New RPCs row (about line 1882) should name ConsumeRunQuestion."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "The row's core deliverables are missing; the implementer reports the slice as partial. Only the proto fields, migration 0071 and the recovery hold/expiry in terminalization.rs exist. Nothing pauses a run as awaiting_input, nothing applies an answer on /continue, there is no single-use consume and no flag. A pass needs all of the items below.",
+     "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs + orchestration_grpc.rs: add consume_run_question as a single-use CAS that writes consumed_at. Its WHERE clause is id, org_id, user_id, run_id, delivery='resume', state='answered' AND consumed_at IS NULL, with a same-claim replay as ConsumeApproval does. Add a real-PG test where two parallel consumes leave one winner. The ConsumeRunQuestion RPC in orchestration.proto is a shared edit the lead lands first.",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs + resume.rs: for delivery=='resume', park the run with PendingPause{kind: input, pause_ref: question_id}. On resume, read AgentResume.question_id/answer_json and apply the answer as the stage-2 tool result or as the stage-1 brief. Add the WS03 message-equality test with an input pause. This depends on the lead making mod.rs execute_ask_user create resume questions.",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs + http_routes.rs: the /continue path must accept {question_id, answer}, return 409 continuation_already_consumed on a second consume, and emit the awaiting_input frame / RunPausedForInput event. The sse_events.rs variant is a shared edit.",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts + use-chat-controller.question.test.ts: answerQuestion must post continueRun when delivery==='resume'. Add the controller test the row names.",
+     "AGENT_ASK_USER_RESUME_ENABLED: add a strict parser that defaults to false and a unit test. Resume may be selected only when this flag, AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and EXECUTION_LOOP_RESUME_ENABLED are all on and at least one effectful step is done. It must exist before create_run_question stops refusing delivery 'resume'."
+    ],
+    "dod_gaps": [
+     "The two #[ignore] DB tests (terminalization::resume_question_db_tests::*) need the Postgres harness: scripts/tests/session-core-db-tests.sh with filter terminalization.",
+     "Apply migration 0071 on a scratch database, then run the revert once.",
+     "buf generate, lint and breaking for AgentResume tags 10/11 (and later ConsumeRunQuestion); compile checks do not prove the wire tags.",
+     "Live proof per the row: a run with two effectful steps asks a question, docker restart execution-core, then answer; the run completes with one terminal receipt and no replay; capture psql showing consumed_at set.",
+     "Shared edits listed by the implementer: orchestration.proto RPC, mod.rs execute_ask_user, sse_events.rs plus the taxonomy regeneration, BFF orchestration.rs continue body, the FE orchestration-client and continue contract, compose flag entries, and the plan 4.3 row plus a DEC-39 depth-register row."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The execution-core grpc.rs park and segment validators do not refuse AgentResume.question_id or answer_json. Nothing reads the fields yet, but the validators must refuse them before any reader ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "consumed_at has no writer until ConsumeRunQuestion exists. The single-use guard needs a compare-and-set on run_id, org_id, user_id, delivery resume, state answered and consumed_at null, plus claim-hash replay as in ConsumeApproval. An answer CAS alone does not guard a launch retry."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The two resume_question DB tests are written and registered as ignored, but not run. The lead runs them through the harness."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Migration number: 0071 (batch) against 0063 (plan 4.4 and the inflight lock). 0063 is free in this tree. The lead must choose before merge."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Plan 4.3 lists no ConsumeRunQuestion RPC, but the S5 row names a handler for one. Add it to the plan and the ledger when the proto lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "claim_due_recovery does not exclude runs with a live resume question, although it excludes live approvals. A held run is claimed every activity-retry period, which churns the outbox. Mirror the exclusion when the resume path goes live."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "question_expired has no SPA copy (frontend, not owned), so a run that ends this way shows the raw failure code."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "create_run_question still refuses delivery resume on purpose. Flip it only after the consume RPC, the executor park and the continue branch all exist."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Ledger entry (S7 or earlier): question_expired is recovery-only, mirroring outcome_unknown, and a resume question holds its run the way an approval does."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "resume.rs decision_closer is never called (pre-existing cargo warning). It may be the closer the resume path needs for denied or expired questions, so check it before wiring. verification_result_for (approval_delivery_worker.rs) and execute_step_with_subagent (runtime_loop/mod.rs) are also pre-existing unused functions."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The recovery warn line no longer says outcome_unknown and now carries a failure_code field. Update any log search or dashboard that matches the old text."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Migration number: plan section 4.4 reserves 0063 for WS14.S5 run_question_consume and 0063 is free in the tree, but the batch named 0071 and the file is 0071. The lead must decide before merge, and any rename must also cover the include_str! path in the terminalization test."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "AgentResume uses question_id=10 and answer_json=11 rather than DEC-39's 9 and 10, because tag 9 is reserved (it was formerly tool_input). Keeping reserved 9 is correct and additive, but the deviation needs a depth-register row and a correction to the plan 4.3 row."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execution-core grpc.rs park and segment validators accept AgentResume.question_id/answer_json without reading or refusing them, so a peer-set answer is silently dropped. Refuse them until the reader ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "has_pending_resume_question holds only state='requested'. After the owner answers but before the continuation consumes, a resume question no longer holds the run, so recovery can end an answered-but-unconsumed run as outcome_unknown. Consider holding while state='answered' AND consumed_at IS NULL inside a bounded window."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "claim_due_recovery does not exclude runs with a live resume question (it does exclude live approvals). A held run is reclaimed and released every activity-retry period, which churns the outbox."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "question_expired has no SPA failure copy, so a run that ends this way shows the raw code."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The recovery warn log text changed from 'terminalized as outcome_unknown after producer loss' to a generic message with a failure_code field. Any log search that matches the old string needs updating."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a run that has both an expired and a still-requested resume question. The hold wins by ordering, and only the source-order test pins that."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p session-core --bin session-core (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "ok: 731 passed, 0 failed, 294 ignored. Compiles cleanly. The ignored tests include the two resume_question DB tests, which need the Postgres harness; I did not run them.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core -- question_expired_is_written_by_recovery_only migration_0071 a_resume_question_holds_the_run",
+      "outcome": "ok: 3 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "Slice test_commands (WS14-S5 entry in W2-45.json)",
+      "outcome": "Empty list, so there are no plan-specified commands to run. Not run: the 2 DB-backed resume_question tests (Postgres harness, lead's job), buf generate/lint/breaking for the proto change, and the execution-core/model-gateway checks (the slice changed neither crate).",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "audit"
+   ],
+   "notes": "Fix 2 is applied: AgentResume keeps reserved 9, question_id is tag 10 and answer_json is tag 11. The proto is still CRLF throughout. Fix 1 is not closed. Rows (a) to (e) each depend on an unowned change listed in needs_other_files, so none of them was written. The consume CAS and its handler need the ConsumeRunQuestion RPC. The park needs mod.rs to create resume-delivery questions, since execute_ask_user hard-codes next_turn. The gateway and FE branches need the awaiting_input event and a continue body that carries the question. The flag reader would have no consumer until those land, and the batch forbids unused code. lead_todo item 6 lists the owned work to write once the prerequisites land. Compile checks do not prove the wire tags; buf generate, lint and breaking are the lead's gate. No commit, stage, push, docker or DB harness run. Every cargo command used CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0. No copy of the workspace was made, and no other target directory was created."
+  },
+  {
+   "id": "WS13-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/approval_gate_contract.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/verify-approvals-v2.sh (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (modified: APPROVAL_ZDR_CASES, check_approval_zdr_cases, self-test copy and rename tamper, main-flow call)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts (modified: proto-driven ApprovalKind totality test)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test approval_gate_contract (cwd apps/Model Plane/rust)",
+     "outcome": "10 passed, 0 failed, after the final edits"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 services/execution-core/tests/approval_gate_contract.rs",
+     "outcome": "clean (rustfmt applied once to this new LF file)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy -q -p execution-core --test approval_gate_contract",
+     "outcome": "exit 0; no findings in the new file after the doc fixes (the warnings in the log come from other crates)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "138 passed, 4 failed. The four failures are pre-existing and in files this slice does not touch. The five approval ZDR golden cases each report ok."
+    },
+    {
+     "command": "sync check in a scratch tree with the guard renamed, and again with the guard file absent",
+     "outcome": "each reports not ok for the approval ZDR case (renamed guard: approval_grant_use_under_zdr_refused; absent file: guards missing)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh --self-test",
+     "outcome": "exit 1 at its first check, because the same four pre-existing failures are in its scratch copy; not a pass. The new tamper branch was exercised by the scratch-tree run instead."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/shared/approvals/approval-copy.test.ts (cwd apps/Frontend Plane/verevonv3)",
+     "outcome": "13 passed (12 existing, 1 new proto-driven). pnpm exec was refused because it starts a dependency install that fails in this worktree."
+    },
+    {
+     "command": "bash -n apps/Model Plane/scripts/verify-approvals-v2.sh; run with no environment; dry run against a closed local port with a failing database command, evidence to a scratch folder",
+     "outcome": "syntax ok; no-environment run exits 2 with usage; dry run completes with FAIL and SKIP lines and exit 1, and writes nothing into the repository"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the live walk on the proof stack: bash \"apps/Model Plane/scripts/verify-approvals-v2.sh\" with MP_GATEWAY_URL, MP_USER_BEARER, SESSION_CORE_SQL (a command that runs psql against the session-core database), APPROVAL_ID, RUN_ID and THREAD_ID. Add DECIDE=1, APPROVAL_AUDIT_EVENTS_ENABLED=1, STEP_UP_ENFORCE=1 with STEP_UP_APPROVAL_ID and MP_STEP_UP_BEARER, DENIED_APPROVAL_ID (after re-proposing its call), SCOPE_GRANTS=1 with GRANT_APPROVAL_ID, then GRANT_RELEASED=1 on a second run, and REVOKE=1 once the revoke route exists. Evidence lands in docs/compliance/evidence/approvals-v2-<UTC stamp>/.",
+    "Run the session-core DB test a_thread_grant_never_releases_a_run_that_keeps_no_state through the DB harness (DATABASE_URL, scripts/tests/session-core-db-tests.sh); approval_grant_use_under_zdr_refused cites it.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs (WS13-S1 and S3 owners): in create_approval, line ~3411, `let (metadata, cause_code) = new_approval_metadata(&req, caller.zdr());` must also drop the cause for a waiver (caller.zdr() || caller.zdr_waiver().is_some()); in decide_approval, line ~3786, refuse a waived caller next to `retention_receipt::refuse_zdr_continuation(&caller)?;` before store::decide_approval_recorded. Add a unit test beside a_zero_retention_caller_stores_no_cause.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/orchestration_store.rs: decide_approval_recorded (line ~1169, `if updated && record.audit`) must not write approval_decided for a non-persistent run; the handler fix in the previous item does not cover a waived store caller.",
+    "WS13-S6 owners: add the gateway routes GET /v1/orchestration/threads/:thread_id/approval-grants and DELETE /v1/orchestration/approval-grants/:grant_id (model-gateway http_routes.rs route table, lines ~428-470), the BFF routes in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs, and the client in apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts. Until then the walk's S6 list and revoke steps fail.",
+    "Record the decision in apps/Model Plane/docs/decisions/ledger.md: approval surfaces are guarded by approval_gate_contract.rs and not by zdr-posture-matrix.json rows. The owner either confirms that or asks for matrix rows, which means a schema change across six consumers.",
+    "Commit the four files listed (two new, two modified). The other uncommitted work in this worktree (execution.proto, terminalization.rs, migration 0071 and its revert) belongs to another batch and is not part of this slice.",
+    "CI runs cargo test --workspace --no-fail-fast and the full pnpm test; neither was run here (the single frontend test file was)."
+   ],
+   "deviations": [
+    "zdr-posture-matrix.json, its .sha256 and the three vendored copies (mp-contracts, model-gateway and execution-core fixtures) are unchanged. Its strict loaders reject unknown fields across six consumers, and its rows are route and bearer decisions, so approval surfaces cannot be rows without a cross-plane schema change. The golden cases are guard functions in approval_gate_contract.rs, registered in zdr-contract-sync.test.sh as APPROVAL_ZDR_CASES, following the MCP-golden precedent in api/contracts/README.md.",
+    "Three of the five ZDR cases are source-order guards, not behavioural tests (approval_audit_not_emitted_under_zdr, approval_scope_grant_under_zdr_refused, approval_denial_memory_not_consulted_under_zdr), because their behavioural tests belong in session-core, model-gateway and execution-core agent.rs, which this slice may not edit. approval_cause_not_persisted_under_zdr and approval_grant_use_under_zdr_refused cite existing behavioural tests as their twins.",
+    "The gate contract covers execution-core only, as the row places it."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs (waiver refusal for the cause and for decision provenance; see lead_todo 3)",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs (decide_approval_recorded audit gate for non-persistent runs; see lead_todo 4)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (approval-grant list and revoke routes; see lead_todo 5)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs (BFF approval-grant routes; see lead_todo 5)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts (grant client; see lead_todo 5)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json and its three vendored copies, only if the owner wants approval rows in the matrix"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "One captured end-to-end run of apps/Model Plane/scripts/verify-approvals-v2.sh on a running stack in a dated evidence folder under docs/compliance/evidence (needs docker, lead only); its S6 grant-list and revoke steps will FAIL until the WS13-S6 gateway/BFF routes exist",
+     "cargo test --workspace --no-fail-fast and full pnpm test not run (CI)",
+     "session-core DB test a_thread_grant_never_releases_a_run_that_keeps_no_state (behavioural twin of approval_grant_use_under_zdr_refused) needs DATABASE_URL through the DB harness",
+     "Owner confirmation that the five approval ZDR golden cases live as guard functions in approval_gate_contract.rs registered via APPROVAL_ZDR_CASES rather than as zdr-posture-matrix.json rows (follows the MCP-golden precedent in api/contracts/README.md); record in apps/Model Plane/docs/decisions/ledger.md"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "A waived run's approval writes are not refused: create_approval stores metadata.cause through new_approval_metadata, which keys on caller.zdr() (session-core orchestration_grpc.rs: helper near lines 1443-1455, call near line 3411), and decide_approval merges metadata.decision for any caller that refuse_zdr_continuation admits, while a waiver's credential has zdr() false (auth.rs:155-157), against DEC-32 (a waived run counts as ZDR for every new durable store). The data is content-free, but the write is durable and unconditional."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A waived decision still writes its approval_decided outbox row once APPROVAL_AUDIT_EVENTS_ENABLED is on, because decide_approval_recorded (orchestration_store.rs near line 1169) has no retention check, so this must be fixed before that switch is enabled."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The WS13-S6 HTTP and UI surface is absent: the gateway and the BFF have no approval-grant list or revoke route and the frontend has no grant client (listApprovalGrants, revokeApprovalGrant), although the store and gRPC handlers exist, so the card's Revoke control cannot be built and scope grants must stay off until it lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "apps/Model Plane/scripts/verify-approvals-v2.sh is syntax-checked and dry-run against a closed port, but not run on a stack, and its S6 list and revoke steps will FAIL until the grant routes exist."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The S8 row's matrix golden cases are not in zdr-posture-matrix.json because its strict loaders (mp-contracts, model-gateway, execution-core, auth-core, the BFF and integration-corev2) reject unknown fields and matrix rows are route and bearer decisions; the owner should confirm the guard approach and record it in apps/Model Plane/docs/decisions/ledger.md."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Three of the five ZDR guards check source order rather than behaviour (approval_audit_not_emitted_under_zdr, approval_scope_grant_under_zdr_refused, approval_denial_memory_not_consulted_under_zdr), so a behavioural test in each owning crate is the stronger proof and remains owed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The behavioural twin of approval_grant_use_under_zdr_refused, session-core's DB test a_thread_grant_never_releases_a_run_that_keeps_no_state, is ignored without DATABASE_URL and was not run here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Four checks in scripts/tests/zdr-contract-sync.test.sh fail in this Windows working copy on files this slice does not touch: three .sha256 pins have CRLF line endings in the working tree (the auth-core cross-plane token-requests pin, the auth-core quarry-token-claims pin and the usage-ledger envelope pin), and Quarry's zdr-feature-matrix.json no longer matches its pinned digest; the self-test therefore also fails at its first step here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "approval-copy.test.ts lists the six browser risk categories by hand and does not read the Rust RiskCategory enum (execution-core browser_agent/browser_risk.rs), so a new category would have no copy check until someone adds it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The TypeScript typecheck of approval-copy.test.ts was not run: this worktree's node_modules TypeScript link is dangling and pnpm exec starts a dependency install here, so vitest ran the file instead (13 of 13 passed)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The gate contract covers execution-core only, so the awaiting_approval SSE frames the model gateway emits (model-gateway sse.rs near line 13027) are not inventoried by it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Waived runs are not treated as ZDR for approval stores (DEC-32): session-core create_approval calls new_approval_metadata(&req, caller.zdr()) and refuse_zdr_continuation checks only caller.zdr(), while a waiver credential has zdr() false, so a waived run's metadata.cause and decision provenance are written; fix belongs to the S1/S3 owners in orchestration_grpc.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "orchestration_store.rs decide_approval_recorded writes the approval_decided outbox row with no retention check, so a waived decision emits an audit row once APPROVAL_AUDIT_EVENTS_ENABLED is on; must be closed before that switch is enabled."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "WS13-S6 HTTP/UI surface (gateway GET /v1/orchestration/threads/:id/approval-grants and DELETE /v1/orchestration/approval-grants/:id, BFF routes, frontend grant client) is absent, so the verify walk's S6 list/revoke checks cannot pass and scope grants must stay off."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The S8 row names zdr-posture-matrix.json for the golden cases, but the matrix and its pin are unchanged and the cases are guard functions in execution-core/tests/approval_gate_contract.rs registered in zdr-contract-sync.test.sh; this matches the documented MCP-golden precedent (strict loaders reject unknown fields) but needs owner confirmation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Three of the five ZDR cases (approval_audit_not_emitted_under_zdr, approval_scope_grant_under_zdr_refused, approval_denial_memory_not_consulted_under_zdr) are source-order string guards, not behavioural tests, and break on harmless refactors while not proving runtime behaviour."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "verify-approvals-v2.sh s6_scope_not_offered POSTs a real decide (approve, scope thread) on APPROVAL_ID without DECIDE=1, so if the gateway regresses and accepts the scope the walk silently approves the provider write, contradicting its header ('a decision is made only with DECIDE=1')."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Four pre-existing zdr-contract-sync failures in this Windows working copy (three CRLF .sha256 pins and the Quarry zdr-feature-matrix digest) make the --self-test fail at its first step, so the new rename-tamper branch is not exercised by --self-test here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The self-test's rename tamper uses GNU 'sed -i' without a suffix, which fails on BSD/macOS sed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "approval-copy.test.ts reads ApprovalKind from the proto but the browser risk categories are still hand-listed rather than read from execution-core browser_risk.rs RiskCategory."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The gate contract inventories execution-core only; awaiting_approval SSE frames emitted in model-gateway are not covered."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --test approval_gate_contract",
+      "outcome": "10 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+      "outcome": "138 passed, 4 failed. All 5 approval ZDR golden cases ok. The 4 failures are in Quarry zdr-feature-matrix digest, usage-envelopes.v2.json.sha256 pin, auth-core cross-plane-token-requests.sha256, and quarry-token-claims.golden.sha256, all files this slice does not touch (the pin mismatch may be a line-ending issue).",
+      "passed": false
+     },
+     {
+      "command": "vitest run src/shared/approvals/approval-copy.test.ts --pool=threads",
+      "outcome": "13 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "bash -n verify-approvals-v2.sh",
+      "outcome": "syntax ok. The live end-to-end run was not done: it needs a docker stack, which testers may not run.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --workspace --no-fail-fast, pnpm test (full), go tests",
+      "outcome": "Not run. The slice touched only an execution-core test file and a frontend test file, no Go code. Both of those were compiled and run through the targeted commands above. The full runs are not needed to check this slice.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Built the S8 proof and guard set. The gate contract pins the approval creators (4 sites) and the awaiting_approval sites (3) to inventories and checks each states its cause; CauseCode is matched exhaustively and checked against approval-causes.json; every non-reserved code is raised by production code. The five ZDR golden cases are ordering guards in that same file, registered by APPROVAL_ZDR_CASES in the sync script; the approval-copy suite now reads the proto ApprovalKind enum; verify-approvals-v2.sh is written and dry-run, but not run on a stack. Status is partial for four reasons: zdr-posture-matrix.json was not given rows (deviation below), the live walk belongs to the lead, the audit found a waived-run ZDR write gap in session-core, and the S6 grant list and revoke surface does not exist in gateway, BFF or frontend. The last two sit in files this slice may not edit. Worktree state: other batches have uncommitted changes (execution.proto, terminalization.rs, migration 0071 and its revert); I did not touch them. Nothing was staged, committed or pushed, and docker was not run. No new DB tests were written; the approval_grant_use guard cites an existing ignored DB test."
+  }
+ ]
+}

@@ -1,0 +1,514 @@
+{
+ "batchId": "W2-41",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS18-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (round 2: loadThread project gate at lines 1277-1284)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts (test addition only; WS25-S6 has its own additions in the same file)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-project.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-projects.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-project.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatProjectsSection.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-projects.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-project.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatProjectsSection.test.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.project-gate.test.ts (new, round 2: two tests on the loadThread gate)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/chat-projects.spec.ts (new; not run)"
+   ],
+   "tests_run": [
+    {
+     "command": "vitest run src/features/chat/components/use-chat-controller.project-gate.test.ts (new test, gate in place)",
+     "outcome": "PASS: 2 tests"
+    },
+    {
+     "command": "Mutation check: loadThread gate temporarily reverted to the ungated one-liner in the same file, then restored exactly (file re-checked: LF, gate present)",
+     "outcome": "FAIL as intended: the switch-off test fails (getChatThreadTranscript not called with thread-room); the switch-on test still passes"
+    },
+    {
+     "command": "vitest run chat-projects.test.ts use-chat-project.test.ts ChatProjectsSection.test.tsx action-registry.test.ts ChatSidebarOrganizer.test.tsx chat-organization.test.ts src/features/chat/components/use-chat-controller (final, after restore)",
+     "outcome": "PASS: 23 files, 273 tests"
+    },
+    {
+     "command": "vitest run src/features/chat src/features/core (final)",
+     "outcome": "PASS: 137 files, 1783 tests, no failures"
+    },
+    {
+     "command": "tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "23 error lines, none in files this slice touches: 21 in src/shared/api/quarry-client.ts (@quarry/client not built) and 1 in src/shared/api/schedule-contract.test.ts (both pre-existing); 1 in src/shared/actions/model-access.ts (no model-access row for chat.set_agent_mode, from the concurrent WS25-S6 action; model-access.ts has no git changes)"
+    },
+    {
+     "command": "eslint src/features/chat/components/use-chat-controller.ts src/features/chat/components/use-chat-controller.project-gate.test.ts",
+     "outcome": "0 errors. Controller has 13 solid/reactivity warnings at lines 499, 936, 2878, 2912, 2913, 3349, 3586, 3614, 4252, 4259, 4347, 4373, 4573; none on the changed lines (771, 1277-1284, 3063). New test file is clean"
+    },
+    {
+     "command": "eslint -c eslint.ui-gates.config.js (same two files)",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "E2E_CHAT_PROJECTS_ENABLED=1 pnpm test:e2e chat-projects.spec.ts",
+     "outcome": "NOT RUN: needs the dockerized :5199 stack and a build with VITE_CHAT_PROJECTS_ENABLED=true"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/dreaming.rs: in load_pending_messages, after the line `AND m.copied_from_message_id IS NULL \\` (about line 1318), add `AND NOT (t.space_id IS NOT NULL OR t.origin IN ('space', 'agent_run')) \\` (K3-5; alias t is threads). Optionally repeat the predicate in load_preceding_context (about line 1386). Add the ignored DB test space_thread_messages_never_reach_user_memory beside the existing Dreaming DB tests and run it through the harness.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docker-compose.yml: after the VITE_PLAN_EXECUTE_ENABLED line (about line 349), add `      VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}`. The Dockerfile has no VITE_* build argument, so the staging image path needs the value at build time.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/.env.example: add VITE_CHAT_PROJECTS_ENABLED=false beside VITE_PLAN_EXECUTE_ENABLED (about line 64).",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/vite-env.d.ts: add `readonly VITE_CHAT_PROJECTS_ENABLED?: string;` beside VITE_PLAN_EXECUTE_ENABLED (optional; type only).",
+    "Decide, then apply in use-chat-controller.ts (this slice's own file, outside the fix list so it waits for the lead): line 771 becomes `if (chatProjectsEnabled() && scopedThreadRefs.has(threadId)) return`, and the call at line 3063 becomes `if (chatProjectsEnabled()) rememberProjectThread(serverThreadId, requestedSpaceRef)`. Depth findings 1 and 2.",
+    "Decide the switch-on rule for the loadThread project branch (depth finding 3) before any environment enables VITE_CHAT_PROJECTS_ENABLED.",
+    "Do not set VITE_CHAT_PROJECTS_ENABLED=true in any environment, staging included, until the dreaming shared edit and its DB test pass (K3-5).",
+    "Run pnpm build in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3 (typecheck, vite build, bundle budget). Expect the quarry-client and schedule-contract errors; the model-access.ts error clears when the WS25-S6 chat.set_agent_mode model-access row is in place.",
+    "Run E2E_CHAT_PROJECTS_ENABLED=1 pnpm test:e2e chat-projects.spec.ts against a dockerized stack built with VITE_CHAT_PROJECTS_ENABLED=true (:5199). Not run here.",
+    "Live DoD evidence (lead, not run here): rebuild the frontend image; capture Control membership and thread-decision calls for a project turn; screenshots of the first-send audience ask (D4) and the Do notice in a room project (D5).",
+    "Model Plane owner: decide whether the server refuses sandbox tools in room projects (DEC-06 D5) before the client D5 notice is trusted; this slice does not verify it.",
+    "Add the ZDR golden row (a project turn under ZDR is refused before any thread write) in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (needs_other_files).",
+    "Add chat stylesheet rules for the new class names (needs_other_files)."
+   ],
+   "deviations": [
+    "Added a regression test file beside the controller (use-chat-controller.project-gate.test.ts). It is a test file beside the changed file, so it stays inside the ownership rule, and it is listed in files_changed.",
+    "Did not apply the line-771 or line-3063 gates even though both break switch-off identity: both are outside the fix list, and the reviewer's justification for line 771 does not hold (see depth_findings 1 and 2)."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/dreaming.rs (K3-5 Dreaming exclusion of space threads, plus the ignored DB test space_thread_messages_never_reach_user_memory)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docker-compose.yml (VITE_CHAT_PROJECTS_ENABLED plumbing beside VITE_PLAN_EXECUTE_ENABLED, about line 349)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/.env.example (VITE_CHAT_PROJECTS_ENABLED=false, about line 64)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/vite-env.d.ts (optional type declaration)",
+    "A chat stylesheet owned by the chat surface (not named by this slice) for the new class names: verevon-chat-project-strip, verevon-chat-project-chip, verevon-chat-project-chip__clear, verevon-chat-project-notice, verevon-chat-project-ask, core-chat-projects, core-chat-projects__head, core-chat-projects__form, core-chat-projects__label, core-chat-projects__list, core-chat-projects__item, core-chat-projects__row, core-chat-projects__threads",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (ZDR golden row: a project turn under ZDR is refused before any thread write)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts line 771 (writeThreadSnapshot): the new guard `if (scopedThreadRefs.has(threadId)) return` has no switch check. With VITE_CHAT_PROJECTS_ENABLED off, loadThread still puts an origin=space thread's session spaceRef into scopedThreadRefs (the line `if (scoped) scopedThreadRefs.set(threadId, scoped)`, about line 1355, is unchanged from HEAD). So with the switch off that thread stops writing its local history, local transcript and server snapshot, which HEAD did. This breaks the rule that behaviour is identical with the switch off. Change it to `if (chatProjectsEnabled() && scopedThreadRefs.has(threadId)) return` and add a switch-off test beside use-chat-controller.project-gate.test.ts.",
+     "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts line 3063 (adoptServerThread): `rememberProjectThread(serverThreadId, requestedSpaceRef)` runs with the switch off whenever a send to a scoped origin=space thread sets requestedSpaceRef (taken from scopedThreadRefs). It then writes PROJECT_THREAD_HINTS_KEY, a thread-to-Space map, into persistent client storage, which HEAD never wrote. This is a storage side effect with the switch off. Guard the call with `if (chatProjectsEnabled())`."
+    ],
+    "dod_gaps": [
+     "Land the dreaming.rs K3-5 predicate and its ignored DB test space_thread_messages_never_reach_user_memory through the DB harness before any environment enables the switch.",
+     "Run the Playwright chat-projects.spec.ts against a frontend image built with VITE_CHAT_PROJECTS_ENABLED=true.",
+     "Live evidence: Control membership, thread-decision and retrieval-decision calls for a project turn; viewer and non-member refused server-side; screenshots of the D4 confirm and the D5 notice; resume after reload.",
+     "Gateway-side GATEWAY_CHAT_PROJECTS_ENABLED / chat_projects capability (gateway files are outside this slice's ownership)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Switch-off break left in place, outside the fix list. writeThreadSnapshot (use-chat-controller.ts line 771) returns early for any thread in scopedThreadRefs, and that guard is new in this slice and not gated. With the switch off, origin=space threads that open with a session spaceRef stop writing local history, transcript and server snapshot. Recommended one-line gate: if (chatProjectsEnabled() && scopedThreadRefs.has(threadId)) return. Not applied; needs the lead's go-ahead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Switch-off storage write, outside the fix list. adoptServerThread (use-chat-controller.ts line 3063) calls rememberProjectThread whenever requestedSpaceRef is set. A send to a scoped origin=space thread sets it even with the switch off, because the stream's connected event reaches adoptServerThread. rememberProjectThread writes PROJECT_THREAD_HINTS_KEY with no switch check (projectThreadRef reads are gated, so the entry is never read). Recommended: call it only when chatProjectsEnabled(). Not applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Switch-on inconsistency and a blocker before enabling. The loadThread branch reads scopedThreadRefs, which loadThread fills from the session spaceRef only after the branch decision. A thread with no routing hint in this browser (for example one a teammate started) takes Chat's transcript route on its first open, and the room route on any later open. The switch-on half of the new test pins only the later open. Choose one rule (the routing hint, or the session spaceRef decided before the branch) before any environment enables the switch."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Lines 771 and 3063 have no tests. Add one each when their gates are approved."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Carried over from the previous report, not re-verified this round: committed dreaming.rs load_pending_messages (about lines 1312-1334) has no space_id or origin predicate, so Dreaming can extract memory from Space threads (K3-5, EP-8). The switch must stay off until the shared edit lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Carried over, not re-verified this round: no BFF switch or capability endpoint (the only gate is VITE_CHAT_PROJECTS_ENABLED; owner decision needed on server-side refusal before staging); the ZDR golden row is missing; project threads have no live run following, approvals or plan hydration; turn actions (regenerate, edit, branch, rewind, fork, continue, feedback) still call origin=chat endpoints for project threads."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Carried over, not re-verified this round: no stylesheet for the new class names; the e2e spec has not run; room transcripts carry no timestamps or authors; listChatProjects reads membership once per Space on each mount; the sidebar picker is not disabled in temporary chat (the composer refuses instead); the first-send ask has no focus management and no Escape; the D5 server refusal is unverified; a solid/reactivity warning on requestedSpaceRef (controller line 2878)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "K3-5 / EP-8 slice 1 is not in place: committed session-core/src/dreaming.rs load_pending_messages (lines 1312-1334) has no `t.space_id IS NOT NULL OR t.origin IN ('space','agent_run')` predicate, so Dreaming would mine project-thread messages into personal memory. The switch must stay off until the lead's shared edit and the ignored DB test space_thread_messages_never_reach_user_memory land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The row's switch is GATEWAY_CHAT_PROJECTS_ENABLED plus a BFF capability `chat_projects`, but only the client-side VITE_CHAT_PROJECTS_ENABLED exists (strict literal \"true\", default off). There is no gateway switch, so the server does not refuse project turns while the feature is off, and the compose, .env.example and vite-env.d.ts plumbing are still shared edits waiting on the lead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "loadThread decides the project route from scopedThreadRefs or the local hint before the session spaceRef is read, so a project thread without a local hint (a teammate's thread, another browser) opens on Chat's transcript route the first time and on the room route after that. Settle on one rule before enabling."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Project threads still call origin=chat endpoints for regenerate, edit, branch, rewind, fork, continue and feedback, and they have no live-run following, approvals or plan hydration. This needs scoping before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The ZDR golden row is missing from model-gateway tests/zdr_feature_table.rs (a ZDR project turn is answered and writes no thread), and that file is not in this slice's ownership set."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan test command `pnpm test:e2e chat-projects.spec.ts` was not run (it needs the dockerized :5199 stack built with the switch on), so the spec is unverified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "There are no stylesheet rules for the new class names (verevon-chat-project-*, core-chat-projects*). The first-send audience ask (role=alertdialog) has no focus management and does not close on Escape."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "DEC-06 D5: the server-side refusal of sandbox tools in room projects is unverified. The client notice is informational only."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm test:e2e chat-projects.spec.ts",
+      "outcome": "NOT RUN: needs the dockerized :5199 stack and a build with VITE_CHAT_PROJECTS_ENABLED=true; docker is forbidden for the tester",
+      "passed": false
+     },
+     {
+      "command": "vitest run --pool=threads chat-projects.test.ts use-chat-project.test.ts ChatProjectsSection.test.tsx action-registry.test.ts use-chat-controller.project-gate.test.ts",
+      "outcome": "5 files passed, 65 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+      "outcome": "Errors only outside the slice's files: 21 in quarry-client.ts (pre-existing, not shown), schedule-contract.test.ts(28,16) TS2352 (pre-existing), and model-access.ts(90,14) TS2741 missing 'chat.set_agent_mode' (from the concurrent WS25-S6 action, not this slice). No errors in any file the slice touched.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr",
+    "EP-8 slice 1 (Dreaming exclusion of space threads) is owned outside this program: verify it first, else build the exclusion inside this slice"
+   ],
+   "notes": "Round 2. Reviewer fix 1 is applied. In loadThread, knownProjectRef is now chatProjectsEnabled() ? (scopedThreadRefs.get(threadId) ?? projectThreadRef(threadId)) : undefined, so with the switch off the project branch is never taken and an origin=space thread whose spaceRef is already in scopedThreadRefs keeps Chat's transcript route. The new test file pins both sides: switch off, the second open reads Chat's transcript and never the room; switch on, the second open reads the room transcript. The negative side was run against the ungated line and failed as intended, then the gate was restored.\n\nNot applied, because they are outside the fix list, but both break the switch-off identity rule. The reviewer's justification for the line-771 guard does not hold: foreignOriginThreadIds is written only by markThreadForeignOrigin, which initializeChat calls at mount, and only for a deep link whose lookup returns no session or fails. An origin=space thread whose session resolves is never marked, so isForeignOriginThread does not skip it. HEAD has no scopedThreadRefs check in writeThreadSnapshot, so the line-771 guard in this slice stops local history, transcript and server snapshot writes for those threads with the switch off. Details and the one-line gates are in depth_findings 1 and 2.\n\nStatus stays partial for the earlier reasons: the K3-5 precondition is still a shared edit in dreaming.rs, the ZDR golden row is missing, the stylesheet is missing, and the e2e spec has not run. Pre-existing type errors are unchanged; the model-access.ts error comes from the concurrent WS25-S6 batch, and this slice did not change that file."
+  },
+  {
+   "id": "WS25-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\src\\agent_mode.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\src\\lib.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\agent_mode_golden.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\agent-modes.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\agent-modes.json.sha256",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\permission\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\org_policy_characterisation.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\profile.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\http_routes.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\agent_mode_resolution_test.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-contracts agent_mode (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "pass: 10 unit tests in agent_mode and 3 golden tests (agent_mode_golden.rs), before the final rustfmt pass"
+    },
+    {
+     "command": "cargo test -q -p mp-contracts (full, final tree)",
+     "outcome": "pass: exit 0, all 15 test binaries report ok"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib permission",
+     "outcome": "pass: 46 passed (before the rustfmt-only wrap of one assert)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib (full, final tree)",
+     "outcome": "pass: 1636 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+     "outcome": "pass: 11 passed, unchanged"
+    },
+    {
+     "command": "cargo test -p execution-core --test org_policy_characterisation",
+     "outcome": "pass: 12 passed (from_wire golden updated to the S6 reversal)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full, final tree, with the four shared handback lines applied temporarily)",
+     "outcome": "pass: 2639 passed, 0 failed, 4 ignored; includes agent_mode_turn_tests (sse.rs) and the profile tests"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test agent_mode_resolution_test",
+     "outcome": "pass: 8 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+     "outcome": "pass: 159 passed (the invoke/stream path, with the shared lines applied temporarily)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_feature_table (with the agent_mode case row applied temporarily)",
+     "outcome": "pass: 12 passed; without that row every_field_has_a_row_that_matches_its_treatment fails"
+    },
+    {
+     "command": "node ./node_modules/vitest/vitest.mjs run chat-client.test.ts chat-client.connector-scope.test.ts action-registry.test.ts (verevonv3)",
+     "outcome": "pass: 174 passed, 3 files, against the current files"
+    },
+    {
+     "command": "sh ./node_modules/.bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "with the model-access.ts line applied temporarily: only pre-existing errors (quarry-client.ts @quarry/client missing; schedule-contract.test.ts TS2352); without it: one new error, model-access.ts TS2741 chat.set_agent_mode missing"
+    },
+    {
+     "command": "node ./node_modules/eslint/bin/eslint.js on chat-client.ts, action-registry.ts, action-registry.test.ts",
+     "outcome": "pass: exit 0"
+    },
+    {
+     "command": "rustfmt --edition 2021 --check (new Rust files, profile.rs, and the sse.rs and http_routes.rs ranges I edited)",
+     "outcome": "clean for my hunks; remaining diffs are in pre-existing code. New files were formatted with rustfmt."
+    },
+    {
+     "command": "admission-contract.test.ts, live proof, DB tests, other model-gateway integration targets, clippy, cargo test --workspace",
+     "outcome": "not run. The admission test needs the golden regeneration handed back; the rest is lead-run or disk-limited (C: had 4.7 GB free, about 1 GB per model-gateway test binary)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "1. shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (CRLF): in invoke_field_names add `        agent_mode: _,` after `        profile: _,`; add `        \"agent_mode\",` after `        \"profile\",` in the names list; in FIELD_TREATMENTS add after `    (\"profile\", refused_feature(\"deployed_agent\")),` these three lines: `    // The mode a person chose is resolved before a turn is admitted (WS25-S6): it only tightens the` / `    // posture, and a plan gate it sets is refused through `plan_mode` like any plan flag.` / `    (\"agent_mode\", Treatment::Honored),`. Without it the crate does not build.",
+    "2. shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs (CRLF): in the make_request test literal add `            agent_mode: None,` after `            profile: None,`.",
+    "3. shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (CRLF): in cases() add `        (\"agent_mode\", with(\"agent_mode\", json!(\"auto\")), None),` after the `(\"profile\", with(\"profile\", json!(\"chat\")), None),` row. Verified: 12 of 12 pass.",
+    "4. shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (LF): in MODEL_ACCESS add `  'chat.set_agent_mode': exempt('agent_cannot_self_govern', 'context_write'),` after the chat.set_connector_scope row. Verified: the typecheck then shows only the pre-existing errors.",
+    "5. shared-edit scripts/tests/zdr-contract-sync.test.sh (LF): in GOLDENS add `  \"apps/Model Plane/api/contracts/agent-modes.json|baee130b47b668bab8cffdb547cdee592269eef89969214da53165b54b113027\"` after the org-agent-policy-schema row.",
+    "6. shared-edit apps/Model Plane/api/contracts/README.md (CRLF): add a table row for agent-modes.json: authored, WS25-S6, pinned by its .sha256, read by mp-contracts agent_mode and its golden test.",
+    "7. shared-edit apps/Model Plane/deploy/docker-compose.yml (LF): in the model-gateway service environment, beside the other gateway switches, add `AGENT_MODES: ${AGENT_MODES:-false}`. Only the gateway reads it.",
+    "8. After item 4: in apps/Frontend Plane/verevonv3 regenerate the admission golden with `VEREVON_UPDATE_GOLDEN=1 node ./node_modules/vitest/vitest.mjs run src/shared/actions/admission-contract.test.ts` (writes src/shared/api/contracts/agent-action-admission.json; pnpm exec fails in this worktree on the Quarry SDK path). Refresh any .sha256 pin beside it, then re-vendor apps/Model Plane/api/contracts/agent-action-admission.json (+ .sha256), apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json, apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json and apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, and run the consumer tests. admission-contract.test.ts fails until this is done.",
+    "9. Ledger: append a WS25-S6 entry to apps/Model Plane/docs/decisions/ledger.md: the four ids and presets; strictest-wins over the floor, org cap and choice; read_only is a plan gate; lockdown refuses agentic turns (mode_lockdown); an unknown id is refused (agent_mode_unknown); from_wire non-empty unknown = ask, unreachable from the wire; AGENT_MODES default off. Also the W2-41 build-ledger line.",
+    "10. Live proof, not run here: `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway` (and execution-core), set AGENT_MODES=true, invoke each mode and capture the info lines `agent mode resolved for the turn` and `RunAgent authority resolved`. Confirm that read_only refuses a write tool, that a lockdown agentic turn is refused with mode_lockdown, that an unknown id returns agent_mode_unknown, and that an approval pause of a read_only run resumes read-only (see depth finding 2).",
+    "11. ZDR: add a zdr-posture-matrix.json row `agent_mode_resolves_identically_under_zdr` per the plan's ZDR clause. Not authored here.",
+    "12. Coordination: apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts also carries WS18-S4's import and test; keep both. The untracked apps/Frontend Plane/verevonv3/src/shared/actions/chat-project.ts belongs to WS18-S4.",
+    "13. Disk: C: had 4.7 GB free after these runs and each model-gateway test binary is about 1 GB. Other model-gateway integration targets were not built."
+   ],
+   "deviations": [
+    "An unknown agent_mode on the stream path is a typed SSE error (agent_mode_unknown, HTTP 200 stream like every typed refusal on that path); the unary invoke returns HTTP 400 as the plan row says.",
+    "read_only and lockdown reach the autonomy rung through plan_mode (resolve_autonomy_rung states READ_ONLY); the preset's rung field is pinned in the golden and tested but not carried separately.",
+    "lockdown's preset has no plan gate, so plain chat stays available (including under ZDR); only agentic turns are refused with mode_lockdown.",
+    "The mode resolves before normalize_stream, so the admission rules judge a read-only plan gate exactly as they judge a client plan_mode.",
+    "No server capability advertisement of agent_modes: the advertisement point (the model catalogue) is outside the owned files.",
+    "Edited execution-core/tests/org_policy_characterisation.rs, the S0 golden that pins from_wire; its own header says the slice that changes it changes its golden.",
+    "Added one content-free info line in the dispatch (RunAgent authority resolved: mode, plan_mode, autonomy_rung) to supply the logged-fields evidence the plan asks for.",
+    "from_wire's unknown-to-ask change is not behind a switch but is unreachable from the wire: the gRPC direct path (validate_direct_permission_mode) rejects anything but auto, ask or deny, and the Do loop maps through resolve_mode, so no observable change with the switch off."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (required for the crate to build: 5 lines, see lead_todo 1)",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (required for the test build: 1 line, see lead_todo 2)",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (1 case row, see lead_todo 3)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (1 row, see lead_todo 4; typecheck requires it)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json and the vendored copies (regenerate and re-vendor, see lead_todo 8)",
+    "scripts/tests/zdr-contract-sync.test.sh (GOLDENS row, see lead_todo 5)",
+    "apps/Model Plane/api/contracts/README.md (table row, see lead_todo 6)",
+    "apps/Model Plane/deploy/docker-compose.yml (AGENT_MODES environment entry, see lead_todo 7)",
+    "apps/Model Plane/docs/decisions/ledger.md (WS25-S6 entry, see lead_todo 9)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json (agent_mode_resolves_identically_under_zdr row, see lead_todo 11)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "HARD BUILD BREAK until the lead applies them: model-gateway does not compile in the worktree. InvokeRequest gained agent_mode, and the exhaustive destructure in zdr_features.rs (E0027) and the normalize.rs test literal (E0063) do not name it. Apply lead_todo 1-3 (zdr_features.rs: `agent_mode: _,` plus the \"agent_mode\" name plus the `(\"agent_mode\", Treatment::Honored)` row; normalize.rs: `agent_mode: None,`; zdr_feature_table.rs: the agent_mode case row) before any commit. I applied exactly these lines to a scratch copy, not the worktree: the lib profile/agent_mode tests passed 22/22, agent_mode_resolution_test passed 8/8 and zdr_feature_table passed 12/12.",
+     "Frontend: model-access.ts needs the `chat.set_agent_mode` exempt row (lead_todo 4). Without it admission-contract.test.ts fails 5 tests (TypeError reading 'access') and the typecheck gives TS2741. After that, regenerate and re-vendor the agent-action-admission golden into the Model Plane, execution-core, model-gateway and capability-core fixtures (lead_todo 8).",
+     "Shared edits still to apply: the zdr-contract-sync.test.sh GOLDENS row for agent-modes.json (sha baee130b... matches the file), the api/contracts/README.md row, `AGENT_MODES: ${AGENT_MODES:-false}` in deploy/docker-compose.yml, the ledger entry for WS25-S6 plus the W2-41 build-ledger line, and the zdr-posture-matrix.json row agent_mode_resolves_identically_under_zdr.",
+     "The plan row's 'server advertises capability agent_modes' is not built. The advertisement point (the model catalogue) is outside the owned files, so the lead must assign it.",
+     "Live proof (lead, docker): rebuild model-gateway and execution-core with AGENT_MODES=true and invoke each mode. Capture the 'agent mode resolved for the turn' and 'RunAgent authority resolved' info lines. Show live that read_only refuses a write tool, that lockdown refuses an agentic turn with mode_lockdown, and that an unknown id returns agent_mode_unknown."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Plan evidence not run: rebuilt proof stack with AGENT_MODES=true, each mode invoked, the two info lines captured, read_only refusing a write tool live, lockdown agentic refusal, unknown id returning agent_mode_unknown."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "continue_run (sse.rs, the spawn_run_dispatch call with CONTINUE_PERMISSION_MODE and plan_mode=false) states no plan flag on /continue. A read-only run that pauses for approval must keep its plan gate across resume: the comment says execution-core runs it under the paused mode, but no test pins this. Verify before AGENT_MODES is on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The ZDR clause is incomplete: the zdr-posture-matrix row agent_mode_resolves_identically_under_zdr is not authored. The ZDR refusal of read_only comes from the stream-path plan-flag mutation, which the table test (raw request) cannot show. A stream-level ZDR test is needed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The server does not advertise the agent_modes capability (plan row). The advertisement point is the model catalogue, outside the owned files; the S11 composer depends on it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner or lead to confirm the unknown-id convention: stream path typed SSE error (HTTP 200) versus the plan row's HTTP 400, which only the unary endpoint returns."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ask_first and auto state no rung, so a thread grant (for example WorkspaceWrite from an approved plan) still applies under them; only read_only and lockdown narrow it. Owner to decide whether modes should cap the grant (DEC-15 says locks are ceilings)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "read_only also sets plan_mode for plain chat turns, which writes the durable run mode (mark_run_plan_mode) and enters the in-memory plan store. Confirm live that the direct tool loop refuses writes under plan mode."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "continuations (/continue and the park form) take no agent_mode and do not consult do_runs. Lockdown therefore covers new agentic turns only; S9 org enforcement must cover continuations."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "preset.rung is realised only through plan_mode in resolve_autonomy_rung. An explicit rung cap (S9) needs a seam in spawn_run_dispatch, which already takes 29 parameters."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The unary invoke refuses unknown modes but applies no known mode, since it runs no agent loop. If it ever gains tools, the mode must be applied there too."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Coordination: action-registry.test.ts and the worktree are shared with WS18-S4 (its import and test are in the same file; chat-project.ts is untracked). Merge carefully."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No frontend caller sets agentMode or invokes chat.set_agent_mode until the S11 picker; the body field is inert until then."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Ceiling and Source::Ceiling are unused until the Space source lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "validate_direct_permission_mode (grpc.rs) and PermissionMode::parse_strict both enumerate auto, ask and deny. grpc.rs is not owned here; delegate later."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The RunAgent authority resolved info line logs at info for every Do run. It is content-free; check its volume on the proof stack."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "read_only reaches its gate only through the stream-path `req.plan_mode |= plan_gate`. /continue (continue_run with plan_mode=false) takes no agent_mode, and no test pins that a read_only run paused for approval resumes still in plan mode. Prove this before AGENT_MODES is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Under ZDR a read_only choice sets plan_mode before zdr_features::refusal (sse.rs ~1843), so the turn is refused as plan_mode. This is consistent but untested at stream level, and the matrix row agent_mode_resolves_identically_under_zdr does not exist yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "read_only combined with execute_granted is refused as invalid_request ('execute_granted and plan_mode are mutually exclusive'), not with a mode-specific code. Fail-closed but opaque to the composer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "read_only on a plain (non-agentic) chat turn sets plan_mode, which writes the durable run plan mode, and on the openai-codex-subscription route normalize refuses plan_mode without agentic. Confirm both behaviours are intended for plain chat."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An unknown agent_mode on the stream path is a typed SSE error frame (HTTP 200); only the unary /invoke returns the plan's HTTP 400. The owner should confirm this convention."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ask_first and auto state rung Unspecified, so a thread grant (for example WorkspaceWrite) still applies under them, and a mode is not a ceiling on the grant. This needs an owner call against DEC-15/WS25-D6 before S9."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Lockdown covers only new agentic stream turns: continuations (/continue and the park form) never consult preset.do_runs, so S9 must enforce it there too."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ordering guard in agent_mode_resolution_test is a source-text find over sse.rs (resolve before normalize_stream, LOCKDOWN_CODE before fn spawn_run_dispatch). It is brittle and proves no behaviour. A request-level stream test of the lockdown and unknown refusals would be stronger."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No frontend caller sets agentMode or invokes chat.set_agent_mode until the S11 picker, so the wire field is inert until then."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Ceiling and Source::Ceiling are unused outside tests until the Space source lands. validate_direct_permission_mode (grpc.rs) duplicates PermissionMode::parse_strict."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The new 'RunAgent authority resolved' info line fires on every Do run. It is content-free (run_id, mode, plan_mode, rung), but check its volume on the proof stack."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Coordination: action-registry.test.ts also carries WS18-S4's chat-project import and test, and chat-project.ts is untracked WS18-S4 work. Stage hunks carefully."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-contracts agent_mode",
+      "outcome": "PASS: 10 unit tests in agent_mode plus 3 in tests/agent_mode_golden.rs, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway profile",
+      "outcome": "FAIL: model-gateway does not compile. E0027 in src/zdr_features.rs (destructure does not mention field agent_mode) and E0063 in src/normalize.rs:568 (InvokeRequest initializer missing agent_mode). Both files are shared files the slice does not own, and the implementer reported these edits as handed back to the lead. No profile tests ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+      "outcome": "PASS: 11 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test org_policy_characterisation (touched test file)",
+      "outcome": "PASS: 12 passed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway (compile check of touched crate)",
+      "outcome": "FAIL: lib does not compile, same E0027/E0063 on agent_mode in shared files, until the lead applies the handed-back lines",
+      "passed": false
+     },
+     {
+      "command": "vitest run --pool=threads action-registry.test.ts chat-client.test.ts (verevonv3)",
+      "outcome": "PASS: 2 files, 168 tests passed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "WS25-S6 code is built and its unit and integration tests pass. It adds the four-mode vocabulary and a strictest-wins resolve over the platform floor, the org cap and the user choice, with the golden pinned by sha256; execution-core's from_wire now asks on an unknown non-empty value; model-gateway resolves a chosen mode on the stream path before normalisation (a read-only choice sets plan mode, lockdown refuses agentic turns with mode_lockdown, an unknown id gets agent_mode_unknown); and the chat client sends agent_mode only when set. The chat.set_agent_mode action is registered and the AGENT_MODES switch is read by the strict parser, default off. With no choice the posture, plan flag and rung are exactly what they were. The lib does NOT compile in this worktree until the zdr_features.rs and normalize.rs lines are applied (InvokeRequest gained agent_mode and zdr_features destructures every field). I applied those lines, plus the zdr_feature_table case row and the model-access.ts line, only to verify, then reverted all of them, so the worktree holds only owned changes. Status is partial because of those shared lines, the admission golden regeneration, the ZDR matrix row, the capability advertisement and the live proof. action-registry.test.ts also carries WS18-S4's import and test (keep both); the untracked chat-project.ts is theirs."
+  }
+ ]
+}

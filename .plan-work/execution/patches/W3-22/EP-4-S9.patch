@@ -1,0 +1,1354 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx
+new file mode 100644
+index 000000000..75eb274e7
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx	
+@@ -0,0 +1,159 @@
++// @vitest-environment jsdom
++
++/**
++ * Where MCP Apps are drawn (EP-4 S9). Only a chat assistant answer with
++ * `VITE_MCP_APPS`, `VITE_CHAT_INLINE_WIDGETS` and `VITE_CHAT_WIDGET_BRIDGE` all
++ * `true` reads apps, only for settled `mcp__<server>__<tool>` calls, at most two
++ * on their own; a surface that is not the chat answer (the Space room), a
++ * temporary chat and the switch off read nothing at all.
++ */
++
++import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import * as chatClient from '@/shared/api/chat-client'
++import { AssistantMessage } from './ChatMessages'
++import { McpAppsForAnswer } from './McpAppFrame'
++import type { ChatToolCall, ChatTurn } from './chat-types'
++
++vi.mock('@/shared/api/chat-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/chat-client')>()
++  return { ...actual, getMcpAppResource: vi.fn() }
++})
++
++const call = (id: string, name: string, overrides: Partial<ChatToolCall> = {}): ChatToolCall => ({
++  id,
++  name,
++  args: {},
++  status: 'done',
++  output: 'ok',
++  ...overrides,
++})
++
++const turn = (toolCalls: ChatToolCall[], overrides: Partial<ChatTurn> = {}): ChatTurn => ({
++  id: 'asst-1',
++  role: 'assistant',
++  content: 'Her er tallene.',
++  createdAt: '2026-11-05T08:00:00.000Z',
++  streaming: false,
++  tools: [],
++  attachments: [],
++  toolCalls,
++  ...overrides,
++})
++
++const handlers = () => ({
++  copied: false,
++  onBranch: vi.fn(),
++  onCopy: vi.fn(),
++  onFeedback: vi.fn(async () => true),
++  onRegenerate: vi.fn(),
++  onApprovalDecision: vi.fn(),
++  onApprovePlan: vi.fn(),
++  onViewSteps: vi.fn(),
++})
++
++function switchesOn() {
++  vi.stubEnv('VITE_MCP_APPS', 'true')
++  vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
++  vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++}
++
++async function settle() {
++  for (let i = 0; i < 3; i += 1) {
++    await Promise.resolve()
++    flush()
++  }
++}
++
++const getResource = () => vi.mocked(chatClient.getMcpAppResource)
++
++beforeEach(() => {
++  getResource().mockImplementation(async (_serverId, tool) => ({
++    uri: `ui://apps/${tool}`,
++    html: `<p>${tool}</p>`,
++    needsNetwork: false,
++  }))
++})
++
++afterEach(() => {
++  cleanup()
++  vi.unstubAllEnvs()
++  getResource().mockReset()
++})
++
++describe('MCP Apps under a chat answer', () => {
++  it('a settled MCP call with an app is drawn under the answer', async () => {
++    switchesOn()
++    const { container } = render(() => (
++      <AssistantMessage {...handlers()} message={turn([call('c1', 'mcp__srv-erp__show_table')])} />
++    ))
++    await waitFor(() => expect(container.querySelector('.verevon-mcp-app iframe')).not.toBeNull())
++    expect(getResource()).toHaveBeenCalledWith('srv-erp', 'show_table')
++    expect(container.textContent).toContain('App fra srv-erp')
++  })
++
++  it('non mcp tool has no app', async () => {
++    switchesOn()
++    const { container } = render(() => (
++      <AssistantMessage
++        {...handlers()}
++        message={turn([
++          call('c1', 'web_search'),
++          // Still running, failed or without output: nothing to draw yet.
++          call('c2', 'mcp__srv-erp__show_table', { status: 'running', output: undefined }),
++          call('c3', 'mcp__srv-erp__show_table', { status: 'error', error: 'down' }),
++        ])}
++      />
++    ))
++    await settle()
++    expect(getResource()).not.toHaveBeenCalled()
++    expect(container.querySelector('.verevon-mcp-app')).toBeNull()
++  })
++
++  it('room surface has no app', async () => {
++    switchesOn()
++    // McpAppsForAnswer outside a chat answer's live surface, as the Space room would draw it.
++    const { container } = render(() => <McpAppsForAnswer calls={[call('c1', 'mcp__srv-erp__show_table')]} />)
++    await settle()
++    expect(getResource()).not.toHaveBeenCalled()
++    expect(container.querySelector('iframe')).toBeNull()
++  })
++
++  it('a temporary chat and the switch off read nothing', async () => {
++    switchesOn()
++    const temporary = render(() => (
++      <AssistantMessage {...handlers()} temporaryChat message={turn([call('c1', 'mcp__srv-erp__show_table')])} />
++    ))
++    await settle()
++    expect(temporary.container.querySelector('.verevon-mcp-app')).toBeNull()
++    temporary.unmount()
++
++    vi.stubEnv('VITE_MCP_APPS', 'TRUE')
++    const off = render(() => <AssistantMessage {...handlers()} message={turn([call('c1', 'mcp__srv-erp__show_table')])} />)
++    await settle()
++    expect(off.container.querySelector('.verevon-mcp-app')).toBeNull()
++    expect(getResource()).not.toHaveBeenCalled()
++  })
++
++  it('third app is click to load', async () => {
++    switchesOn()
++    const { container } = render(() => (
++      <AssistantMessage
++        {...handlers()}
++        message={turn([
++          call('c1', 'mcp__srv-erp__show_table'),
++          call('c2', 'mcp__srv-erp__show_chart'),
++          call('c3', 'mcp__srv-erp__show_map'),
++        ])}
++      />
++    ))
++    await waitFor(() => expect(container.querySelectorAll('.verevon-mcp-app iframe')).toHaveLength(2))
++    const show = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Vis app (show_map)'))
++    expect(show).toBeDefined()
++    fireEvent.click(show!)
++    await waitFor(() => expect(container.querySelectorAll('.verevon-mcp-app iframe')).toHaveLength(3))
++    // One read per tool: the lookup and the frame share it.
++    expect(getResource()).toHaveBeenCalledTimes(3)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index da7a1a046..e14e1ba9c 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -124,6 +124,7 @@ import {
+ } from './chat-code-highlight'
+ import { ChartFenceBlock } from './ChatChart'
+ import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
++import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
+ import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
+ import { SettledTurnContent } from './SettledTurnFold'
+ import { StepStrip, stepStripEnabled } from './StepStrip'
+@@ -868,6 +869,15 @@ export function AssistantMessage(props: {
+             <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+               <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+             </InlineWidgetAnswer>
++            {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
++            <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
++              <McpAppsForAnswer
++                calls={props.message.toolCalls ?? []}
++                streaming={props.message.streaming}
++                temporaryChat={props.temporaryChat}
++                onSelectFollowUp={props.onSelectFollowUp}
++              />
++            </Show>
+           </InlineWidgetSurface>
+           <Show when={stepStripEnabled && props.message.streaming}>
+             <StepStrip
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx
+new file mode 100644
+index 000000000..cb8275c76
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx	
+@@ -0,0 +1,109 @@
++// @vitest-environment jsdom
++
++/**
++ * One MCP App in the frame (EP-4 S9). The frame names the server it comes from,
++ * says when the app wanted network it does not get, draws nothing when there is
++ * no app to read, and answers the app's JSON-RPC only from its own window.
++ */
++
++import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { McpAppResource } from '@/shared/api/chat-client'
++import { MCP_APP_METHODS } from '../lib/mcp-app-bridge'
++import { McpAppFrame } from './McpAppFrame'
++import type { ChatToolCall } from './chat-types'
++
++const APP: McpAppResource = { uri: 'ui://charts/table', html: '<title>Tabell</title><div id="app"></div>', needsNetwork: false }
++
++const CALL: ChatToolCall = {
++  id: 'call-1',
++  name: 'mcp__srv-erp__show_table',
++  args: { region: 'nord' },
++  status: 'done',
++  output: '3 rader',
++}
++
++/** Stands in for the frame's window; the host compares `event.source` with it by identity. */
++function frameWindow() {
++  return { postMessage: vi.fn() }
++}
++
++async function mount(load: () => Promise<McpAppResource | null>, onSelectFollowUp?: (text: string) => void) {
++  const view = render(() => (
++    <McpAppFrame serverId="srv-erp" tool="show_table" call={CALL} load={load} onSelectFollowUp={onSelectFollowUp} />
++  ))
++  await Promise.resolve()
++  flush()
++  return view
++}
++
++function post(source: unknown, data: unknown, origin = 'null') {
++  const event = new MessageEvent('message', { data, origin })
++  Object.defineProperty(event, 'source', { value: source })
++  window.dispatchEvent(event)
++  flush()
++}
++
++afterEach(() => {
++  cleanup()
++  vi.restoreAllMocks()
++})
++
++describe('McpAppFrame', () => {
++  it('label names the server', async () => {
++    const { container } = await mount(async () => APP)
++    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
++    const frame = container.querySelector('iframe')!
++    expect(container.textContent).toContain('App fra srv-erp')
++    expect(frame.getAttribute('title')).toBe('App fra srv-erp')
++    // The same isolation as an inline widget: scripts only, never same-origin.
++    expect(frame.getAttribute('sandbox')).toBe('allow-scripts')
++    expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer')
++    expect(frame.getAttribute('srcdoc')).toContain('Content-Security-Policy')
++    expect(frame.getAttribute('srcdoc')).toContain(APP.html)
++    expect(container.textContent).not.toContain('nettverkstilgang')
++  })
++
++  it('network notice shown', async () => {
++    const { container } = await mount(async () => ({ ...APP, needsNetwork: true }))
++    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
++    expect(container.textContent).toContain('Denne appen trenger nettverkstilgang, som ikke er tilgjengelig her')
++    // Reported, not honoured: the CSP still allows no connection.
++    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain("connect-src 'none'")
++  })
++
++  it('fetch failure shows the tool card only', async () => {
++    for (const load of [async () => null, () => Promise.reject(new Error('down'))]) {
++      const { container, unmount } = await mount(load)
++      await Promise.resolve()
++      flush()
++      expect(container.querySelector('iframe')).toBeNull()
++      expect(container.textContent).not.toContain('App fra')
++      unmount()
++    }
++  })
++
++  it('answers the app in its own frame and stages its message', async () => {
++    const onSelectFollowUp = vi.fn()
++    const { container } = await mount(async () => APP, onSelectFollowUp)
++    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
++    const win = frameWindow()
++    Object.defineProperty(container.querySelector('iframe')!, 'contentWindow', { configurable: true, value: win })
++
++    post(win, { jsonrpc: '2.0', id: 1, method: MCP_APP_METHODS.initialize, params: {} })
++    expect(win.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 1, result: expect.any(Object) }), '*')
++
++    // Another window's traffic is not this app's: nothing is answered.
++    post(frameWindow(), { jsonrpc: '2.0', id: 2, method: 'ping' })
++    expect(win.postMessage).toHaveBeenCalledTimes(1)
++
++    post(win, { jsonrpc: '2.0', id: 3, method: MCP_APP_METHODS.message, params: { role: 'user', content: { type: 'text', text: 'Vis som tabell' } } })
++    expect(onSelectFollowUp).not.toHaveBeenCalled()
++    expect(container.textContent).toContain('Forslag fra appen:')
++    fireEvent.click(container.querySelector('.verevon-chat-followup-chip')!)
++    flush()
++    expect(onSelectFollowUp).toHaveBeenCalledTimes(1)
++    expect(onSelectFollowUp).toHaveBeenCalledWith('Vis som tabell')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx
+new file mode 100644
+index 000000000..b4829e913
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx	
+@@ -0,0 +1,339 @@
++/**
++ * MCP Apps in a chat answer (EP-4 S9): under a settled `mcp__<server>__<tool>`
++ * call whose tool declares an app, the app drawn in the same opaque-origin
++ * sandbox as an inline widget, fed the call's input and result, able to size
++ * itself, stage a message the person sends and ask to open a link the person
++ * confirms (`chat.open_mcp_app`, `chat.stage_mcp_app_message`; protocol and
++ * limits in `mcp-app-bridge.ts`).
++ *
++ * The document is read on demand through the gateway with the viewer's own
++ * authority (`getMcpAppResource`) and held only as long as the answer that drew
++ * it: nothing is stored, and a temporary (zero-retention) chat draws no app.
++ * The frame's CSP stays `PREVIEW_CSP`: an app that declares network origins is
++ * told so in a notice and still renders without them (D12).
++ */
++
++import { createEffect, createMemo, createSignal, For, onCleanup, Show, useContext } from 'solid-js'
++import type { JSX } from '@solidjs/web'
++import { useI18n } from '@/shared/i18n'
++import { sandboxWidgetDocument } from '@/shared/lib/sandbox-html'
++import { getMcpAppResource, type McpAppResource } from '@/shared/api/chat-client'
++import { widgetThemeCss } from '../lib/inline-widget'
++import { createAnswerFollowupBudget, type TokenBucket } from '../lib/widget-bridge'
++import { createMcpAppBridgeHost, parseMcpToolName, type McpAppHostContext } from '../lib/mcp-app-bridge'
++import { InlineWidgetSurface, WIDGET_SANDBOX, inlineWidgetsEnabled, widgetBridgeEnabled } from './InlineWidget'
++import type { ChatToolCall } from './chat-types'
++import './inline-widget.css'
++
++/**
++ * `VITE_MCP_APPS`, literal `'true'` only. It acts only where widgets run with
++ * their bridge (`VITE_CHAT_INLINE_WIDGETS` and `VITE_CHAT_WIDGET_BRIDGE`). Off:
++ * no resource is read and no frame is drawn.
++ */
++export const mcpAppsEnabled = () =>
++  import.meta.env.VITE_MCP_APPS === 'true' && inlineWidgetsEnabled() && widgetBridgeEnabled()
++
++/** Apps one answer draws on its own; the others wait for "Vis app". Each frame is a whole document. */
++export const MAX_LIVE_APPS_PER_ANSWER = 2
++
++/** Distinct tools one answer looks up, so a run of many MCP calls does not open a session per call. */
++export const MAX_APP_LOOKUPS_PER_ANSWER = 4
++
++export type McpAppLoader = (serverId: string, tool: string) => Promise<McpAppResource | null>
++
++/** One read per tool for the answer's lifetime: the lookup and the frame share it. */
++function answerScopedLoader(load: McpAppLoader): McpAppLoader {
++  const reads = new Map<string, Promise<McpAppResource | null>>()
++  return (serverId, tool) => {
++    const key = `${serverId}\u0000${tool}`
++    let read = reads.get(key)
++    if (!read) {
++      read = load(serverId, tool).catch(() => null)
++      reads.set(key, read)
++    }
++    return read
++  }
++}
++
++/** A call the app host may draw for: an MCP call that has settled with an output. */
++function settledMcpCall(call: ChatToolCall): { serverId: string; tool: string } | null {
++  if (!call.status || call.status === 'running' || call.status === 'error' || call.error) return null
++  if (typeof call.output !== 'string') return null
++  return parseMcpToolName(call.name)
++}
++
++function hostContext(locale: string): McpAppHostContext {
++  const scheme = getComputedStyle(document.documentElement).getPropertyValue('color-scheme')
++  return { theme: scheme.includes('dark') ? 'dark' : 'light', locale }
++}
++
++function hostThemeCss(): string {
++  const style = getComputedStyle(document.documentElement)
++  return widgetThemeCss((name) => style.getPropertyValue(name))
++}
++
++/**
++ * The apps under one assistant answer. Drawn only on the chat surface
++ * (`InlineWidgetSurface` is `live`), never in a temporary chat, and only for
++ * calls whose tool declares an app; the first `MAX_LIVE_APPS_PER_ANSWER` open
++ * on their own.
++ */
++export function McpAppsForAnswer(props: {
++  calls: readonly ChatToolCall[]
++  streaming?: boolean
++  temporaryChat?: boolean
++  onSelectFollowUp?: (text: string) => void
++  load?: McpAppLoader
++}): JSX.Element {
++  const surfaceLive = useContext(InlineWidgetSurface) === 'live'
++  const load = answerScopedLoader(props.load ?? getMcpAppResource)
++  // The apps of one answer share one message budget, as its widgets share theirs.
++  const messageBudget = createAnswerFollowupBudget()
++  const [apps, setApps] = createSignal<ReadonlyMap<string, McpAppResource | null>>(new Map())
++
++  const candidates = createMemo(() => {
++    if (!surfaceLive || !mcpAppsEnabled() || props.temporaryChat || props.streaming) return []
++    return props.calls.flatMap((call) => {
++      const parsed = settledMcpCall(call)
++      return parsed ? [{ call, ...parsed, key: `${parsed.serverId}\u0000${parsed.tool}` }] : []
++    })
++  })
++  // The distinct tools to look up, first seen first. `load` reads each once, so a re-run reads nothing new.
++  const lookups = createMemo(() => {
++    const seen = new Map<string, { key: string; serverId: string; tool: string }>()
++    for (const candidate of candidates()) {
++      if (seen.size >= MAX_APP_LOOKUPS_PER_ANSWER) break
++      if (!seen.has(candidate.key)) seen.set(candidate.key, { key: candidate.key, serverId: candidate.serverId, tool: candidate.tool })
++    }
++    return [...seen.values()]
++  })
++
++  createEffect(lookups, (pending) => {
++    let live = true
++    for (const lookup of pending) {
++      void load(lookup.serverId, lookup.tool).then((resource) => {
++        if (live) setApps((known) => new Map(known).set(lookup.key, resource))
++      })
++    }
++    return () => {
++      live = false
++    }
++  })
++
++  const appCalls = createMemo(() => candidates().filter((candidate) => apps().get(candidate.key)))
++
++  return (
++    <Show when={appCalls().length > 0}>
++      <div class="verevon-mcp-apps">
++        <For each={appCalls()}>
++          {(candidate, index) => (
++            <McpAppSlot autoOpen={index() < MAX_LIVE_APPS_PER_ANSWER} tool={candidate.tool}>
++              <McpAppFrame
++                serverId={candidate.serverId}
++                tool={candidate.tool}
++                call={candidate.call}
++                load={load}
++                messageBudget={messageBudget}
++                onSelectFollowUp={props.onSelectFollowUp}
++              />
++            </McpAppSlot>
++          )}
++        </For>
++      </div>
++    </Show>
++  )
++}
++
++/** An app past the answer's live limit waits behind "Vis app" until the person clicks. */
++function McpAppSlot(props: { autoOpen: boolean; tool: string; children: JSX.Element }): JSX.Element {
++  const i18n = useI18n()
++  const [opened, setOpened] = createSignal(false)
++  return (
++    <Show
++      when={props.autoOpen || opened()}
++      fallback={
++        <button type="button" class="verevon-inline-widget__activate" onClick={() => setOpened(true)}>
++          {i18n.tr(`Vis app (${props.tool})`, `Show app (${props.tool})`)}
++        </button>
++      }
++    >
++      {props.children}
++    </Show>
++  )
++}
++
++/**
++ * One app. Reads its document (through `load`, `getMcpAppResource` by default);
++ * a call without an app, a refused read or a failed one draws nothing, so the
++ * tool call reads as it did before.
++ */
++export function McpAppFrame(props: {
++  serverId: string
++  tool: string
++  call: ChatToolCall
++  load?: McpAppLoader
++  messageBudget?: TokenBucket
++  onSelectFollowUp?: (text: string) => void
++}): JSX.Element {
++  const i18n = useI18n()
++  const [resource, setResource] = createSignal<McpAppResource | null>(null)
++  const load = props.load ?? getMcpAppResource
++
++  // Solid v2 has no onMount: a two-phase effect with a constant compute runs once after mount.
++  createEffect(() => undefined, () => {
++    let live = true
++    load(props.serverId, props.tool)
++      .then((read) => {
++        if (live) setResource(read)
++      })
++      .catch(() => {
++        if (live) setResource(null)
++      })
++    return () => {
++      live = false
++    }
++  })
++
++  return (
++    <Show when={resource()}>
++      {(read) => (
++        <McpAppDocument
++          resource={read()}
++          serverId={props.serverId}
++          tool={props.tool}
++          call={props.call}
++          locale={i18n.locale()}
++          messageBudget={props.messageBudget ?? createAnswerFollowupBudget()}
++          onSelectFollowUp={props.onSelectFollowUp}
++        />
++      )}
++    </Show>
++  )
++}
++
++function McpAppDocument(props: {
++  resource: McpAppResource
++  serverId: string
++  tool: string
++  call: ChatToolCall
++  locale: string
++  messageBudget: TokenBucket
++  onSelectFollowUp?: (text: string) => void
++}): JSX.Element {
++  const i18n = useI18n()
++  const label = () => i18n.tr(`App fra ${props.serverId}`, `App from ${props.serverId}`)
++  // The theme is read once: the frame reloads whenever srcdoc changes. No widget shim: an app brings its own
++  // MCP Apps client, which speaks JSON-RPC to `parent` directly.
++  const documentHtml = createMemo(() => sandboxWidgetDocument(props.resource.html, hostThemeCss()))
++
++  let frameElement: HTMLIFrameElement | undefined
++  const [height, setHeight] = createSignal<number | null>(null)
++  const [stagedMessage, setStagedMessage] = createSignal<string | null>(null)
++  const [pendingLink, setPendingLink] = createSignal<string | null>(null)
++
++  const bridge = createMcpAppBridgeHost({
++    frameWindow: () => frameElement?.contentWindow ?? null,
++    messageBudget: props.messageBudget,
++    hostContext: hostContext(props.locale),
++    toolInput: props.call.args,
++    toolOutput: props.call.output ?? '',
++  })
++
++  const onMessage = (event: MessageEvent) => {
++    const outcome = bridge.handle(event)
++    if (!outcome.ok) return
++    const target = frameElement?.contentWindow
++    // The target is '*' because an opaque-origin frame has no origin to name; the window is this frame's own.
++    for (const reply of outcome.send) target?.postMessage(reply, '*')
++    const action = outcome.action
++    if (!action) return
++    switch (action.kind) {
++      case 'resize':
++        setHeight(action.height)
++        return
++      case 'stage_message':
++        if (!props.onSelectFollowUp) {
++          bridge.releaseMessage()
++          return
++        }
++        setStagedMessage(action.text)
++        return
++      case 'confirm_link':
++        // One question at a time: an app cannot stack link prompts over the one the person reads.
++        if (pendingLink() === null) setPendingLink(action.url)
++        return
++    }
++  }
++  window.addEventListener('message', onMessage)
++  onCleanup(() => window.removeEventListener('message', onMessage))
++
++  const clearMessage = () => {
++    setStagedMessage(null)
++    bridge.releaseMessage()
++  }
++  const sendMessage = (text: string) => {
++    clearMessage()
++    props.onSelectFollowUp?.(text)
++  }
++
++  return (
++    <figure class="verevon-inline-widget verevon-mcp-app" data-mcp-server={props.serverId}>
++      <figcaption class="verevon-inline-widget__toolbar">
++        <span class="verevon-inline-widget__title">{label()}</span>
++        <span class="verevon-inline-widget__note">{props.tool}</span>
++      </figcaption>
++      <Show when={props.resource.needsNetwork}>
++        <p class="verevon-inline-widget__note" role="note">
++          {i18n.tr(
++            'Denne appen trenger nettverkstilgang, som ikke er tilgjengelig her',
++            'This app needs network access, which is not available here',
++          )}
++        </p>
++      </Show>
++      <iframe
++        ref={(element) => { frameElement = element }}
++        class="verevon-inline-widget__frame"
++        title={label()}
++        sandbox={WIDGET_SANDBOX}
++        srcdoc={documentHtml()}
++        referrerpolicy="no-referrer"
++        loading="lazy"
++        style={height() !== null ? { height: `${height()}px` } : undefined}
++      />
++      <Show when={stagedMessage()}>
++        {(text) => (
++          <div class="verevon-chat-followups" role="group" aria-label={i18n.tr('Forslag fra appen', 'Suggestion from the app')}>
++            <span class="verevon-inline-widget__note">{i18n.tr('Forslag fra appen:', 'Suggestion from the app:')}</span>
++            <button type="button" class="verevon-chat-followup-chip" onClick={() => sendMessage(text())}>
++              {text()}
++            </button>
++            <button type="button" class="verevon-inline-widget__action" onClick={clearMessage}>
++              {i18n.tr('Avvis', 'Dismiss')}
++            </button>
++          </div>
++        )}
++      </Show>
++      <Show when={pendingLink()}>
++        {(url) => (
++          <div class="verevon-chat-followups" role="group" aria-label={i18n.tr('Lenke fra appen', 'Link from the app')}>
++            <span class="verevon-inline-widget__note">
++              {i18n.tr('Appen vil åpne:', 'The app wants to open:')} {url()}
++            </span>
++            <a
++              class="verevon-chat-followup-chip"
++              href={url()}
++              target="_blank"
++              rel="noopener noreferrer"
++              onClick={() => setPendingLink(null)}
++            >
++              {i18n.tr('Åpne lenken', 'Open the link')}
++            </a>
++            <button type="button" class="verevon-inline-widget__action" onClick={() => setPendingLink(null)}>
++              {i18n.tr('Avbryt', 'Cancel')}
++            </button>
++          </div>
++        )}
++      </Show>
++    </figure>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts
+new file mode 100644
+index 000000000..8c6fe8ede
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts	
+@@ -0,0 +1,167 @@
++import { describe, expect, it } from 'vitest'
++import {
++  APP_CALL_REQUIRES_CHAT,
++  JSON_RPC_METHOD_NOT_FOUND,
++  MCP_APP_METHODS,
++  MCP_APPS_PROTOCOL_VERSION,
++  createMcpAppBridgeHost,
++  parseMcpToolName,
++  toolResultParams,
++  type JsonRpcMessage,
++} from './mcp-app-bridge'
++import { createTokenBucket, MAX_WIDGET_HEIGHT } from './widget-bridge'
++
++/** Stands in for the frame's window; the host compares `event.source` with it by identity. */
++const FRAME = { name: 'app-frame' }
++
++function host(budget = createTokenBucket(5, 60_000, () => 0)) {
++  return createMcpAppBridgeHost({
++    frameWindow: () => FRAME,
++    messageBudget: budget,
++    hostContext: { theme: 'dark', locale: 'nb' },
++    toolInput: { region: 'nord' },
++    toolOutput: '{"content":[{"type":"text","text":"3 rader"}],"structuredContent":{"rows":3}}',
++    now: () => 0,
++  })
++}
++
++const request = (id: number, method: string, params: Record<string, unknown> = {}) => ({
++  source: FRAME,
++  origin: 'null',
++  data: { jsonrpc: '2.0', id, method, params },
++})
++
++const notify = (method: string, params: Record<string, unknown> = {}) => ({
++  source: FRAME,
++  origin: 'null',
++  data: { jsonrpc: '2.0', method, params },
++})
++
++function sent(outcome: ReturnType<ReturnType<typeof host>['handle']>): JsonRpcMessage[] {
++  if (!outcome.ok) throw new Error(`dropped: ${outcome.reason}`)
++  return outcome.send
++}
++
++describe('mcp-app-bridge', () => {
++  it('initialize_handshake', () => {
++    const bridge = host()
++    const [reply] = sent(bridge.handle(request(1, MCP_APP_METHODS.initialize, { protocolVersion: MCP_APPS_PROTOCOL_VERSION })))
++    expect(reply).toMatchObject({
++      jsonrpc: '2.0',
++      id: 1,
++      result: {
++        protocolVersion: MCP_APPS_PROTOCOL_VERSION,
++        hostInfo: { name: 'Verevon' },
++        hostContext: { theme: 'dark', locale: 'nb', displayMode: 'inline' },
++      },
++    })
++    // No server tools or resources are offered while app-initiated calls are off.
++    const capabilities = (reply as { result: { hostCapabilities: Record<string, unknown> } }).result.hostCapabilities
++    expect(Object.keys(capabilities)).toEqual(['openLinks'])
++  })
++
++  it('tool_input_and_result_sent_once', () => {
++    const bridge = host()
++    // Nothing goes to the app before the handshake completes.
++    expect(sent(bridge.handle(notify(MCP_APP_METHODS.initialized)))).toEqual([])
++    sent(bridge.handle(request(1, MCP_APP_METHODS.initialize)))
++    const first = sent(bridge.handle(notify(MCP_APP_METHODS.initialized)))
++    expect(first).toEqual([
++      { jsonrpc: '2.0', method: MCP_APP_METHODS.toolInput, params: { arguments: { region: 'nord' } } },
++      {
++        jsonrpc: '2.0',
++        method: MCP_APP_METHODS.toolResult,
++        params: { content: [{ type: 'text', text: '3 rader' }], structuredContent: { rows: 3 } },
++      },
++    ])
++    expect(sent(bridge.handle(notify(MCP_APP_METHODS.initialized)))).toEqual([])
++  })
++
++  it('tools_call_refused_while_s10_off', () => {
++    const [reply] = sent(host().handle(request(7, MCP_APP_METHODS.toolsCall, { name: 'delete_all', arguments: {} })))
++    expect(reply).toEqual({
++      jsonrpc: '2.0',
++      id: 7,
++      error: { code: JSON_RPC_METHOD_NOT_FOUND, message: APP_CALL_REQUIRES_CHAT, data: { reason: APP_CALL_REQUIRES_CHAT } },
++    })
++  })
++
++  it('unknown_method_is_method_not_found', () => {
++    for (const method of ['resources/read', 'ui/request-display-mode', 'sampling/createMessage']) {
++      const [reply] = sent(host().handle(request(3, method)))
++      expect(reply).toMatchObject({ id: 3, error: { code: JSON_RPC_METHOD_NOT_FOUND, message: 'method_not_found' } })
++    }
++    // A notification is never answered, even an unknown one.
++    expect(sent(host().handle(notify('notifications/message', { level: 'info' })))).toEqual([])
++  })
++
++  it('message_is_staged', () => {
++    const bridge = host()
++    const params = { role: 'user', content: { type: 'text', text: 'Vis som tabell' } }
++    const first = bridge.handle(request(1, MCP_APP_METHODS.message, params))
++    expect(first).toEqual({ ok: true, send: [{ jsonrpc: '2.0', id: 1, result: {} }], action: { kind: 'stage_message', text: 'Vis som tabell' } })
++    // One staged at a time: a loop on ui/message is refused, not stacked.
++    const second = bridge.handle(request(2, MCP_APP_METHODS.message, params))
++    expect(second).toMatchObject({ ok: true, action: null, send: [{ id: 2, error: { message: 'message_already_staged' } }] })
++    bridge.releaseMessage()
++    expect(bridge.handle(request(3, MCP_APP_METHODS.message, params))).toMatchObject({ action: { kind: 'stage_message' } })
++  })
++
++  it('messages share the answer budget', () => {
++    const bridge = host(createTokenBucket(1, 60_000, () => 0))
++    const params = { role: 'user', content: { type: 'text', text: 'Neste' } }
++    bridge.handle(request(1, MCP_APP_METHODS.message, params))
++    bridge.releaseMessage()
++    expect(bridge.handle(request(2, MCP_APP_METHODS.message, params))).toMatchObject({ send: [{ error: { message: 'rate_limited' } }] })
++  })
++
++  it('an over-long or non-user message is refused', () => {
++    const bridge = host()
++    for (const params of [
++      { role: 'user', content: { type: 'text', text: 'x'.repeat(501) } },
++      { role: 'assistant', content: { type: 'text', text: 'Neste' } },
++      { role: 'user', content: { type: 'image', data: 'AAAA' } },
++    ]) {
++      expect(bridge.handle(request(1, MCP_APP_METHODS.message, params))).toMatchObject({ action: null, send: [{ error: { message: 'invalid_message' } }] })
++    }
++  })
++
++  it('open_link goes through the safe-link check', () => {
++    const bridge = host()
++    expect(bridge.handle(request(1, MCP_APP_METHODS.openLink, { url: 'https://example.com/rapport' }))).toMatchObject({
++      action: { kind: 'confirm_link', url: 'https://example.com/rapport' },
++    })
++    expect(bridge.handle(request(2, MCP_APP_METHODS.openLink, { url: 'javascript:alert(1)' }))).toMatchObject({
++      action: null,
++      send: [{ error: { message: 'unsafe_link' } }],
++    })
++  })
++
++  it('size is clamped', () => {
++    const outcome = host().handle(notify(MCP_APP_METHODS.sizeChanged, { width: 400, height: 99_999 }))
++    expect(outcome).toEqual({ ok: true, send: [], action: { kind: 'resize', height: MAX_WIDGET_HEIGHT } })
++  })
++
++  it('foreign source and non-null origin are dropped unanswered', () => {
++    const bridge = host()
++    expect(bridge.handle({ ...request(1, MCP_APP_METHODS.initialize), source: {} })).toEqual({ ok: false, reason: 'foreign_source' })
++    expect(bridge.handle({ ...request(1, MCP_APP_METHODS.initialize), origin: 'https://evil.example' })).toEqual({ ok: false, reason: 'non_null_origin' })
++    expect(bridge.handle({ source: FRAME, origin: 'null', data: { jsonrpc: '2.0', id: 1, result: {} } })).toEqual({ ok: false, reason: 'unexpected_response' })
++    expect(bridge.handle({ source: FRAME, origin: 'null', data: { v: 1, type: 'size' } })).toEqual({ ok: false, reason: 'malformed' })
++    expect(bridge.handle(request(1, MCP_APP_METHODS.message, { content: { type: 'text', text: 'x'.repeat(9000) } }))).toEqual({ ok: false, reason: 'oversized' })
++    expect(bridge.drops()).toEqual({ non_null_origin: 1, unexpected_response: 1, malformed: 1, oversized: 1 })
++  })
++
++  it('a plain text output is one text block', () => {
++    expect(toolResultParams('3 rader')).toEqual({ content: [{ type: 'text', text: '3 rader' }] })
++    expect(toolResultParams('{"rows":3}')).toEqual({ content: [{ type: 'text', text: '{"rows":3}' }] })
++  })
++
++  it('parses the namespaced tool name as execution-core does', () => {
++    expect(parseMcpToolName('mcp__01HSRV__show_chart')).toEqual({ serverId: '01HSRV', tool: 'show_chart' })
++    expect(parseMcpToolName('mcp__01HSRV__a__b')).toEqual({ serverId: '01HSRV', tool: 'a__b' })
++    for (const name of ['web_search', 'mcp__', 'mcp__srv', 'mcp____tool', 'mcp__srv__']) {
++      expect(parseMcpToolName(name)).toBeNull()
++    }
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts
+new file mode 100644
+index 000000000..206245c6f
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts	
+@@ -0,0 +1,320 @@
++/**
++ * The MCP App host's side of the frame (EP-4 S9): JSON-RPC 2.0 over postMessage,
++ * as the MCP Apps extension defines it, held to the inline widget bridge's limits.
++ *
++ * An MCP tool may name an HTML app that draws its result. The app runs in the
++ * same opaque-origin sandbox as an inline widget (`sandbox="allow-scripts"`,
++ * `connect-src 'none'`), so everything it can do goes through this host: it is
++ * told the call's input and result once, may size itself, may ask to open a safe
++ * link the person confirms, and may stage a message the person sends (D3). It
++ * gets no storage, no network and no host data. A `tools/call` from the app is
++ * refused with `app_call_requires_chat` until app-initiated calls exist (S10);
++ * every other request is method-not-found.
++ *
++ * The extension's method names live in `MCP_APP_METHODS` only (checked against
++ * the 2026-01-26 revision), because the extension is young and they may move.
++ *
++ * Pure: the host takes its frame, clock and budgets as arguments, so every rule
++ * is testable without a frame.
++ */
++
++import { isSafeLinkHref } from './safe-href'
++import {
++  clampWidgetHeight,
++  createTokenBucket,
++  MAX_BRIDGE_MESSAGE_BYTES,
++  MAX_FOLLOWUP_CHARS,
++  SIZE_MESSAGES_PER_SECOND,
++  type TokenBucket,
++  type WidgetBridgeEvent,
++} from './widget-bridge'
++
++/** The extension revision this host speaks; sent back in the `ui/initialize` result. */
++export const MCP_APPS_PROTOCOL_VERSION = '2026-01-26'
++
++/** Every extension method the host reads or sends. A name not here is method-not-found. */
++export const MCP_APP_METHODS = {
++  /** App to host request: the handshake. */
++  initialize: 'ui/initialize',
++  /** App to host notification: the app is ready; only then does the host send anything. */
++  initialized: 'ui/notifications/initialized',
++  /** Host to app notification: the call's complete arguments, once. */
++  toolInput: 'ui/notifications/tool-input',
++  /** Host to app notification: the call's `CallToolResult`, once, after the input. */
++  toolResult: 'ui/notifications/tool-result',
++  /** App to host notification: the app's rendered size. */
++  sizeChanged: 'ui/notifications/size-changed',
++  /** App to host request: open a link (the person confirms it). */
++  openLink: 'ui/open-link',
++  /** App to host request: a user message (staged as a chip the person sends). */
++  message: 'ui/message',
++  /** App to host request: call a tool on the app's server (refused until S10). */
++  toolsCall: 'tools/call',
++  /** App to host request: liveness. */
++  ping: 'ping',
++} as const
++
++/** JSON-RPC 2.0 error codes the host answers with. */
++export const JSON_RPC_METHOD_NOT_FOUND = -32601
++export const JSON_RPC_INVALID_PARAMS = -32602
++/** Implementation-defined server error: the request was valid but the host declined it now. */
++export const JSON_RPC_DECLINED = -32000
++
++/** The refusal an app reads for `tools/call` while app-initiated calls are off (D13). */
++export const APP_CALL_REQUIRES_CHAT = 'app_call_requires_chat'
++
++/** Longer than any request id an app needs; bounds what the host echoes back. */
++const MAX_ID_CHARS = 64
++
++export type JsonRpcId = string | number
++
++export type JsonRpcMessage =
++  | { jsonrpc: '2.0'; id: JsonRpcId; result: Record<string, unknown> }
++  | { jsonrpc: '2.0'; id: JsonRpcId; error: { code: number; message: string; data?: Record<string, unknown> } }
++  | { jsonrpc: '2.0'; method: string; params: Record<string, unknown> }
++
++/** Why a message was dropped without an answer. Counted per reason, never shown to the app. */
++export type McpAppBridgeDrop = 'foreign_source' | 'non_null_origin' | 'malformed' | 'oversized' | 'unexpected_response'
++
++/** The context `ui/initialize` hands the app: the theme and how it is shown, nothing about the person. */
++export type McpAppHostContext = {
++  theme: 'light' | 'dark'
++  locale: string
++}
++
++/** What the host does with an accepted message, besides answering it. */
++export type McpAppAction =
++  | { kind: 'resize'; height: number }
++  | { kind: 'stage_message'; text: string }
++  | { kind: 'confirm_link'; url: string }
++
++export type McpAppBridgeOutcome =
++  | { ok: true; send: JsonRpcMessage[]; action: McpAppAction | null }
++  | { ok: false; reason: McpAppBridgeDrop }
++
++export type McpAppBridgeHost = {
++  handle(event: WidgetBridgeEvent): McpAppBridgeOutcome
++  /** The person sent or dismissed the staged message: the app may stage another. */
++  releaseMessage(): void
++  /** Drops per reason since the frame mounted. */
++  drops(): Readonly<Partial<Record<McpAppBridgeDrop, number>>>
++}
++
++type Inbound =
++  | { kind: 'request'; id: JsonRpcId; method: string; params: Record<string, unknown> }
++  | { kind: 'notification'; method: string; params: Record<string, unknown> }
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
++  const proto = Object.getPrototypeOf(value)
++  return proto === Object.prototype || proto === null
++}
++
++/** UTF-8 size of the message as JSON; null when it does not serialize (cycles, BigInt). */
++function serializedBytes(data: unknown): number | null {
++  try {
++    const json = JSON.stringify(data)
++    return json === undefined ? null : new TextEncoder().encode(json).length
++  } catch {
++    return null
++  }
++}
++
++function isJsonRpcId(value: unknown): value is JsonRpcId {
++  if (typeof value === 'string') return value.length <= MAX_ID_CHARS
++  return typeof value === 'number' && Number.isSafeInteger(value)
++}
++
++/**
++ * Read one posted message as JSON-RPC. Accepted only from this frame's own window
++ * and from the opaque origin (`'null'`) a sandboxed frame without
++ * `allow-same-origin` always has; anything else is dropped before its data is read.
++ */
++function parseInbound(event: WidgetBridgeEvent, frameWindow: unknown): { ok: true; message: Inbound } | { ok: false; reason: McpAppBridgeDrop } {
++  if (frameWindow == null || event.source !== frameWindow) return { ok: false, reason: 'foreign_source' }
++  if (event.origin !== 'null') return { ok: false, reason: 'non_null_origin' }
++
++  const data = event.data
++  if (!isPlainObject(data)) return { ok: false, reason: 'malformed' }
++  const bytes = serializedBytes(data)
++  if (bytes === null) return { ok: false, reason: 'malformed' }
++  if (bytes > MAX_BRIDGE_MESSAGE_BYTES) return { ok: false, reason: 'oversized' }
++  if (data.jsonrpc !== '2.0') return { ok: false, reason: 'malformed' }
++  // The host sends no requests, so an app has nothing to answer.
++  if (typeof data.method !== 'string') {
++    return 'result' in data || 'error' in data ? { ok: false, reason: 'unexpected_response' } : { ok: false, reason: 'malformed' }
++  }
++  const params = data.params === undefined ? {} : data.params
++  if (!isPlainObject(params)) return { ok: false, reason: 'malformed' }
++  if (data.id === undefined) return { ok: true, message: { kind: 'notification', method: data.method, params } }
++  if (!isJsonRpcId(data.id)) return { ok: false, reason: 'malformed' }
++  return { ok: true, message: { kind: 'request', id: data.id, method: data.method, params } }
++}
++
++const result = (id: JsonRpcId, value: Record<string, unknown> = {}): JsonRpcMessage => ({ jsonrpc: '2.0', id, result: value })
++
++const failure = (id: JsonRpcId, code: number, message: string): JsonRpcMessage => ({
++  jsonrpc: '2.0',
++  id,
++  error: { code, message, data: { reason: message } },
++})
++
++const notification = (method: string, params: Record<string, unknown>): JsonRpcMessage => ({ jsonrpc: '2.0', method, params })
++
++/**
++ * The text of a `ui/message`: a user-role text block (the extension sends one
++ * block; a list of blocks is read for its text blocks). Null when there is no
++ * text or it is over the follow-up limit, which is dropped, not cut, so the chip
++ * never misquotes.
++ */
++export function stagedMessageText(params: Record<string, unknown>): string | null {
++  if (params.role !== undefined && params.role !== 'user') return null
++  const blocks = Array.isArray(params.content) ? params.content : [params.content]
++  const text = blocks
++    .filter((block): block is Record<string, unknown> => isPlainObject(block) && block.type === 'text' && typeof block.text === 'string')
++    .map((block) => block.text as string)
++    .join('\n')
++    .trim()
++  return text && text.length <= MAX_FOLLOWUP_CHARS ? text : null
++}
++
++/**
++ * A tool's stored output as the `CallToolResult` the app reads: an output that
++ * already is one (a `content` list) goes as it is, anything else as one text block.
++ */
++export function toolResultParams(output: string): Record<string, unknown> {
++  try {
++    const parsed: unknown = JSON.parse(output)
++    if (isPlainObject(parsed) && Array.isArray(parsed.content)) return parsed
++  } catch {
++    // Not JSON: the output is plain text.
++  }
++  return { content: [{ type: 'text', text: output }] }
++}
++
++/**
++ * One frame's side of the app protocol: the source and origin check, the size
++ * cap, the handshake, the call's input and result sent once after the app says
++ * it is initialized, one staged message at a time against the answer's shared
++ * budget, and the frame's own size budget.
++ */
++export function createMcpAppBridgeHost(options: {
++  frameWindow: () => unknown
++  messageBudget: TokenBucket
++  hostContext: McpAppHostContext
++  /** The settled call's arguments, as the transcript holds them. */
++  toolInput: unknown
++  /** The settled call's output text. */
++  toolOutput: string
++  now?: () => number
++}): McpAppBridgeHost {
++  const sizeBudget = createTokenBucket(SIZE_MESSAGES_PER_SECOND, 1000, options.now)
++  const dropped: Partial<Record<McpAppBridgeDrop, number>> = {}
++  let initializeAnswered = false
++  let callSent = false
++  let messageStaged = false
++
++  const drop = (reason: McpAppBridgeDrop): McpAppBridgeOutcome => {
++    dropped[reason] = (dropped[reason] ?? 0) + 1
++    return { ok: false, reason }
++  }
++  const answer = (send: JsonRpcMessage[], action: McpAppAction | null = null): McpAppBridgeOutcome => ({ ok: true, send, action })
++
++  const handleRequest = (id: JsonRpcId, method: string, params: Record<string, unknown>): McpAppBridgeOutcome => {
++    switch (method) {
++      case MCP_APP_METHODS.initialize:
++        initializeAnswered = true
++        return answer([
++          result(id, {
++            protocolVersion: MCP_APPS_PROTOCOL_VERSION,
++            hostInfo: { name: 'Verevon', version: '1' },
++            // Links only: no server tools or resources (S10), no logging, no display modes beyond inline.
++            hostCapabilities: { openLinks: {} },
++            hostContext: {
++              theme: options.hostContext.theme,
++              locale: options.hostContext.locale,
++              displayMode: 'inline',
++              availableDisplayModes: ['inline'],
++              platform: 'web',
++            },
++          }),
++        ])
++      case MCP_APP_METHODS.ping:
++        return answer([result(id)])
++      case MCP_APP_METHODS.openLink: {
++        const url = typeof params.url === 'string' ? params.url.trim() : ''
++        if (!isSafeLinkHref(url)) return answer([failure(id, JSON_RPC_INVALID_PARAMS, 'unsafe_link')])
++        return answer([result(id)], { kind: 'confirm_link', url })
++      }
++      case MCP_APP_METHODS.message: {
++        const text = stagedMessageText(params)
++        if (text === null) return answer([failure(id, JSON_RPC_INVALID_PARAMS, 'invalid_message')])
++        // The slot is checked first, so an app looping on ui/message does not spend the answer's budget.
++        if (messageStaged) return answer([failure(id, JSON_RPC_DECLINED, 'message_already_staged')])
++        if (!options.messageBudget.take()) return answer([failure(id, JSON_RPC_DECLINED, 'rate_limited')])
++        messageStaged = true
++        return answer([result(id)], { kind: 'stage_message', text })
++      }
++      case MCP_APP_METHODS.toolsCall:
++        return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)])
++      default:
++        return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, 'method_not_found')])
++    }
++  }
++
++  const handleNotification = (method: string, params: Record<string, unknown>): McpAppBridgeOutcome => {
++    switch (method) {
++      case MCP_APP_METHODS.initialized: {
++        // Nothing goes to the app before the handshake completes, and the call goes once.
++        if (!initializeAnswered || callSent) return answer([])
++        callSent = true
++        const input = isPlainObject(options.toolInput) ? options.toolInput : {}
++        return answer([
++          notification(MCP_APP_METHODS.toolInput, { arguments: input }),
++          notification(MCP_APP_METHODS.toolResult, toolResultParams(options.toolOutput)),
++        ])
++      }
++      case MCP_APP_METHODS.sizeChanged: {
++        const height = clampWidgetHeight(params.height)
++        if (height === null) return answer([])
++        // A resize loop beyond the budget is ignored, not echoed.
++        return sizeBudget.take() ? answer([], { kind: 'resize', height }) : answer([])
++      }
++      default:
++        // JSON-RPC never answers a notification; an unknown one is ignored.
++        return answer([])
++    }
++  }
++
++  return {
++    handle(event) {
++      const parsed = parseInbound(event, options.frameWindow())
++      // A foreign source is another frame's or the page's own traffic, not this app's to count.
++      if (!parsed.ok) return parsed.reason === 'foreign_source' ? parsed : drop(parsed.reason)
++      const message = parsed.message
++      return message.kind === 'request'
++        ? handleRequest(message.id, message.method, message.params)
++        : handleNotification(message.method, message.params)
++    },
++    releaseMessage() {
++      messageStaged = false
++    },
++    drops() {
++      return { ...dropped }
++    },
++  }
++}
++
++/**
++ * Split `mcp__<server_id>__<tool>` into its parts, as execution-core's
++ * `parse_mcp_tool_name` does: on the FIRST `__` after the prefix (a tool name may
++ * itself contain `__`; a server id does not). Null for any other name.
++ */
++export function parseMcpToolName(name: string): { serverId: string; tool: string } | null {
++  if (!name.startsWith('mcp__')) return null
++  const rest = name.slice('mcp__'.length)
++  const split = rest.indexOf('__')
++  if (split <= 0) return null
++  const tool = rest.slice(split + 2)
++  return tool ? { serverId: rest.slice(0, split), tool } : null
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 436d04216..56361a7d1 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1116,6 +1116,32 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the MCP App host as low-risk actions the model cannot execute (EP-4-S9)', () => {
++    const open = getActionDescriptor('chat.open_mcp_app')
++    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.open_mcp_app')).toBe(false)
++    expect(open?.description ?? '').toContain('Never model-executable')
++    expect(open?.inputSchema.safeParse({ serverId: 'srv-1', tool: 'show_chart' }).success).toBe(true)
++    for (const input of [
++      { serverId: '', tool: 'show_chart' },
++      { serverId: 'srv-1', tool: '' },
++      // The org and viewer are the session's: a caller names only the server and the tool.
++      { serverId: 'srv-1', tool: 'show_chart', orgId: 'org-2' },
++      { serverId: 'srv-1', tool: 'show_chart', uri: 'ui://other/app' },
++    ]) {
++      expect(open?.inputSchema.safeParse(input).success).toBe(false)
++    }
++
++    const stage = getActionDescriptor('chat.stage_mcp_app_message')
++    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.stage_mcp_app_message')).toBe(false)
++    expect(stage?.description ?? '').toContain('Never model-executable')
++    expect(stage?.inputSchema.safeParse({ text: 'Vis som tabell' }).success).toBe(true)
++    for (const input of [{ text: '' }, { text: 'x'.repeat(501) }, { text: 'Neste', send: true }]) {
++      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
++    }
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1634,7 +1660,8 @@ describe('action registry', () => {
+     // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
+     // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
+     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+-    expect(ids).toHaveLength(310)
++    // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
++    expect(ids).toHaveLength(312)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 870776776..1e67bf159 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1443,6 +1443,22 @@ const chatOpenWidgetLinkInput = z
+   })
+   .strict()
+ 
++// The app an MCP tool call in a chat answer declares (EP-4 S9). Named by the call's server and tool only; the
++// gateway re-checks that the viewer may use the server and re-discovers which `ui://` document the tool names.
++const chatOpenMcpAppInput = z
++  .object({
++    serverId: z.string().trim().min(1).max(256),
++    tool: z.string().trim().min(1).max(256),
++  })
++  .strict()
++
++// A message an MCP App staged (EP-4 S9): the same bounds as a widget's follow-up, the person sends it.
++const chatStageMcpAppMessageInput = z
++  .object({
++    text: z.string().min(1).max(500),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4875,6 +4891,28 @@ export const actionRegistry = [
+     inputSchema: chatOpenWidgetLinkInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.open_mcp_app',
++    label: 'Show the app of an MCP tool call',
++    description: 'Draw the app an MCP tool call in a chat answer declares, under that answer, labelled with its server, in the same isolated frame as an inline widget: no network, no storage and no host data. The gateway reads the app with the viewer\'s own access to the server, and nothing is stored. The app is told the call\'s input and result once; it may size itself, stage a message and ask to open a link, and the person decides each. At most two apps per answer open on their own; the others wait for a click. Hidden in a temporary chat (zero data retention). Never model-executable: what a tool draws is not the model\'s to open.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatOpenMcpAppInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'chat.stage_mcp_app_message',
++    label: 'Stage a message an MCP App proposed',
++    description: 'Show a message an MCP App in a chat answer asked to send as a chip under that app, labelled as coming from the app. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler. At most one chip per app at a time, five per answer per minute, and 500 characters; anything over is refused to the app. Never model-executable: an app is a server\'s content, and the person decides every turn it proposes.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatStageMcpAppMessageInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts
+index 602bfeab6..581a73027 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
+@@ -10,6 +10,7 @@ import {
+   describeFeedbackFailure,
+   getChatThread,
+   getChatThreadTranscript,
++  getMcpAppResource,
+   getThreadContext,
+   getThreadMessages,
+   listChatThreads,
+@@ -3182,3 +3183,44 @@ describe('EP-4 S2 inline widget feature family', () => {
+     expect(buildChatWireBody({ content: 'hi' }).features).toContain('usage')
+   })
+ })
++
++describe('EP-4 S9 MCP app resource read', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
++    JSON.stringify(body),
++    { status, headers: { 'Content-Type': 'application/json' } },
++  ))
++
++  it('reads the app document by server and tool name only', async () => {
++    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '<p>app</p>', needs_network: true } }))
++    expect(await getMcpAppResource('srv-1', 'show&org_id=org-2')).toEqual({
++      uri: 'ui://charts/pie',
++      html: '<p>app</p>',
++      needsNetwork: true,
++    })
++    const url = String(vi.mocked(fetch).mock.calls[0]?.[0])
++    expect(url).toContain('/api/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2')
++  })
++
++  it('reads a 404 (switch off, no app) and a 403 (zero retention) as no app', async () => {
++    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
++    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
++    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'mcp_execution' } }, 403))
++    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
++  })
++
++  it('a document that is not a ui:// app is no app', async () => {
++    vi.stubGlobal('fetch', json({ data: { uri: 'https://evil.example/app', html: '<p>app</p>' } }))
++    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
++    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '   ' } }))
++    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
++  })
++
++  it('rejects any other failure with the typed error', async () => {
++    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
++    await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 6cb438c71..88fd87ffd 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -4146,6 +4146,37 @@ export async function listDeckTemplates(): Promise<DeckTemplate[] | null> {
+     : []
+ }
+ 
++/** An MCP tool's app document (EP-4 S9), read on demand and never stored. */
++export type McpAppResource = {
++  uri: string
++  html: string
++  /** The app declared network origins; the frame's CSP still allows none (D12). */
++  needsNetwork: boolean
++}
++
++/**
++ * The `ui://` app `tool` on MCP server `serverId` declares, read by the gateway with the viewer's authority
++ * (`chat.open_mcp_app`). `null` when there is no app to draw: the route answers 404 while the gateway's switch
++ * is off and for a tool without an app or a server the viewer may not use, and a zero-retention session is
++ * refused (403). Any other failure rejects with the typed `ApiError`. Not cached here: the caller holds the
++ * document only as long as its frame.
++ */
++export async function getMcpAppResource(serverId: string, tool: string): Promise<McpAppResource | null> {
++  const params = new URLSearchParams({ server_id: serverId, tool })
++  let raw: unknown
++  try {
++    raw = await requestJson<unknown>(`/api/v1/mcp-apps/resource?${params.toString()}`)
++  } catch (error) {
++    if (error instanceof ApiError && (error.status === 404 || error.status === 403)) return null
++    throw error
++  }
++  const record = objectValue(raw)
++  const uri = str(record?.uri)
++  const html = typeof record?.html === 'string' ? record.html : ''
++  if (!uri?.startsWith('ui://') || !html.trim()) return null
++  return { uri, html, needsNetwork: record?.needs_network === true }
++}
++
+ /**
+  * One page of an artifact's stored revisions, newest first, text included.
+  * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`

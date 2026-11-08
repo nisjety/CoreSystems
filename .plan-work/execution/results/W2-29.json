@@ -1,0 +1,752 @@
+{
+ "batchId": "W2-29",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS27-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-types.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPanels.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatLiveRunPanel.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentRunConsole.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentRunConsole.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\tests\\e2e\\chat-cost-meter.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm vitest run src/features/chat/components/RunCostMeter.test.tsx src/features/chat/components/ChatMessages.metrics.test.tsx src/features/agents/components/AgentRunConsole.test.tsx src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/ChatLiveRunPanel.test.tsx --pool=forks",
+     "outcome": "5 files, 161 tests passed, run after the mixed-basis label change; only comment edits came after it. Before any edit the three named files passed 38 tests."
+    },
+    {
+     "command": "pnpm vitest run src/features/chat src/features/agents --pool=forks (final tree, machine otherwise idle)",
+     "outcome": "111 files, 1542 tests passed. An earlier run of the same suite, made while my eslint and playwright --list ran alongside, had one file fail (use-chat-controller.snapshot-throttle.test.ts: a 30 s timeout in one test, then a cascade assertion in the next). That file passed 21 of 21 when run alone, and the idle full run passed."
+    },
+    {
+     "command": "pnpm typecheck (tsc -b), final tree",
+     "outcome": "22 errors, the identical set to the pre-change baseline (21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts). None in changed files."
+    },
+    {
+     "command": "pnpm exec eslint on the 9 changed TS/TSX files (main config)",
+     "outcome": "0 errors; 13 warnings, all pre-existing on lines outside my changed hunks (use-chat-controller.ts, ChatLiveRunPanel.tsx)."
+    },
+    {
+     "command": "pnpm exec eslint -c eslint.ui-gates.config.js on the 6 changed src files",
+     "outcome": "exit 0."
+    },
+    {
+     "command": "pnpm exec eslint tests/e2e/chat-cost-meter.spec.ts",
+     "outcome": "exit 0."
+    },
+    {
+     "command": "pnpm exec playwright test --list tests/e2e/chat-cost-meter.spec.ts",
+     "outcome": "Lists 4 tests in the e2e project. The spec was NOT run: it needs the signed-in dev stack and a second dev server."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: add the line `          meter={activeRunTurn()?.meter}` after line 787 (`toolCalls={activeRunTurn()?.toolCalls}`, inside the `<StepsPanel` element), and the line `        meter={activeRunTurn()?.meter}` after line 1216 (`runId={liveRunId()}`, inside the `<ChatLiveRunPanel` element). Without these lines neither the Work panel nor the live rail receives a meter.",
+    "shared-edit apps/Frontend Plane/verevonv3/playwright.config.ts: in `const CHAT_WORKSPACE_SPECS` change the regex to `/chat-(?:workspace|voice-mode|transcript-performance|attachment-gates|cost-meter)\\.spec\\.ts/` so tests/e2e/chat-cost-meter.spec.ts runs in the chat project. Otherwise it falls into the e2e project, which needs the setup login.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml line 374: `MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-false}` becomes `MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-true}`. Apply ONLY after the live proof below passes, as the S4 DoD requires.",
+    "Live proof, lead-run, not done here: rebuild model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true on a test stack; restart the verevonv3 frontend container (bind mount, Vite needs a restart); run a 3-round tool turn in a planned chat turn and in /agents/runs; confirm the meter climbs with calls and that its last figures equal the usage frame; confirm a subscription turn reads 'Included in the subscription' and an unknown-model turn reads 'Price unavailable'; capture screenshots and the SSE transcript.",
+    "E2E run, lead-run, after the playwright.config.ts edit: start a second dev server (for example port 5174) and run `LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/chat-cost-meter.spec.ts`. It needs the signed-in stack for the setup login. Selectors were taken from source, so expect to adjust them on first run."
+   ],
+   "deviations": [
+    "Mount points: the meter sits in StepsPanel under the Work header, and in ChatLiveRunPanel only when no Work content is open, so one meter shows at a time. Both take a `meter` prop from ChatPage, which is not owned.",
+    "The cost label adds a mixed-basis qualifier ('..., token-priced calls only') beyond the row's wording. The gateway states no cost_basis for a mixed turn and its cost is then the metered calls alone, so the label is required for honesty. Covered by a unit test.",
+    "The S6 props (RunCeilingReading with ceiling/fraction/warning) became fields of RunMeter in chat-types.ts, so RunCostMeter takes one `meter` prop. The S6 test cases were kept and rewritten to the new prop, and the file grew from 7 to 21 tests.",
+    "AgentRunConsole's TrustPanel tokens and cost stats were replaced by the meter, so the trust panel carries one cost line.",
+    "In the Work panel's technical-activity disclosure, 'Prompt cache' reads the meter's cache figure when present and falls back to the usage event, as the row asked.",
+    "The Playwright spec answers the chat stream with page.route and sets the English locale. It is outside the chat project until the playwright.config.ts shared edit is applied.",
+    "The MODEL_GATEWAY_USAGE_PROGRESS default flip to true (the row's DoD step) is deliberately not applied; it follows the live proof."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "apps/Frontend Plane/verevonv3/playwright.config.ts",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "ChatPage.tsx (not owned) must pass `meter={activeRunTurn()?.meter}` to StepsPanel and ChatLiveRunPanel. Until the lead applies those two shared-edit lines, the chat Work panel and the live rail never get meter data, so the chat half of the row is mounted but not fed.",
+     "playwright.config.ts (not owned): the CHAT_WORKSPACE_SPECS regex needs `cost-meter` added so tests/e2e/chat-cost-meter.spec.ts runs in the chat project. The spec has not been run; it needs the signed-in dev stack and a second dev server.",
+     "Live proof is owed (rebuilt model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true, frontend container restart, a 3-round tool turn in chat and in /agents/runs, a subscription turn and an unknown-model turn, screenshots and the SSE transcript).",
+     "The DoD flip of MODEL_GATEWAY_USAGE_PROGRESS to default true in apps/Model Plane/deploy/docker-compose.yml is lead-owned and should happen only after the live proof."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof yet: the meter has not been seen on a rebuilt frontend with MODEL_GATEWAY_USAGE_PROGRESS on, so the DoD evidence (a 3-round tool turn climbing and ending equal to the usage frame, subscription and unknown-model turns, screenshots, SSE transcript) is owed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Mixed-basis money copy outside this slice: a turn mixing metered and subscription calls has no cost_basis on the wire, so MessageMetricsBadge and the Details popover in ChatMessages.tsx (not owned) still print the metered sum as the turn's cost with no qualifier. Only the new meter says 'token-priced calls only'."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With MODEL_GATEWAY_USAGE_PROGRESS off, the meter still appears at the end of every turn: the final usage frame always carries calls, unpriced_calls and cost_by_category, ungated since WS27-S2. The S4 row names no FE switch, so the owner should confirm that the switched-off build may show the meter at turn end."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Session-only meter: a reload drops a turn's calls, cache figures, category breakdown and warning; the transcript keeps only the message's own totals. Persisting it needs chat-normalizers.ts, which is not owned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Resume gap: the resumed-stream handler object in use-chat-controller.ts has no usage or usage_progress handler (usage was already missing there), so a resumed turn's meter stays empty until its next turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Progress frames carry no cost_by_category, so the expandable breakdown appears only once the turn ends."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller-level test drives onUsageProgress and onUsage through use-chat-controller.ts. The reducers, the component and the agent console are unit-tested; the controller wiring is covered only by typecheck and lint."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "tests/e2e/chat-cost-meter.spec.ts has not been run; it needs the signed-in dev stack. Its selectors come from reading source ('What should the agent do?', 'Run task', '.verevon-run-trust .verevon-run-cost-meter') and may need adjusting on first run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Trace list (usage.progress in verevon-ui-events.ts, not owned) carries no ceiling fields, so the Trace shows progress without the warning the meter shows."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The spa-ui-gates copy gate is already failing at HEAD: the UI-copy gate over src/features/chat and src/features/agents reports 43 problems, all in chat-normalizers.ts, which this slice did not touch. The changed files pass it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RunCostMeter.tsx imports formatUsd from chat-media-markdown.tsx, which pulls that module into the meter's graph; formatUsd belongs in a leaf module."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The agent console's telemetry 'Kostnad' stat still prints the running cost, while the Trust meter in the same console says 'Price unavailable' or 'Included in the subscription'. The two cost surfaces should agree."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Work panel's 'Prompt cache' line reads the meter's cache figure while 'Output' and 'Tokens/sec' still come from the usage.recorded event, so the disclosure mixes two sources."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The meter is styled inline because global.css (not owned) has no rules for the run-cost-meter classes; the warning chip and the breakdown need a CSS pass."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The new Norwegian copy (Kontrollkall, bare kall med tokenpris, Hurtigbuffer lest/skrevet, the cache share line) was written by the implementer and needs a native-speaker review."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "applyUsageProgress drops only frames with strictly fewer calls, so a progress frame with the same call count that arrives after the usage frame would overwrite the final total and remove costByCategory. The gateway sends progress before usage on an ordered stream, so this is unlikely, but a 'finalised' marker would make the usage frame the authority without depending on order."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In AgentRunConsole the telemetry 'Kostnad' stat (around line 2419) still prints costUsd as `$x.xxxx` with no qualifier. For a mixed metered+subscription run, the Trust meter says 'token-priced calls only' while this stat shows the bare figure. Subscription runs no longer show $0 there, because applyUsageTotal clears costUsd."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Mixed-basis turns (no cost_basis on the wire) are labelled 'token-priced calls only' only in the new meter. MessageMetricsBadge and the Details popover in ChatMessages.tsx (not owned) still show the metered sum as the turn's cost. This should be fixed before the progress switch is turned on by default."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller-level test sends onUsageProgress or onUsage through use-chat-controller.ts to turn.meter. The reducers and the component are unit-tested, but the wiring is checked only by typecheck."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The resumed-stream handlers in use-chat-controller.ts have no onUsage or onUsageProgress, so the meter of a resumed turn stays empty."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With MODEL_GATEWAY_USAGE_PROGRESS off, the meter still appears at turn end, because the final usage frame carries calls, unpriced_calls and cost_by_category. Behaviour with the switch off is therefore not identical to before (the agent console's Trust panel changes form). The S4 row names no FE switch, so the owner should confirm this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RunMeter is session-only (turnsToTranscript does not copy it), so a reload loses calls, the cache breakdown and the warning."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RunCostMeter.tsx imports formatUsd from chat-media-markdown.tsx. A leaf formatting module would keep the meter's import graph small."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The new Norwegian strings (Kontrollkall, 'bare kall med tokenpris', Hurtigbuffer lest/skrevet) need a native-speaker review. The meter is styled inline because global.css has no run-cost-meter rules."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm vitest run RunCostMeter.test.tsx ChatMessages.metrics.test.tsx AgentRunConsole.test.tsx --pool=forks (in verevonv3)",
+      "outcome": "3 files passed, 54 tests passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck (tsc -b) in verevonv3",
+      "outcome": "22 errors: 21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts. Both files are outside this slice's owned files, and the count matches the implementer's stated pre-change baseline. No errors in changed files.",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec playwright test --list tests/e2e/chat-cost-meter.spec.ts",
+      "outcome": "Lists the 4 spec tests under the e2e project (plus the auth setup test). The spec was not run, because it needs the signed-in dev stack and docker is forbidden here.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money"
+   ],
+   "notes": "WS27-S4 frontend, built in wave mode; no Rust or Go changed, so no cargo or go commands were run. RunCostMeter.tsx extends the S6 ceiling meter into the full meter: tokens in and out, the cache share only when non-zero, the cost or 'Price unavailable' or 'Included in the subscription' (a subscription is checked first, so $0 is never shown), the last call phase, a cost-by-category disclosure for a priced total, and a warning whose text is a memo so aria-live fires only on change. Pure reducers applyUsageProgress (monotonic guard on calls, sticky warnings, per-frame share) and applyUsageTotal (usage frame is the authority) are wired into use-chat-controller.ts onUsageProgress and onUsage, into ChatTurn.meter (session-only; turnsToTranscript does not copy it), into StepsPanel (ChatPanels.tsx), into the ChatLiveRunPanel fallback when no Work content is open, and into AgentRunConsole (RunUsage extended; its TrustPanel now renders the meter). Behaviour change to note: the agent console previously printed the subscription placeholder as '$0.0000'; that no longer happens. The Work panel and the live rail receive no data until the lead applies the two ChatPage lines in lead_todo, which is why status is partial. Also not done: the e2e run, the live proof, and the DoD flip of MODEL_GATEWAY_USAGE_PROGRESS. Files I did not touch but that show as modified in this worktree (a sibling slice in this batch, presumably WS16-S1): apps/gateway/src/domains/chat/history.rs, src/shared/api/chat-client.ts, src/shared/api/chat-client.test.ts. Not edited: eslint-suppressions.json (no new UI-gate findings in changed files)."
+  },
+  {
+   "id": "WS16-S1",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/attention.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/attention.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/attention_grpc.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0053_attention_state.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0053_attention_state.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/attention.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/attention_grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/tests/attention_zdr_matrix.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/attention_http_test.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib",
+     "outcome": "Fails with 2 errors, both E0609 'no field attention_client on type AppState' at src/http_routes.rs:10143 and :10199. No other error. Expected until the shared state.rs edit (lead_todo 2) lands."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p model-gateway --test attention_http_test",
+     "outcome": "Same 2 errors; the lib fails first, so the test file itself is not type-checked yet."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p mp-orchestration --lib",
+     "outcome": "1 error: E0004 non-exhaustive match at crates/mp-orchestration/src/proto_shim.rs:515:18, missing ProtoEvent::RunUsageProgress(_). Still present and the only error in the crate."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib",
+     "outcome": "235 passed, 0 failed."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path apps/gateway/Cargo.toml attention_fields_reach_the_spa_only_with_a_state (in apps/Frontend Plane/verevonv3)",
+     "outcome": "1 passed, 0 failed. The BFF was not changed this round."
+    },
+    {
+     "command": "rustfmt --edition 2021 --check tests/attention_http_test.rs",
+     "outcome": "No diff in the new file. The only diff reported is the existing one in tests/support/offline_downstreams.rs, which the test pulls in as a module and this slice does not own."
+    },
+    {
+     "command": "rustfmt --edition 2021 --check src/http_routes.rs",
+     "outcome": "No hunk in the lines this slice adds. The other hunks are outside those lines."
+    },
+    {
+     "command": "line-length check (100 columns) on the added lines of http_routes.rs and attention_http_test.rs",
+     "outcome": "No added line over 100 characters. Both files are CRLF throughout (16438 and 487 lines)."
+    },
+    {
+     "command": "read-only grep cross-check of helper signatures used by session-core attention_grpc.rs",
+     "outcome": "attention::list, page_size, mark_seen_permitted, RunRetention::from_caller, Refusal::grpc_status, record_metrics, identity and authorize_operation all match their call sites. session-core still does not compile, so this is not a test."
+    },
+    {
+     "command": "NOT RUN: cargo test -q -p model-gateway --lib attention_state_tests",
+     "outcome": "Blocked: the lib does not compile until lead_todo 2 lands. The previous round's green run no longer reproduces."
+    },
+    {
+     "command": "NOT RUN: cargo test -q -p model-gateway --test attention_http_test (and offline_downstreams_contract)",
+     "outcome": "Blocked by the same missing AppState field."
+    },
+    {
+     "command": "NOT RUN: cargo test -q -p session-core --all-targets; --test attention_zdr_matrix",
+     "outcome": "Blocked by the mp-orchestration E0004 (lead_todo 1). Session-core code and tests are unverified."
+    },
+    {
+     "command": "NOT RUN: ignored attention DB tests (session-core bin, attention filter, --ignored)",
+     "outcome": "Not run by me: DB harness work belongs to the lead. The five names are listed in db_tests_written."
+    }
+   ],
+   "db_tests_written": [
+    "attention::db_tests::a_pending_approval_on_a_running_run_is_needs_approval",
+    "attention::db_tests::an_expired_approval_is_ignored",
+    "attention::db_tests::a_superseded_plan_is_ignored",
+    "attention::db_tests::another_tenants_approval_does_not_reach_this_thread",
+    "attention::db_tests::the_list_marks_an_unread_reply_and_counts_it"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: line 638, change `ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {` to `ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) | ProtoEvent::RunUsageProgress(_) => {`. This reuses the existing ShimError::UnsupportedEvent arm and fixes the E0004 at line 515. It is WS27-S9's tag-29 change; WS27-S9 decides whether the usage mirror should map the event instead.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF): (a) add `attention_service_client::AttentionServiceClient,` to the `use mp_contracts::model_plane::v1::{...}` block at the top; (b) after line 108 (`pub message_tree_client: MessageTreeServiceClient<Channel>,`) add `/// Session Core's Attention service on the session_client endpoint (WS16-S1).` and `pub attention_client: AttentionServiceClient<Channel>,`; (c) in AppState::new(), after line 424 (`learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),`) add `attention_client: AttentionServiceClient::new(session_channel.clone()),`; (d) in from_env(), after line 595 (the `)?);` closing `let learning_client`) add a block `let attention_client = AttentionServiceClient::new(Self::lazy_channel(` / `\"SESSION_CORE_URL\",` / `\"SESSION_CORE_ADDR\",` / `\"http://localhost:9091\",` / `)?);` in the file's multi-line layout; (e) after lines 797 and 851 (both `state.learning_client = learning_client;`) add `state.attention_client = attention_client;`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs (CRLF): add `attention_service_client::AttentionServiceClient,` to the `use mp_contracts::model_plane::v1::{...}` block (starts line 32), and after line 73 (`state.learning_client = LearningGovernanceServiceClient::new(offline_channel());`) add `state.attention_client = AttentionServiceClient::new(offline_channel());`. offline_downstreams_contract.rs fails until this line exists.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml, session-core service, after line 934 (`      SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}`) add `      # WS16-S1: attention state on thread listings, ListAttention and MarkThreadSeen. Off by default; only true turns it on.` and `      SESSION_CORE_ATTENTION_ENABLED: ${SESSION_CORE_ATTENTION_ENABLED:-false}`. The switch is read by attention::enabled() through mp_contracts::loop_fold::switch_from.",
+    "Ledger (not owned): record the DEC-11 reconciliation in apps/Model Plane/docs/decisions/ledger.md and the MASTER L129 edit: precedence as the WS16 S1 row orders it; unseen equals threads.last_read_at through WS17 S7 (K3-7/K3-8); kind 6 unassigned; NEEDS_INPUT derived from run_questions (K3-1).",
+    "After lead_todo 1 to 3 land, with CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0: `cargo test -q -p model-gateway --lib attention_state_tests`; `cargo test -q -p model-gateway --test attention_http_test`; `cargo test -q -p model-gateway --test offline_downstreams_contract`; `cargo test -q -p session-core --all-targets` (includes attention_zdr_matrix); then the ignored DB tests with DATABASE_URL on a scratch database: `cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1`. On Windows, if a non-lib model-gateway target fails for the known pre-existing reason, run only the named target.",
+    "Lead evidence still owed by the row (not run by me): rebuild session-core and model-gateway; EXPLAIN the approvals and plans partial indexes; measure the ListThreads enrich p95; check flag-off responses byte for byte; curl the BFF to /v1/attention, then mark seen."
+   ],
+   "deviations": [
+    "/v1/attention returns zero counts when the switch is off (Session Core sends no counts), so the response shape is the same in both states.",
+    "The limit query value is relayed unclamped; Session Core clamps absent, zero, negative and over-200 values to 200.",
+    "Items also carry reason (approval, plan, input), omitted when unspecified, so the BFF can tell which pending row sets a waiting state. The WS16 S1 row does not name the field.",
+    "Refusals use the existing thread-route mapping: switch off or zero-retention caller gives 412 with code thread_persistence_not_permitted and Session Core's message; not-owner gives 403."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs (RunUsageProgress arm at line 638; WS27-S9's change; blocks every session-core build)",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs (attention_client field, import, constructors, from_env branches)",
+    "apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs (offline attention client line and import)",
+    "apps/Model Plane/deploy/docker-compose.yml (SESSION_CORE_ATTENTION_ENABLED line after 934)",
+    "apps/Model Plane/docs/decisions/ledger.md and the MASTER L129 entry (DEC-11 record)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs (shared, lead): add the `attention_client: AttentionServiceClient<Channel>` field, its import, and its construction in AppState::new() and from_env() as the implementer's lead_todo 2 gives it. Reason: I re-ran `cargo check -p model-gateway --lib` and it fails with E0609 'no field attention_client on type AppState' at http_routes.rs:10143 and :10199, so the whole model-gateway crate and attention_http_test cannot build.",
+     "apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs (shared, lead): add `state.attention_client = AttentionServiceClient::new(offline_channel());` and its import (lead_todo 3). Reason: without that line offline_downstreams_contract and every test built on it fail to compile once the field exists.",
+     "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs (shared, lead, WS27-S9's change): add `ProtoEvent::RunUsageProgress(_)` to the existing UnsupportedEvent arm near line 638 (lead_todo 1). Reason: I confirmed `cargo check -p session-core --all-targets` stops at E0004 at proto_shim.rs:515. Until that arm is added, none of the session-core attention code or attention_zdr_matrix compiles or runs. This slice did not cause the break, but its session-core deliverable cannot be verified until it is fixed."
+    ],
+    "dod_gaps": [
+     "Rebuild session-core and model-gateway, then show seeded states on /v1/threads and /v1/attention with the switch on.",
+     "Check byte for byte that switch-off responses for ListThreads and /v1/threads are unchanged.",
+     "Live Do-mode gated action: psql shows runs.status='running' and approvals.status='requested', and a curl through the BFF returns attention_state:\"needs_approval\". Then decide, then re-read.",
+     "EXPLAIN (ANALYZE) on the approvals and plans partial indexes, plus the ListThreads enrich p95 on a seeded 10k-thread org.",
+     "Run the ignored DB tests (`cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1`) on a scratch database.",
+     "Shared edit to deploy/docker-compose.yml: add `SESSION_CORE_ATTENTION_ENABLED: ${SESSION_CORE_ATTENTION_ENABLED:-false}`.",
+     "Record DEC-11 in the ledger and edit MASTER L129."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Session-core code and tests are unverified. The crate cannot compile until proto_shim.rs has the RunUsageProgress arm (lead_todo 1). Nothing in session-core may be claimed passing yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway lib and attention_http_test are not compiled past the missing AppState field (E0609 at http_routes.rs:10143 and :10199). The item and counts mapping after the client call and the test file have been checked only by reading and rustfmt. The first real compile is after lead_todo 2 and 3."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the shared state.rs and offline_downstreams.rs lines land, model-gateway does not compile at all, so every lib test in that crate is blocked, not just the attention ones. Do not commit this worktree before those lines are applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "enrich runs inside ListThreads with the switch on, so a failed pending-row read fails the whole thread listing. Not in this round's required fixes; consider leaving the attention fields unset on a read error."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In a shared Space listing, enrich exposes derived needs_approval and needs_input states for other members' threads. The Space session must confirm this is acceptable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 10k-thread latency probe and the EXPLAIN evidence named by the row are not written or run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No attention enforcement row exists in api/contracts/zdr-posture-matrix.json (DEC-39 'matrix row'). Adding one needs a sha256 and fixture resync. Session Core's mark_seen_permitted is the enforcement point today."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "DEC-11's precedence text conflicts with the S1 row order. The implemented S1 order needs owner or integrator sign-off and a ledger entry."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test asserts that a flag-off ListThreads response is byte-identical. It holds by proto3 default omission and the unset fields, not by an assertion."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The partial index on runs named by the row is not added; the decision waits on EXPLAIN."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "attention_since for WORKING is the latest run's updated_at, not the run's start time."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Session-core attention.rs, attention_grpc.rs, the ListThreads enrich and tests/attention_zdr_matrix.rs have never compiled or run in this worktree (mp-orchestration E0004), so nothing in session-core can be claimed passing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway's list_attention and mark_thread_seen handlers, and tests/attention_http_test.rs, have been checked only by reading. The first real compile and test run comes after the state.rs and offline_downstreams.rs edits."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/Model Plane/api/contracts/zdr-posture-matrix.json (and its .sha256) are owned by this slice but have no attention row. attention_zdr_matrix.rs therefore cannot iterate a matrix enforcement row for mark_seen, as the row's test asks; today the only guard is mark_seen_permitted in Session Core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, attention::enrich returns its error through `?` inside ListThreads, so one failed pending-row read fails the whole thread listing instead of leaving the attention fields unset."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In a shared Space listing, enrich derives needs_approval and needs_input for other members' threads. Visibility of other members' pending states has not been decided."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts is named in the row (optional attention fields, unknown -> undefined) but is unchanged. Only chat-client.ts carries the fields."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Implemented precedence (needs_approval > needs_input > plan_ready > working > failed > completed > archived > idle) follows the S1 row but conflicts with the DEC-11 default text and WS15 D3. It needs a ledger entry and owner sign-off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test asserts that a switch-off ListThreads response is byte-identical. It holds only because proto3 omits default values (Unspecified/None/false)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The row names a partial index on runs; migration 0053 adds only the approvals and plans partial indexes, pending EXPLAIN."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "attention_since for WORKING is the latest run's updated_at, not when the run started working, so it moves on every run update."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo check -p mp-orchestration --all-targets",
+      "outcome": "FAIL: E0004 at crates/mp-orchestration/src/proto_shim.rs:515, match is missing orchestration_event::Event::RunUsageProgress(_). It is the only error and it also fails the lib test target.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --all-targets",
+      "outcome": "Cannot run: session-core depends on mp-orchestration, which fails with the E0004 above. The session-core attention code and attention_zdr_matrix test are unverified.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --all-targets",
+      "outcome": "Cannot run: 2 compile errors, E0609 no field attention_client on AppState, at http_routes.rs:10143 and :10199, in both the lib and the lib test target. attention_http_test is unverified.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p mp-contracts --all-targets",
+      "outcome": "PASS: 235 lib tests plus the integration binaries, all ok, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1",
+      "outcome": "Not run: session-core does not compile (mp-orchestration E0004). It also needs the DB harness, which is the lead's.",
+      "passed": false
+     },
+     {
+      "command": "cargo fmt --all -- --check",
+      "outcome": "FAIL: the workspace has many diffs, mostly in files this slice does not own (mp-content-safety, mp-contracts src/*, mp-orchestration proto_shim.rs). I did not isolate whether any diff falls in the slice's own files. The implementer reported no diff in the lines it added.",
+      "passed": false
+     },
+     {
+      "command": "pnpm exec vitest run src/shared/api/chat-client.test.ts --pool=threads",
+      "outcome": "PASS: 1 file, 134 tests passed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (verevonv3)",
+      "outcome": "PASS: 769 passed, 1 ignored in the main target, then 7, 3 and 1 passed in the other targets. 0 failed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "auth",
+    "authority"
+   ],
+   "notes": "Fix round on owned files only. Required fix 2 is done: http_routes.rs has GET /v1/attention and POST /v1/threads/:thread_id/seen beside the presentation route, with handlers list_attention and mark_thread_seen, their response structs, attention_reason_name and one unit test; tests/attention_http_test.rs is new with 6 tests (owner-bound scope from the verified claims, closed-state relay with unknown numbers omitted, switch-off answer, mark-seen owner binding, Session Core refusals relayed as 412/403/404, blank id refused before the RPC, session credential required). Required fix 1 is a shared file and was not edited (lead_todo 1). Both new handlers read state.attention_client, which AppState does not have yet, so model-gateway fails to compile (E0609) until lead_todo 2 and 3 are applied. Apply lead_todo 1 to 3 before committing, or the commit leaves the gateway broken. rustc stops at the missing field, so the mapping after the client call and the test file have been checked by reading and rustfmt only. Session-core has not compiled in this worktree since the RunUsageProgress change. Nothing committed or staged."
+  },
+  {
+   "id": "WS27-S9",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_orchestration_test.go",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/go/gen' && env -u GOFLAGS go test -count=1 ./...",
+     "outcome": "ok github.com/triodelab/model-plane/gen/go/model_plane/v1 (1.011s), exit 0; the dataplane packages have no test files"
+    },
+    {
+     "command": "cd 'apps/Model Plane/go/gen' && env -u GOFLAGS go vet ./model_plane/v1/",
+     "outcome": "exit 0, no output"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p mp-orchestration --lib (run from apps/Model Plane/rust)",
+     "outcome": "exit 101, reproduces the blocker: one error, E0004 at crates/mp-orchestration/src/proto_shim.rs:515 (the match on the proto event), RunUsageProgress(_) not covered"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib run_usage",
+     "outcome": "2 passed, 0 failed, exit 0 (1545 filtered out); execution-core does not depend on mp-orchestration"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib follow_agentic_run",
+     "outcome": "1 passed, 0 failed, exit 0; model-gateway does not depend on mp-orchestration"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib usage_progress",
+     "outcome": "5 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core event_run_id",
+     "outcome": "NOT PASSED and not run to completion: exit 101 while compiling mp-orchestration, with the same E0004. Blocked until the lead applies the proto_shim.rs shared edit (lead_todo 0)."
+    },
+    {
+     "command": "rustfmt 1.9.0 --edition 2021 --emit stdout on a scratchpad probe holding the widened arm at the same nesting",
+     "outcome": "exit 0; the one-line arm (113 columns) is reflowed to three pattern lines, exactly the text in lead_todo 0"
+    },
+    {
+     "command": "git status and git diff --stat (read-only) on the slice files and proto_shim.rs",
+     "outcome": "the six slice files show as modified; proto_shim.rs has no diff against HEAD, so the shared edit applies cleanly"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: lines 638-640 (CRLF file, keep CRLF). Replace line 638, `            ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {`, with these three lines, and keep lines 639 (`                return Err(ShimError::UnsupportedEvent);`) and 640 (`            }`) as they are: `            ProtoEvent::QuestionAsked(_)` / `            | ProtoEvent::QuestionAnswered(_)` / `            | ProtoEvent::RunUsageProgress(_) => {`. The one-line form is 113 columns, over rustfmt's 100. No rustfmt.toml exists in the worktree, and rustfmt 1.9.0 produces exactly these three lines (probe checked).",
+    "After the edit, from apps/Model Plane/rust run: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core event_run_id. It must pass. It includes event_run_id_extracts_per_variant (orchestration_grpc.rs:5421, with the RunUsageProgress assertion at 5597-5614). Then run cargo test -q -p mp-orchestration --lib. A session-core failure outside orchestration_grpc.rs is most likely another batch's uncommitted edit in grpc.rs or main.rs, not this slice.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: after line 1264 (`      EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}`), add `      EXECUTION_RUN_USAGE_PROGRESS: ${EXECUTION_RUN_USAGE_PROGRESS:-false}` with a one-line comment saying it is off by default and only the literal true enables it. The key is not present yet. The file is LF. MODEL_GATEWAY_USAGE_PROGRESS is already passed through at line 374.",
+    "Regenerate the SSE taxonomy: python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' (adds `run_usage_progress | 29 | not yet` to apps/Model Plane/docs/sse-event-taxonomy.md), then run it with --check. Not run in this batch.",
+    "Live proof, lead only, not run: deploy execution-core and session-core with EXECUTION_RUN_USAGE_PROGRESS=true first, then model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true. Run a multi-round Do run, capture the usage_progress frames and the final usage frame, and compare them with GET /api/v1/cost/run (WS02 S3 on).",
+    "Commit only the six files in files_changed. sse.rs (+547/-19) and agent.rs (+249) are large. The symbols they add are this slice's: AgentRunUsage goes from 0 to 9 lines and RunUsageProgress from 0 to 11 lines in sse.rs, and run_usage_progress and publish_run_usage_progress are new in agent.rs. Still, review the hunks before staging so other batches' uncommitted work in those files stays out. Keep out the other batches' edits: attention, sessions, frontend cost meter, http routes, mp-contracts build.rs, and session-core grpc.rs and main.rs."
+   ],
+   "deviations": [
+    "Required fix 1 is a shared-file edit. It is handed to the lead in lead_todo and not applied here, so the session-core test that verifies it has not been run.",
+    "Unchanged from the earlier round: tag 29, not the row's 27; RunUsageProgress is nested in OrchestrationEvent; no named arm in orchestration_event_to_sse (the taxonomy generator counts named arms, and the frame comes from follow_agentic_run's usage mapper); the row's single filter 'orchestration_event_to_sse follow_agentic_run' matches no test name, so those tests were run as separate filters; the row's hard-coded final usage was already replaced by WS02 S3 at this HEAD, and this slice prices that frame's legs under the run's snapshot when the gateway switch is on."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/sse-event-taxonomy.md"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs (shared file, the lead applies it; CRLF): the slice's new OrchestrationEvent variant RunUsageProgress (tag 29) breaks the build. `cargo check -p mp-orchestration --lib` fails with E0004 at proto_shim.rs:515 (non-exhaustive match), so session-core and the plan's event_run_id test cannot compile. Fix: widen the arm at line 638 to `ProtoEvent::QuestionAsked(_)` / `| ProtoEvent::QuestionAnswered(_)` / `| ProtoEvent::RunUsageProgress(_) => {`, keep the `return Err(ShimError::UnsupportedEvent);` body, then run `cargo test -p session-core --bin session-core event_run_id` and `cargo test -p mp-orchestration --lib`. Both must pass. This is lead_todo 0, exactly as the implementer wrote it."
+    ],
+    "dod_gaps": [
+     "The shared edit to proto_shim.rs (see required_fixes) is not applied yet, so session-core is not compiled or tested with this slice.",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: pass through `EXECUTION_RUN_USAGE_PROGRESS: ${EXECUTION_RUN_USAGE_PROGRESS:-false}` for execution-core. Not present yet.",
+     "Regenerate the SSE taxonomy (apps/Model Plane/scripts/gen-sse-event-taxonomy.py, then run it with --check). Not run.",
+     "Live proof not done: deploy execution-core and session-core with EXECUTION_RUN_USAGE_PROGRESS=true, then model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true. Run a multi-round Do run, capture the usage_progress frames and the final usage frame, and compare them with GET /api/v1/cost/run.",
+     "Stage only this slice's hunks. sse.rs and agent.rs are large, and the tree holds other batches' work (http_routes.rs attention, session-core grpc.rs and main.rs, sessions.proto, the frontend)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Confirm the gating. With MODEL_GATEWAY_USAGE_PROGRESS on and EXECUTION_RUN_USAGE_PROGRESS off, the final usage frame is still priced from its legs (cost_usd, cost_basis, cost_by_category and unpriced_calls change from null)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Waived (ZDR) Do runs get no pricing, but execution-core still publishes their counts. The owner must confirm that DEC-18 D4 covers waived runs."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not done. See lead_todo 4 for the deploy order and the captures to take."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test pins that RunUsageProgress is broadcast but never persisted. The only guard is the wildcard at orchestration_grpc.rs:2098. None was written in this round."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Rust wire-parity golden for RunUsageProgress in mp-orchestration/tests/proto_wire_parity.rs. The Go golden exists and passes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new TryFrom error arm is untested. The test the_question_events_have_no_domain_mapping (proto_shim.rs:659-676) covers only the two question events. A later shared edit could add RunUsageProgress there."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives agentic_run_stream end to end through real rounds with the switches on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "publish_run_usage_progress awaits one RecordOrchestrationEvent per counted round on the loop's critical path. Each call also runs authorize_run_owner, a DB lookup (orchestration_grpc.rs:4192). Move it to a spawned best-effort publish if latency shows up."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each increment is priced under the model of the round that reported it. A dropped or reordered progress event moves tokens into the next event's price. The final frame is exact."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Progress totals are per invocation (per segment). A continuation's meter restarts at zero, as RunAgentResponse.usage does."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A progress event published before the gateway's tail subscribes is not replayed, because the live tail has no cursor. The final frame carries the exact total."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Each progress event also occupies the per-run replay ring, so a long Do run can evict older step events for a reconnecting client."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Pre-existing drift left alone: go/gen browser.pb.go (line endings). The Python and TypeScript generated trees also lack the park and question events."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "An earlier pass of this slice deleted its own scratchpad directory (gofmtcheck), which also held an unrelated lease_head.go. Nothing in the repository was touched."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The model-gateway lib tests could not be re-run in this verify pass. model-gateway (lib test) no longer compiles because of another batch's uncommitted edit: http_routes.rs:10199 uses `attention_client`, which AppState does not have. The implementer's earlier green runs (follow_agentic_run, usage_progress, full lib 2533 passed) are therefore not reconfirmed against the current tree."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "With MODEL_GATEWAY_USAGE_PROGRESS on and EXECUTION_RUN_USAGE_PROGRESS off, the final Do-run usage frame changes from a null cost to cost_usd, basis and category priced from the legs. The final frame's pricing follows the gateway switch, not the slice's own flag. The owner must confirm that this coupling is intended."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "execution-core publishes RunUsageProgress counts for ZDR and waived runs too; only the gateway suppresses pricing for them (agent_usage is None when zdr or retention_class is set). The event carries counts and ids only and is never persisted, but the owner should confirm that DEC-18 D4 covers this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Any caller with orchestration:write that owns the run can record a forged RunUsageProgress through RecordOrchestrationEvent, and that moves the live meter. The final frame is priced from RunAgentResponse legs, so no ledger is affected."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "publish_run_usage_progress awaits a RecordOrchestrationEvent round trip, which includes authorize_run_owner's DB lookup, on the loop's critical path after every counted round."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No session-core test pins that RunUsageProgress is broadcast but never persisted. The only guard is persist_browser_event's wildcard arm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Rust wire-parity golden for RunUsageProgress exists in mp-orchestration/tests/proto_wire_parity.rs (the Go golden exists and passes). No test covers the new UnsupportedEvent arm in proto_shim."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives agentic_run_stream end to end with both switches on, so the frame order of usage_progress against step frames and the final usage frame is unpinned."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan's test commands are wrong as written: session-core is bin-only (use --bin session-core), and the two model-gateway filters must follow `--`. The orchestration_event_to_sse filter matches no test."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "go test -count=1 ./... (apps/Model Plane/go/gen)",
+      "outcome": "model_plane/v1 ok (1.0s); dataplane packages have no test files",
+      "passed": true
+     },
+     {
+      "command": "go vet ./model_plane/v1/",
+      "outcome": "exit 0, no output",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "1547 passed, 0 failed, 0 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib orchestration_event_to_sse follow_agentic_run",
+      "outcome": "Plan filter as written is not valid cargo syntax. Run as separate filters: orchestration_event_to_sse matches 0 tests (0 passed); follow_agentic_run 1 passed. Full model-gateway --lib: 2533 passed, 0 failed, 4 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p mp-orchestration --lib",
+      "outcome": "FAIL: E0004 at crates/mp-orchestration/src/proto_shim.rs:515, non-exhaustive match, Event::RunUsageProgress(_) not covered (proto_shim.rs is a shared file, the lead's edit is pending)",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p session-core --lib event_run_id",
+      "outcome": "Cannot run: session-core is bin-only (no library target). Tried --bin session-core instead, and it fails to compile mp-orchestration with the same E0004",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money",
+    "zdr"
+   ],
+   "notes": "Worktree root: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b. Paths in this report are relative to it.\n\nFix round, required item 1: not applied by me. proto_shim.rs is a shared file the reviewer assigned to the lead, so the exact lines are in lead_todo. No file of this slice changed in this round. The rustfmt probe lives in the scratchpad only.\n\nVerified this round:\n- cargo check reproduces the blocker: one E0004 at proto_shim.rs:515, RunUsageProgress(_) not covered. The arm to change is lines 638-640.\n- Tag 29 is RunUsageProgress run_usage_progress = 29 (proto line 1272). The prost variant name matches the compiler's text.\n- The new Err arm is not reached in session-core. Its only use of the domain type is the domain-to-proto From in orchestration_nats.rs (line 137). record_orchestration_event (orchestration_grpc.rs:4163-4221) works on the proto type. So the shared edit changes no session-core runtime behaviour; it only lets mp-orchestration and its dependant compile.\n- Every other match that names QuestionAnswered also names RunUsageProgress (orchestration_grpc.rs:2238; sse.rs:13303 and 13477), or is a matches! with a wildcard (orchestration_grpc.rs:2252). The remaining mentions are a construction (2514) and a let-else (6226). persist_browser_event (orchestration_grpc.rs:1977) returns Ok at its wildcard (line 2098), so RunUsageProgress is broadcast and buffered but not persisted.\n- The session-core test literal (orchestration_grpc.rs:5598-5613) matches the proto message (proto lines 1503-1520) by field name and type. Checked by reading, not by compiling.\n- Within Model Plane only session-core depends on mp-orchestration (Cargo.toml grep), so the execution-core and model-gateway tests were not affected by the blocker.\n\nNot verified: session-core compiling as a whole and its test passing. Both need the lead's shared edit first. session-core also carries other batches' uncommitted edits in grpc.rs and main.rs.\n\nRe-run this round: go test ./... and go vet on model_plane/v1 passed; execution-core --lib run_usage passed (2); model-gateway --lib follow_agentic_run passed (1) and usage_progress passed (5). Not re-run: the full execution-core and model-gateway lib suites (last round 1547 and 2533 passed; neither crate changed this round). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws27s9_fix_tests.log"
+  }
+ ]
+}

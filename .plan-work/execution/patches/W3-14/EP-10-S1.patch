@@ -1,0 +1,2057 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs
+index 16b994ece..f1f2505cd 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs	
+@@ -94,6 +94,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/orchestration/approvals/{approval_id}/quarantine-preview",
+             get(get_quarantine_preview),
+         )
++        .route(
++            "/api/v1/orchestration/approvals/{approval_id}/preview",
++            get(get_approval_preview),
++        )
+         .route(
+             "/api/v1/orchestration/threads/{thread_id}/lineage",
+             get(get_lineage),
+@@ -499,6 +503,24 @@ async fn get_quarantine_preview(
+     .await
+ }
+ 
++/// The full draft behind a pending write approval (EP-10-S1). A plain pass-through: model-gateway
++/// owns the switch and refuses a zero-retention caller, and Session Core answers only the run's
++/// owner while the approval is pending, so the gateway adds no authority of its own.
++async fn get_approval_preview(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(approval_id): Path<String>,
++) -> impl IntoResponse {
++    mg_get(
++        &state,
++        &user,
++        &headers,
++        &format!("/v1/orchestration/approvals/{}/preview", enc(&approval_id)),
++    )
++    .await
++}
++
+ async fn get_lineage(
+     State(state): State<AppState>,
+     Extension(user): Extension<AuthenticatedUser>,
+@@ -2058,4 +2080,66 @@ mod tests {
+             "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            post(answer_run_question),"
+         ));
+     }
++
++    /// EP-10-S1: the preview route is a GET pass-through to model-gateway's preview route.
++    #[test]
++    fn orchestration_approval_preview_route_is_registered_as_a_get() {
++        let source = include_str!("orchestration.rs").replace("\r\n", "\n");
++        assert!(source.contains(
++            "\"/api/v1/orchestration/approvals/{approval_id}/preview\",\n            get(get_approval_preview),"
++        ));
++    }
++
++    /// EP-10-S1: the owner's session bearer reaches model-gateway's preview route, and its answer
++    /// (the preview, or the typed 404 with the switch off) reaches the browser unchanged.
++    #[tokio::test]
++    async fn orchestration_approval_preview_passes_the_answer_through_unchanged() {
++        use axum::{
++            extract::{Path, State},
++            response::IntoResponse,
++            Extension,
++        };
++        use http_body_util::BodyExt;
++        use wiremock::{
++            matchers::{header, method, path},
++            Mock, MockServer, ResponseTemplate,
++        };
++
++        for (upstream_status, upstream_body) in [
++            (
++                200_u16,
++                json!({"data": {"preview": {"kind": "mail_send", "to": ["a@example.com"], "body_text": "Hei"}}}),
++            ),
++            (
++                404_u16,
++                json!({"error": {"code": "preview_unavailable", "message": "the approval preview is not available"}}),
++            ),
++        ] {
++            let server = MockServer::start().await;
++            mount_token_mocks(&server).await;
++            Mock::given(method("GET"))
++                .and(path("/v1/orchestration/approvals/apr-1/preview"))
++                .and(header("x-session-authorization", "Bearer session-test-token"))
++                .respond_with(ResponseTemplate::new(upstream_status).set_body_json(upstream_body.clone()))
++                .expect(1)
++                .mount(&server)
++                .await;
++
++            let mut state = test_state(false);
++            state.auth_core_url = server.uri();
++            state.model_gateway_url = server.uri();
++            let response = super::get_approval_preview(
++                State(state),
++                Extension(test_user()),
++                HeaderMap::new(),
++                Path("apr-1".to_owned()),
++            )
++            .await
++            .into_response();
++            assert_eq!(response.status().as_u16(), upstream_status);
++            let bytes = response.into_body().collect().await.expect("body").to_bytes();
++            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
++            assert_eq!(body, upstream_body);
++        }
++    }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-preview.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-preview.test.tsx
+new file mode 100644
+index 000000000..f77a60fe4
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-preview.test.tsx	
+@@ -0,0 +1,119 @@
++// @vitest-environment jsdom
++
++/**
++ * "Show the full email" on the approval card (EP-10-S1). It appears only on a paused mail send and
++ * only with `VITE_APPROVAL_WRITE_PREVIEW` the literal `true`; with the switch off the card is as
++ * it was. Opening it reads the draft once.
++ */
++
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { Approval, ApprovalPreview } from '@/shared/api/orchestration-client'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { ApprovalRequests } from './ChatMessages'
++
++const { mockGetApprovalPreview } = vi.hoisted(() => ({ mockGetApprovalPreview: vi.fn() }))
++vi.mock('@/shared/api/orchestration-client', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/api/orchestration-client')>()),
++  getApprovalPreview: mockGetApprovalPreview,
++}))
++
++const MAIL_SEND: Approval = {
++  id: 'approval-mail',
++  kind: 'APPROVAL_KIND_TOOL_CALL',
++  cause: { code: 'provider_write', tool: 'execute_provider_action', scopeOptions: ['once'], stepUpRequired: false },
++  detail: "send an email to a@example.com with the subject 'Status'; it opens 'Hei'",
++}
++
++const SLACK_POST: Approval = {
++  id: 'approval-slack',
++  kind: 'APPROVAL_KIND_TOOL_CALL',
++  cause: { code: 'provider_write', tool: 'execute_provider_action', scopeOptions: ['once'], stepUpRequired: false },
++}
++
++const OWNER_EFFECT: Approval = {
++  id: 'approval-owner',
++  kind: 'APPROVAL_KIND_DESTRUCTIVE',
++  cause: { code: 'owner_effect_reserved', tool: 'tickets.create', scopeOptions: ['once'], stepUpRequired: false },
++}
++
++const PREVIEW: ApprovalPreview = {
++  kind: 'mail_send',
++  provider: 'google',
++  operation: 'gmail.send',
++  connectionId: 'conn-1',
++  to: ['a@example.com'],
++  subject: 'Status',
++  bodyText: 'Hei, the whole body and not just its opening',
++  hasHtml: false,
++  isReply: false,
++  rawOnly: false,
++  editableFields: ['to', 'subject', 'body_text'],
++  actionFingerprint: 'f'.repeat(64),
++  revision: 0,
++}
++
++function show(approvals: Approval[]) {
++  const onDecide = vi.fn()
++  render(() => (
++    <I18nProvider>
++      <ApprovalRequests approvals={approvals} onDecide={onDecide} />
++    </I18nProvider>
++  ))
++  return onDecide
++}
++
++const disclosures = () => screen.queryAllByRole('button', { name: 'Show the full email' })
++
++beforeEach(() => {
++  window.localStorage.setItem(localeStorageKey, 'en')
++  mockGetApprovalPreview.mockReset()
++})
++
++afterEach(() => {
++  cleanup()
++  vi.unstubAllEnvs()
++  try {
++    window.localStorage.clear()
++  } catch {
++    // ignore
++  }
++})
++
++describe('the full-email disclosure on the approval card', () => {
++  it('is absent with the switch off, so the card is unchanged', () => {
++    for (const value of [undefined, '1', 'TRUE ']) {
++      if (value !== undefined) vi.stubEnv('VITE_APPROVAL_WRITE_PREVIEW', value)
++      show([MAIL_SEND])
++      expect(disclosures()).toHaveLength(0)
++      cleanup()
++      vi.unstubAllEnvs()
++    }
++    expect(mockGetApprovalPreview).not.toHaveBeenCalled()
++  })
++
++  it('appears only on a mail send', () => {
++    vi.stubEnv('VITE_APPROVAL_WRITE_PREVIEW', 'true')
++    show([MAIL_SEND, SLACK_POST, OWNER_EFFECT])
++    expect(disclosures()).toHaveLength(1)
++  })
++
++  it('reads the draft once, on open, and leaves the decision buttons as they were', async () => {
++    vi.stubEnv('VITE_APPROVAL_WRITE_PREVIEW', 'true')
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const onDecide = show([MAIL_SEND])
++    expect(mockGetApprovalPreview).not.toHaveBeenCalled()
++
++    fireEvent.click(disclosures()[0])
++    flush()
++    await waitFor(() => expect(screen.getByText(PREVIEW.bodyText)).toBeTruthy())
++    expect(mockGetApprovalPreview).toHaveBeenCalledTimes(1)
++    expect(mockGetApprovalPreview.mock.calls[0][0]).toBe('approval-mail')
++
++    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
++    flush()
++    expect(onDecide).toHaveBeenCalledWith('approval-mail', 'approve')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index a92f533c5..1cd6440eb 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -1,6 +1,7 @@
+ import { ForkAction, threadForkEnabled } from './ForkAction'
+ import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+ import { RunNotifyButton } from './RunNotifyButton'
++import { WritePreviewDisclosure, approvalWritePreviewEnabled, isMailSendApproval } from './WritePreview'
+ import {
+   type Approval,
+   type ApprovalDecision,
+@@ -2363,6 +2364,9 @@ export function ApprovalRequests(props: {
+             <Show when={approvalReason(approval, i18n)}>
+               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+             </Show>
++            <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
++              <WritePreviewDisclosure approvalId={approval.id} />
++            </Show>
+             <Show
+               when={confirming() === approval.id}
+               fallback={
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx
+new file mode 100644
+index 000000000..5e1c051be
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx	
+@@ -0,0 +1,167 @@
++// @vitest-environment jsdom
++
++/**
++ * The full draft of a paused mail send on its approval card (EP-10-S1). Every recipient, the full
++ * subject and the full body are shown as plain text; a drafted tag is never rendered as markup.
++ */
++
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { ApiError } from '@/shared/api/http'
++import type { Approval, ApprovalPreview } from '@/shared/api/orchestration-client'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { WritePreview, WritePreviewDisclosure, isMailSendApproval, type WritePreviewState } from './WritePreview'
++
++const MAIL: ApprovalPreview = {
++  kind: 'mail_send',
++  provider: 'google',
++  operation: 'gmail.send',
++  connectionId: 'conn-1',
++  to: Array.from({ length: 12 }, (_, i) => `r${i}@example.com`),
++  subject: 'Quarterly status',
++  bodyText: 'Hei,\n\n<script>alert(1)</script> <b>bold</b>\nHilsen',
++  hasHtml: false,
++  isReply: false,
++  rawOnly: false,
++  editableFields: ['to', 'subject', 'body_text'],
++  actionFingerprint: 'f'.repeat(64),
++  revision: 0,
++}
++
++function showState(state: WritePreviewState) {
++  return render(() => (
++    <I18nProvider>
++      <WritePreview state={state} />
++    </I18nProvider>
++  ))
++}
++
++beforeEach(() => {
++  window.localStorage.setItem(localeStorageKey, 'en')
++})
++
++afterEach(() => {
++  cleanup()
++  try {
++    window.localStorage.clear()
++  } catch {
++    // ignore
++  }
++})
++
++describe('WritePreview', () => {
++  it('shows every recipient, the full subject and the full body', () => {
++    showState({ status: 'ready', preview: MAIL })
++
++    for (const recipient of MAIL.to) expect(screen.getByText(recipient)).toBeTruthy()
++    expect(screen.getByText('Quarterly status')).toBeTruthy()
++    const body = document.querySelector('pre.verevon-chat-approval__preview-body')
++    expect(body?.textContent).toBe(MAIL.bodyText)
++  })
++
++  it('renders the body as plain text and never injects markup', () => {
++    showState({ status: 'ready', preview: MAIL })
++
++    expect(document.querySelector('script')).toBeNull()
++    expect(document.querySelector('.verevon-chat-approval__preview b')).toBeNull()
++    expect(document.body.textContent).toContain('<script>alert(1)</script>')
++  })
++
++  it('notes a reply and a formatted mail without showing the formatted copy', () => {
++    showState({ status: 'ready', preview: { ...MAIL, isReply: true, hasHtml: true } })
++
++    expect(screen.getByText('Reply in an existing thread.')).toBeTruthy()
++    expect(screen.getByText('Formatted mail: the formatting is not shown here.')).toBeTruthy()
++  })
++
++  it('has a loading, an error and a not-available state', () => {
++    showState({ status: 'loading' })
++    expect(screen.getByText('Loading the email …')).toBeTruthy()
++    cleanup()
++
++    showState({ status: 'error', message: 'The email could not be loaded.' })
++    expect(screen.getByRole('alert').textContent).toBe('The email could not be loaded.')
++    cleanup()
++
++    showState({ status: 'unavailable' })
++    expect(screen.getByText('Preview not available.')).toBeTruthy()
++    cleanup()
++
++    // Another kind of call carries no values, so there is nothing to show beyond the card.
++    showState({ status: 'ready', preview: { ...MAIL, kind: 'other', to: [], subject: '', bodyText: '' } })
++    expect(screen.getByText('Preview not available.')).toBeTruthy()
++    cleanup()
++
++    showState({ status: 'ready', preview: { ...MAIL, rawOnly: true, to: [], subject: '', bodyText: '' } })
++    expect(screen.getByText('This email is already encoded and cannot be shown here.')).toBeTruthy()
++  })
++})
++
++describe('WritePreviewDisclosure', () => {
++  function showDisclosure(load: (approvalId: string) => Promise<ApprovalPreview | null>) {
++    render(() => (
++      <I18nProvider>
++        <WritePreviewDisclosure approvalId="appr_1" load={load} />
++      </I18nProvider>
++    ))
++    return screen.getByRole('button', { name: 'Show the full email' })
++  }
++
++  it('fetches the draft once, on the first open, and keeps it across a close', async () => {
++    const load = vi.fn().mockResolvedValue(MAIL)
++    const toggle = showDisclosure(load)
++    expect(load).not.toHaveBeenCalled()
++
++    fireEvent.click(toggle)
++    flush()
++    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
++    expect(load).toHaveBeenCalledWith('appr_1')
++    expect(toggle.getAttribute('aria-expanded')).toBe('true')
++
++    fireEvent.click(toggle)
++    flush()
++    expect(screen.queryByText('Quarterly status')).toBeNull()
++    fireEvent.click(toggle)
++    flush()
++    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
++    expect(load).toHaveBeenCalledTimes(1)
++  })
++
++  it('says not available when the server answers with no preview', async () => {
++    const toggle = showDisclosure(vi.fn().mockResolvedValue(null))
++    fireEvent.click(toggle)
++    flush()
++    await waitFor(() => expect(screen.getByText('Preview not available.')).toBeTruthy())
++  })
++
++  it('words a refusal through the error copy, never its raw message', async () => {
++    const refused = new ApiError('internal sentence that must not show', 412, 'zdr_durable_mutation_forbidden')
++    const toggle = showDisclosure(vi.fn().mockRejectedValue(refused))
++    fireEvent.click(toggle)
++    flush()
++    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
++    expect(screen.getByRole('alert').textContent).not.toContain('internal sentence that must not show')
++  })
++})
++
++describe('isMailSendApproval', () => {
++  const base: Approval = {
++    id: 'appr_1',
++    cause: { code: 'provider_write', tool: 'execute_provider_action', scopeOptions: ['once'], stepUpRequired: false },
++    detail: "send an email to a@example.com with the subject 'S'",
++  }
++
++  it('is true only for a provider action whose reason is a mail send', () => {
++    expect(isMailSendApproval(base)).toBe(true)
++    expect(isMailSendApproval({ ...base, detail: 'post a message' })).toBe(false)
++    expect(isMailSendApproval({ ...base, detail: undefined })).toBe(false)
++    const otherTool: Approval = {
++      ...base,
++      cause: { code: 'provider_write', tool: 'delete_records', scopeOptions: ['once'], stepUpRequired: false },
++    }
++    expect(isMailSendApproval(otherTool)).toBe(false)
++    expect(isMailSendApproval({ ...base, cause: undefined })).toBe(false)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx
+new file mode 100644
+index 000000000..ad0aff076
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx	
+@@ -0,0 +1,167 @@
++import { For, Show, createSignal } from 'solid-js'
++import { getApprovalPreview, type Approval, type ApprovalPreview } from '@/shared/api/orchestration-client'
++import { translateApiError, useI18n } from '@/shared/i18n'
++
++/**
++ * The full draft of a paused mail send, shown on its approval card before the person decides it
++ * (EP-10-S1, action `approvals.preview`). Read-only: it changes nothing and grants nothing.
++ *
++ * The body is plain text in a `pre-wrap` block and is never rendered as markup, so a drafted
++ * `<script>` or link is shown as the characters it is. A formatted (HTML) copy is only noted.
++ */
++
++/** Off unless `VITE_APPROVAL_WRITE_PREVIEW` is the literal `true`; the gateway has its own switch. */
++export const approvalWritePreviewEnabled = () => import.meta.env.VITE_APPROVAL_WRITE_PREVIEW === 'true'
++
++/**
++ * The opening every mail send's approval reason has (`provider_effect_summary` in mp-contracts,
++ * the only reason that names a send). The browser projection of an approval deliberately carries
++ * no operation (`action_key` never leaves the gateway), so this is the one signal the card has;
++ * the preview itself says what the call is.
++ */
++const MAIL_SEND_SUMMARY_OPENING = 'send an email to '
++
++/** Whether an approval is a paused mail send, the one write the full-draft preview is for. */
++export function isMailSendApproval(approval: Approval): boolean {
++  return (
++    approval.cause?.tool === 'execute_provider_action' &&
++    (approval.detail ?? '').startsWith(MAIL_SEND_SUMMARY_OPENING)
++  )
++}
++
++export type WritePreviewState =
++  | { status: 'loading' }
++  | { status: 'unavailable' }
++  | { status: 'error'; message: string }
++  | { status: 'ready'; preview: ApprovalPreview }
++
++/** One state of the preview: loading, not available, failed, or the draft itself. */
++export function WritePreview(props: { state: WritePreviewState }) {
++  const i18n = useI18n()
++  const ready = () => {
++    const state = props.state
++    return state.status === 'ready' ? state.preview : undefined
++  }
++  const mail = () => {
++    const preview = ready()
++    return preview?.kind === 'mail_send' && !preview.rawOnly ? preview : undefined
++  }
++  const failure = () => {
++    const state = props.state
++    return state.status === 'error' ? state.message : undefined
++  }
++  return (
++    <div class="verevon-chat-approval__preview" aria-live="polite">
++      <Show when={props.state.status === 'loading'}>
++        <p class="verevon-chat-approval__preview-note">{i18n.tr('Henter e-posten …', 'Loading the email …')}</p>
++      </Show>
++      <Show when={failure()}>
++        {(message) => (
++          <p class="verevon-chat-approval__preview-note" role="alert">
++            {message()}
++          </p>
++        )}
++      </Show>
++      <Show
++        when={
++          props.state.status === 'unavailable' ||
++          (ready() !== undefined && mail() === undefined)
++        }
++      >
++        <p class="verevon-chat-approval__preview-note">
++          {ready()?.rawOnly
++            ? i18n.tr(
++                'Denne e-posten er ferdig kodet og kan ikke vises her.',
++                'This email is already encoded and cannot be shown here.',
++              )
++            : i18n.tr('Forhåndsvisning er ikke tilgjengelig.', 'Preview not available.')}
++        </p>
++      </Show>
++      <Show when={mail()}>
++        {(preview) => (
++          <dl class="verevon-chat-approval__preview-fields">
++            <dt>{i18n.tr('Til', 'To')}</dt>
++            <dd>
++              <ul class="verevon-chat-approval__preview-recipients">
++                <For each={preview().to}>{(recipient) => <li>{recipient}</li>}</For>
++              </ul>
++            </dd>
++            <dt>{i18n.tr('Emne', 'Subject')}</dt>
++            <dd>{preview().subject || i18n.tr('(uten emne)', '(no subject)')}</dd>
++            <dt>{i18n.tr('Melding', 'Message')}</dt>
++            <dd>
++              <pre class="verevon-chat-approval__preview-body" style={{ 'white-space': 'pre-wrap' }}>
++                {preview().bodyText}
++              </pre>
++            </dd>
++            <Show when={preview().isReply}>
++              <p class="verevon-chat-approval__preview-note">
++                {i18n.tr('Svar i en eksisterende tråd.', 'Reply in an existing thread.')}
++              </p>
++            </Show>
++            <Show when={preview().hasHtml}>
++              <p class="verevon-chat-approval__preview-note">
++                {i18n.tr(
++                  'Formatert e-post: formateringen vises ikke her.',
++                  'Formatted mail: the formatting is not shown here.',
++                )}
++              </p>
++            </Show>
++          </dl>
++        )}
++      </Show>
++    </div>
++  )
++}
++
++/**
++ * "Show the full email" on a mail send's approval card. The draft is fetched once, on the first
++ * open, and kept for the life of the card; closing only hides it.
++ */
++export function WritePreviewDisclosure(props: {
++  approvalId: string
++  load?: (approvalId: string) => Promise<ApprovalPreview | null>
++}) {
++  const i18n = useI18n()
++  const [open, setOpen] = createSignal(false)
++  const [state, setState] = createSignal<WritePreviewState | undefined>(undefined)
++
++  const fetchOnce = async () => {
++    if (state() !== undefined) return
++    setState({ status: 'loading' })
++    try {
++      const preview = await (props.load ?? getApprovalPreview)(props.approvalId)
++      setState(preview ? { status: 'ready', preview } : { status: 'unavailable' })
++    } catch (failure) {
++      setState({
++        status: 'error',
++        message: translateApiError(failure, i18n.tr, {
++          no: 'Kunne ikke hente e-posten.',
++          en: 'The email could not be loaded.',
++        }),
++      })
++    }
++  }
++
++  const toggle = () => {
++    const next = !open()
++    setOpen(next)
++    if (next) void fetchOnce()
++  }
++
++  return (
++    <div class="verevon-chat-approval__disclosure">
++      <button
++        type="button"
++        class="verevon-chat-approval__disclosure-toggle"
++        aria-expanded={open()}
++        onClick={toggle}
++      >
++        {open()
++          ? i18n.tr('Skjul e-posten', 'Hide the email')
++          : i18n.tr('Vis hele e-posten', 'Show the full email')}
++      </button>
++      <Show when={open() ? state() : undefined}>{(current) => <WritePreview state={current()} />}</Show>
++    </div>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 42325b379..1c6e4ffed 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -340,6 +340,45 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the approval preview as a low-risk read the model cannot execute (EP-10-S1)', () => {
++    const preview = getActionDescriptor('approvals.preview')
++
++    expect(preview?.ownerPlane).toBe('model')
++    expect(preview?.risk).toBe('low')
++    expect(preview?.requiresApproval).toBe(false)
++    expect(isModelExecutableAction('approvals.preview')).toBe(false)
++    expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(
++      'approvals.preview',
++    )
++    const description = preview?.description ?? ''
++    expect(description).toContain('approval_not_found')
++    expect(description).toContain('preview_unavailable')
++    expect(description).toContain('Never model-executable')
++
++    // The approval id is the one input: the org and the owner are the credential's.
++    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1' }).success).toBe(true)
++    expect(preview?.inputSchema.safeParse({ approvalId: '' }).success).toBe(false)
++    expect(preview?.inputSchema.safeParse({ approvalId: 'appr_1', orgId: 'org_x' }).success).toBe(false)
++
++    const shaped = {
++      kind: 'mail_send',
++      provider: 'google',
++      operation: 'gmail.send',
++      connectionId: 'conn-1',
++      to: ['a@example.com'],
++      subject: 'S',
++      bodyText: 'Hei',
++      hasHtml: false,
++      isReply: false,
++      rawOnly: false,
++      editableFields: ['to', 'subject', 'body_text'],
++      actionFingerprint: 'f'.repeat(64),
++      revision: 0,
++    }
++    expect(preview?.outputSchema.safeParse(shaped).success).toBe(true)
++    expect(preview?.outputSchema.safeParse({ ...shaped, kind: 'calendar_event' }).success).toBe(false)
++  })
++
+   it('registers the tool policy and the tool approval as high-risk, owner-only actions the model cannot execute', () => {
+     for (const id of ['tools.set_policy', 'mcp.approve_tool'] as const) {
+       const action = getActionDescriptor(id)
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index ffd2ec0ab..d2a4d3082 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1467,6 +1467,33 @@ const approvalsDecideInput = z
+   })
+   .strict()
+ 
++// The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
++// org and the owner are the verified credential's.
++const approvalsPreviewInput = z
++  .object({
++    approvalId: z.string().min(1),
++  })
++  .strict()
++
++// What the card shows. `mail_send` carries every recipient, the full subject and the full body as
++// plain text; `other` names only the provider, operation and connection; `none` is an approval
++// with no retained call (a browser takeover).
++const approvalsPreviewOutput = z.object({
++  kind: z.enum(['mail_send', 'other', 'none']),
++  provider: z.string(),
++  operation: z.string(),
++  connectionId: z.string(),
++  to: z.array(z.string()),
++  subject: z.string(),
++  bodyText: z.string(),
++  hasHtml: z.boolean(),
++  isReply: z.boolean(),
++  rawOnly: z.boolean(),
++  editableFields: z.array(z.string()),
++  actionFingerprint: z.string(),
++  revision: z.number().int().nonnegative(),
++})
++
+ const chatClearThreadsInput = z.object({})
+ 
+ const chatDeleteThreadInput = z.object({
+@@ -3909,6 +3936,17 @@ export const actionRegistry = [
+     inputSchema: approvalsDecideInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'approvals.preview',
++    label: 'Preview an approval draft',
++    description: 'Read the full draft a pending write approval would send, before deciding it: every recipient, the full subject and the full plain-text body of a mail send. Read-only; it changes nothing and grants nothing. Only the run\'s owner sees it, and only while the approval is pending: another person, another org, a decided or expired approval and an unknown id all answer the same 404 approval_not_found. A call other than a mail send shows only its provider and operation. Refused typed under zero data retention and for a waived credential, since such a run keeps no draft. Off until the preview is switched on, when it answers 404 preview_unavailable. The body is text and is never rendered as markup. Never model-executable: the draft is shown to the person deciding it.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: approvalsPreviewInput,
++    outputSchema: approvalsPreviewOutput,
++  },
+   {
+     id: 'chat.clear_threads',
+     label: 'Clear all chat threads',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts
+index 5c186ac58..1024c0b80 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts	
+@@ -14,6 +14,7 @@ import {
+   continueParkedRun,
+   continueRun,
+   decideApproval,
++  getApprovalPreview,
+   listApprovals,
+   listRunQuestions,
+   normalizePlan,
+@@ -831,3 +832,74 @@ describe('run questions', () => {
+     expect(naming.sort()).toEqual(['features/chat/components/use-chat-controller.ts', 'shared/api/orchestration-client.ts'])
+   })
+ })
++
++describe('getApprovalPreview (EP-10-S1)', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  const errorResponse = (status: number, code: string) =>
++    new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
++      status,
++      headers: { 'Content-Type': 'application/json' },
++    })
++
++  it('reads the shaped draft from the preview route, every recipient and the full body', async () => {
++    const fetchMock = vi.fn().mockResolvedValue(
++      jsonResponse({
++        preview: {
++          kind: 'mail_send',
++          provider: 'google',
++          operation: 'gmail.send',
++          connection_id: 'conn-1',
++          to: ['a@example.com', 'b@example.com', 7],
++          subject: 'Status',
++          body_text: 'Hei,\n\nthe whole body',
++          has_html: true,
++          is_reply: true,
++          raw_only: false,
++          editable_fields: ['to', 'subject', 'body_text'],
++          action_fingerprint: 'f'.repeat(64),
++          revision: 0,
++          format: 'plain_text',
++        },
++      }),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const preview = await getApprovalPreview('appr 1')
++
++    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v1/orchestration/approvals/appr%201/preview')
++    expect(preview).toEqual({
++      kind: 'mail_send',
++      provider: 'google',
++      operation: 'gmail.send',
++      connectionId: 'conn-1',
++      to: ['a@example.com', 'b@example.com'],
++      subject: 'Status',
++      bodyText: 'Hei,\n\nthe whole body',
++      hasHtml: true,
++      isReply: true,
++      rawOnly: false,
++      editableFields: ['to', 'subject', 'body_text'],
++      actionFingerprint: 'f'.repeat(64),
++      revision: 0,
++    })
++  })
++
++  it('answers null for every 404 (not the owner, decided, switched off) and for an unknown kind', async () => {
++    for (const code of ['approval_not_found', 'preview_unavailable']) {
++      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(404, code)))
++      await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
++    }
++    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ preview: { kind: 'calendar_event' } })))
++    await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
++  })
++
++  it('throws a zero-retention refusal typed, so the card can say why', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(412, 'zdr_durable_mutation_forbidden')))
++    const refused = await getApprovalPreview('appr_1').catch((error: unknown) => error)
++    expect(refused).toBeInstanceOf(ApiError)
++    expect((refused as ApiError).code).toBe('zdr_durable_mutation_forbidden')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts
+index 7d6c71fb7..be88589d6 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
+@@ -425,6 +425,72 @@ export async function readQuarantinePreview(
+   }
+ }
+ 
++/**
++ * The full draft behind a pending write approval (EP-10-S1, action `approvals.preview`). A mail
++ * send carries every recipient, the full subject and the full body; `other` names only the
++ * operation; `none` is an approval with no retained call. Plain text only: render it as text.
++ */
++export type ApprovalPreview = {
++  kind: 'mail_send' | 'other' | 'none'
++  provider: string
++  operation: string
++  connectionId: string
++  to: string[]
++  subject: string
++  bodyText: string
++  hasHtml: boolean
++  isReply: boolean
++  rawOnly: boolean
++  editableFields: string[]
++  actionFingerprint: string
++  revision: number
++}
++
++const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
++
++const textList = (value: unknown): string[] =>
++  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
++
++/**
++ * Read the full draft of a pending approval. Answered only to the run's owner while the approval
++ * is pending; every other case (another person, a decided or expired approval, the preview
++ * switched off) is a 404, returned here as `null` so the card says "preview not available". A
++ * zero-retention or waived refusal and every other failure throw, typed, as `ApiError`.
++ */
++export async function getApprovalPreview(
++  approvalId: string,
++  signal?: AbortSignal,
++): Promise<ApprovalPreview | null> {
++  // The `{data: {preview}}` envelope is unwrapped by `requestJson`.
++  let payload: { preview?: Record<string, unknown> }
++  try {
++    payload = await requestJson<{ preview?: Record<string, unknown> }>(
++      `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/preview`,
++      { signal },
++    )
++  } catch (error) {
++    if (error instanceof ApiError && error.status === 404) return null
++    throw error
++  }
++  const raw = payload.preview
++  if (!raw || typeof raw.kind !== 'string' || !APPROVAL_PREVIEW_KINDS.has(raw.kind)) return null
++  return {
++    kind: raw.kind as ApprovalPreview['kind'],
++    provider: str(raw.provider) ?? '',
++    operation: str(raw.operation) ?? '',
++    connectionId: str(raw.connection_id) ?? '',
++    to: textList(raw.to),
++    subject: typeof raw.subject === 'string' ? raw.subject : '',
++    bodyText: typeof raw.body_text === 'string' ? raw.body_text : '',
++    hasHtml: raw.has_html === true,
++    isReply: raw.is_reply === true,
++    rawOnly: raw.raw_only === true,
++    editableFields: textList(raw.editable_fields),
++    actionFingerprint: str(raw.action_fingerprint) ?? '',
++    revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
++  }
++}
++
+ /** Resume a run that paused for approval, after the decision is recorded. */
+ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
+   await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {
+diff --git a/apps/Model Plane/proto/model_plane/v1/orchestration.proto b/apps/Model Plane/proto/model_plane/v1/orchestration.proto
+index 6343e3b30..f61eba0a4 100644
+--- a/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
+@@ -95,6 +95,11 @@ service OrchestrationCoreService {
+   // approval and no one else (build plan WS10 S8).
+   rpc GetQuarantinePreview(GetQuarantinePreviewRequest) returns (GetQuarantinePreviewResponse);
+ 
++  // EP-10 S1: the full draft a pending approval would release, shaped from its retained
++  // descriptor, for the run owner only. Refused for zero-retention and waived callers; every
++  // other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
++  rpc GetApprovalPreview(GetApprovalPreviewRequest) returns (GetApprovalPreviewResponse);
++
+   // Claim due durable approval deliveries for an authenticated internal
+   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+   // is derived from its verified service credential, never from this request.
+@@ -1049,6 +1054,53 @@ message GetQuarantinePreviewResponse {
+   string trust_class = 4;
+ }
+ 
++// EP-10 S1: GetApprovalPreview asks for the draft behind one pending approval.
++message GetApprovalPreviewRequest {
++  // EP-10 S1: the pending approval to preview.
++  string approval_id = 1;
++  // EP-10 S1: server-authoritative org scope; must match the caller.
++  string org_id = 2;
++}
++
++// EP-10 S1: what an approval would release, in display fields. Never the raw descriptor: a kind
++// other than "mail_send" carries no argument values.
++message ApprovalPreview {
++  // EP-10 S1: "mail_send", "other" (another tool call, no values) or "none" (the approval has
++  // no retained descriptor, such as a browser takeover; nothing beyond the card to show).
++  string kind = 1;
++  // EP-10 S1: the provider the operation belongs to ("google", "microsoft"); empty when unknown.
++  string provider = 2;
++  // EP-10 S1: the provider operation as drafted.
++  string operation = 3;
++  // EP-10 S1: the connection the call is pinned to.
++  string connection_id = 4;
++  // EP-10 S1: every recipient of a mail send, in draft order.
++  repeated string to = 5;
++  // EP-10 S1: the full subject of a mail send.
++  string subject = 6;
++  // EP-10 S1: the full plain-text body of a mail send. Show as text, never as markup.
++  string body_text = 7;
++  // EP-10 S1: true when the draft also carries a formatted (HTML) body, which is not shown.
++  bool has_html = 8;
++  // EP-10 S1: true when the send replies in an existing thread (threadId or inReplyTo set).
++  bool is_reply = 9;
++  // EP-10 S1: true for a Gmail raw draft, whose fields are inside an encoded message.
++  bool raw_only = 10;
++  // EP-10 S1: the fields a later edit may change ("to", "subject", "body_text"); empty when
++  // the draft is not editable.
++  repeated string editable_fields = 11;
++  // EP-10 S1: the descriptor's action fingerprint, so a later edit can name what it saw.
++  string action_fingerprint = 12;
++  // EP-10 S1: the descriptor revision the preview was shaped from; 0 until edits exist (S4).
++  uint32 revision = 13;
++}
++
++// EP-10 S1: the preview of one pending approval.
++message GetApprovalPreviewResponse {
++  // EP-10 S1: the shaped preview.
++  ApprovalPreview preview = 1;
++}
++
+ // ConsumeApproval claims one granted loop-mode approval for the loop that is
+ // re-entering. Scope comes from the verified caller; the ids only select.
+ message ConsumeApprovalRequest {
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 0cb58aef7..647c72ef5 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -43,6 +43,7 @@ pub mod telemetry_labels;
+ pub mod tool_arguments;
+ pub mod tool_class;
+ pub mod user_question;
++pub mod write_preview;
+ pub mod zdr_refusal;
+ 
+ /// Generated protobuf and gRPC types for the Model Plane.
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/write_preview.rs b/apps/Model Plane/rust/crates/mp-contracts/src/write_preview.rs
+new file mode 100644
+index 000000000..c5740b7fb
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/write_preview.rs	
+@@ -0,0 +1,301 @@
++//! What the approval card shows of a paused write before the person decides it (EP-10-S1,
++//! decision D4).
++//!
++//! Pure: session-core decrypts the retained descriptor for the run's owner on a pending approval
++//! and passes its `tool_name` and `input` here; the result is the only thing the preview RPC
++//! returns, so the raw descriptor never leaves session-core. A mail send carries every recipient,
++//! the full subject and the full plain-text body. Every other call carries its provider,
++//! operation and connection and no argument values, since only a mail send has a card that knows
++//! how to show them. The caller never logs the result or puts it in an event.
++
++use serde_json::Value;
++
++use crate::approval_edit::{FIELD_BODY_TEXT, FIELD_SUBJECT, FIELD_TO};
++use crate::provider_writes::{
++    is_mail_send, mail_recipients, EditableKind, ProviderWriteOperation, WRITE_OPERATIONS,
++};
++
++/// The one tool whose input names a provider operation.
++const PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
++
++/// What a preview shows.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PreviewKind {
++    /// A mail send, with its recipients, subject and body.
++    MailSend,
++    /// Another call: its provider, operation and connection, no values.
++    Other,
++    /// The approval keeps no descriptor (a browser takeover, a cause with no tool call), so there
++    /// is nothing beyond the card itself to show.
++    NoDescriptor,
++}
++
++impl PreviewKind {
++    /// The wire value.
++    #[must_use]
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::MailSend => "mail_send",
++            Self::Other => "other",
++            Self::NoDescriptor => "none",
++        }
++    }
++}
++
++/// The display fields of one approval preview, in the proto's order.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ApprovalPreviewView {
++    pub kind: PreviewKind,
++    pub provider: String,
++    pub operation: String,
++    pub connection_id: String,
++    pub to: Vec<String>,
++    pub subject: String,
++    pub body_text: String,
++    pub has_html: bool,
++    pub is_reply: bool,
++    pub raw_only: bool,
++    pub editable_fields: Vec<&'static str>,
++}
++
++impl ApprovalPreviewView {
++    /// The preview of an approval with no retained descriptor (EP-1's `browser_human_assist`
++    /// among them, integration round B C-B4): every field empty.
++    #[must_use]
++    pub fn no_descriptor() -> Self {
++        Self::bare(PreviewKind::NoDescriptor, String::new(), String::new(), String::new())
++    }
++
++    fn bare(kind: PreviewKind, provider: String, operation: String, connection_id: String) -> Self {
++        Self {
++            kind,
++            provider,
++            operation,
++            connection_id,
++            to: Vec::new(),
++            subject: String::new(),
++            body_text: String::new(),
++            has_html: false,
++            is_reply: false,
++            raw_only: false,
++            editable_fields: Vec::new(),
++        }
++    }
++}
++
++/// Shape the retained `tool_name` and `input` of a descriptor into what the card shows.
++///
++/// The recipients are split as integration-corev2 splits them (`mail_recipients`), so the card
++/// lists exactly who the send reaches. A Gmail `raw` draft keeps its fields inside an encoded
++/// message: it is marked `raw_only`, shows none of them and offers no edit.
++#[must_use]
++pub fn preview_from_input(tool_name: &str, input: &Value) -> ApprovalPreviewView {
++    if tool_name != PROVIDER_ACTION_TOOL {
++        return ApprovalPreviewView::bare(
++            PreviewKind::Other,
++            String::new(),
++            String::new(),
++            String::new(),
++        );
++    }
++    let text = |key: &str| {
++        input
++            .get(key)
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned()
++    };
++    let operation = text("operation");
++    let connection_id = text("connection_id");
++    let provider = provider_of(&operation).unwrap_or("").to_owned();
++    if !is_mail_send(&operation) {
++        return ApprovalPreviewView::bare(PreviewKind::Other, provider, operation, connection_id);
++    }
++
++    let mut view =
++        ApprovalPreviewView::bare(PreviewKind::MailSend, provider, operation, connection_id);
++    let Some(body) = input.get("body").and_then(Value::as_object) else {
++        return view;
++    };
++    let field = |key: &str| body.get(key).and_then(Value::as_str);
++    view.is_reply = field("threadId").is_some_and(|value| !value.trim().is_empty())
++        || field("inReplyTo").is_some_and(|value| !value.trim().is_empty());
++    if body.contains_key("raw") {
++        view.raw_only = true;
++        return view;
++    }
++    view.to = mail_recipients(body.get("to"));
++    view.subject = field("subject").unwrap_or("").trim().to_owned();
++    view.body_text = field("bodyText").unwrap_or("").to_owned();
++    view.has_html = field("bodyHtml").is_some_and(|html| !html.trim().is_empty());
++    if editable_kind_of(&view.operation) == Some(EditableKind::MailSend) {
++        view.editable_fields = vec![FIELD_TO, FIELD_SUBJECT, FIELD_BODY_TEXT];
++    }
++    view
++}
++
++/// The catalogued write row an operation names, by its bare name or an alias, ignoring case and
++/// surrounding spaces as execution-core's catalogue does. The descriptor's input names no
++/// provider, and each catalogued operation belongs to one.
++fn write_row(operation: &str) -> Option<&'static ProviderWriteOperation> {
++    let operation = operation.trim();
++    WRITE_OPERATIONS.iter().find(|write| {
++        write.operation.eq_ignore_ascii_case(operation)
++            || write
++                .aliases
++                .iter()
++                .any(|alias| alias.eq_ignore_ascii_case(operation))
++    })
++}
++
++fn provider_of(operation: &str) -> Option<&'static str> {
++    write_row(operation).map(|write| write.provider)
++}
++
++fn editable_kind_of(operation: &str) -> Option<EditableKind> {
++    write_row(operation).map(|write| write.editable_kind)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    fn mail(body: Value) -> Value {
++        json!({
++            "connection_id": "conn-1",
++            "operation": "gmail.send",
++            "params": { "userId": "me" },
++            "body": body,
++        })
++    }
++
++    #[test]
++    fn mail_send_preview_keeps_every_recipient_and_the_full_body() {
++        let recipients: Vec<String> = (0..12).map(|i| format!("r{i}@example.com")).collect();
++        let body_text = format!("Hei,\n\n{}\nHilsen", "x".repeat(4000));
++        let view = preview_from_input(
++            "execute_provider_action",
++            &mail(json!({
++                "to": recipients.join(", "),
++                "subject": format!("  {}  ", "S".repeat(400)),
++                "bodyText": body_text,
++            })),
++        );
++        assert_eq!(view.kind, PreviewKind::MailSend);
++        assert_eq!(view.provider, "google");
++        assert_eq!(view.operation, "gmail.send");
++        assert_eq!(view.connection_id, "conn-1");
++        assert_eq!(view.to, recipients, "no recipient is cut, unlike the 10 the reason names");
++        assert_eq!(view.subject, "S".repeat(400), "the subject is trimmed, never shortened");
++        assert_eq!(view.body_text, body_text, "the body is whole, line breaks kept");
++        assert!(!view.has_html && !view.is_reply && !view.raw_only);
++        assert_eq!(view.editable_fields, vec!["to", "subject", "body_text"]);
++    }
++
++    #[test]
++    fn mail_send_preview_names_the_microsoft_provider_and_marks_html() {
++        let view = preview_from_input(
++            "execute_provider_action",
++            &json!({
++                "connection_id": "conn-ms",
++                "operation": "Microsoft.Mail.Send",
++                "body": {
++                    "to": ["a@example.com", " b@example.com "],
++                    "subject": "Hi",
++                    "bodyText": "Text",
++                    "bodyHtml": "<p>Text</p>",
++                },
++            }),
++        );
++        assert_eq!(view.kind, PreviewKind::MailSend);
++        assert_eq!(view.provider, "microsoft");
++        assert_eq!(view.to, vec!["a@example.com", "b@example.com"]);
++        assert!(view.has_html);
++        assert_eq!(view.body_text, "Text", "the formatted body is flagged, never shown");
++    }
++
++    #[test]
++    fn other_writes_carry_no_values() {
++        let view = preview_from_input(
++            "execute_provider_action",
++            &json!({
++                "connection_id": "conn-2",
++                "operation": "message.send",
++                "params": { "channel": "C1" },
++                "body": { "text": "secret plan", "to": "x@example.com", "subject": "S" },
++            }),
++        );
++        assert_eq!(
++            view,
++            ApprovalPreviewView::bare(
++                PreviewKind::Other,
++                "slack".to_owned(),
++                "message.send".to_owned(),
++                "conn-2".to_owned(),
++            )
++        );
++
++        let not_a_provider_call =
++            preview_from_input("delete_records", &json!({ "operation": "mail.send", "id": "r-1" }));
++        assert_eq!(not_a_provider_call.kind, PreviewKind::Other);
++        assert!(not_a_provider_call.operation.is_empty());
++        assert!(not_a_provider_call.connection_id.is_empty());
++        assert!(not_a_provider_call.to.is_empty() && not_a_provider_call.body_text.is_empty());
++    }
++
++    #[test]
++    fn gmail_raw_draft_is_raw_only() {
++        let view = preview_from_input(
++            "execute_provider_action",
++            &mail(json!({
++                "raw": "RnJvbTogYUBleGFtcGxlLmNvbQ==",
++                "to": "a@example.com",
++                "threadId": "t-9",
++            })),
++        );
++        assert_eq!(view.kind, PreviewKind::MailSend);
++        assert!(view.raw_only);
++        assert!(view.is_reply);
++        assert!(view.to.is_empty() && view.subject.is_empty() && view.body_text.is_empty());
++        assert!(view.editable_fields.is_empty(), "a raw draft is preview-only");
++    }
++
++    #[test]
++    fn reply_headers_mark_is_reply() {
++        for body in [
++            json!({ "to": "a@example.com", "bodyText": "x", "threadId": "t-1" }),
++            json!({ "to": "a@example.com", "bodyText": "x", "inReplyTo": "<m-1@example.com>" }),
++        ] {
++            assert!(preview_from_input("execute_provider_action", &mail(body)).is_reply);
++        }
++        let blank = mail(json!({ "to": "a@example.com", "bodyText": "x", "threadId": "  " }));
++        assert!(!preview_from_input("execute_provider_action", &blank).is_reply);
++    }
++
++    #[test]
++    fn a_mail_send_without_a_body_shows_nothing_and_offers_no_edit() {
++        let view = preview_from_input(
++            "execute_provider_action",
++            &json!({ "connection_id": "conn-1", "operation": "mail.send" }),
++        );
++        assert_eq!(view.kind, PreviewKind::MailSend);
++        assert!(view.to.is_empty() && view.editable_fields.is_empty());
++    }
++
++    #[test]
++    fn an_approval_without_a_descriptor_has_the_no_descriptor_form() {
++        let view = ApprovalPreviewView::no_descriptor();
++        assert_eq!(view.kind.as_str(), "none");
++        assert!(view.provider.is_empty() && view.operation.is_empty());
++        assert!(view.connection_id.is_empty());
++        assert!(view.to.is_empty() && view.editable_fields.is_empty());
++    }
++
++    #[test]
++    fn the_kinds_have_fixed_wire_values() {
++        assert_eq!(PreviewKind::MailSend.as_str(), "mail_send");
++        assert_eq!(PreviewKind::Other.as_str(), "other");
++        assert_eq!(PreviewKind::NoDescriptor.as_str(), "none");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index e1869a0e6..4d255a5b6 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -475,6 +475,10 @@ fn orchestration_routes() -> Router<AppState> {
+             "/v1/orchestration/approvals/:approval_id/quarantine-preview",
+             get(get_quarantine_preview),
+         )
++        .route(
++            "/v1/orchestration/approvals/:approval_id/preview",
++            get(get_approval_preview),
++        )
+         .route(
+             "/v1/orchestration/threads/:thread_id/lineage",
+             get(get_subagent_lineage),
+@@ -1551,6 +1555,106 @@ async fn get_quarantine_preview(
+     })))
+ }
+ 
++/// The full-draft preview switch (EP-10-S1). Off: the route answers 404 `preview_unavailable` and
++/// nothing reaches Session Core. Only the literal `true` enables it.
++const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
++
++fn approval_write_preview_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WRITE_PREVIEW_ENV).ok().as_deref())
++}
++
++/// `GET /v1/orchestration/approvals/{id}/preview` - see [`approval_preview`].
++async fn get_approval_preview(
++    state: State<AppState>,
++    claims: Extension<Claims>,
++    bearer: VerifiedModelBearer,
++    path: Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    approval_preview(state, claims, bearer, path, approval_write_preview_enabled()).await
++}
++
++/// The full draft a pending approval would release, `{data: {preview}}` (EP-10-S1, decision D4).
++/// Session Core decrypts the descriptor for the run's owner only and shapes it; the gateway adds
++/// nothing and logs nothing of it. A zero-retention bearer is refused before anything is read
++/// (`continuation_gate`, as for a decision), and Session Core refuses a waived one. The org is the
++/// verified JWT org. Every way of not seeing a draft reads as the same 404.
++async fn approval_preview(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: VerifiedModelBearer,
++    Path(approval_id): Path<String>,
++    enabled: bool,
++) -> Result<Json<Value>, HttpJsonError> {
++    if !enabled {
++        return Err(run_trace_error(
++            StatusCode::NOT_FOUND,
++            "preview_unavailable",
++            "the approval preview is not available",
++        ));
++    }
++    crate::zdr_posture::continuation_gate(&claims)?;
++    let response = state
++        .orchestration_client
++        .clone()
++        .get_approval_preview(authenticated_session_request(
++            mp_contracts::model_plane::v1::GetApprovalPreviewRequest {
++                approval_id,
++                org_id: claims.org_id.clone(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|status| approval_preview_status_to_http(&status))?
++        .into_inner();
++    let preview = response
++        .preview
++        .as_ref()
++        .ok_or_else(|| approval_preview_status_to_http(&tonic::Status::not_found("no preview")))?;
++    Ok(Json(json!({ "data": { "preview": approval_preview_value(preview) } })))
++}
++
++/// Session Core's answer to a preview read. A typed ZDR refusal keeps its catalogue body; another
++/// owner's approval, a decided or expired one and an older Session Core all read as one 404.
++fn approval_preview_status_to_http(status: &tonic::Status) -> HttpJsonError {
++    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
++        return grpc_status_to_http(status);
++    }
++    match status.code() {
++        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
++            run_trace_error(
++                StatusCode::NOT_FOUND,
++                "approval_not_found",
++                "no such pending approval",
++            )
++        }
++        tonic::Code::InvalidArgument => run_trace_error(
++            StatusCode::BAD_REQUEST,
++            "invalid_approval_preview",
++            "the approval id was refused",
++        ),
++        _ => grpc_status_to_http(status),
++    }
++}
++
++fn approval_preview_value(preview: &mp_contracts::model_plane::v1::ApprovalPreview) -> Value {
++    json!({
++        "kind": preview.kind,
++        "provider": preview.provider,
++        "operation": preview.operation,
++        "connection_id": preview.connection_id,
++        "to": preview.to,
++        "subject": preview.subject,
++        "body_text": preview.body_text,
++        "has_html": preview.has_html,
++        "is_reply": preview.is_reply,
++        "raw_only": preview.raw_only,
++        "editable_fields": preview.editable_fields,
++        "action_fingerprint": preview.action_fingerprint,
++        "revision": preview.revision,
++        "format": "plain_text",
++    })
++}
++
+ async fn get_subagent_lineage(
+     State(state): State<AppState>,
+     bearer: VerifiedModelBearer,
+@@ -20995,3 +21099,143 @@ mod run_timing_route_tests {
+         assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+     }
+ }
++
++#[cfg(test)]
++mod approval_preview_route_tests {
++    //! EP-10-S1: the full-draft preview route. Off and zero-retention answers are decided before
++    //! anything reaches Session Core, so these tests need no Session Core at all.
++    use super::*;
++
++    use axum::{body::Body, http::Request as HttpRequest};
++    use tower::ServiceExt;
++
++    fn claims(zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
++            "user_id": "user-a", "principal_type": "user", "zdr": zdr
++        }))
++        .expect("claims")
++    }
++
++    /// The route with its switch on and with it off; the env read stays out of parallel tests.
++    /// The orchestration client is the lazy default, which nothing here may reach.
++    fn app(zdr: bool) -> Router {
++        Router::new()
++            .route(
++                "/v1/orchestration/approvals/:approval_id/preview",
++                get(
++                    |state: State<AppState>,
++                     claims: Extension<Claims>,
++                     bearer: VerifiedModelBearer,
++                     path: Path<String>| approval_preview(state, claims, bearer, path, true),
++                ),
++            )
++            .route(
++                "/off/v1/orchestration/approvals/:approval_id/preview",
++                get(
++                    |state: State<AppState>,
++                     claims: Extension<Claims>,
++                     bearer: VerifiedModelBearer,
++                     path: Path<String>| approval_preview(state, claims, bearer, path, false),
++                ),
++            )
++            .with_state(AppState::new())
++            .layer(Extension(claims(zdr)))
++            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
++                "session-core-bearer",
++            )))
++    }
++
++    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
++        let response = router
++            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
++            .await
++            .unwrap();
++        let status = response.status();
++        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
++            .await
++            .unwrap();
++        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
++    }
++
++    #[tokio::test]
++    async fn preview_route_off_by_default() {
++        for unset in [None, Some(""), Some("1"), Some("yes"), Some("on")] {
++            assert!(
++                !mp_contracts::loop_fold::switch_from(unset),
++                "{unset:?} must not enable the preview"
++            );
++        }
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++        let (status, body) =
++            get_json(app(false), "/off/v1/orchestration/approvals/appr_1/preview").await;
++        assert_eq!(status, StatusCode::NOT_FOUND);
++        assert_eq!(body["error"]["code"], "preview_unavailable");
++        assert!(body["error"]["message"].is_string());
++    }
++
++    #[tokio::test]
++    async fn preview_route_refuses_zdr_token() {
++        let (status, body) =
++            get_json(app(true), "/v1/orchestration/approvals/appr_1/preview").await;
++        let (expected_status, Json(expected)) =
++            crate::zdr_posture::continuation_gate(&claims(true)).expect_err("a ZDR bearer is refused");
++        assert_eq!(status, expected_status);
++        assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
++        assert!(body["error"]["code"].is_string());
++    }
++
++    #[test]
++    fn preview_route_maps_not_found() {
++        for status in [
++            tonic::Status::not_found("approval not found"),
++            tonic::Status::permission_denied("user-bound approval credential required"),
++            tonic::Status::unimplemented("older session-core"),
++        ] {
++            let (code, Json(body)) = approval_preview_status_to_http(&status);
++            assert_eq!(code, StatusCode::NOT_FOUND, "{status:?}");
++            assert_eq!(body["error"]["code"], "approval_not_found");
++        }
++        let (code, Json(body)) =
++            approval_preview_status_to_http(&tonic::Status::invalid_argument("approval_id is required"));
++        assert_eq!(code, StatusCode::BAD_REQUEST);
++        assert_eq!(body["error"]["code"], "invalid_approval_preview");
++
++        // A waived caller's typed refusal from Session Core keeps its catalogue body.
++        let refused = mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH
++            .grpc_status(tonic::Code::PermissionDenied);
++        let (code, Json(body)) = approval_preview_status_to_http(&refused);
++        assert_eq!(code, StatusCode::FORBIDDEN);
++        assert_eq!(
++            body,
++            mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH.json_body(),
++            "not flattened into a 404"
++        );
++    }
++
++    #[test]
++    fn preview_value_is_the_shaped_draft_as_plain_text() {
++        let preview = mp_contracts::model_plane::v1::ApprovalPreview {
++            kind: "mail_send".to_owned(),
++            provider: "google".to_owned(),
++            operation: "gmail.send".to_owned(),
++            connection_id: "conn-1".to_owned(),
++            to: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
++            subject: "S".to_owned(),
++            body_text: "<b>not markup</b>".to_owned(),
++            has_html: true,
++            is_reply: false,
++            raw_only: false,
++            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
++            action_fingerprint: "f".repeat(64),
++            revision: 0,
++        };
++        let value = approval_preview_value(&preview);
++        assert_eq!(value["kind"], "mail_send");
++        assert_eq!(value["to"], json!(["a@example.com", "b@example.com"]));
++        assert_eq!(value["body_text"], "<b>not markup</b>");
++        assert_eq!(value["format"], "plain_text");
++        assert_eq!(value["editable_fields"], json!(["to", "subject", "body_text"]));
++        assert_eq!(value["revision"], 0);
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs
+index 468eb632e..5748b356a 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs	
+@@ -2375,6 +2375,13 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
+         Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+     }
+ 
++    async fn get_approval_preview(
++        &self,
++        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
++    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
++        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
++    }
++
+     async fn list_plans(
+         &self,
+         _: TReq<mpv1::ListPlansRequest>,
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs
+index 505a1a374..fb8013ebe 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
+@@ -271,6 +271,13 @@ impl OrchestrationCoreService for MockOrchestration {
+         Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+     }
+ 
++    async fn get_approval_preview(
++        &self,
++        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
++    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
++        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
++    }
++
+     type StreamRunEventsStream = MockEventStream;
+ 
+     async fn list_plans(
+@@ -1418,6 +1425,13 @@ impl OrchestrationCoreService for OrgScopedMock {
+         Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+     }
+ 
++    async fn get_approval_preview(
++        &self,
++        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
++    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
++        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
++    }
++
+     async fn list_plans(
+         &self,
+         _: TonicRequest<ListPlansRequest>,
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs
+index fb3aeda39..cb59a2202 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
+@@ -2393,6 +2393,29 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
+     Ok(())
+ }
+ 
++/// The wire form of an approval preview (EP-10-S1). The revision stays 0 until edited descriptors
++/// exist (EP-10-S4).
++fn approval_preview_to_proto(
++    view: mp_contracts::write_preview::ApprovalPreviewView,
++    action_fingerprint: String,
++) -> proto::ApprovalPreview {
++    proto::ApprovalPreview {
++        kind: view.kind.as_str().to_owned(),
++        provider: view.provider,
++        operation: view.operation,
++        connection_id: view.connection_id,
++        to: view.to,
++        subject: view.subject,
++        body_text: view.body_text,
++        has_html: view.has_html,
++        is_reply: view.is_reply,
++        raw_only: view.raw_only,
++        editable_fields: view.editable_fields.into_iter().map(str::to_owned).collect(),
++        action_fingerprint,
++        revision: 0,
++    }
++}
++
+ /// Only a persistent run keeps a question: a zero-retention run keeps nothing, and a waived run is
+ /// persistent only for chat, so it asks nothing and stores nothing new (DEC-32).
+ #[allow(clippy::result_large_err)]
+@@ -3614,6 +3637,65 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+         result
+     }
+ 
++    // EP-10-S1 (decision D4): the full draft behind a pending approval, for the run's owner and
++    // no one else. The descriptor is decrypted here and only the shaped preview leaves; neither is
++    // logged nor put in an event. A ZDR caller has no descriptor to read and a waived one counts
++    // as ZDR (D9), so both are refused before any lookup; every other miss is the same NOT_FOUND.
++    async fn get_approval_preview(
++        &self,
++        request: Request<proto::GetApprovalPreviewRequest>,
++    ) -> Result<Response<proto::GetApprovalPreviewResponse>, Status> {
++        let started = Instant::now();
++        let result: Result<Response<proto::GetApprovalPreviewResponse>, Status> = async {
++            let caller = identity(&request)?;
++            refuse_zdr_or_waived_question_caller(&caller)?;
++            authorize_operation(&caller, "orchestration:read")?;
++            let req = request.into_inner();
++            if req.approval_id.is_empty() {
++                return Err(Status::invalid_argument("approval_id is required"));
++            }
++            validate_approval_org(&req.org_id)?;
++            caller.authorize_org(&req.org_id)?;
++            let user_id = caller
++                .user_id()
++                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
++                .to_owned();
++            let read =
++                store::read_descriptor_for_owner(&self.pool, &req.approval_id, &req.org_id, &user_id)
++                    .await
++                    .map_err(|_| Status::internal("approval preview unavailable"))?;
++            let preview = match read {
++                store::OwnerDescriptor::NotFound => {
++                    return Err(Status::not_found("approval not found"));
++                }
++                store::OwnerDescriptor::NoDescriptor => approval_preview_to_proto(
++                    mp_contracts::write_preview::ApprovalPreviewView::no_descriptor(),
++                    String::new(),
++                ),
++                store::OwnerDescriptor::Descriptor {
++                    descriptor,
++                    action_fingerprint,
++                } => {
++                    let tool_name = descriptor
++                        .get("tool_name")
++                        .and_then(serde_json::Value::as_str)
++                        .unwrap_or("");
++                    let input = descriptor.get("input").unwrap_or(&serde_json::Value::Null);
++                    approval_preview_to_proto(
++                        mp_contracts::write_preview::preview_from_input(tool_name, input),
++                        action_fingerprint,
++                    )
++                }
++            };
++            Ok(Response::new(proto::GetApprovalPreviewResponse {
++                preview: Some(preview),
++            }))
++        }
++        .await;
++        record_metrics("get_approval_preview", started, result.is_ok());
++        result
++    }
++
+     async fn create_approval(
+         &self,
+         request: Request<proto::CreateApprovalRequest>,
+@@ -7121,6 +7203,100 @@ mod tests {
+         );
+     }
+ 
++    fn preview_request(org_id: &str) -> proto::GetApprovalPreviewRequest {
++        proto::GetApprovalPreviewRequest {
++            approval_id: "appr_1".to_owned(),
++            org_id: org_id.to_owned(),
++        }
++    }
++
++    // EP-10-S1 (D4, D9): a ZDR caller has no descriptor and a waived one counts as ZDR, so both are
++    // refused with the typed refusal before anything is read. The pool is unreachable: reaching
++    // the database would answer Internal.
++    #[tokio::test]
++    async fn preview_refuses_zdr_and_waived_identities() {
++        let (svc, _rx) = lazy_unreachable_service();
++        for caller in [
++            VerifiedIdentity::user_for_test_with_zdr("org_p", "user_p", true),
++            VerifiedIdentity::user_for_test_with_waiver("org_p", "user_p", "conn-1", "ack-1"),
++        ] {
++            let refused = svc
++                .get_approval_preview(with_caller(preview_request("org_p"), caller))
++                .await
++                .expect_err("refused");
++            assert_ne!(refused.code(), tonic::Code::Internal, "the preview reached the database");
++            assert!(Refusal::from_status(&refused).is_some(), "typed refusal: {refused}");
++        }
++    }
++
++    // The org is the verified credential's, never the request's: another org is refused before
++    // any lookup.
++    #[tokio::test]
++    async fn preview_refuses_another_org_before_any_lookup() {
++        let (svc, _rx) = lazy_unreachable_service();
++        let refused = svc
++            .get_approval_preview(with_caller(
++                preview_request("org_other"),
++                VerifiedIdentity::user_for_test("org_p", "user_p"),
++            ))
++            .await
++            .expect_err("refused");
++        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
++    }
++
++    // The handler gates before it reads, and neither the descriptor nor the preview reaches a log
++    // line or an event: the body has no tracing macro and no event write.
++    #[test]
++    fn preview_is_never_logged() {
++        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
++        let start = source
++            .find("    async fn get_approval_preview(")
++            .expect("the preview handler is present");
++        let rest = &source[start..];
++        let body = &rest[..rest
++            .find("record_metrics(\"get_approval_preview\"")
++            .expect("the end of the handler")];
++        let gate = body
++            .find("refuse_zdr_or_waived_question_caller(&caller)?;")
++            .expect("the ZDR gate");
++        let org = body.find("caller.authorize_org(&req.org_id)?;").expect("the org gate");
++        let lookup = body.find("store::read_descriptor_for_owner(").expect("the store read");
++        assert!(gate < org && org < lookup, "the preview gate order");
++        for forbidden in [
++            "info!", "warn!", "debug!", "error!", "trace!", "tracing::", "println!", "eprintln!",
++            "broadcast", "record_orchestration_event", "persist_",
++        ] {
++            assert!(!body.contains(forbidden), "the preview handler must not use {forbidden}");
++        }
++    }
++
++    #[test]
++    fn preview_wire_form_carries_the_shaped_draft_and_the_fingerprint() {
++        let view = mp_contracts::write_preview::preview_from_input(
++            "execute_provider_action",
++            &serde_json::json!({
++                "connection_id": "conn-1",
++                "operation": "mail.send",
++                "body": { "to": "a@example.com, b@example.com", "subject": "S", "bodyText": "Body" },
++            }),
++        );
++        let wire = approval_preview_to_proto(view, "f".repeat(64));
++        assert_eq!(wire.kind, "mail_send");
++        assert_eq!(wire.provider, "microsoft");
++        assert_eq!(wire.to, vec!["a@example.com", "b@example.com"]);
++        assert_eq!(wire.body_text, "Body");
++        assert_eq!(wire.editable_fields, vec!["to", "subject", "body_text"]);
++        assert_eq!(wire.action_fingerprint, "f".repeat(64));
++        assert_eq!(wire.revision, 0);
++
++        let none = approval_preview_to_proto(
++            mp_contracts::write_preview::ApprovalPreviewView::no_descriptor(),
++            String::new(),
++        );
++        assert_eq!(none.kind, "none");
++        assert!(none.operation.is_empty() && none.to.is_empty() && none.action_fingerprint.is_empty());
++    }
++
+     // EP-4 S5: only execution-core may say an MCP server asked. A person's credential, or any other
+     // service, is refused before the run is looked up, so the refusal needs no database.
+     #[tokio::test]
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs
+index 64c825d54..6d4af051c 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
+@@ -2370,6 +2370,74 @@ pub async fn get_approval_for_org(
+     Ok(row)
+ }
+ 
++/// What the preview of one approval may read (EP-10-S1).
++#[derive(Debug, Clone, PartialEq)]
++pub enum OwnerDescriptor {
++    /// Not a pending, unexpired approval of a persistent run the caller owns in this org. One
++    /// answer for every such case, so a miss discloses nothing about another owner's approval.
++    NotFound,
++    /// A pending approval of the caller's that retains no descriptor (a browser takeover, a cause
++    /// with no tool call).
++    NoDescriptor,
++    /// The decrypted descriptor and its stored fingerprint.
++    Descriptor {
++        descriptor: JsonValue,
++        action_fingerprint: String,
++    },
++}
++
++/// Read and decrypt the retained descriptor of a pending approval for the run's owner, for the
++/// approval card's preview (EP-10-S1, decision D4). The approval must be `requested` and
++/// unexpired, its run must be the caller's and persistent (a waived run counts as ZDR, D9), and
++/// the descriptor is decrypted with the same scope binding it was encrypted under. The caller
++/// shapes the result through `mp_contracts::write_preview` and never logs it.
++///
++/// # Errors
++///
++/// Returns an error when the query fails, the key is missing, or the stored ciphertext does not
++/// decrypt to JSON.
++pub async fn read_descriptor_for_owner(
++    pool: &Pool,
++    approval_id: &str,
++    org_id: &str,
++    user_id: &str,
++) -> Result<OwnerDescriptor> {
++    if org_id.trim().is_empty() || user_id.trim().is_empty() {
++        return Ok(OwnerDescriptor::NotFound);
++    }
++    let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
++        "SELECT d.user_id, d.action_fingerprint, d.ciphertext \
++         FROM approvals a \
++         JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
++         LEFT JOIN approval_continuation_descriptors d \
++           ON d.approval_id = a.id AND d.org_id = a.org_id AND d.run_id = a.run_id \
++         WHERE a.id = $1 AND a.org_id = $2 AND a.user_id = $3 AND r.user_id = $3 \
++           AND a.status = 'requested' AND (a.expires_at IS NULL OR a.expires_at > now()) \
++           AND r.retention_class = 'persistent'",
++    )
++    .bind(approval_id)
++    .bind(org_id)
++    .bind(user_id)
++    .fetch_optional(pool)
++    .await?;
++    let Some((descriptor_user, fingerprint, ciphertext)) = row else {
++        return Ok(OwnerDescriptor::NotFound);
++    };
++    let (Some(descriptor_user), Some(action_fingerprint), Some(ciphertext)) =
++        (descriptor_user, fingerprint, ciphertext)
++    else {
++        return Ok(OwnerDescriptor::NoDescriptor);
++    };
++    let plaintext =
++        DescriptorCipher::from_env()?.decrypt(approval_id, org_id, &descriptor_user, &ciphertext)?;
++    let descriptor: JsonValue = serde_json::from_str(&plaintext)
++        .map_err(|_| anyhow::anyhow!("stored continuation descriptor is invalid"))?;
++    Ok(OwnerDescriptor::Descriptor {
++        descriptor,
++        action_fingerprint,
++    })
++}
++
+ /// Fetch a single approval by its `(org_id, idempotency_key)` pair. Used to
+ /// resolve the existing durable record when an idempotent re-request hit the
+ /// `ON CONFLICT ... DO NOTHING` no-op path and so returned no new id. (D-1)
+@@ -6425,3 +6493,201 @@ mod approval_scope_grant_db_tests {
+         assert_eq!(proposals, 0);
+     }
+ }
++
++#[cfg(test)]
++mod approval_preview_db_tests {
++    //! EP-10-S1: the owner-only descriptor read behind the approval card's preview. Every miss is
++    //! the one `NotFound`, so another owner, another org, a decided or expired approval and a
++    //! waived run all look the same.
++    use super::*;
++    use base64::Engine as _;
++    use sqlx::postgres::PgPoolOptions;
++
++    async fn scratch_pool() -> Option<Pool> {
++        let Ok(url) = std::env::var("DATABASE_URL") else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return None;
++        };
++        assert!(url.contains("test"), "the scratch database name must say test");
++        let pool = PgPoolOptions::new()
++            .max_connections(4)
++            .connect(&url)
++            .await
++            .expect("connect pg");
++        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
++        // The retained descriptor is encrypted: the process needs its key.
++        std::env::set_var(
++            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
++            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
++        );
++        Some(pool)
++    }
++
++    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++    struct Seed {
++        run_id: String,
++        org: String,
++        user: String,
++    }
++
++    /// A waived run must name its acknowledgement and connection, and no other class may (a
++    /// table CHECK).
++    async fn seed_run(pool: &Pool, tag: &str, class: &str) -> Seed {
++        let sfx = mp_ids::new_ulid();
++        let (thread_id, run_id, org, user) = (
++            format!("pv-t-{tag}-{sfx}"),
++            format!("pv-r-{tag}-{sfx}"),
++            format!("pv-org-{sfx}"),
++            "u1".to_owned(),
++        );
++        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
++            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
++        let (ack, connection) = if class == "zdr_waived" {
++            (Some("ack-1"), Some("conn-1"))
++        } else {
++            (None, None)
++        };
++        sqlx::query(
++            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
++             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
++        )
++        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
++        .bind(class).bind(ack).bind(connection)
++        .execute(pool).await.expect("seed run");
++        Seed { run_id, org, user }
++    }
++
++    fn mail_descriptor(seed: &Seed) -> JsonValue {
++        serde_json::json!({
++            "version": 1,
++            "run_id": seed.run_id,
++            "org_id": seed.org,
++            "user_id": seed.user,
++            "step_id": "tool_1_call-1",
++            "action_kind": "tool_call",
++            "action_fingerprint": FINGERPRINT,
++            "tool_name": "execute_provider_action",
++            "input": {
++                "connection_id": "conn-1",
++                "operation": "gmail.send",
++                "body": { "to": "a@example.com", "subject": "S", "bodyText": "the whole body" },
++            },
++            "permission_mode": "ask",
++        })
++    }
++
++    async fn approval(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
++        let id = format!("appr_{}", mp_ids::new_ulid());
++        request_approval(
++            pool,
++            &id,
++            &seed.run_id,
++            None,
++            "tool_call",
++            &seed.user,
++            &seed.org,
++            &seed.user,
++            "",
++            &serde_json::json!({}),
++            descriptor,
++            Some(Utc::now() + chrono::Duration::minutes(5)),
++            "",
++        )
++        .await
++        .expect("request approval")
++        .expect("inserted");
++        id
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn preview_is_owner_only() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "owner", "persistent").await;
++        let descriptor = mail_descriptor(&seed);
++        let id = approval(&pool, &seed, Some(&descriptor)).await;
++        let read = read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user)
++            .await
++            .expect("read");
++        assert_eq!(
++            read,
++            OwnerDescriptor::Descriptor {
++                descriptor,
++                action_fingerprint: FINGERPRINT.to_owned(),
++            }
++        );
++        let other = read_descriptor_for_owner(&pool, &id, &seed.org, "u2").await.expect("read");
++        assert_eq!(other, OwnerDescriptor::NotFound, "another member of the org reads nothing");
++        let unknown = read_descriptor_for_owner(&pool, "appr_missing", &seed.org, &seed.user)
++            .await
++            .expect("read");
++        assert_eq!(unknown, OwnerDescriptor::NotFound);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn preview_refuses_other_org_as_not_found() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "org", "persistent").await;
++        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
++        let read = read_descriptor_for_owner(&pool, &id, "pv-org-other", &seed.user)
++            .await
++            .expect("read");
++        assert_eq!(read, OwnerDescriptor::NotFound);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn preview_refuses_decided_and_expired_approvals() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "state", "persistent").await;
++        let decided = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
++        decide_approval(&pool, &decided, &seed.org, Some(&seed.user), "denied", &seed.user, "no")
++            .await
++            .expect("decide");
++        assert_eq!(
++            read_descriptor_for_owner(&pool, &decided, &seed.org, &seed.user).await.expect("read"),
++            OwnerDescriptor::NotFound,
++            "a decided approval is not previewed"
++        );
++        let expired = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
++        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
++            .bind(&expired)
++            .execute(&pool)
++            .await
++            .expect("expire");
++        assert_eq!(
++            read_descriptor_for_owner(&pool, &expired, &seed.org, &seed.user).await.expect("read"),
++            OwnerDescriptor::NotFound,
++            "an expired approval is not previewed"
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn preview_refuses_a_waived_run_as_not_found() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "waived", "zdr_waived").await;
++        let id = approval(&pool, &seed, Some(&mail_descriptor(&seed))).await;
++        assert_eq!(
++            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
++            OwnerDescriptor::NotFound,
++            "a waived run counts as ZDR (D9)"
++        );
++    }
++
++    /// Integration round B C-B4: a cause with no descriptor (`browser_human_assist`) previews as
++    /// the no-descriptor form, not as a miss.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn preview_of_an_approval_without_a_descriptor_is_the_no_descriptor_form() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "assist", "persistent").await;
++        let id = approval(&pool, &seed, None).await;
++        assert_eq!(
++            read_descriptor_for_owner(&pool, &id, &seed.org, &seed.user).await.expect("read"),
++            OwnerDescriptor::NoDescriptor
++        );
++    }
++}

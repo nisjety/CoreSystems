@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EffectiveScrapeOptions",
+  "description": "The options a response was produced with, so a caller (or a model) can see\nwhat was applied and what was not.",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "description": "The actions as counts only: never a text or a selector.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionsSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "cache_age_ms": {
+      "description": "INNH-7: on a `max_age` hit, how old the served result was, in milliseconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "cache_state": {
+      "$ref": "#/$defs/CacheState"
+    },
+    "cached_at": {
+      "description": "INNH-7: on a `max_age` hit, when the served result was fetched (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "doc_routing": {
+      "type": "string"
+    },
+    "exclude_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extractor": {
+      "$ref": "#/$defs/Extractor"
+    },
+    "formats": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScrapeFormat"
+      }
+    },
+    "ignored_fields": {
+      "description": "Accepted options this version does not apply, and unknown request keys\nthat were ignored.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "include_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_age": {
+      "description": "INNH-7: the `max_age` the request asked for, in milliseconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "max_inline_bytes": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "only_main_content": {
+      "type": "boolean"
+    },
+    "redact_pii": {
+      "description": "E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)\nwhen it did not. Always reported, so a caller can see what was applied.",
+      "$ref": "#/$defs/PiiRedaction",
+      "default": "off"
+    },
+    "remove_base64_images": {
+      "type": "boolean"
+    },
+    "strict": {
+      "description": "Unknown keys were rejected (strict) rather than ignored (lenient).",
+      "type": "boolean"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "zdr": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "formats",
+    "only_main_content",
+    "include_tags",
+    "exclude_tags",
+    "remove_base64_images",
+    "extractor",
+    "timeout_ms",
+    "max_inline_bytes",
+    "zdr",
+    "ignored_fields",
+    "cache_state",
+    "doc_routing",
+    "strict"
+  ],
+  "$defs": {
+    "ActionOnError": {
+      "description": "What to do when an action fails: stop and report, or go on to the next one.\nThere is no retry: a replayed click or type can submit twice.",
+      "type": "string",
+      "enum": [
+        "abort",
+        "continue"
+      ]
+    },
+    "ActionsSummary": {
+      "description": "The echo of a request's actions in an effective-options response.",
+      "type": "object",
+      "properties": {
+        "capture_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "on_error": {
+          "$ref": "#/$defs/ActionOnError"
+        },
+        "total_wait_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "count",
+        "types",
+        "total_wait_ms",
+        "capture_count",
+        "on_error"
+      ]
+    },
+    "CacheState": {
+      "description": "Whether the page cache was consulted for this response.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "hit",
+            "miss"
+          ]
+        },
+        {
+          "description": "Not used: ZDR, non-default options or an explicit `cache: off`.",
+          "type": "string",
+          "const": "bypass"
+        }
+      ]
+    },
+    "Extractor": {
+      "description": "Which content extractor shapes the markdown. `Readability` is the\nmain-content heuristic (`only_main_content`, the default); `CleanFull` keeps\nthe whole body minus scripts and chrome; `Raw` converts the document as it is.",
+      "type": "string",
+      "enum": [
+        "readability",
+        "clean_full",
+        "raw"
+      ]
+    },
+    "PiiRedaction": {
+      "description": "E3.6-5: whether the text a scrape returns goes through the PII scanner\n(`quarry_transform::pii`). `Off` is the default. `On` is served under zero data\nretention only, and never with a capture or an action (see `ScrapeOptions::resolve`).",
+      "type": "string",
+      "enum": [
+        "off",
+        "on"
+      ]
+    },
+    "ScrapeFormat": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "html",
+            "rawHtml",
+            "links",
+            "metadata",
+            "screenshot",
+            "pdf",
+            "summary"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "screenshot",
+                "pdf"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "schema": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "object"
+                }
+              }
+            },
+            "type": {
+              "const": "json"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "language": {
+              "type": "string",
+              "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$"
+            },
+            "max_chars": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 200
+            },
+            "type": {
+              "const": "summary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "question"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "question"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max_chars_each": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 40
+            },
+            "max_highlights": {
+              "type": "integer",
+              "maximum": 10,
+              "minimum": 1
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 1000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "highlights"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "query"
+          ]
+        }
+      ]
+    }
+  }
+}

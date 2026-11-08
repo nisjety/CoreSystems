@@ -1,0 +1,485 @@
+{
+ "batchId": "W2-43",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS13-S7",
+   "outcome": "needs-attention",
+   "status": "blocked",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib approval (from apps/Model Plane/rust, background, log C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\mg-approval-r2.log)",
+     "outcome": "NOT FINISHED at report time. Cargo was still compiling model_gateway (rustc alive at 16:02, log 0 bytes). No pass and no fail was observed. The log ends with CARGO_EXIT=<code> when the run exits; read that line before counting the owned-file tests as green."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 http_routes.rs (no write)",
+     "outcome": "91 diffs. The previous round recorded the same 91 at HEAD; that was not re-verified here. No diff falls in the S7 line ranges 1955-1970, 2040-2112, 2250-2315 or 7795-7945."
+    },
+    {
+     "command": "python3 count of CRLF and LF bytes in http_routes.rs",
+     "outcome": "17672 CRLF and 17672 LF: every line is CRLF, no line-ending drift."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/proto/model_plane/v1/orchestration.proto: in DecideApprovalRequest, after `ApprovalScope scope = 7;` (line 957), add a comment and `bool rule_proposed = 8;` (additive). Record tag 8 in plan section 4.3.",
+    "Next batch, owned file apps/Model Plane/rust/services/model-gateway/src/http_routes.rs, only after the proto field exists: user_decision_request (lines 2188-2207) sets rule_proposed from asks_rule, and the warn block in decide_approval (lines 2306-2313) is deleted.",
+    "Do not enable APPROVAL_RULE_PROPOSALS_ENABLED until the proto field, the session-core write and migration 0070, the mp-contracts eligibility change, the BFF passthrough, the capability-core expiry and audit rows, and the FE card have all landed.",
+    "Decide whether S7 may proceed while ADR-0011 is unwritten (ledger line 95 says S6 and S7 wait for it).",
+    "Read the last line of the scratchpad log mg-approval-r2.log (CARGO_EXIT=<code>). Only exit 0 with the test result lines counts as a pass for the owned-file tests. The run was not finished when this report was written.",
+    "Named tests not written: confirming_writes_a_digest_pinned_allow and a_digest_drift_demotes_the_rule_to_ask (capability-core; the existing drift behaviour is engine_policy_test.go:87, 'a changed definition demotes an allow to an ask', but no S7-named assertion exists). FE ApprovalRuleProposals.test.tsx also not written. Owners: capability-core and the FE."
+   ],
+   "deviations": [
+    "No edit this round. All four required fixes need files outside `files` (proto, session-core, migrations, capability-core, execution-core, mp-contracts, BFF, FE), and the batch rules forbid editing them.",
+    "Fix 1's owned-file step (pass asks_rule as rule_proposed, delete the warn block) cannot land before the proto field exists, because the struct literal would not compile. It is deferred to the next batch."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto: in DecideApprovalRequest, after `ApprovalScope scope = 7;` (line 957), add a comment and `bool rule_proposed = 8;`. Tags 1-7 are used, 8 is free. Record tag 8 in plan section 4.3.",
+    "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go and orchestration_grpc.pb.go: regenerate with buf after the proto change (plan 6.4 recipe).",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs: DecisionRecord (line 1003) and the metadata.decision JSON (lines 1071-1075) gain rule_proposed. apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs: the decide caller (lines 3828-3840) passes req.rule_proposed. Content-free only.",
+    "apps/Model Plane/rust/services/session-core/migrations/0070_approval_grant_rule_link.sql plus revert/0070_approval_grant_rule_link.down.sql: nullable rule_id on approval_scope_grants (0062 committed without it). 0070 is the next free number; 0069 is the last.",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs: eligible_scopes (lines 137-160) and is_standing_excluded (163-169) must offer thread for an mcp__ cause with a pinned digest and class <= external_write (K3-3). Without this Always is unreachable. Also the natural home for rule_proposals_from and rule_proposals_enabled, which now sit in http_routes.rs.",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs: DecideBody (lines 528-536, deny_unknown_fields) must accept promote and scope thread/run. decide_upstream_body (541-564) refuses every scope except once with 422 scope_not_enabled today.",
+    "apps/Model Plane/go/services/capability-core/migrations/0030_tool_policy_expiry.up.sql and .down.sql: expires_at on tool_policies (table from 0017, altered by 0025). 0030 is the next free number; 0029 is the last.",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go: setToolPolicyRequest (lines 187-190) accepts expires_at. DisallowUnknownFields (line 250) refuses it today. Add content-free tool_policy_rule_created, _confirmed and _expired rows beside tool_policy_set and tool_policy_revoked (lines 54-55).",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go: ignore expired allow rules in DecideWithPolicies. The digest-drift demotion already exists (line 304).",
+    "apps/Model Plane/rust/services/execution-core: content-free tool_policy_rule_used row with rule_id when a rule releases a call. No such row exists today.",
+    "apps/Model Plane/api/openapi.yaml and the regenerated api/sdk typescript and python: DecideApprovalBody gains an optional promote boolean.",
+    "Frontend Plane (verevonv3): settings card 'Rules proposed from approvals' (path undetermined), Always control on MCP rows only, use-chat-controller forwards promote, and ApprovalRuleProposals.test.tsx.",
+    "apps/Model Plane/docs/decisions/ledger.md: S7 entry. ADR-0011 is not written (ledger line 95 says S6 and S7 wait for it).",
+    "apps/Model Plane/docs/plans/model-plane-depth-register.md: depth findings (lead writes it)."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "The row's code deliverable is missing. The slice row asks that Always become a proposed rule which, once confirmed, writes a digest-pinned user-scope allow (mcp_tool only, ceiling external_write) with 90/365-day expiry, digest-drift demotion, and content-free tool_policy_rule_created/_confirmed/_used/_expired audit rows. What landed in apps/Model Plane/rust/services/model-gateway/src/http_routes.rs is gateway-side validation (checked_rule_proposal, rule_offered_for, the APPROVAL_RULE_PROPOSALS_ENABLED switch) and a warn! log at decide_approval. No rule is proposed, stored, confirmed, expired or audited anywhere. The lead must widen the ownership set (orchestration.proto tag 8 rule_proposed plus Go regen, session-core DecisionRecord and migration 0070 with its revert, mp-contracts approval_cause.rs eligibility for pinned mcp__ causes, the BFF orchestration.rs DecideBody/decide_upstream_body, capability-core migration 0030 expires_at plus tool_policies.go audit rows plus the engine.go expiry check, the execution-core rule_used row, the FE card) or re-scope the row before it can pass.",
+     "Two of the three named tests do not exist: confirming_writes_a_digest_pinned_allow and a_digest_drift_demotes_the_rule_to_ask (capability-core). Neither does the FE ApprovalRuleProposals.test.tsx or the K3-10 expiry/audit-row assertions. Only an_always_choice_before_confirmation_is_a_thread_grant exists, and it passes.",
+     "Once the proto field exists, in http_routes.rs user_decision_request must carry asks_rule as rule_proposed and the warn-only block in decide_approval must be deleted. The current warn-only path is a placeholder: turning the switch on accepts an Always and silently drops it."
+    ],
+    "dod_gaps": [
+     "ADR-0011 is unwritten (decisions ledger line 95 says S6 and S7 wait for it). Only the lead can decide whether S7 proceeds past gateway validation.",
+     "No live proof of Always -> settings confirm -> digest-pinned allow -> rule use -> expiry/drift demotion. This needs the full stack and the lead.",
+     "WS05 TOOL_POLICY_ENFORCED prerequisite, and the WS13-S6 and WS13-S1 prerequisite tests outside model-gateway, were not exercised."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Always is unreachable end to end. mp-contracts approval_cause.rs is_standing_excluded (163-169) removes every mcp__ tool from thread scope, and checked_decision_scope refuses thread for an MCP cause (scope_not_offered) before the rule check runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No wire carrier for rule_proposed. With APPROVAL_RULE_PROPOSALS_ENABLED on, a valid Always records a thread grant and only a warn log says no rule was proposed. The switch must stay off until the carrier lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "BFF orchestration.rs refuses promote (deny_unknown_fields, lines 528-536) and every scope except once (decide_upstream_body, 541-564). The SPA cannot send thread or promote."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "K3-10 expiry and the tool_policy_rule_* audit rows are unbuilt. capability-core tool_policies has no expires_at, PUT refuses it through DisallowUnknownFields (line 250), and capability-core writes only tool_policy_set and tool_policy_revoked. execution-core writes no rule-use row."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "ADR-0011 is not written (ledger line 95). S6 and S7 wait for it, so the lead decides whether S7 proceeds beyond gateway validation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end test drives decide_approval with promote through the HTTP handler. Coverage is the pure checked_rule_proposal and its wrappers only. The two named capability-core and FE tests are not written."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "rule_proposals_from and rule_proposals_enabled sit in http_routes.rs. Move them to approval_cause.rs beside the other approval switches when that file is owned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Always is unreachable end to end today. mp-contracts approval_cause.rs is_standing_excluded drops every mcp__ tool from thread scope, so checked_decision_scope refuses thread (scope_not_offered) before checked_rule_proposal runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With APPROVAL_RULE_PROPOSALS_ENABLED=true, a valid promote records a thread grant and produces only a warn log. The user would believe a rule was proposed. The switch must stay off until the proto carrier and the session-core write land."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF orchestration.rs DecideBody (deny_unknown_fields) refuses promote, and decide_upstream_body refuses every scope except once. The SPA cannot send Always."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "capability-core tool_policies has no expires_at (the PUT refuses it through DisallowUnknownFields), capability-core writes no tool_policy_rule_* rows, and execution-core writes no rule-use row. K3-10 is entirely unbuilt."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No handler-level test drives decide_approval with promote through HTTP. Coverage is limited to the pure checked_rule_proposal and its env-parsing wrapper."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "rule_offered_for treats an empty or unknown effect_class as eligible only if SideEffectClass::from_wire maps it above ExternalWrite. The test asserts that empty is refused, so the behaviour is correct as long as from_wire's fallback for unknown values stays pessimistic."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rule_proposals_from, rule_proposals_enabled and MCP_TOOL_PREFIX belong in mp-contracts approval_cause.rs beside the other approval switches once that file is owned."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "An untracked apps/Control Plane/audit-core/audit-verify.exe binary sits in the worktree. It belongs to no slice in W2-43."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib approval (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "compiled; 74 passed, 0 failed (filtered out 2592)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib -- an_always_choice_before_confirmation_is_a_thread_grant confirming_writes_a_digest_pinned_allow a_digest_drift_demotes_the_rule_to_ask",
+      "outcome": "only 1 test matched and passed (an_always_choice_before_confirmation_is_a_thread_grant). confirming_writes_a_digest_pinned_allow and a_digest_drift_demotes_the_rule_to_ask do not exist anywhere in the Model Plane tree.",
+      "passed": false
+     },
+     {
+      "command": "FE test ApprovalRuleProposals.test.tsx (vitest)",
+      "outcome": "cannot run: the file does not exist (grep found no ApprovalRuleProposals in verevonv3/src or Model Plane). Component not built.",
+      "passed": false
+     },
+     {
+      "command": "K3-10 expiry (90/365 days) and tool_policy_rule_* audit-row assertions",
+      "outcome": "cannot run: no such tests exist. The implementer reported the capability-core expires_at migration, the audit rows, and the execution-core rule_used row as not done.",
+      "passed": false
+     },
+     {
+      "command": "prerequisites: WS13-S6 tests and WS13-S1 commands",
+      "outcome": "not run separately. The 74 approval tests in model-gateway pass, but S6 and S1 tests outside that crate were not exercised.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "audit"
+   ],
+   "notes": "Status blocked. The owned-file S7 code is unchanged since the previous round (only http_routes.rs, 234 insertions). None of the four required fixes can close inside `files`. Fix 1 needs the proto field before the gateway struct literal compiles. Fix 2 needs capability-core and execution-core. Fix 3's two named tests live in capability-core and the FE. Fix 4 needs mp-contracts approval_cause.rs and the BFF. Under the batch ownership rule I edited none of those files and listed them in needs_other_files and lead_todo. Of the named tests only an_always_choice_before_confirmation_is_a_thread_grant exists, in the owned file. No commit, push, stash, reset or second target directory."
+  },
+  {
+   "id": "WS25-S9",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs (new: policy client and D8 cache, admit_turn, resolve_turn, rung clamp, revision stamp, switch parser, 17 unit tests)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs (new: 9 tests, including the wiring guard)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/lib.rs (one line: pub mod org_agent_policy)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs (4 hunks: admission before the mode resolves, resolve_turn, rung clamp in spawn_run_dispatch, revision stamp)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/coordinator.rs (record_grant clamps the grant to the held rung cap; signature unchanged)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (one content-free attribution log line)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/autonomy_ladder_contract.rs (source-order guard for the cap)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/policy/engine.go (OrgExtensionRule, ORG_EXTENSION_ALLOWLIST switch, denial in EvaluateCapability and EvaluateTool, ToolBinding.ServerID)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/policy/engine_org_policy_test.go (new: 7 test functions)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go (MCP server listing filter, shared rule reader, WithOrgExtensionPolicy)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd capability-core && go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "go test -count=1 ./internal/policy/ -run OrgExtension (final, after the fixture approval-floor fix)",
+     "outcome": "ok"
+    },
+    {
+     "command": "go test -count=1 ./... (capability-core, full module)",
+     "outcome": "every package ok, exit 0"
+    },
+    {
+     "command": "gofmt -l internal/policy/engine_org_policy_test.go",
+     "outcome": "clean. engine.go and registry_apis.go are CRLF at HEAD (whole-file gofmt noise); their LF copies are clean except a pre-existing mcpServerRow alignment outside this slice"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway org_agent_policy (final, after rustfmt)",
+     "outcome": "22 passed, 0 failed (17 new plus 5 pre-existing S7 proxy tests), exit 0"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test org_policy_enforcement_test (final)",
+     "outcome": "9 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full, final)",
+     "outcome": "2662 passed, 0 failed, 4 ignored, exit 0"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test --no-run",
+     "outcome": "compiles, exit 0. Not run: that binary dials the dev stack"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test autonomy_ladder_contract",
+     "outcome": "12 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib",
+     "outcome": "1650 passed, 0 failed, 0 ignored, exit 0"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on org_agent_policy.rs and org_policy_enforcement_test.rs",
+     "outcome": "clean after formatting these two new LF files"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "1. shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: at line 173, append .WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), policy.OrgExtensionAllowListFromLookup(os.Getenv)) to the pol := policy.New(reg)...WithToolPolicies(toolPolicies, toolPolicyEnforced) chain; at line 296, append the same call to mcpHandler := api.NewMCPHandler(pool)...WithMCPServiceToken(mcpServiceToken).",
+    "2. shared-edit apps/Model Plane/go/services/capability-core/internal/server/server.go: the tool-binding query (about lines 720-765) selects server_id from capability_tools, scans it, and sets ServerID: serverID in the &policy.ToolBinding{ literal at line 759. This must land before ORG_EXTENSION_ALLOWLIST=true.",
+    "3. shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in the plan-approval handler near line 9275 (state.plan_mode.record_grant(...)), after recording, read state.plan_mode.granted_rung(org_id, thread_id) and return that rung in the approval response.",
+    "4. shared-edit apps/Model Plane/deploy/docker-compose.yml (and .env.example): model-gateway environment ORG_AGENT_POLICY_MODE: ${ORG_AGENT_POLICY_MODE:-off}; capability-core environment ORG_EXTENSION_ALLOWLIST: ${ORG_EXTENSION_ALLOWLIST:-false}.",
+    "5. shared-edit apps/Model Plane/docs/decisions/ledger.md: append a WS25-S9 entry covering the D8 bounds, unknown mode = enforce, the explicit cap with no grant, and capability-core as the store (DEC-14).",
+    "6. shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json: add the row lockdown_blocks_do_run_for_zdr_org that the row names; the matrix is the lead's file.",
+    "7. Live proof (lead, not run here): rebuild capability-core, model-gateway and execution-core with bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build <svc>. Set ORG_AGENT_POLICY_API=true on capability-core and ORG_AGENT_POLICY_MODE=shadow on the gateway, then enforce. As admin PUT mode_cap=read_only and confirm a member's Do write is refused; set lockdown and confirm mode_lockdown; stop capability-core and confirm org_policy_unavailable on Do with plain chat unaffected. With ORG_EXTENSION_ALLOWLIST=true and ext.mcp_servers none, confirm the server is absent from GET /api/v1/mcp and calls are denied with org_extension_not_allowed.",
+    "8. Commit hygiene: apps/Model Plane/rust/services/model-gateway/src/http_routes.rs carries 234 insertions from another session in this worktree and must not be committed with this slice."
+   ],
+   "deviations": [
+    "The gateway policy cache is a process-wide OnceLock in org_agent_policy.rs, because state.rs (AppState) is not owned here. Tests reach it through a store seam.",
+    "record_grant keeps its unit return type: the e2e test closures are typed impl FnOnce(&PlanModeStore), so a value return would not compile there. The effective rung is read back with the existing granted_rung.",
+    "The seams are invoke_stream_sse (admission) and spawn_run_dispatch (rung clamp, revision stamp), not the sse.rs line numbers the row names, which have moved.",
+    "DEC-13's GetModelAccess and inference-core pull are not used. WS25 reads capability-core over HTTP under DEC-14, taking only DEC-13's fetch shape: TTL, stale bounds, unknown mode = enforce.",
+    "The execution-core attribution is a content-free info log line, not the per-step audit detail the row names.",
+    "ToolBinding.ServerID is added but not populated, because server.go is not owned. The allow-list is therefore fail-closed until lead_todo 2 lands.",
+    "The autonomy ladder guard is a source-order test. The never-exceeds-cap property is unit-tested by clamp_rung in model-gateway.",
+    "The plan-approval response is unchanged (http_routes.rs is not owned), so lead_todo 3 is still needed.",
+    "The plan-approval-clamped-by-rung-cap case is covered through clamp_rung with held_rung_cap, not through record_grant, whose switch is read once from the environment."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go (lead_todo 1)",
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go (lead_todo 2)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (lead_todo 3: plan-approval response)",
+    "apps/Model Plane/deploy/docker-compose.yml and .env.example (lead_todo 4)",
+    "apps/Model Plane/docs/decisions/ledger.md (lead_todo 5)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json (lead_todo 6)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof is not done. It needs rebuilt model-gateway, capability-core and execution-core images, then: admin PUT mode_cap=read_only and a member's Do write refused; lockdown refused with mode_lockdown; capability-core stopped gives 503 org_policy_unavailable on Do while plain chat still works; with ORG_EXTENSION_ALLOWLIST=true, a disallowed server is absent from GET /api/v1/mcp and its calls are denied with org_extension_not_allowed (lead_todo 7).",
+     "capability-core cmd/main.go does not wire WithOrgExtensionPolicy on the engine or the MCP handler yet (lead_todo 1), so the Go allow-list cannot be reached at runtime until the lead makes this shared edit.",
+     "server.go does not populate ToolBinding.ServerID yet (lead_todo 2). Turning ORG_EXTENSION_ALLOWLIST on before that lands denies every MCP tool under approved_only.",
+     "The plan row says record_grant 'returns effective rung', but the plan-approval response still does not carry the effective rung (lead_todo 3, http_routes.rs is shared).",
+     "The compose/.env.example switch entries (lead_todo 4), the decision ledger entry (lead_todo 5) and the ZDR matrix row lockdown_blocks_do_run_for_zdr_org (lead_todo 6) are lead files and are not done.",
+     "Commit hygiene: http_routes.rs carries WS13-S7 hunks (promote/APPROVAL_RULE_PROPOSALS_ENABLED) from another session, and apps/Control Plane/audit-core/audit-verify.exe is untracked. Neither belongs in this slice's commit."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The row's DoD evidence (rebuilt gateway, capability-core and execution-core; admin cap; member Do write refused; capability-core down gives 503) has not been produced and needs the lead's stack run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Resumed runs (continue_run and the park resume) bypass admission, so an org mode cap or lockdown does not bind a continuation and its rung is not capped; the resume path needs the same admission before ORG_AGENT_POLICY_MODE=enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Enforce refuses every Do run whose invoke carries no VerifiedCapabilityBearer, because admission has no bearer to fetch with; confirm every Do-run caller carries one before enforce is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With ORG_EXTENSION_ALLOWLIST=true and ToolBinding.ServerID unpopulated, approved_only denies every MCP tool and none denies all; this is fail-closed but removes MCP for the org until lead_todo 2 lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "approved_only tool approval is enforced only at the signed gate, while the gateway catalogue (hydrated from GET /api/v1/mcp) offers every tool of an allowed server, so the row's offer-only-when-pinned condition is not met in the catalogue."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The extension allow-list reads the org policy row on every MCP evaluation with no cache; add a TTL cache before ORG_EXTENSION_ALLOWLIST is enabled on a busy org."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A fresh run under a rung cap with no grant now states the cap, where UNSPECIFIED was unconstrained in the loop; the owner should confirm this narrowing for read_only and workspace_write caps, as D4 is written."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan-approval response does not yet carry the effective rung, so the UI can show a grant wider than the run receives until the approval reads granted_rung (lead_todo 3)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives record_grant under enforcement through the store, because the switch is read once from the environment; the clamp is covered by unit tests and a source guard only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The execution-core attribution is a log line, not the per-step audit detail the row names, so a stored step does not yet carry the policy revision."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "DEC-13's service-principal exemption (user_id None) is not applied to the org policy, so unattended service-principal Do runs are bound by the cap; confirm with WS20."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Other Do entry points (browser_run and the tools.rs code_interpreter path) do not pass admission; only invoke_stream_sse and spawn_run_dispatch apply the policy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The gateway MCP catalogue has a 60 s TTL, so a tightened allow-list reaches the catalogue after up to a minute, while the signed gate denies at once."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The mode_lockdown copy reads 'locked to plain answers' for both a chat lockdown and an org lockdown; org-specific copy belongs to WS25-S10/S11."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The OrgPolicyContext.policy_digest proto comment still says 'Empty until WS25 S7'; the proto is not owned here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Resumed runs (continue_run and the park resume) skip admit_turn, so an org mode cap or lockdown set after a run started does not bind its continuation. This must be closed before ORG_AGENT_POLICY_MODE=enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under enforce, an agentic invoke with no VerifiedCapabilityBearer fails hydrate ('capability bearer is unavailable') and is refused with org_policy_unavailable, so every Do caller must carry a capability bearer before enforce is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Only invoke_stream_sse and spawn_run_dispatch apply the policy. Other Do entry points (browser_run, the tools.rs code_interpreter path) bypass the mode cap and lockdown, so the DoD 'cannot start a write Do run from any client' is not yet met for those paths."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under enforce, a cold cache means only the first admission fetches. spawn_run_dispatch then falls back to ReadOnly whenever the entry is missing (for example after ensure removed it). This is fail-closed but can silently narrow runs; the live proof should confirm runs keep their grant during normal operation."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "With ORG_EXTENSION_ALLOWLIST on, the MCP server listing (registry_apis.go listOrCreate) hides disallowed servers from every caller, admins included. An admin UI that lists servers to add to the allow-list from this route can no longer see them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "mcp_tool_approval=approved_only is enforced only at the signed gate (ToolDigest non-empty). The gateway catalogue still offers every tool of an allowed server, so the row's 'offer a tool only when pinned' condition holds for execution but not for the offer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "denyOnOrgExtension and the MCP listing read the org policy row from Postgres on every MCP evaluation with no cache. This needs a TTL cache before ORG_EXTENSION_ALLOWLIST is enabled on busy orgs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "clamp_rung states the cap explicitly for a fresh run with no grant (previously UNSPECIFIED, which falls back to posture gates). With rung_cap=workspace_write this can state a wider rung than an ungranted run had before; the owner should confirm this reading of 'explicit cap (never UNSPECIFIED)'."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "execution-core attribution is a content-free tracing::info line, not the per-step run audit detail the row names (agent.rs ~1816), so stored steps do not carry the policy revision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives PlanModeStore::record_grant under enforce, because policy_mode() is a process OnceLock read from the environment. The clamp is covered only through clamp_rung/held_rung_cap unit tests and a source guard."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Service-principal (user_id None) Do runs are bound by the org cap. DEC-13's exemption is not applied; confirm with WS20."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In registry_apis.go, the new WithOrgExtensionPolicy/orgExtensionReader block sits between the existing doc comment of authorizedInternalServiceCall and that function, so the old comment now attaches to WithOrgExtensionPolicy and authorizedInternalServiceCall has none."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The execute_permission_mode ratchet in spawn_run_dispatch still reads the raw grant rung, not the clamped one. This only errs stricter (an extra ask), but the two can disagree when a cap clamps a full-access grant."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The proto comment on OrgPolicyContext.policy_revision/policy_digest still says 'until WS25 S7'; the mode_lockdown copy says 'This chat is locked' even when the org locked it."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway org_agent_policy (plan test command)",
+      "outcome": "22 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test org_policy_enforcement_test",
+      "outcome": "9 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib",
+      "outcome": "2662 passed, 0 failed, 4 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --no-run (all targets compile)",
+      "outcome": "no compile errors",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test autonomy_ladder_contract",
+      "outcome": "12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib",
+      "outcome": "1650 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go vet ./...",
+      "outcome": "exit 0, no findings",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go test -count=1 ./...",
+      "outcome": "every package ok, no failures (policy package ok)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "WS25-S9 gateway enforcement and the capability-core extension allow-list are built behind ORG_AGENT_POLICY_MODE (default off; shadow observes; any other value enforces) and ORG_EXTENSION_ALLOWLIST (default off; literal true only). Gateway: the org document is read through capability-core GET /api/v1/org-agent-policy with a 30 s TTL and D8 stale bounds (900 s restrictive, 120 s permissive). A Do run whose policy cannot be read is refused with org_policy_unavailable; a plain turn keeps its floor. The org mode cap binds a turn whether or not the person chose a mode, and a choice cannot loosen it; lockdown refuses Do runs with mode_lockdown. Fresh-run rungs are held to the rung cap (an explicit cap when there is no grant), and recorded grants are clamped. Runs are attributed to the held policy revision. Capability-core: the signed gate denies MCP tools whose server is outside ext.mcp_servers (org_extension_not_allowed), approved_only tool approval requires a pinned definition, and the MCP server listing hides disallowed servers, which also feeds the gateway MCP catalogue. With the switches off the paths are unchanged: no network call, resolve_turn returns None when no mode is chosen and the cap is default, clamp and stamp pass through, and the Go rule is never read. Status is done for the code and unit tests. Two capability-core wiring shared edits (lead_todo 1-2) and the live proof (lead_todo 7) are lead-run; until item 1 lands the Go allow-list is not reachable. No docker, no DB harness, no commit, no push. The worktree's http_routes.rs carries 234 insertions from another session and must be excluded from this slice's commit; sse.rs and coordinator.rs diffs contain only this slice's hunks."
+  }
+ ]
+}

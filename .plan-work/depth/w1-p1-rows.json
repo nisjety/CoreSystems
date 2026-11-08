@@ -1,0 +1,1076 @@
+[
+{
+"id": "D1-007",
+"slice": "WS05-S2, S4",
+"kind": "follow-up",
+"text": "ZDR goldens `mcp_tool_observation_under_zdr` and `mcp_tools_under_zdr_not_offered_not_executed` in `zdr-posture-matrix.json` (+ `.sha256`, vendored copies, pin in `zdr-contract-sync.test.sh`), then run that script."
+},
+{
+"id": "D1-026",
+"slice": "WS04-S4",
+"kind": "risk",
+"text": "`with_local_fallback` consults memory only when Session Core holds no grant, so a newer, narrower in-memory grant (a waived approval, or a transient `SetRunMode` failure) loses to an older, broader durable grant for up to 24 h. Fix: stamp the memory entry and compare with a `granted_at` from `GetThreadGrant`, or take the narrower rung."
+},
+{
+"id": "D1-032",
+"slice": "WS11-S7",
+"kind": "risk",
+"text": "Nothing in the request path copies reasoning_effort onto InferRequest until WS11-S5 lands the gateway derivation, so the clamp is inert end to end (it only acts when req.reasoning_effort is Some); also the legacy thinking_budget_tokens is not clamped, so a flag-off ladder path still spends the legacy budget under an exhausted posture."
+},
+{
+"id": "D1-033",
+"slice": "WS11-S7",
+"kind": "risk",
+"text": "The clamp is inert end to end until WS11-S5 copies reasoning_effort onto InferRequest. Until then req.reasoning_effort is always None here. The legacy thinking_budget_tokens is not clamped, so an exhausted-budget org on the legacy path still gets its full thinking budget."
+},
+{
+"id": "D1-068",
+"slice": "WS01-S9",
+"kind": "risk",
+"text": "Before SESSION_CORE_MIGRATION_IGNORE_MISSING is set true anywhere (S10/S12 rollback overlay), check that the 0044-0048 constraint and trigger replacements are safe for the older binary. They are grandfathered from the additive rule."
+},
+{
+"id": "D1-070",
+"slice": "WS01-S9",
+"kind": "risk",
+"text": "session-core 0044-0048 are grandfathered from the additive rule (0044 and 0048 drop constraints they replace). Check them against the older binary before the switch is set true in the rollback overlay."
+},
+{
+"id": "D1-096",
+"slice": "WS12-S10",
+"kind": "test-gap",
+"text": "tool_loop.rs committed line 6356 (debug!) logs query = %question with the same value and is not flagged at all, because question and query are outside the row's denylist."
+},
+{
+"id": "D1-098",
+"slice": "WS12-S10",
+"kind": "test-gap",
+"text": "The denylist omits question, query and turn_question, so the sibling debug! at tool_loop.rs about line 6425 (query = %question) is not flagged; widening the denylist is a DEC-39 D2 owner call."
+},
+{
+"id": "D1-112",
+"slice": "WS01-S4",
+"kind": "risk",
+"text": "Existing VEREVON_AUDIT messages (up to 72 h) stay in the narrowed stream and are never delivered to audit-core, because the new durables use DeliverAll on a different stream. Events published before the cutover only reach audit-core if replayed by hand."
+},
+{
+"id": "D1-138",
+"slice": "WS01-S5",
+"kind": "test-gap",
+"text": "release-runtime-partition-test.sh, release-contract-test.sh and release-input-security-test.sh were not run: Windows Python lacks O_NOFOLLOW, and even with a copy shim the walk of config-policy keys is too slow to finish. Run all three on Linux or CI before relying on the gate changes. The new fixtures (attestation block with computed digest; 6 ZDR keys plus the Anthropic keys in the test config policy) were only checked through a function-level harness."
+},
+{
+"id": "D1-139",
+"slice": "WS01-S5",
+"kind": "follow-up",
+"text": "Add the alerts. ZdrAttestationReviewDue: warn when `min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() < 14*86400`, critical when `< 3*86400`. ZdrAttestationLapsed: `time() - mp_inference_zdr_attestation_review_by_timestamp_seconds > 86400`. The gauge is the start of the review-by UTC day, and the attestation stops granting after that day. Put them in the rules file whichever of WS01-S1 and WS06-S0 creates `observability/rules/`, with promtool firing and quiet cases, and add the inference-core :8082 scrape if absent."
+},
+{
+"id": "D1-141",
+"slice": "WS01-S5",
+"kind": "test-gap",
+"text": "The three release-*.sh tests were not run by the implementer or by me, because Windows Python has no O_NOFOLLOW. The release gate edits (validate_runtime_public_policy_files, validate_runtime_config, new check-zdr-attestation) are therefore proven only by function-level runs plus my direct run of the operator check. Run them on Linux or CI before relying on the gate."
+},
+{
+"id": "D1-143",
+"slice": "WS01-S5",
+"kind": "follow-up",
+"text": "ZdrAttestationReviewDue (warn under 14 days, critical under 3) and ZdrAttestationLapsed alerts, plus an inference-core :8082 scrape job and promtool tests, are not written. Without them a lapse is visible only in logs and the gauge, so write them before relying on the lifecycle."
+},
+{
+"id": "D1-148",
+"slice": "WS01-S10",
+"kind": "risk",
+"text": "`docker run --env-file` and Compose dotenv parse quoting differently. If runtime-public-policy.env or the runtime env file carries quoted values, session-core may boot with wrong config. Check this on the first live run and, if it bites, render the env through `release-artifact.sh compose` instead."
+},
+{
+"id": "D1-156",
+"slice": "WS12-S11",
+"kind": "risk",
+"text": "Seven baselined files already exceed their committed ceilings through uncommitted edits in this worktree: session-core grpc.rs +719, tool_loop.rs +142, e2e_invoke_chain_test.rs +49, spaces.rs +48, sse.rs +44, terminalization.rs +59, use-chat-controller.ts +4. They fail the gate once those hunks are committed unless extracted first; the lead must settle this before the blocking phase."
+},
+{
+"id": "D1-157",
+"slice": "WS12-S11",
+"kind": "follow-up",
+"text": "There is no reviewed path for a legitimate ceiling raise: --update never raises and the base-ref check flags any raise. The owner must decide whether a deliberate exception exists and how it is recorded; until then hot files can only shrink, which the plan expects to hit WS03/WS04 first."
+},
+{
+"id": "D1-158",
+"slice": "WS12-S11",
+"kind": "risk",
+"text": "A moved or renamed baselined file escapes the base comparison: git mv into a gen/ directory or to an uncounted suffix drops the entry with no raise, so the check passes. Closing it needs rename or content matching against the base."
+},
+{
+"id": "D1-165",
+"slice": "WS09-S5",
+"kind": "risk",
+"text": "Unsent composer attachments are not guarded until DashboardComposer registers its guard (see lead_todo); until then a stale-build reload can discard them, so keep the slice's behaviour switched on only after that edit."
+},
+{
+"id": "D1-175",
+"slice": "WS05-S5",
+"kind": "risk",
+"text": "TOOL_POLICY_ENFORCED cannot be switched on until the server.go and main.go edits in lead_todo land; until then the engine has no caller and the API only stores policies."
+},
+{
+"id": "D1-176",
+"slice": "WS05-S5",
+"kind": "risk",
+"text": "Admin scope names (admin, org:admin, *:admin) are the existing verifiedIsAdmin set; whether Control actually mints one of them for org admins is unconfirmed (the plan's own risk), so an org-scope write may be unreachable in a live deployment until checked."
+},
+{
+"id": "D1-177",
+"slice": "WS05-S5",
+"kind": "risk",
+"text": "Policy writes need capability:write on a user principal; whether the BFF-minted capability-core token for an ordinary person carries that scope (approveTool already depends on it) must be confirmed before a person can set a personal policy."
+},
+{
+"id": "D1-179",
+"slice": "WS05-S5",
+"kind": "risk",
+"text": "Nothing consults a stored policy until the lead lands the shared edits: server.go EvaluatePolicy must call EvaluateTool, and cmd/main.go must call NewToolPoliciesHandler, Register and WithToolPolicies(ToolPolicyEnforcedFromLookup). docker-compose.yml needs TOOL_POLICY_ENFORCED defaulting to false, and the capabilities.proto comment needs the three new policy_source values. TOOL_POLICY_ENFORCED cannot be switched on before then."
+},
+{
+"id": "D1-180",
+"slice": "WS05-S5",
+"kind": "risk",
+"text": "Org-scope writes depend on Control minting an admin, org:admin or *:admin scope, which is unconfirmed. Personal writes depend on the BFF-minted capability-core token carrying capability:write. Check both before the live proof."
+},
+{
+"id": "D1-184",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "The audit outbox relay is not wired until main.go gets runSIEMAuditOutbox; until then destination changes write their audit row but it is never published, so the 'durable audit row per change' is stored but not delivered."
+},
+{
+"id": "D1-185",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and an invalid or missing ORG_CORE_SIEM_SEAL_KEY the server boots and every SIEM route answers 503 instead of failing the start; boot validation needs the main.go edit."
+},
+{
+"id": "D1-186",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not know organization_siem_audit_outbox (no FK, rows carry org_id, actor id and destination host), so erasure leaves those content-free rows behind; siem_destinations itself cascades. Decide whether erasure must purge or keep them and extend the erasure function in a later migration."
+},
+{
+"id": "D1-188",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "Until the lead wires runSIEMAuditOutbox in cmd/server/main.go, destination changes commit their audit row but it is never delivered to audit-core, so the 'durable audit row per change' is incomplete."
+},
+{
+"id": "D1-189",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and a missing or invalid seal key, the server boots and every SIEM route answers 503 (it only logs). Boot validation in main.go should turn this into a startup failure."
+},
+{
+"id": "D1-190",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration."
+},
+{
+"id": "D1-193",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "The audit outbox relay is not wired until main.go gets runSIEMAuditOutbox; until then destination changes write their audit row but it is never published, so the 'durable audit row per change' is stored but not delivered."
+},
+{
+"id": "D1-194",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and an invalid or missing ORG_CORE_SIEM_SEAL_KEY the server boots and every SIEM route answers 503 instead of failing the start; boot validation needs the main.go edit."
+},
+{
+"id": "D1-195",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not know organization_siem_audit_outbox (no FK, rows carry org_id, actor id and destination host), so erasure leaves those content-free rows behind; siem_destinations itself cascades. Decide whether erasure must purge or keep them and extend the erasure function in a later migration."
+},
+{
+"id": "D1-197",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "Until the lead wires runSIEMAuditOutbox in cmd/server/main.go, destination changes commit their audit row but it is never delivered to audit-core, so the 'durable audit row per change' is incomplete."
+},
+{
+"id": "D1-198",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and a missing or invalid seal key, the server boots and every SIEM route answers 503 (it only logs). Boot validation in main.go should turn this into a startup failure."
+},
+{
+"id": "D1-199",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration."
+},
+{
+"id": "D1-202",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "The audit outbox relay is not wired until main.go gets runSIEMAuditOutbox; until then destination changes write their audit row but it is never published, so the 'durable audit row per change' is stored but not delivered."
+},
+{
+"id": "D1-203",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and an invalid or missing ORG_CORE_SIEM_SEAL_KEY the server boots and every SIEM route answers 503 instead of failing the start; boot validation needs the main.go edit."
+},
+{
+"id": "D1-204",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not know organization_siem_audit_outbox (no FK, rows carry org_id, actor id and destination host), so erasure leaves those content-free rows behind; siem_destinations itself cascades. Decide whether erasure must purge or keep them and extend the erasure function in a later migration."
+},
+{
+"id": "D1-206",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "Until the lead wires runSIEMAuditOutbox in cmd/server/main.go, destination changes commit their audit row but it is never delivered to audit-core, so the 'durable audit row per change' is incomplete."
+},
+{
+"id": "D1-207",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "With the flag on and a missing or invalid seal key, the server boots and every SIEM route answers 503 (it only logs). Boot validation in main.go should turn this into a startup failure."
+},
+{
+"id": "D1-208",
+"slice": "WS06-S7",
+"kind": "risk",
+"text": "gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration."
+},
+{
+"id": "D1-213",
+"slice": "WS12-S9",
+"kind": "risk",
+"text": "apps/Infra Plane/core-gateway/internal/config/config.go:233 is a Viper default DSN that names the legacy coresystem database and embeds a literal password value in source (value deliberately not reproduced here); the Viper default applies when DATABASE_POSTGRESURL is unset. Remove the literal and the default."
+},
+{
+"id": "D1-214",
+"slice": "WS12-S9",
+"kind": "risk",
+"text": "The allowlist can be edited in the same change that adds a violation, because the gate has no base-ref relaxation check like size-ratchet has; add that check, and a CODEOWNERS entry for scripts/gates/plane-boundary.json (DEC-39 D2), before the step blocks."
+},
+{
+"id": "D1-216",
+"slice": "WS12-S9",
+"kind": "risk",
+"text": "apps/Infra Plane/core-gateway/internal/config/config.go:233 holds a Viper default DSN with a literal password in source; the gate output does not echo it, but the literal should be removed."
+},
+{
+"id": "D1-219",
+"slice": "WS01-S7.code",
+"kind": "risk",
+"text": "Counter deltas are stack-global (no org filter): any other traffic during the turn makes zdr-live-proof.sh --phase after fail; add an org-scoped variant once the threads/messages/runs/outbox org columns are confirmed, or run on a quiet stack."
+},
+{
+"id": "D1-229",
+"slice": "WS04-S2",
+"kind": "risk",
+"text": "`agentic_run_stream` registers nothing with the cancel registry (WS03 owns this), so `/continue` segments are not reachable over the run-keyed subject until WS03 registers the stream and calls `attach`."
+},
+{
+"id": "D1-237",
+"slice": "WS01-S11",
+"kind": "risk",
+"text": "The rehearsal evidence file records no candidate or rollback manifest digest, so the gate cannot tie a PASSED rehearsal to the artifacts under review; rollback-rehearsal.sh should write the two manifest digests and the gate should compare them."
+},
+{
+"id": "D1-238",
+"slice": "WS01-S11",
+"kind": "follow-up",
+"text": "The thresholds are file-only. No script reads live metrics (gateway error ratio, p95, audit lag, terminal rows, ZDR days to review) and compares them to approved targets, so the 7-day baseline plus an enforcement step is still to build before any row can move to approved."
+},
+{
+"id": "D1-246",
+"slice": "WS12-S12",
+"kind": "follow-up",
+"text": "vite.config.ts test.exclude needs 'scripts/**/*.test.mjs' before the first push; without it pnpm test (vitest run) in spa-verify collects the node:test file and fails (reproduced)."
+},
+{
+"id": "D1-247",
+"slice": "WS12-S12",
+"kind": "follow-up",
+"text": "bundle-budget.json ceilings are null, so the budget only warns and passes; the lead must record the first CI measurement (the spa-verify log line 'assets/index-*.js: N gzip bytes; K JS files: M gzip bytes') before the gate enforces anything."
+},
+{
+"id": "D1-250",
+"slice": "WS12-S12",
+"kind": "follow-up",
+"text": "Ceilings are null, so the gate enforces nothing until the first CI measurement is recorded."
+},
+{
+"id": "D1-273",
+"slice": "WS05-S6.code",
+"kind": "risk",
+"text": "Under TOOL_CLASS_GATE=enforce a tool declared with the ask floor reads as requires_consent_to_disclose: it labels the approval as a disclosure (approval_kind Permission) instead of a destructive operation. The seeded built-ins are correct, but a future MCP or policy row with floor ask but a risky class would be mislabelled. Decide whether the disclosure marker needs its own column before MCP rows can carry an ask floor."
+},
+{
+"id": "D1-274",
+"slice": "WS05-S6.code",
+"kind": "follow-up",
+"text": "The requires_*_with variants and the RunGate methods have no production caller yet: grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. Until they are switched (files not owned here) the owner and disclosure markers do not move with TOOL_CLASS_GATE; the posture gate does through evaluate_call_with_class."
+},
+{
+"id": "D1-275",
+"slice": "WS05-S6.code",
+"kind": "follow-up",
+"text": "requires_durable_owner_approval_with, requires_consent_to_disclose_with and the RunGate methods have no production caller: grpc.rs, runtime_loop/agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. The owner and disclosure markers do not follow TOOL_CLASS_GATE until those call sites are switched (files not owned by this slice), and that must happen before enforce is meaningful for them."
+},
+{
+"id": "D1-291",
+"slice": "WS06-S2",
+"kind": "risk",
+"text": "Until S3, chained rows are never purged (Purge skips chain_seq IS NOT NULL), so the audit table grows unbounded once the flag is on; S3's chain-safe purge must ship before long-running use."
+},
+{
+"id": "D1-292",
+"slice": "WS06-S2",
+"kind": "risk",
+"text": "A rolling deploy lets an old-image replica insert an unchained row with ingested_at just before an org's activated_at, so it is silently classed legacy_unchained and never chained; a stop-the-world image swap or an activation grace window is needed before the flag is switched on."
+},
+{
+"id": "D1-294",
+"slice": "WS06-S2",
+"kind": "risk",
+"text": "Migration 007 installs the DELETE/UPDATE guard trigger on first boot even with the switch off, so an old-image replica running Purge will fail its delete until replaced; roll audit-core as one image swap."
+},
+{
+"id": "D1-300",
+"slice": "WS01-S12.code",
+"kind": "risk",
+"text": "scripts/coresystem-cross-plane-preflight.sh check_evidence_open prints state=recorded when rg is missing (the failing rg falls into the else branch), so a missing tool reads as evidence recorded; it should fail closed with a command -v rg check."
+},
+{
+"id": "D1-301",
+"slice": "WS01-S12.code",
+"kind": "follow-up",
+"text": "CAPABILITY_PROMOTION_LEDGER.tsv lacks five capability IDs seeded by capability-core migrations (cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.skill.summarize), making conformance report capability_promotion_ledger_invalid and failing coresystem-conformance-test.sh; add them as source_only rows."
+},
+{
+"id": "D1-309",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "The purge verifies only the rows it is about to delete, linked to the newest signed checkpoint. It does not check that the head or the newest attested sequence still agree with the retained suffix, so a tampered retained row is caught only by S4's verifier, not by purge."
+},
+{
+"id": "D1-310",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Attestations are never pruned and the attestor writes one per head change per org. On a hot org that is a row per interval at most. S4 or S9 should decide a retention rule (keep the newest per day) before the table grows."
+},
+{
+"id": "D1-311",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "The purge detects a tampered prefix but does not alert on it: there is no purge, incident or attestation metric (internal/metrics is not owned here), and S4 owns the rules. Add audit_core_chain_purge_blocked_total and an incident-count alert, or the incident table is only visible by querying it."
+},
+{
+"id": "D1-312",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Replicas each run Attest and Purge. Attest is idempotent via ON CONFLICT DO NOTHING. A purge that loses the advisory lock skips that org until the next daily sweep, so a purger that stalls leaves expired rows for a day."
+},
+{
+"id": "D1-313",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Checkpoint signatures cover created_at at microsecond precision, written by the Go side and stored verbatim. S4's verifier and the offline audit-verify CLI must format it with chain.SignedTimeLayout in UTC or every checkpoint will look invalid."
+},
+{
+"id": "D1-315",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "No purge, incident or attestation metrics or alerts exist (internal/metrics is not owned here). Blocked purges are visible only in logs and in audit_chain_incidents. S4 should add audit_core_chain_purge_blocked_total and an incident alert, and a blocked org writes a new incident row on every daily sweep."
+},
+{
+"id": "D1-316",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day."
+},
+{
+"id": "D1-328",
+"slice": "WS01-S13.code",
+"kind": "follow-up",
+"text": "Pass 2 proof is not yet scripted end to end: zdr-live-turn.spec.ts only expects the typed refusal, and zdr-live-proof.sh has no phase asserting zdr appears in /api/v1/models; both are needed before pass 2 can run."
+},
+{
+"id": "D1-336",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "The purge verifies only the rows it is about to delete, linked to the newest signed checkpoint. It does not check that the head or the newest attested sequence still agree with the retained suffix, so a tampered retained row is caught only by S4's verifier, not by purge."
+},
+{
+"id": "D1-337",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Attestations are never pruned and the attestor writes one per head change per org. On a hot org that is a row per interval at most. S4 or S9 should decide a retention rule (keep the newest per day) before the table grows."
+},
+{
+"id": "D1-338",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "The purge detects a tampered prefix but does not alert on it: there is no purge, incident or attestation metric (internal/metrics is not owned here), and S4 owns the rules. Add audit_core_chain_purge_blocked_total and an incident-count alert, or the incident table is only visible by querying it."
+},
+{
+"id": "D1-339",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Replicas each run Attest and Purge. Attest is idempotent via ON CONFLICT DO NOTHING. A purge that loses the advisory lock skips that org until the next daily sweep, so a purger that stalls leaves expired rows for a day."
+},
+{
+"id": "D1-340",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Checkpoint signatures cover created_at at microsecond precision, written by the Go side and stored verbatim. S4's verifier and the offline audit-verify CLI must format it with chain.SignedTimeLayout in UTC or every checkpoint will look invalid."
+},
+{
+"id": "D1-342",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "No purge, incident or attestation metrics or alerts exist (internal/metrics is not owned here). Blocked purges are visible only in logs and in audit_chain_incidents. S4 should add audit_core_chain_purge_blocked_total and an incident alert, and a blocked org writes a new incident row on every daily sweep."
+},
+{
+"id": "D1-343",
+"slice": "WS06-S3",
+"kind": "risk",
+"text": "Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day."
+},
+{
+"id": "D1-346",
+"slice": "WS06-S4",
+"kind": "follow-up",
+"text": "S5 must emit the export format audit-verify defines (field names in the cmd/audit-verify doc comment) and define a signed manifest payload; the CLI treats the manifest head as an unsigned claim."
+},
+{
+"id": "D1-347",
+"slice": "WS06-S4",
+"kind": "risk",
+"text": "After a restore of audit tables from a copy, the saved verifier cursor can exceed the restored head and the next incremental pass reports a false head_behind_chain break. The runbook (S9) must say to delete the org's audit_chain_verifications row, or the loop should treat a cursor above the head as a reset."
+},
+{
+"id": "D1-365",
+"slice": "WS02-S8.code",
+"kind": "risk",
+"text": "Write share will read 0.0% on OpenAI-API routes if the provider reports no cache-creation count, so it is not evidence of writes until a pinned route reports one."
+},
+{
+"id": "D1-368",
+"slice": "WS02-S8.code",
+"kind": "risk",
+"text": "The capture token needs cost:org:read for the eval organisation, and cost-core's accepted audience may differ from the model-gateway token that drive mints; verify before the live run."
+},
+{
+"id": "D1-375",
+"slice": "WS01-S14.code",
+"kind": "follow-up",
+"text": "The ZDR lapse alerts ZdrAttestationReviewDue and ZdrAttestationLapsed and the inference-core :8082 scrape job are not written (D1-139, D1-143), so a lapse is visible only in logs and the gauge."
+},
+{
+"id": "D1-382",
+"slice": "WS06-S5",
+"kind": "follow-up",
+"text": "Deploy ordering and grant: nothing grants audit:compliance:read:self yet (compose and run-control-plane.sh are shared files), so the API is unreachable until the lead edits the credential block, and the audit-core image must be live before that block ships."
+},
+{
+"id": "D1-383",
+"slice": "WS06-S5",
+"kind": "risk",
+"text": "cmd/audit-verify cannot verify a sub-range export: it treats manifest last_seq as the head and reports truncated_below_attestation when the range stops before the newest attestation; it needs a range mode and it does not check the manifest signature yet."
+},
+{
+"id": "D1-384",
+"slice": "WS06-S5",
+"kind": "follow-up",
+"text": "Needed before switching on: add KeyRing.SignPayload(payload) and VerifyPayload(keyID, payload, sig) in internal/chain/sign.go (nil-safe through CanSign, so a typed-nil ring yields ErrNoSigningKey and an unsigned manifest) and add the compliance scope to the gateway credential block; otherwise the API is unreachable and unsigned."
+},
+{
+"id": "D1-385",
+"slice": "WS06-S5",
+"kind": "risk",
+"text": "cmd/audit-verify treats manifest last_seq as the head and does not verify the manifest signature or support a sub-range export, so only a full-range export currently verifies offline; add a range mode before relying on sub-range exports as evidence."
+},
+{
+"id": "D1-386",
+"slice": "WS06-S5",
+"kind": "test-gap",
+"text": "The SQL in internal/store/compliance.go (MIN/MAX(chain_seq) by ingested_at range resolution, keyset paging with chain_seq > $2, thinning filters with ($n = '' OR col = $n), manifest ends, key listing) is unexecuted; it mirrors the verify.go query pattern (chainRowColumns + scanChainRow) and reads correctly, but must be proven on the DB harness before enabling."
+},
+{
+"id": "D1-390",
+"slice": "WS06-S6",
+"kind": "risk",
+"text": "The audit-core compliance routes are scoped by the audit:compliance:read:self credential in the compose block. The gateway sends the standard verevon-gateway v3 delegation, so the live proof must confirm that scope is granted to the gateway principal; I could not check the compose block from this slice."
+},
+{
+"id": "D1-399",
+"slice": "WS06-S8",
+"kind": "follow-up",
+"text": "Before AUDIT_SIEM_EXPORT_ENABLED is switched on for any org, the S2 details guard must move from observe to enforce (or the golden content-free check run on live rows): the exporter ships `details` exactly as stored, so a producer that puts content in details would leave the database for a customer SIEM."
+},
+{
+"id": "D1-401",
+"slice": "WS06-S8",
+"kind": "follow-up",
+"text": "Before AUDIT_SIEM_EXPORT_ENABLED is turned on for any org, the S2 details guard must be enforcing or the export-content-free golden check must run on live rows, because the exporter ships `details` exactly as stored."
+},
+{
+"id": "D1-408",
+"slice": "WS06-S8",
+"kind": "follow-up",
+"text": "Before AUDIT_SIEM_EXPORT_ENABLED is switched on for any org, the S2 details guard must move from observe to enforce (or the golden content-free check run on live rows): the exporter ships `details` exactly as stored, so a producer that puts content in details would leave the database for a customer SIEM."
+},
+{
+"id": "D1-410",
+"slice": "WS06-S8",
+"kind": "follow-up",
+"text": "Before AUDIT_SIEM_EXPORT_ENABLED is turned on for any org, the S2 details guard must be enforcing or the export-content-free golden check must run on live rows, because the exporter ships `details` exactly as stored."
+},
+{
+"id": "D1-418",
+"slice": "WS04-S3",
+"kind": "risk",
+"text": "Core NATS is at-most-once and the owner enqueues before it replies: a reply lost twice (original and the one retry) gives a 503 although the message may be queued on the owner and, the persist step being skipped, is never recorded; the client may resend it and the run could read it twice. WS04-S6 (client_message_id, persist-then-enqueue) is what closes this; do not flip the switch for production before it."
+},
+{
+"id": "D1-426",
+"slice": "WS06-S9",
+"kind": "risk",
+"text": "A head marked broken has no repair path: chain.go:132 is the only writer of state 'broken', no code path sets it back to 'ok', and a broken org gets no new attestations and no purge. An owner decision and a repair procedure are needed before the chain is switched on."
+},
+{
+"id": "D1-427",
+"slice": "WS06-S9",
+"kind": "risk",
+"text": "No key-rotation command exists. run-control-plane.sh mints the audit-chain pair only when a value is missing and persist_if_missing never overwrites (lines 126-131, 217-228), so rotation is a manual secret-store change; a half-present ledger yields a mismatched pair that stops boot when the chain or pruning is on."
+},
+{
+"id": "D1-428",
+"slice": "WS06-S9",
+"kind": "risk",
+"text": "The details guard only counts oversize and denied keys (chain.go:30-38 and 332-335) and never rejects. The SIEM export sends details to customer endpoints, so content a producer puts in details reaches the customer's SIEM and is kept for the retention window. Decide enforce or observe before AUDIT_SIEM_EXPORT_ENABLED is switched on in any environment."
+},
+{
+"id": "D1-444",
+"slice": "WS02-S9",
+"kind": "risk",
+"text": "Before INFERENCE_ANTHROPIC_TIERED_SYSTEM is switched on, check that cache writes are not paid each turn for a Context tier that changes often; the plan says S2 baseline decides ship."
+},
+{
+"id": "D1-445",
+"slice": "WS02-S9",
+"kind": "follow-up",
+"text": "The gateway inline chat path sends no plan until sse.rs renders with render_tiered and run_tool_rounds_for_model carries the plan; today only the Do loop (execution-core) can benefit."
+},
+{
+"id": "D1-446",
+"slice": "WS02-S9",
+"kind": "follow-up",
+"text": "The gateway half of the row is not wired: tool_loop.rs sends prompt_tiers: None because run_tool_rounds_for_model's only caller is in sse.rs (not owned), so the inline chat path gets no tiered blocks until sse.rs renders with render_tiered and passes TieredPrompt::plan() through a new trailing parameter; only the Do loop benefits today."
+},
+{
+"id": "D1-454",
+"slice": "WS10-S1",
+"kind": "risk",
+"text": "Clients that matched the old untyped 400 for an ALLOWED_MODELS refusal (grep of http.ts and the BFF gateway was not done; http.ts is not owned) will now see 403 with a nested error object; check before the model-gateway image ships."
+},
+{
+"id": "D1-462",
+"slice": "WS04-S6",
+"kind": "risk",
+"text": "The SPA now sends idempotency_key on every ordinary send whatever the gateway switch says, which activates the in-memory idempotency guard for the product (duplicate_in_flight, invalid_idempotency_key and a fail-closed 1,024-entry cap per replica, idempotency_registry.rs MAX_ENTRIES); the plan specifies it, but the 'switch off is byte-identical' claim does not hold for the stream path, so measure the in-flight claim count before this ships."
+},
+{
+"id": "D1-463",
+"slice": "WS04-S6",
+"kind": "risk",
+"text": "Peer-replica queue stores a message before it knows the stream's conversation_only scope (the probe reply carries only the thread): the first store is a guess retried once on FAILED_PRECONDITION; run_control.rs's Probe reply should carry conversation_only so the guess can go."
+},
+{
+"id": "D1-464",
+"slice": "WS04-S6",
+"kind": "risk",
+"text": "Persist-first leaves a stored row when the queue then refuses (429 Full, a bus 503): the message sits in the transcript undelivered; a resend with the same id dedupes, but a user who rewrites the text gets a second row; decide whether a refused or unavailable queue should be recorded as withdrawn (needs the WS17 marker) or accepted as is."
+},
+{
+"id": "D1-465",
+"slice": "WS04-S6",
+"kind": "risk",
+"text": "The end-of-run resend fires only on the live stream's done frame; if the queued_input delivery frame is lost (dropped connection, resume path, another tab) a delivered message is sent again as a new turn: one transcript row (same id) but a second answer."
+},
+{
+"id": "D1-466",
+"slice": "WS04-S6",
+"kind": "follow-up",
+"text": "Switch-on needs the sse_events payload golden, its .sha256 pins, the SPA vendored copy and the zdr-contract-sync digest regenerated, plus the tool_loop.rs and sse.rs call-ins (lead_todo); until then the new frame and the stream-path receipts do not exist."
+},
+{
+"id": "D1-467",
+"slice": "WS04-S6",
+"kind": "follow-up",
+"text": "Switch-on is blocked until the golden and pins, the sse.rs and tool_loop.rs call-ins and the compose default-off line land; until then the new delivery frame and the stream-path receipts do not exist."
+},
+{
+"id": "D1-471",
+"slice": "WS10-S3",
+"kind": "risk",
+"text": "Under MODEL_ENTITLEMENT_MODE=off GetModelAccess answers 'not enforced' and refuses draft/include_catalogue as model_entitlement_unavailable (nothing is resolved with the switch off), so the WS10-S5 ZDR write guard cannot evaluate a draft until inference-core runs shadow or enforce; S5 must treat that as its documented 503 fail-closed or the lead must decide that admin draft checks may resolve while off."
+},
+{
+"id": "D1-473",
+"slice": "WS10-S3",
+"kind": "follow-up",
+"text": "The infer-statuses.json golden changed (two kinds, a PERMISSION_DENIED code, trailer x-mp-entitlement-reason on the model_not_entitled case); the sha pin and the two Data Plane vendored copies must be updated and their status decoders checked for unknown kinds, and trailer_keys in the golden does not yet list x-mp-entitlement-reason."
+},
+{
+"id": "D1-474",
+"slice": "WS10-S3",
+"kind": "risk",
+"text": "Prompt-cache hits are rechecked against model_used/provider_used, but a provider that is unspecified-default per candidate is judged on the effective model after request_for; a policy that names a Verevon intent id in allow/deny is never matched against it (intent ids pass as unspecified), so org-core validation should reject or ignore verevon-* entries."
+},
+{
+"id": "D1-475",
+"slice": "WS10-S3",
+"kind": "risk",
+"text": "Entitlement is not applied to inference-core's non-chat RPCs or to CreateEmbedding (chat only per D5); revisit if the policy should cover vision/image models used for chat-like analysis."
+},
+{
+"id": "D1-477",
+"slice": "WS10-S3",
+"kind": "risk",
+"text": "A policy entry naming a verevon-* intent id is never matched, because intent ids pass as unspecified; an Auto request is judged only on the concrete model the intent layer resolves, and resolve_intent does not exclude denied models, so Auto can end in no_entitled_route even when an allowed model exists. This is acceptable for the plan row but needs an explicit live-proof case for flow (d), and org-core should reject verevon-* entries."
+},
+{
+"id": "D1-478",
+"slice": "WS10-S3",
+"kind": "risk",
+"text": "Mode::parse treats an unknown value as enforce, as the plan row says, which departs from the repository's only-literal-true switch pattern; with enforce and no usable ORG_CORE_URL or token, every user chat call and ListModels refuses. The warn log at boot is the only signal, so the deploy must set both values before enforce."
+},
+{
+"id": "D1-481",
+"slice": "WS04-S7",
+"kind": "risk",
+"text": "The Pending claim lasts 120 s with no heartbeat, as the local registry's PENDING_TTL does. A stream running longer than 120 s lets a duplicate start a second run on another replica; renew the claim on a timer in the owner before the flip."
+},
+{
+"id": "D1-482",
+"slice": "WS04-S7",
+"kind": "risk",
+"text": "A duplicate arriving before the original has buffered a frame, with the run-control bus off, gets the error that names the original instead of attaching, because resume_stream_for finds no buffer and no live producer. Decide whether to buffer `connected` before the claim returns or to require the bus for the switch."
+},
+{
+"id": "D1-483",
+"slice": "WS04-S7",
+"kind": "risk",
+"text": "The stream path never commits to the local registry, so today a completed key is free again; with the switch on, the shared claim stays Done for 600 s and a later same-key send (a regenerate that reuses the key) attaches to the old answer instead of running, so confirm the SPA never reuses a key for regenerate or edited resubmit before the flip."
+},
+{
+"id": "D1-490",
+"slice": "WS10-S5",
+"kind": "risk",
+"text": "The guard takes attested model ids from GET /v1/models as the acting admin, which S4 filters by that admin's own stored policy. A model the admin currently cannot see but the draft would allow is not counted as attested, so the guard can refuse a legitimate ZDR policy (the safe direction). It needs an unfiltered attested set, for example an attested flag on ModelAccessEntry."
+},
+{
+"id": "D1-491",
+"slice": "WS10-S5",
+"kind": "risk",
+"text": "The guard sends min_privacy_tier as org-core's lower-case label (global, eu_resident, zdr_contractual, sovereign), but the proto field is the PrivacyTier enum. S4's JSON-to-proto mapping must accept the labels."
+},
+{
+"id": "D1-498",
+"slice": "WS10-S4",
+"kind": "risk",
+"text": "Gateway admission fails open on a non-typed GetModelAccess error, so under enforce a refused turn can still create thread/message/run rows before inference-core's PEP refuses it; decide whether enforce should fail closed at the gateway once the mode is exposed in the answer."
+},
+{
+"id": "D1-499",
+"slice": "WS10-S4",
+"kind": "risk",
+"text": "The effort clamp is not applied on the agentic path (RunAgentRequest to execution-core), so a capped role can still run a deep agent loop; the ceiling must reach execution-core before max_effort is promised."
+},
+{
+"id": "D1-500",
+"slice": "WS10-S4",
+"kind": "follow-up",
+"text": "Typed execution-core run failure is unbuilt (needs agent.rs and subscription_refusal.rs); until then an entitlement refusal in a governed run ends as the generic graceful reply."
+},
+{
+"id": "D1-501",
+"slice": "WS10-S4",
+"kind": "follow-up",
+"text": "Typed execution-core run failure for model_not_entitled / model_entitlement_unavailable is unbuilt (needs agent.rs and subscription_refusal.rs, not owned); pin it with the existing contract test wire when the lead does the shared edit."
+},
+{
+"id": "D1-507",
+"slice": "WS08-S2.code",
+"kind": "risk",
+"text": "CHAT_SANDBOX_ATTACHMENTS_ENABLED=true makes the policy accept kind:\"file\" and publish modes.sandbox_files, but no consumer exists until WS08-S5. A file would validate and then be ignored by the stream, so the switch must not be turned on before S5."
+},
+{
+"id": "D1-508",
+"slice": "WS08-S2.code",
+"kind": "risk",
+"text": "An image attachment given as a hosted `url` with no bytes still passes validation (size counted as 0) and is fetched by inference-core's AnalyzeImage as before. The policy declares no URL allowlist, so the owner should decide whether URL images stay allowed."
+},
+{
+"id": "D1-517",
+"slice": "WS10-S6",
+"kind": "follow-up",
+"text": "Wire the sidebar: CoreSidebar.tsx must read the BFF `enabled` flag and pass { modelAccessEnabled } to applyDemoModeNavGate, otherwise the Model access tab stays hidden although the /settings/model-access route works by URL."
+},
+{
+"id": "D1-518",
+"slice": "WS10-S6",
+"kind": "risk",
+"text": "Verify /api/v1/models through the Frontend gateway (domains/chat/json_handlers.rs list_models) passes the model-gateway `entitlement` sibling field through unchanged; the SPA reads it from there and without it no reconcile happens (fail-open in the UI, server still enforces)."
+},
+{
+"id": "D1-519",
+"slice": "WS10-S6",
+"kind": "follow-up",
+"text": "CoreSidebar.tsx does not yet pass the BFF `enabled` flag to applyDemoModeNavGate, so the Modelltilgang nav item stays hidden even with the admin switch on. The section is reachable only by URL until the lead wires it (shared-edit)."
+},
+{
+"id": "D1-526",
+"slice": "WS07-S1",
+"kind": "follow-up",
+"text": "Org policy is not wired: resolve passes OrgMemoryPolicy::Allow, so org_disabled and policy_unavailable are decided and tested in the table but never produced; WS07-S4 must supply the mirror value and make resolve fail closed when the mirror is stale."
+},
+{
+"id": "D1-527",
+"slice": "WS07-S1",
+"kind": "risk",
+"text": "capability-core /api/v1/memory writes agent_memory by direct SQL in the shared DB and bypasses this gate until WS07-S5; the writer source-scan only covers session-core dreaming.rs, so that writer and the operator memory_dedup CLI (which retires rows but never creates content) are outside the guarantee."
+},
+{
+"id": "D1-530",
+"slice": "WS07-S1",
+"kind": "follow-up",
+"text": "Org policy is not wired: resolve and resolve_in_tx hard-code OrgMemoryPolicy::Allow, so org_disabled and policy_unavailable exist only in the decision table; WS07-S4 must supply the mirror and fail closed on staleness."
+},
+{
+"id": "D1-531",
+"slice": "WS07-S1",
+"kind": "risk",
+"text": "capability-core /api/v1/memory writes agent_memory by direct SQL and bypasses the gate until WS07-S5; every_agent_memory_writer_calls_the_gate scans only session-core dreaming.rs and grpc.rs, so that writer and the memory-dedup CLI are outside the guarantee."
+},
+{
+"id": "D1-534",
+"slice": "WS08-S3.code",
+"kind": "risk",
+"text": "prost-generated pb::InferRequest derives Debug and would print image bytes if any caller logs a request with {:?}; the internal ImagePart redacts, the wire type does not. No grep for such a log was done."
+},
+{
+"id": "D1-535",
+"slice": "WS08-S3.code",
+"kind": "follow-up",
+"text": "vision_unsupported is not yet in the committed status contract golden, the gateway refusal catalogue or its trailer reader; a gateway reading the trailer treats it as an unknown FAILED_PRECONDITION until WS08-S4 and the golden regeneration land."
+},
+{
+"id": "D1-536",
+"slice": "WS08-S3.code",
+"kind": "follow-up",
+"text": "Gateway side is not wired: the model-gateway refusal catalogue, trailer reader and sse-event-taxonomy do not know kind vision_unsupported, so it reads as an unknown FAILED_PRECONDITION; WS08-S4 must map it before any caller sets image_parts."
+},
+{
+"id": "D1-543",
+"slice": "WS03-S8",
+"kind": "risk",
+"text": "Nothing writes the executor markers on round folds yet, so with SESSION_CORE_CRASH_PARK_ENABLED on the worker refuses every fold as route_unrecorded; the executor must write parks-so-far (a resumed run's count too, or the park cap is bypassed), route model, connection id and child ceiling on round folds of run_parkable loops only, and never on an approval continuation or client/MCP-tool run, or crash-park holds runs nothing can resume for the 24 h TTL."
+},
+{
+"id": "D1-544",
+"slice": "WS03-S8",
+"kind": "risk",
+"text": "Zombie loop: a loop silent for more than the 15 min deadline plus the 15 min grace is crash parked and can then be continued while still alive; its later fold save goes stale and the writer fails but the loop keeps going (read-only calls, final answer), so two loops can answer one run; the thread watermark only catches an answer already appended, so the executor must stop a run_parkable loop at its first stale/closed save before any further inference, append or receipt."
+},
+{
+"id": "D1-545",
+"slice": "WS03-S8",
+"kind": "risk",
+"text": "No UI or button resumes a park, so with crash park on a dead run is now held up to SESSION_CORE_PARK_TTL_SECONDS (default 86400) with no thread explanation instead of ending outcome_unknown at about 15 min; the owner has to decide the TTL (or a fixed notice) before flip (4)."
+},
+{
+"id": "D1-548",
+"slice": "WS03-S8",
+"kind": "risk",
+"text": "The thread_watermark stamp lives in fold extensions and is carried forward by any resume that clones the fold, so a later executor-written park fold (credential window, provider exhausted) on a crash-resumed run keeps the old stamp; claim() keys its thread re-check on the stamp alone, so it would close that legitimate park when the thread has moved since, ending the run outcome_unknown. Strip the key when the executor writes a park fold, or key the claim re-check on park_reason crash_interrupted, before the switch is flipped."
+},
+{
+"id": "D1-549",
+"slice": "WS03-S8",
+"kind": "risk",
+"text": "Executor markers are not written on round folds, so with SESSION_CORE_CRASH_PARK_ENABLED on every fold is refused route_unrecorded; the executor must write the four park keys (including a resumed run's park count) on run_parkable round folds only, never on approval continuations or client/MCP-tool runs."
+},
+{
+"id": "D1-552",
+"slice": "WS07-S2",
+"kind": "risk",
+"text": "Reset only reaches semantic copies whose ids exist in agent_memory; Letta-only memories that ListMemory still shows survive a Reset, so S3's 'Reset all memory' button should list the semantic tier and delete those ids or say so."
+},
+{
+"id": "D1-553",
+"slice": "WS07-S2",
+"kind": "follow-up",
+"text": "The model-gateway route for ResetMemory (POST /v1/memories/reset) and the gateway action memory.reset are S3 work; no caller reaches this RPC until then. Any new MemoryService mock added before then needs the reset_memory stub too."
+},
+{
+"id": "D1-561",
+"slice": "WS07-S5",
+"kind": "risk",
+"text": "capability-core now mints its session-core token with session:memory-controls:read; if Auth Core's loaded principal registry does not yet grant it, minting fails for ALL session-core calls (learning review transcript read and skill upsert, schedule-prepare), so the principals reload must precede the capability-core rebuild."
+},
+{
+"id": "D1-562",
+"slice": "WS07-S5",
+"kind": "risk",
+"text": "session-core get_memory_controls still requires memory:read from service callers, so the proxy gate fails closed (503) on every verb until that call accepts session:memory-controls:read; the proxy has no known callers, but the gate cannot be switched on live before this."
+},
+{
+"id": "D1-570",
+"slice": "WS07-S6",
+"kind": "risk",
+"text": "Switching a thread from off back to inherit does not move any watermark. Dreaming only filters on user_memory_controls.extract_after, so messages written while the thread was off can be mined after it resumes. This differs from the user-level resume, which bumps extract_after. A per-thread resume timestamp (for example threads.memory_mode_changed_at) is needed before the toggle is switched on for users."
+},
+{
+"id": "D1-571",
+"slice": "WS07-S6",
+"kind": "follow-up",
+"text": "ThreadSummary and the context-assembly response do not expose memory_mode. Without it the chat header toggle cannot show the current state; it needs tags that WS17 does not hold (ThreadSummary 16-19 are reserved) and an integrator decision."
+},
+{
+"id": "D1-572",
+"slice": "WS07-S6",
+"kind": "follow-up",
+"text": "The gateway HTTP body (http_routes.rs), the Frontend gateway route, the action contract and the chat-header toggle beside the persona toggle are not built. They are outside the owned files and are needed before users can set the mode."
+},
+{
+"id": "D1-573",
+"slice": "WS07-S6",
+"kind": "follow-up",
+"text": "learning_events.rs enqueue and memory_grpc.rs search_memory and IndexMemory still use user-level resolve. A run on a thread set off can still be announced to the skill-learning loop, and SearchMemory still returns user rows for it. Both must move to resolve_for_thread; IndexMemory also needs to resolve the thread."
+},
+{
+"id": "D1-574",
+"slice": "WS07-S6",
+"kind": "follow-up",
+"text": "memory_grpc.rs search_memory (line ~381) and IndexMemory (lines ~501 and ~522) and learning_events.rs (line ~334) still call the user-level memory_control::resolve. A thread set off therefore still gets user rows from SearchMemory and can still be announced to the learning loop. They must move to resolve_for_thread before the toggle goes live. These files are outside this slice's ownership."
+},
+{
+"id": "D1-575",
+"slice": "WS07-S6",
+"kind": "follow-up",
+"text": "The gateway HTTP body in http_routes.rs, the Frontend gateway route and action contract, the chat-header toggle, and exposing memory_mode on ThreadSummary or the context response are all unbuilt. Users cannot set or see the mode until they exist."
+},
+{
+"id": "D1-579",
+"slice": "WS08-S7",
+"kind": "risk",
+"text": "Before the cap is raised above today's 1 MB and 3 MiB total, the client composer (attachment-policy.ts constants) and the model-gateway declared policy must both move to the raised numbers; the handoff and body hops now follow max_total_bytes, but evaluateAttachment still hard-codes its own limits when no policy is loaded."
+},
+{
+"id": "D1-580",
+"slice": "WS08-S7",
+"kind": "risk",
+"text": "Until use-chat-controller.ts switches to consumePendingChatLaunchAsync, reloading after a launch with attachments loses the launch (the draft is already cleared). Apply the controller edit before this lands in a shared build."
+},
+{
+"id": "D1-590",
+"slice": "WS10-S7.code",
+"kind": "risk",
+"text": "Under --expect refused the proof asserts zero rows in session-core, but the gateway admission (WS10-S4) fails open on a non-typed GetModelAccess error (D1-498), so a refused member turn may legitimately leave thread/message/run rows until S4 is hardened; the proof will fail honestly in that case and the failure is the finding."
+},
+{
+"id": "D1-597",
+"slice": "WS07-S4",
+"kind": "risk",
+"text": "memory_grpc.rs (not owned) still reports org_learning_policy as an empty string in GetMemoryControls; it should report the mirrored learning mode so the UI and WS02 can show org-level learning state."
+},
+{
+"id": "D1-600",
+"slice": "WS07-S4",
+"kind": "follow-up",
+"text": "Learning review itself is not yet gated by the org opt-in beyond run announcement: capability-core's sessionreview consumer and skill sink (WS07-S7) must read GetMemoryControls before any transcript read; until then LEARNING_REVIEW_ENABLED must stay off for orgs that have not opted in."
+},
+{
+"id": "D1-601",
+"slice": "WS07-S4",
+"kind": "risk",
+"text": "Deviation from the plan row: there is no pull-through at the gate, so the poller is the only refresher. With ORG_POLICY_FAIL_CLOSED=true, a brand-new org (or one the poller has not reached) is Unavailable, which refuses memory and learning, for up to ORG_POLICY_POLL_SECS. The poller is also sequential over every org with a thread, so large fleets lengthen staleness. Decide this before production turns fail-closed on."
+},
+{
+"id": "D1-602",
+"slice": "WS07-S4",
+"kind": "risk",
+"text": "ORG_POLICY_FAIL_CLOSED=true with SESSION_ORG_CORE_SERVICE_TOKEN unset (or the org-core scope not yet granted) refuses memory for every org. The code logs an ERROR once, but the rollout order (org-core scope, then token, then fail-closed) must be enforced by the lead."
+},
+{
+"id": "D1-606",
+"slice": "WS08-S5",
+"kind": "risk",
+"text": "Until sse.rs calls run_tool_rounds_for_model_with_attachments, turning CHAT_SANDBOX_ATTACHMENTS_ENABLED on makes AttachmentPolicy accept kind:file attachments that nothing stages: files would be silently dropped. Keep the switch off until the sse.rs shared edit is in."
+},
+{
+"id": "D1-608",
+"slice": "WS08-S5",
+"kind": "test-gap",
+"text": "Persistent Space roots: staging reuses StagedInputs there and removes the directory afterwards, but no test covers a persistent root, and the assumption that the reserved name attachments is free in Space workspaces (WS22 exclusion, WS19 skills) is unverified."
+},
+{
+"id": "D1-609",
+"slice": "WS08-S5",
+"kind": "risk",
+"text": "Persistent Space roots: StagedInputs::stage calls remove_staged_dir(root/attachments), whose set_mode(dir, 0o755) follows symlinks. A program in an earlier call of the same run can plant attachments as a symlink to a host path, and the next staging call chmods the target as the execution-core user (the existing program-file write has the same symlink-following exposure). Before enabling staging for Space-bound turns, check symlink_metadata and unlink a non-directory entry without chmod. The same function also deletes a legitimate Space file or directory named attachments (reserved-name assumption, no test)."
+},
+{
+"id": "D1-610",
+"slice": "WS08-S5",
+"kind": "risk",
+"text": "CHAT_SANDBOX_ATTACHMENTS_ENABLED is read by sandbox_staging_enabled() but nothing calls it yet (sse.rs pending), while attachment_policy.rs already publishes modes.sandbox_files from the same variable, so the FE would send file bytes that the server drops. The switch must stay off until the sse.rs hand-off lands."
+},
+{
+"id": "D1-616",
+"slice": "WS07-S7",
+"kind": "follow-up",
+"text": "learning/reviewer.go ParseReviewJSON does not read the reason field yet, so every proposal is stored with an empty proposal_reason until the lead applies the parser edit."
+},
+{
+"id": "D1-617",
+"slice": "WS07-S7",
+"kind": "follow-up",
+"text": "capability-core main.go must pass sessionreview.WithMemoryControls(memoryClient) or the consumer's pre-read gate is off (the session-core announcement gate and the upsert gate still hold, but the transcript read and the paid review run before the upsert refuses)."
+},
+{
+"id": "D1-619",
+"slice": "WS07-S7",
+"kind": "risk",
+"text": "Migration 0058 drops agent_skills_org_name_uq: an older session-core cannot run its ON CONFLICT (org_id, name) over this schema, so rollback needs the revert file together with the image rollback; capability-core's new SELECT also fails until 0058 has applied, so deploy session-core first."
+},
+{
+"id": "D1-620",
+"slice": "WS07-S7",
+"kind": "risk",
+"text": "There is no accept or reject path yet (S8 DecideSkillProposal): proposals stay disabled and unusable until S8 lands, and the gateway cache can lag an owner's later decision by up to SKILL_CACHE_TTL_SECONDS (60 s default)."
+},
+{
+"id": "D1-621",
+"slice": "WS07-S7",
+"kind": "follow-up",
+"text": "learning/reviewer.go ParseReviewJSON does not read reason. The parser is not strict about unknown fields, so the prompt and schema asking for reason do not break parsing. Proposals just carry an empty proposal_reason until the lead applies the 3-line edit handed back in lead_todo."
+},
+{
+"id": "D1-625",
+"slice": "WS07-S3",
+"kind": "follow-up",
+"text": "model-access.ts rows and the admission golden for memory.set_state, memory.reset and memory.remember are not in the tree yet (lead wiring); until then typecheck and the admission-contract test fail."
+},
+{
+"id": "D1-626",
+"slice": "WS07-S3",
+"kind": "follow-up",
+"text": "Until the lead adds the model-access.ts rows and regenerates the admission golden, the frontend suite is red (11 tests) and typecheck fails; the tree must not be committed without that wiring, as in c2853992d."
+},
+{
+"id": "D1-634",
+"slice": "WS08-S4.code",
+"kind": "risk",
+"text": "The client gate is a build-time VITE switch that mirrors the server switch. If the two drift, either images are blocked that the diversion would serve, or images reach a server that falls back to AnalyzeImage. A server-declared attachment_policy.modes.vision_as_parts in /v1/models (http_routes.rs, WS10 shares it) would remove the drift."
+},
+{
+"id": "D1-635",
+"slice": "WS08-S4.code",
+"kind": "risk",
+"text": "The vision route check uses the unfiltered inference-core ListModels. It does not apply the org's model-access policy or the user's picked provider, so a vision model the org cannot use can make a Verevon mode look image-capable. inference-core's server-side vision_unsupported refusal is the safety net."
+},
+{
+"id": "D1-636",
+"slice": "WS08-S4.code",
+"kind": "risk",
+"text": "route_reads_images uses the unfiltered inference-core ListModels. It ignores org model-access policy and the user's provider pick, so a Verevon mode can look image-capable when the org cannot use any vision model. inference-core's vision_unsupported refusal is the only safety net and would fail the turn instead of falling back to the diversion."
+},
+{
+"id": "D1-642",
+"slice": "WS07-S8",
+"kind": "test-gap",
+"text": "None of the Rust code of this slice (grpc.rs service, helpers, gdpr.rs, nine tests) has been type-checked or run, because mp-orchestration does not compile in the shared tree (another slice's orchestration.proto change); a first compile may surface errors."
+},
+{
+"id": "D1-643",
+"slice": "WS07-S8",
+"kind": "follow-up",
+"text": "gdpr.rs only has the org purge, so skill_revisions and the S7 owner-scoped agent_skills rows are erased with the organization but there is no per-user erasure; a user-level erasure path must delete agent_skills, then skill_revisions, by owner_user_id (the revision text is a copy of the skill text)."
+},
+{
+"id": "D1-644",
+"slice": "WS07-S8",
+"kind": "follow-up",
+"text": "A learned memory on the ledger cannot be undone through UndoLearningEntry (it returns memory_undo_via_delete); S9 must route its Undo button for kind=memory to DeleteMemory, and restoring a superseded memory (supersedes_id) is not built."
+},
+{
+"id": "D1-645",
+"slice": "WS07-S8",
+"kind": "risk",
+"text": "Until capability-core is rebuilt and deployed with this change, registry edits log as actor_kind 'unattributed'; a second writer added later that sets no settings also logs as 'unattributed', so S10's governance script should count unattributed revisions as a failure."
+},
+{
+"id": "D1-647",
+"slice": "WS07-S8",
+"kind": "risk",
+"text": "Until capability-core is redeployed, and for any later writer that sets no mp.* settings, revisions are logged as actor_kind 'unattributed'; S10's governance script should fail on unattributed revisions."
+},
+{
+"id": "D1-651",
+"slice": "WS08-S6",
+"kind": "risk",
+"text": "Subagent children share the parent's run_id and runtime_loop/mod.rs `run_inputs::global().get(org_id, run_id)` hands them the parent's attached files in code_interpreter; plan requires no inheritance. Needs a shared-edit in mod.rs (pass depth or a root-only flag to the lookup)."
+},
+{
+"id": "D1-652",
+"slice": "WS08-S6",
+"kind": "risk",
+"text": "Do runs that await approval or park return from run_agent, so the RunInputs guard drops and the files are gone on the continuation segment or in-place resume, while the restored messages still hold the sandbox note saying attachments/ exists; plan v1 wants a typed attachments_expired signal instead. Images are likewise not re-sent after a resume."
+},
+{
+"id": "D1-653",
+"slice": "WS08-S6",
+"kind": "risk",
+"text": "RunInputs TTL is 15 minutes (run_inputs.rs, not owned) and is swept on the next registration, so a Do run longer than 15 minutes can lose its files mid-run; TTL should be refreshed or derived from the run deadline."
+},
+{
+"id": "D1-654",
+"slice": "WS08-S6",
+"kind": "follow-up",
+"text": "Server-declared gate missing: attachment_policy.rs needs modes.do_attachments (and chat-client.ts parseAttachmentPolicy the field) so the FE can read it from /v1/models instead of the build-time VITE_CHAT_DO_ATTACHMENTS_ENABLED; compose pass-through for CHAT_DO_ATTACHMENTS_ENABLED is also not added (deploy/docker-compose.yml not owned)."
+},
+{
+"id": "D1-655",
+"slice": "WS08-S6",
+"kind": "risk",
+"text": "Subagent children still inherit the attached FILES. A child is built with `req: parent.req` and the parent's run_id, and `runtime_loop/mod.rs:893` calls `run_inputs::global().get(org_id, run_id)` with no depth check, so a child's code_interpreter reads `attachments/`. The plan says children do not inherit attachments. The test `children_do_not_inherit_attachments` covers only images and the note. The fix is a shared edit in mod.rs: pass depth or a root-only flag into the lookup, and add a test where a child code_interpreter step sees no files. Must land before the switch is turned on."
+},
+{
+"id": "D1-656",
+"slice": "WS08-S6",
+"kind": "risk",
+"text": "A parked, resumed or continuation Do run loses its files, because the RunInputs guard lives only inside the run_agent call. The restored messages still hold the sandbox note saying `attachments/` exists, and images are not re-sent (`image_parts` is empty on the restored and parked paths). The plan wants a typed `attachments_expired` refusal or signal instead of a silent mismatch."
+},
+{
+"id": "D0-016",
+"slice": "WS10-S6",
+"kind": "follow-up",
+"text": "The Model access settings tab is unreachable from the sidebar: `CoreSidebar.tsx` must read the BFF `enabled` flag (`getModelEntitlement(orgId)`, admins only) and pass `{ modelAccessEnabled }` to `applyDemoModeNavGate`, and `CoreSidebarSettingsPanels.tsx` needs the Modelltilgang entry under the same flag; the route `/settings/model-access` itself works by URL. The picker notice uses an inline style (`.verevon-ai-model-picker__notice` has no rule). The Playwright spec `model-entitlement.spec.ts` is written and unrun (second Vite dev server on 5174)."
+},
+{
+"id": "D1-041",
+"slice": "WS10-S2, WS06-S7",
+"kind": "follow-up",
+"text": "The Control Plane compose now requires `INFERENCE_ORG_CORE_SERVICE_TOKEN` and `AUDIT_ORG_CORE_SERVICE_TOKEN` (`:?required`): the Control Plane secret generation must mint them before org-core is recreated, and org-core's image must be rebuilt first (an image that predates the new scopes refuses the whole credential registry). D1-040 is resolved: the package aborted because the compose registry lacked the new principals; with them `go test ./internal/http/` passes."
+}
+]

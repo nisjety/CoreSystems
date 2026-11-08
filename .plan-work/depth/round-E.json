@@ -1,0 +1,43 @@
+{
+ "packets": [
+  {
+   "key": "capcore-cron-sweeper-errors-and-savepoints",
+   "rows": ["D1-756"],
+   "title": "capability-core: the cron sweeper reports the statement that failed, and one failing fire no longer rolls back or blocks the whole batch",
+   "brief": "Context: apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go, Sweeper.RunOnce and fireOne. Found 2026-10-26 by the round-D packet for D1-755 and confirmed by the lead's integration runs: (1) every tx.Exec in the fire path discards its error with `_, _ =` (about lines 139, 145, 155-156, 161, 258-259, 263-264), so when a statement fails the transaction is aborted silently, the later statements fail with SQLSTATE 25P02, and RunOnce reports only 'commit unexpectedly resulted in rollback' (about lines 166-168); the statement that failed first is never logged or returned. (2) rows.Err() is never checked after the due-rows scan loop (about lines 120-129), so a streaming failure yields a short batch with no error. (3) All due schedules (LIMIT 100) share one transaction, so one failing fire rolls back every schedule in the batch, and because the failed schedule stays due and is ordered first (ORDER BY next_fire_at NULLS FIRST), it rolls back the whole sweep on every tick: one bad schedule stops every cron fire in the deployment, with nothing in the log but the rollback.\n\nDo, keeping the sweeper's contract (WS20-S1 'truthful fire status', the fire_key write that TestFireRowCarriesFireKey asserts, the authorizer call, the order of statements for a successful fire): (a) check every tx.Exec error in the fire path; (b) check rows.Err() after the scan loop and return it; (c) run each schedule's fire inside its own savepoint (pgx: tx.Begin(ctx) on a pgx.Tx opens a SAVEPOINT; roll it back on any error in that fire), so a failing fire undoes only its own statements and the other schedules of the batch still fire and commit; (d) log a failed fire once with the schedule id, the org id and the error, and no template or task content (zero data retention: the template can hold user text), and count it in the existing failure metric if there is one (do not invent a new metric family without need). Leave a failed schedule due so it is retried on the next tick, unless the existing code already has a failed-fire status path you can use without changing its meaning (report what you chose and why). RunOnce returns the number of fires that committed; decide whether it also returns an error when some fires failed but others committed, keep its callers' handling correct (grep its callers), and document the choice in the function comment.\n\nRegression tests: unit-level where the existing cron tests can (look at how sweeper_test.go / TestFireRowCarriesFireKey fake the database and reuse that), and one integration-tagged test (build tag integration, testcontainers postgres:16-alpine like internal/taskexec/workflow_dispatcher_template_digest_integration_test.go, with the scratch schema of the three tables including fire_key) in which one of two due schedules fails its fire (for example its tasks INSERT violates a constraint you add to the scratch schema for that row only) and the other still fires and commits, and the failure's error is reported. Both must fail on today's code. You cannot run docker: make the integration test compile (go vet -tags integration ./internal/cron/) and list it under db_tests; the lead runs it.\n\nMust NOT change: the SQL of a successful fire beyond error checks, the authorizer contract, the batch size, any migration, any other package.",
+   "files": [
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go"
+   ],
+   "new_files": [
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper_failure_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper_failure_integration_test.go"
+   ],
+   "tests": [
+    "go build ./...",
+    "go vet ./...",
+    "go vet -tags integration ./internal/cron/",
+    "go test -count=1 ./internal/cron/ ./internal/taskexec/"
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "high"
+  },
+  {
+   "key": "capcore-tool-policies-allow-needs-digest",
+   "rows": ["D1-757"],
+   "title": "capability-core: tool_policies refuses an allow row without a pinned digest",
+   "brief": "Context: migrations/0017_tool_policies.up.sql (WS05-S5) declares pinned_digest TEXT (nullable) and CONSTRAINT tool_policies_allow_digest_check CHECK (decision <> 'allow' OR pinned_digest ~ '^[0-9a-f]{64}$'). When pinned_digest is NULL the regex test is NULL, and Postgres accepts a CHECK that evaluates to NULL, so an allow row with no digest is stored. The digest pin is what keeps an allow from carrying over to a changed tool (a rug pull), so the database must refuse it. Measured by the lead 2026-10-26 (go test -tags integration, testcontainers): TestToolPoliciesAgainstPostgres/the_table_refuses_what_the_API_never_writes fails at internal/api/tool_policies_integration_test.go:310 with 'the table accepted INSERT INTO tool_policies (... 'user','user-alice','c','allow','a')'. It is the only failure left in capability-core's integration suite.\n\nDo: add migration 0025 (name it clearly, for example 0025_tool_policies_allow_needs_digest.up.sql and .down.sql beside it, the up-down layout the other capability-core migrations use). 0017 is applied on live databases, so do not edit it. The migration lint scripts/tests/migration-expand-contract-test.sh (run it: bash scripts/tests/migration-expand-contract-test.sh from apps/Model Plane) treats capability-core migrations from 0017 on as additive-only: DROP, RENAME, TRUNCATE, DELETE FROM, ALTER COLUMN TYPE and SET NOT NULL need a `-- contract: <what>` marker and a revert file. Prefer an additive shape: first make any existing offending rows harmless (an allow row with no digest can never be honoured; UPDATE it to revoked_at = now() if revoked_at is NULL, which the unique active index allows, and say so in a comment), then ADD CONSTRAINT tool_policies_allow_digest_present_check CHECK (decision <> 'allow' OR pinned_digest IS NOT NULL). The down migration drops that constraint (a down file may DROP). Check how the policy read path treats pinned_digest (internal/policy, internal/api tool_policies handlers, COALESCE(pinned_digest, '') uses) and confirm the API never writes an allow without a digest; if it can, report it under needs_other_files instead of changing the handler.\n\nRegression: the existing integration subtest above is the regression (it fails today and must pass after 0025). Also run the expand-contract lint and the migration_reserved_words_test (internal/skillbundle) so the new file passes both. You cannot run docker: list TestToolPoliciesAgainstPostgres under db_tests; the lead runs it.\n\nMust NOT change: 0017, the API, the other constraints.",
+   "files": [],
+   "new_files": [
+    "apps/Model Plane/go/services/capability-core/migrations/0025_tool_policies_allow_needs_digest.up.sql",
+    "apps/Model Plane/go/services/capability-core/migrations/0025_tool_policies_allow_needs_digest.down.sql"
+   ],
+   "tests": [
+    "go vet -tags integration ./internal/api/",
+    "go test -count=1 ./internal/skillbundle/ ./internal/api/ ./internal/policy/",
+    "bash \"../../../scripts/tests/migration-expand-contract-test.sh\""
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "medium"
+  }
+ ]
+}

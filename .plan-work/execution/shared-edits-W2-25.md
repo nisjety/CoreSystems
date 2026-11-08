@@ -1,0 +1,27 @@
+## WS23-S5.code
+shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: in invoke_stream_sse, on the sink chain that starts at `let sink = crate::sse_events::RichEventSink::staging_artifacts(` (about line 3079), add after `        .with_timing(timing.clone())`: `        .with_connector_turn(crate::tool_loop::connector_reads::ConnectorTurn::new(connector_ids.clone(), retrieval_scope.is_auto() && !conversation_only))`. connector_ids (about line 1403) is moved only in the early agentic return (about line 2232), so it is still in scope here; if the borrow checker objects, clone it at that return. Without this line CONNECTOR_ASK_READS_ENABLED changes nothing, because no selection reaches the Ask loop.
+
+## WS23-S5.code
+shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment (the service starts at line 191), after the line `      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}` (about line 740), add at six-space indent: `      CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}` and `      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}`.
+
+## WS24-S4
+shared-edit apps/Model Plane/go/services/capability-core/internal/api/availability.go: (1) inside var genericGlobalHealthCapabilityIDs, directly after the line with one tab then "cap.workspace.read":  {}, (two spaces before {}), add one tab then "cap.workspace.write": {}, (one space before {}). (2) Documentation the allowlist's own rule asks for: directly after the comment line `//       not offer the tools cannot report that it does.` insert these six comment lines, with the blank `//` first. Each line starts with //: `//`, then `//   cap.workspace.write` followed by 22 spaces and `the WS24-S4 per-run overlay write tools`, then `//       (`workspace_edit`, `workspace_put`) change the run's own copy of the Space`, then `//       tree, and no other run sees the change. Added 2026-10-29. The reporter`, then `//       attests it only while WORKSPACE_TOOLS is `all` and the stores are configured,`, then `//       so an instance that does not offer the writes cannot report that it does.`. Keep the file's CRLF endings.
+
+## WS24-S4
+shared-edit apps/Model Plane/go/services/capability-core/internal/api/availability_test.go: in TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes, inside the want map, directly after the line with two tabs then "cap.workspace.read":     {}, (5 spaces before {}), add two tabs then "cap.workspace.write":    {}, (4 spaces before {}). Keep the file's CRLF endings. Land this together with the availability.go edit above: alone, either the Go exact-set test or the Rust allowlist test fails.
+
+## WS17-S9
+shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in pub const FEATURES (line 215), after the connector_read entry (lines 336-339), add Feature { key: "message_versions", label: "message versions" }. Then MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal to regenerate apps/Model Plane/api/contracts/zdr-refusals.json and its .sha256; re-vendor both into apps/Frontend Plane/verevonv3/src/shared/api/contracts/; update the digest pin for apps/Model Plane/api/contracts/zdr-refusals.json in scripts/tests/zdr-contract-sync.test.sh (line 109) and run that script. Then cargo test -q -p model-gateway --test zdr_feature_table must report 10 passed (now 8 passed, 2 failed).
+
+## WS17-S9
+shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs, stream turn near the prepare_managed_run_authenticated_with_receipt call (about line 2007; carried from the previous report, unchanged): (a) when crate::normalize::version_turn(&req) is Some and !crate::http_routes::message_versions_enabled(), refuse 503 history_versions_disabled; (b) call crate::session_flow::move_active_leaf(&state, &org_id, thread_id, &turn, &model_bearer) and map its Err with crate::http_routes::branch_thread_error; (c) take the goal from VersionMove.goal when Some; (d) start the run with crate::session_flow::prepare_version_run_authenticated(&state, thread_id, &org_id, &user_id, goal, &turn, &managed_start_key, &model_bearer) in place of prepare_managed_run_authenticated_with_receipt. Remove the normalize_with stream guard (history_versions_unavailable) and update the_streaming_endpoint_refuses_a_version_turn_until_it_moves_branches.
+
+## WS17-S9
+shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: ChatTurn add version?: ChatMessageVersion (import the type from chat-client). Needed for the switcher and for turn.version; also add regenerateOfMessageId?/editOfMessageId? to SendOptions if the ServerVersionTarget intersection is to go.
+
+## WS17-S9
+shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts: messageToTurn (line 78) carries the message's version: ...(msg.version ? { version: msg.version } : {}). Without it the server version never reaches a turn.
+
+## WS17-S9
+shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (about lines 320 and 958), per turn: serverVersion = serverVersionBadge(turn.version); onSwitchServerVersion = id => switchChatVersion(threadId, id, index, activeLeafId(turns)) followed by a reload; rewindHiddenTurns = rewindPlan(turns, id)?.hiddenTurns; onRewind = () => rewindChatThread(threadId, id, plan.expectedLeafMessageId) followed by a reload.
+

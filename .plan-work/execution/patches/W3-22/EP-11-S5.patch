@@ -1,0 +1,3529 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs
+index cd9524396..7ac0a8b3f 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
+@@ -51,6 +51,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/skills/{skill_id}/versions",
+             get(list_skill_versions),
+         )
++        // EP-11 S5: a skill's draft, published, discarded or restored from an old version.
++        // capability-core mounts these only while SKILL_DRAFT_PUBLISH is on and answers 404
++        // otherwise; the authority here is update_skill's.
++        .route("/api/v1/skills/{skill_id}/publish", post(publish_skill))
++        .route(
++            "/api/v1/skills/{skill_id}/draft",
++            axum::routing::delete(discard_skill_draft),
++        )
++        .route(
++            "/api/v1/skills/{skill_id}/versions/{version}/restore",
++            post(restore_skill_version),
++        )
+         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
+         .route(
+             "/api/v1/plugins/{plugin_id}",
+@@ -464,6 +476,92 @@ async fn delete_skill(
+     .into_response()
+ }
+ 
++/// One draft call on one skill (EP-11 S5), proxied to model-gateway `/v1/skills/{id}/{action}` with
++/// `update_skill`'s authority: an admin on any skill; a member only on a private skill of their own,
++/// and only while `SKILL_MEMBER_AUTHORING` is on. capability-core checks owner-or-admin again and
++/// takes the org from the verified capability token; no body is forwarded.
++async fn proxy_skill_draft_call(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    headers: &HeaderMap,
++    skill_id: &str,
++    action: &str,
++    method: Method,
++) -> axum::response::Response {
++    let admin = can_author_skills(state, user).await;
++    if !admin && !skill_member_authoring_enabled() {
++        return (
++            StatusCode::FORBIDDEN,
++            Json(error(
++                "forbidden",
++                "Only organization admins can edit skills.",
++            )),
++        )
++            .into_response();
++    }
++    let token = shared::model_token(state, user, headers).await;
++    let capability = match shared::required_capability_token(state, user, headers).await {
++        Ok(token) => token,
++        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
++    };
++    if !admin {
++        if let Err(refusal) =
++            member_owns_skill(state, user, token.as_deref(), &capability, skill_id).await
++        {
++            return refusal.into_response();
++        }
++    }
++    let url = format!(
++        "{}/v1/skills/{}/{}",
++        state.model_gateway_url,
++        urlencoding::encode(skill_id),
++        action
++    );
++    shared::proxy_model_json_with_capability(
++        state,
++        method,
++        &url,
++        None,
++        token.as_deref(),
++        Some(&capability),
++        user,
++    )
++    .await
++    .into_response()
++}
++
++/// Publish a skill's draft: it becomes the live text and a new version (EP-11 S5).
++async fn publish_skill(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(skill_id): Path<String>,
++) -> impl IntoResponse {
++    proxy_skill_draft_call(&state, &user, &headers, &skill_id, "publish", Method::POST).await
++}
++
++/// Discard a skill's draft; the live text stays (EP-11 S5).
++async fn discard_skill_draft(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(skill_id): Path<String>,
++) -> impl IntoResponse {
++    proxy_skill_draft_call(&state, &user, &headers, &skill_id, "draft", Method::DELETE).await
++}
++
++/// Restore an old version of a skill as its draft (EP-11 S5). The version is a number by the
++/// route's own type, so nothing but digits reaches the upstream path.
++async fn restore_skill_version(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path((skill_id, version)): Path<(String, u32)>,
++) -> impl IntoResponse {
++    let action = format!("versions/{version}/restore");
++    proxy_skill_draft_call(&state, &user, &headers, &skill_id, &action, Method::POST).await
++}
++
+ /// List the org's plugin packages (open to members so the UI can show them).
+ async fn list_plugins(
+     State(state): State<AppState>,
+@@ -2584,6 +2682,73 @@ mod tests {
+         assert_ne!(status, axum::http::StatusCode::OK);
+     }
+ 
++    /// EP-11 S5: a member publishes a draft of their own private skill while the member switch is on.
++    #[tokio::test]
++    async fn member_publishes_own_private_skill_when_switch_on() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        Mock::given(wm_method("POST"))
++            .and(wm_path("/v1/skills/skill_1/publish"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1", "version": 3})))
++            .mount(&servers.2)
++            .await;
++        let (status, body) =
++            skill_request(&servers, "POST", "/api/v1/skills/skill_1/publish", None, Some("true")).await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert_eq!(body["version"], 3);
++        assert_eq!(skill_calls(&servers.2, "POST", "/v1/skills/skill_1/publish").await.len(), 1);
++    }
++
++    /// EP-11 S5: an org skill's draft stays an admin's to publish, discard or restore.
++    #[tokio::test]
++    async fn member_cannot_publish_discard_or_restore_an_org_skill() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "org", "").await;
++        for (method, uri, upstream) in [
++            ("POST", "/api/v1/skills/skill_1/publish", "/v1/skills/skill_1/publish"),
++            ("DELETE", "/api/v1/skills/skill_1/draft", "/v1/skills/skill_1/draft"),
++            (
++                "POST",
++                "/api/v1/skills/skill_1/versions/2/restore",
++                "/v1/skills/skill_1/versions/2/restore",
++            ),
++        ] {
++            let (status, body) = skill_request(&servers, method, uri, None, Some("true")).await;
++            assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{method} {uri}");
++            assert_eq!(body["error"]["code"], "forbidden");
++            assert!(skill_calls(&servers.2, method, upstream).await.is_empty());
++        }
++    }
++
++    /// EP-11 S5: an admin restores a version as a draft and discards a draft; the version number
++    /// is the only thing the path carries upstream.
++    #[tokio::test]
++    async fn admin_restores_and_discards_a_skill_draft() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("owner", "org", "").await;
++        Mock::given(wm_method("POST"))
++            .and(wm_path("/v1/skills/skill_1/versions/2/restore"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1", "draft": true})))
++            .mount(&servers.2)
++            .await;
++        Mock::given(wm_method("DELETE"))
++            .and(wm_path("/v1/skills/skill_1/draft"))
++            .respond_with(ResponseTemplate::new(204))
++            .mount(&servers.2)
++            .await;
++        let (status, body) =
++            skill_request(&servers, "POST", "/api/v1/skills/skill_1/versions/2/restore", None, None).await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert_eq!(body["draft"], true);
++        let (status, _) = skill_request(&servers, "DELETE", "/api/v1/skills/skill_1/draft", None, None).await;
++        assert!(status.is_success(), "{status}");
++        assert_eq!(skill_calls(&servers.2, "DELETE", "/v1/skills/skill_1/draft").await.len(), 1);
++        let (status, _) =
++            skill_request(&servers, "POST", "/api/v1/skills/skill_1/versions/latest/restore", None, None).await;
++        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
++        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
++    }
++
+     /// EP-11 S2: a member reads a skill's history through the gateway; only the paging parameters
+     /// pass, so a caller cannot name an org or a user upstream.
+     #[tokio::test]
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.drafts.test.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.drafts.test.tsx
+new file mode 100644
+index 000000000..a539028ab
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.drafts.test.tsx	
+@@ -0,0 +1,134 @@
++// @vitest-environment jsdom
++
++// EP-11 S5: a skill's draft shows a badge with Publish and Discard draft, and the history offers
++// "Restore as draft", only while the server's listing says drafts are on. Off, the page is as before.
++
++import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/shared/session/session-store', () => ({
++  getSession: () => ({
++    status: 'authenticated',
++    user: { id: 'user-1' },
++    activeOrg: { id: 'org-1', name: 'Test', role: 'owner' },
++    permissions: [],
++  }),
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return {
++    ...actual,
++    listSkills: vi.fn(),
++    listSkillVersions: vi.fn(),
++    memberSkillAuthoring: vi.fn(async () => false),
++    publishSkillDraft: vi.fn(async () => ({ id: 'skill-1', version: 4, published: true })),
++    discardSkillDraft: vi.fn(async () => undefined),
++    restoreSkillVersion: vi.fn(async () => ({ id: 'skill-1', draft: true, restored_from: 1, bundle_restored: false })),
++  }
++})
++
++import {
++  discardSkillDraft,
++  listSkills,
++  listSkillVersions,
++  publishSkillDraft,
++  restoreSkillVersion,
++  type Skill,
++  type SkillVersion,
++} from '@/shared/api/skills-client'
++import { SkillsSection } from './SkillsSection'
++
++const mockedList = vi.mocked(listSkills)
++const mockedVersions = vi.mocked(listSkillVersions)
++
++function skill(overrides: Partial<Skill> = {}): Skill {
++  return {
++    id: 'skill-1',
++    org_id: 'org-1',
++    name: 'Utrulling',
++    description: '',
++    content: 'step one',
++    trigger_keywords: [],
++    trigger_file_patterns: [],
++    tool_restrictions: [],
++    enabled: true,
++    scope: 'org',
++    review_state: 'accepted',
++    version: 3,
++    digest: '3'.repeat(64),
++    ...overrides,
++  }
++}
++
++function version(n: number): SkillVersion {
++  return {
++    version: n,
++    digest: String(n).repeat(64),
++    name: 'Utrulling',
++    description: '',
++    content: `step ${n}`,
++    trigger_keywords: [],
++    trigger_file_patterns: [],
++    tool_restrictions: [],
++    actor_kind: 'user',
++    actor_id: 'user-1',
++    created_at: '2026-11-05T10:00:00Z',
++  }
++}
++
++afterEach(() => {
++  cleanup()
++  vi.clearAllMocks()
++})
++
++describe('SkillsSection drafts', () => {
++  it('shows_draft_badge_and_publishes_it', async () => {
++    mockedList.mockResolvedValue({ skills: [skill({ draft: { content: 'step four' } })], drafts_enabled: true })
++    const { findByText, getByRole } = render(() => <SkillsSection />)
++    expect(await findByText(/^(Utkast|Draft)$/)).toBeTruthy()
++    fireEvent.click(getByRole('button', { name: /Publiser utkastet til Utrulling|Publish the draft of Utrulling/ }))
++    await waitFor(() => expect(publishSkillDraft).toHaveBeenCalledWith('org-1', 'skill-1'))
++    await waitFor(() => expect(mockedList).toHaveBeenCalledTimes(2))
++  })
++
++  it('discards_a_draft_after_confirming', async () => {
++    mockedList.mockResolvedValue({ skills: [skill({ draft: { content: 'step four' } })], drafts_enabled: true })
++    vi.spyOn(window, 'confirm').mockReturnValue(true)
++    const { findByRole } = render(() => <SkillsSection />)
++    fireEvent.click(await findByRole('button', { name: /Forkast utkastet til Utrulling|Discard the draft of Utrulling/ }))
++    await waitFor(() => expect(discardSkillDraft).toHaveBeenCalledWith('org-1', 'skill-1'))
++  })
++
++  it('hides_draft_controls_while_drafts_are_off', async () => {
++    // A stale draft field without the listing's switch is not shown: off means as before.
++    mockedList.mockResolvedValue({ skills: [skill({ draft: { content: 'step four' } })] })
++    const { findByText, queryByText, queryByRole } = render(() => <SkillsSection />)
++    expect(await findByText('v3')).toBeTruthy()
++    expect(queryByText(/^(Utkast|Draft)$/)).toBeNull()
++    expect(queryByRole('button', { name: /Publiser utkastet|Publish the draft/ })).toBeNull()
++  })
++
++  it('history_offers_restore_as_draft_for_older_versions', async () => {
++    mockedList.mockResolvedValue({ skills: [skill()], drafts_enabled: true })
++    mockedVersions.mockResolvedValue({ versions: [version(3), version(2), version(1)], has_more: false })
++    const { findByRole, findAllByRole } = render(() => <SkillsSection />)
++    fireEvent.click(await findByRole('button', { name: /Historikk for Utrulling|History of Utrulling/ }))
++    const restores = await findAllByRole('button', { name: /Gjenopprett v\d+ som utkast|Restore v\d+ as a draft/ })
++    // The live version is not offered: restoring it would change nothing.
++    expect(restores).toHaveLength(2)
++    fireEvent.click(await findByRole('button', { name: /Gjenopprett v1 som utkast|Restore v1 as a draft/ }))
++    await waitFor(() => expect(restoreSkillVersion).toHaveBeenCalledWith('org-1', 'skill-1', 1))
++  })
++
++  it('history_stays_read_only_while_drafts_are_off', async () => {
++    mockedList.mockResolvedValue({ skills: [skill()] })
++    mockedVersions.mockResolvedValue({ versions: [version(3), version(2)], has_more: false })
++    const { findByRole } = render(() => <SkillsSection />)
++    fireEvent.click(await findByRole('button', { name: /Historikk for Utrulling|History of Utrulling/ }))
++    const dialog = await findByRole('dialog')
++    await waitFor(() => expect(dialog.textContent).toContain('v2'))
++    expect(dialog.querySelectorAll('button')).toHaveLength(1)
++    expect(restoreSkillVersion).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx
+index a1303b803..31b185a9d 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
+@@ -5,9 +5,12 @@ import { createResource } from '@/shared/lib/create-resource-compat'
+ import {
+   createSkill,
+   deleteSkill,
++  discardSkillDraft,
+   listSkills,
+   listSkillVersions,
+   memberSkillAuthoring,
++  publishSkillDraft,
++  restoreSkillVersion,
+   updateSkill,
+   type Skill,
+   type SkillVersion,
+@@ -90,12 +93,28 @@ export function diffSkillLines(previous: string, current: string): SkillDiffLine
+ }
+ 
+ /**
+- * The read-only history of one skill (EP-11 S2): every immutable version, newest first, with its
+- * date, who cut it, a short digest and what changed in its text since the version before. Nothing
+- * here edits or restores; a version is never changed.
++ * The history of one skill (EP-11 S2): every immutable version, newest first, with its date, who
++ * cut it, a short digest and what changed in its text since the version before. A version is never
++ * changed. With `onRestore` (EP-11 S5, drafts on and the viewer may change the skill) each older
++ * version offers "Restore as draft": its text fills the draft, and nothing is live until published.
+  */
+-function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () => void }) {
++function SkillHistoryDrawer(props: {
++  orgId: string
++  skill: Skill
++  onClose: () => void
++  onRestore?: (version: number) => Promise<void>
++}) {
+   const i18n = useI18n()
++  const [restoring, setRestoring] = createSignal<number | null>(null)
++  const restore = async (version: number) => {
++    if (!props.onRestore || restoring() !== null) return
++    setRestoring(version)
++    try {
++      await props.onRestore(version)
++    } finally {
++      setRestoring(null)
++    }
++  }
+   const [history] = createResource(
+     () => props.skill.id,
+     (skillId) => listSkillVersions(props.orgId, skillId),
+@@ -175,6 +194,20 @@ function SkillHistoryDrawer(props: { orgId: string; skill: Skill; onClose: () =>
+                         <span class="verevon-trust-chip">v{version.version}</span>{' '}
+                         {new Date(version.created_at).toLocaleString()} · {actorLabel(version)}{' '}
+                         <code title={version.digest}>{version.digest.slice(0, 12)}</code>
++                        <Show when={props.onRestore && version.version !== props.skill.version}>
++                          {' '}
++                          <SettingsButton
++                            settingsSize="sm"
++                            disabled={restoring() !== null}
++                            onClick={() => void restore(version.version)}
++                            aria-label={i18n.tr(
++                              `Gjenopprett v${version.version} som utkast`,
++                              `Restore v${version.version} as a draft`,
++                            )}
++                          >
++                            {i18n.tr('Gjenopprett som utkast', 'Restore as draft')}
++                          </SettingsButton>
++                        </Show>
+                       </p>
+                       <Show
+                         when={older()}
+@@ -238,9 +271,16 @@ export function SkillsSection() {
+   )
+   const [authoredEditor, setAuthoredEditor] = createSignal<AuthoredKind | null>(null)
+ 
++  // EP-11 S5: the server says in the listing whether edits go through a draft; off, nothing here
++  // shows a draft, a publish or a restore.
++  const [draftsEnabled, setDraftsEnabled] = createSignal(false)
+   const [skills, { refetch }] = createResource(
+     () => orgId() || undefined,
+-    (id) => listSkills(id).then((result) => result.skills),
++    (id) =>
++      listSkills(id).then((result) => {
++        setDraftsEnabled(result.drafts_enabled === true)
++        return result.skills
++      }),
+   )
+ 
+   const [name, setName] = createSignal('')
+@@ -254,6 +294,7 @@ export function SkillsSection() {
+   // version history is on, so with it off nothing here shows and nothing asks.
+   const [historySkill, setHistorySkill] = createSignal<Skill | null>(null)
+   const hasVersion = (skill: Skill): boolean => typeof skill.version === 'number' && skill.version > 0
++  const hasDraft = (skill: Skill): boolean => draftsEnabled() && skill.draft != null
+   const [formError, setFormError] = createSignal<string | null>(null)
+   const [actionError, setActionError] = createSignal<string | null>(null)
+   // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
+@@ -414,6 +455,66 @@ export function SkillsSection() {
+     }
+   }
+ 
++  // EP-11 S5: publishing makes the draft the live text and a new version; the server lints it first.
++  const handlePublish = async (skill: Skill) => {
++    const id = orgId()
++    if (!id || busySkillId()) return
++    setBusySkillId(skill.id)
++    setActionError(null)
++    try {
++      await publishSkillDraft(id, skill.id)
++      await refetch()
++    } catch (err) {
++      setActionError(
++        describeActionError(err, { no: 'Kunne ikke publisere utkastet.', en: 'Could not publish the draft.' }),
++      )
++    } finally {
++      setBusySkillId(null)
++    }
++  }
++
++  const handleDiscardDraft = async (skill: Skill) => {
++    const id = orgId()
++    if (!id || busySkillId()) return
++    if (
++      typeof window !== 'undefined' &&
++      !window.confirm(i18n.tr(`Forkaste utkastet til «${skill.name}»?`, `Discard the draft of “${skill.name}”?`))
++    ) {
++      return
++    }
++    setBusySkillId(skill.id)
++    setActionError(null)
++    try {
++      await discardSkillDraft(id, skill.id)
++      await refetch()
++    } catch (err) {
++      setActionError(
++        translateApiError(err, i18n.tr, { no: 'Kunne ikke forkaste utkastet.', en: 'Could not discard the draft.' }),
++      )
++    } finally {
++      setBusySkillId(null)
++    }
++  }
++
++  // A restore fills the draft only; the history closes so the row shows the draft to publish.
++  const handleRestore = async (skill: Skill, version: number) => {
++    const id = orgId()
++    if (!id) return
++    setActionError(null)
++    try {
++      await restoreSkillVersion(id, skill.id, version)
++      setHistorySkill(null)
++      await refetch()
++    } catch (err) {
++      setActionError(
++        translateApiError(err, i18n.tr, {
++          no: 'Kunne ikke gjenopprette versjonen.',
++          en: 'Could not restore the version.',
++        }),
++      )
++    }
++  }
++
+   const handleDelete = async (skill: Skill) => {
+     const id = orgId()
+     if (!id || busySkillId()) return
+@@ -496,6 +597,18 @@ export function SkillsSection() {
+                               {' '}
+                               <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
+                             </Show>
++                            <Show when={hasDraft(skill)}>
++                              {' '}
++                              <span
++                                class="verevon-trust-chip"
++                                title={i18n.tr(
++                                  'Endringer som ikke er publisert. Samtaler bruker fortsatt den publiserte teksten.',
++                                  'Unpublished changes. Conversations still use the published text.',
++                                )}
++                              >
++                                {i18n.tr('Utkast', 'Draft')}
++                              </span>
++                            </Show>
+                             <Show when={hasVersion(skill)}>
+                               {' '}
+                               <span
+@@ -527,6 +640,25 @@ export function SkillsSection() {
+                         </div>
+                         <Show when={canChange(skill)}>
+                           <div>
++                            <Show when={hasDraft(skill)}>
++                              <SettingsButton
++                                settingsSize="sm"
++                                variant="primary"
++                                disabled={busySkillId() === skill.id}
++                                onClick={() => void handlePublish(skill)}
++                                aria-label={i18n.tr(`Publiser utkastet til ${skill.name}`, `Publish the draft of ${skill.name}`)}
++                              >
++                                {i18n.tr('Publiser', 'Publish')}
++                              </SettingsButton>{' '}
++                              <SettingsButton
++                                settingsSize="sm"
++                                disabled={busySkillId() === skill.id}
++                                onClick={() => void handleDiscardDraft(skill)}
++                                aria-label={i18n.tr(`Forkast utkastet til ${skill.name}`, `Discard the draft of ${skill.name}`)}
++                              >
++                                {i18n.tr('Forkast utkast', 'Discard draft')}
++                              </SettingsButton>{' '}
++                            </Show>
+                             <Show when={canPromote(skill)}>
+                               <SettingsButton
+                                 settingsSize="sm"
+@@ -709,7 +841,16 @@ export function SkillsSection() {
+ 
+       <Show when={historySkill()}>
+         {(skill) => (
+-          <SkillHistoryDrawer orgId={orgId()} skill={skill()} onClose={() => setHistorySkill(null)} />
++          <SkillHistoryDrawer
++            orgId={orgId()}
++            skill={skill()}
++            onClose={() => setHistorySkill(null)}
++            onRestore={
++              draftsEnabled() && canChange(skill()) && skill().review_state !== 'proposed'
++                ? (version) => handleRestore(skill(), version)
++                : undefined
++            }
++          />
+         )}
+       </Show>
+ 
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 436d04216..6b500ee7e 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1560,6 +1560,23 @@ describe('action registry', () => {
+     expect(template?.inputSchema.safeParse({ name: '', content: 'x' }).success).toBe(false)
+   })
+ 
++  it('registers the skill draft lifecycle as person-only writes the model cannot execute (EP-11-S5)', () => {
++    for (const id of ['skills.draft.save', 'skills.publish', 'skills.draft.discard', 'skills.version.restore'] as const) {
++      const action = getActionDescriptor(id)
++      expect(action?.ownerPlane).toBe('model')
++      expect(action?.requiresApproval).toBe(false)
++      expect(MODEL_ACCESS[id].access).toBe('none')
++    }
++    const restore = getActionDescriptor('skills.version.restore')
++    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 2 }).success).toBe(true)
++    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 0 }).success).toBe(false)
++    expect(restore?.inputSchema.safeParse({ skillId: 'sk-1', version: 1.5 }).success).toBe(false)
++    const save = getActionDescriptor('skills.draft.save')
++    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'Nye steg' }).success).toBe(true)
++    expect(save?.inputSchema.safeParse({ skillId: 'sk-1', content: 'x'.repeat(32_001) }).success).toBe(false)
++    expect(getActionDescriptor('skills.publish')?.outputSchema.safeParse({ id: 'sk-1', version: 3, published: true }).success).toBe(true)
++  })
++
+   it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
+     const save = getActionDescriptor('skills.save_from_message')
+     expect(save?.ownerPlane).toBe('model')
+@@ -1634,7 +1651,8 @@ describe('action registry', () => {
+     // +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.
+     // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.
+     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+-    expect(ids).toHaveLength(310)
++    // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
++    expect(ids).toHaveLength(314)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 870776776..23cb4f718 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -763,6 +763,37 @@ const skillsVersionsListOutput = z.object({
+   has_more: z.boolean(),
+ })
+ 
++// A skill's draft (EP-11 S5): saved over the live text without changing it, then published as a
++// new version, discarded, or filled from an old version. Owner-or-admin is the server's rule; nothing
++// here names an org or a user.
++const skillsDraftSaveInput = z.object({
++  skillId: z.string().min(1).max(200),
++  description: z.string().trim().max(300).optional(),
++  content: z.string().trim().min(1).max(32_000).optional(),
++})
++
++const skillIdInput = z.object({
++  skillId: z.string().min(1).max(200),
++})
++
++const skillsPublishOutput = z.object({
++  id: z.string(),
++  version: z.number().int().min(0),
++  published: z.literal(true),
++})
++
++const skillsVersionRestoreInput = z.object({
++  skillId: z.string().min(1).max(200),
++  version: z.number().int().min(1),
++})
++
++const skillsVersionRestoreOutput = z.object({
++  id: z.string(),
++  draft: z.literal(true),
++  restored_from: z.number().int().min(1),
++  bundle_restored: z.boolean(),
++})
++
+ // Authored templates and presets (EP-11 S6): rows of the skills registry with a kind. A template
+ // is text the composer inserts before the person sends, with `{{input}}` as its only placeholder;
+ // a preset is a closed set of visible controls. The server lints both and binds the owner to the
+@@ -3499,6 +3530,50 @@ export const actionRegistry = [
+     inputSchema: skillsVersionsListInput,
+     outputSchema: skillsVersionsListOutput,
+   },
++  {
++    id: 'skills.draft.save',
++    label: 'Save a skill draft',
++    description: 'Save an edit of a published skill\'s description or text as its draft. Turns keep using the published text until the draft is published, so an edit never changes a running conversation silently. The owner or an org admin may save it; a proposal is still edited directly, because accepting it is its publish. Only while the server\'s drafts are on; off, an edit is live at once as before. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillsDraftSaveInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'skills.publish',
++    label: 'Publish a skill draft',
++    description: 'Make a skill\'s draft its live text. The server cuts a new immutable version, which every new turn uses; a run already under way keeps the version it started with. The draft is linted as the text it makes live. The owner or an org admin may publish. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillIdInput,
++    outputSchema: skillsPublishOutput,
++  },
++  {
++    id: 'skills.draft.discard',
++    label: 'Discard a skill draft',
++    description: 'Throw away a skill\'s unpublished draft. The published text and every version stay as they are. The owner or an org admin may discard it. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: skillIdInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'skills.version.restore',
++    label: 'Restore a skill version as a draft',
++    description: 'Fill a skill\'s draft with the text of one of its earlier versions. Nothing is live until the draft is published, which cuts a new version: a restore never points the skill back at an old version. The old bundle comes back only while the server still keeps it. The owner or an org admin may restore. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillsVersionRestoreInput,
++    outputSchema: skillsVersionRestoreOutput,
++  },
+   {
+     id: 'templates.create',
+     label: 'Create a slash template',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts
+index 00302860f..8acf72bae 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
+@@ -48,6 +48,24 @@ export interface Skill {
+    */
+   version?: number
+   digest?: string
++  /**
++   * EP-11 S5: the skill's unpublished edit, when it has one. Turns keep using the live text until
++   * the draft is published. Present only while the server's draft switch is on.
++   */
++  draft?: SkillDraft | null
++  draft_updated_at?: string
++  draft_by?: string
++}
++
++/** A skill's unpublished edit (EP-11 S5): the same fields as a version body. */
++export interface SkillDraft {
++  name?: string
++  description?: string
++  content?: string
++  trigger_keywords?: string[]
++  trigger_file_patterns?: string[]
++  tool_restrictions?: string[]
++  bundle_sha256?: string
+ }
+ 
+ /** One immutable version of a skill, as the history lists it (EP-11 S2). */
+@@ -81,8 +99,12 @@ export async function listAvailableSkills(signal?: AbortSignal): Promise<Skill[]
+   return (payload?.skills ?? []).filter((skill) => skill && skill.enabled !== false && skill.id?.trim())
+ }
+ 
+-export function listSkills(orgId: string): Promise<{ skills: Skill[] }> {
+-  return requestJson<{ skills: Skill[] }>('/api/v1/skills', {
++/**
++ * The org's skills as the Skills page lists them. `drafts_enabled` (EP-11 S5) is true only while
++ * the server saves edits of published skills as drafts; absent, the page offers no draft controls.
++ */
++export function listSkills(orgId: string): Promise<{ skills: Skill[]; drafts_enabled?: boolean }> {
++  return requestJson<{ skills: Skill[]; drafts_enabled?: boolean }>('/api/v1/skills', {
+     headers: { 'x-verevon-org-id': orgId },
+   })
+ }
+@@ -133,7 +155,11 @@ export function memberSkillAuthoring(): Promise<boolean> {
+   return memberSkillAuthoringAnswer
+ }
+ 
+-/** Update a skill's enabled flag, description, or content. */
++/**
++ * Update a skill's enabled flag, description, or content. While the server's draft switch is on,
++ * a description or content change of an accepted skill is saved as its draft (action
++ * `skills.draft.save`) and the answer carries `draft: true`.
++ */
+ export function updateSkill(
+   orgId: string,
+   skillId: string,
+@@ -168,6 +194,43 @@ export async function listSkillVersions(
+   return { versions: payload?.versions ?? [], has_more: payload?.has_more === true }
+ }
+ 
++/**
++ * Publish a skill's draft: it becomes the live text and a new version (EP-11 S5, action
++ * `skills.publish`). The server answers 404 while drafts are off or when there is no draft.
++ */
++export function publishSkillDraft(
++  orgId: string,
++  skillId: string,
++): Promise<{ id: string; version?: number; published?: boolean }> {
++  return requestJson<{ id: string; version?: number; published?: boolean }>(
++    `/api/v1/skills/${encodeURIComponent(skillId)}/publish`,
++    { method: 'POST', headers: { 'x-verevon-org-id': orgId } },
++  )
++}
++
++/** Discard a skill's draft; the live text stays (EP-11 S5, action `skills.draft.discard`). */
++export function discardSkillDraft(orgId: string, skillId: string): Promise<void> {
++  return requestJson<void>(`/api/v1/skills/${encodeURIComponent(skillId)}/draft`, {
++    method: 'DELETE',
++    headers: { 'x-verevon-org-id': orgId },
++  })
++}
++
++/**
++ * Restore an old version of a skill as its draft (EP-11 S5, action `skills.version.restore`). It
++ * is not live until the draft is published, which cuts a new version.
++ */
++export function restoreSkillVersion(
++  orgId: string,
++  skillId: string,
++  version: number,
++): Promise<{ id: string; draft?: boolean; restored_from?: number; bundle_restored?: boolean }> {
++  return requestJson<{ id: string; draft?: boolean; restored_from?: number; bundle_restored?: boolean }>(
++    `/api/v1/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(String(version))}/restore`,
++    { method: 'POST', headers: { 'x-verevon-org-id': orgId } },
++  )
++}
++
+ export function deleteSkill(orgId: string, skillId: string): Promise<void> {
+   return requestJson<void>(`/api/v1/skills/${encodeURIComponent(skillId)}`, {
+     method: 'DELETE',
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go
+index c2f3a6248..709361e9f 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
+@@ -61,12 +61,28 @@ type SkillsHandler struct {
+ 	// templates and presets beside skills (?kind=, kind and settings in bodies); off, every
+ 	// statement and body is as it was and a template or preset write answers 422.
+ 	authoredKinds bool
++	// draftPublish is SKILL_DRAFT_PUBLISH (EP-11 S5): on, an edit of an accepted skill's text
++	// writes its draft, the publish, discard and restore routes are mounted, and reads carry the
++	// draft; off, every statement, route and body is as it was.
++	draftPublish bool
++	// bundleRetention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, a publish also makes the draft's
++	// bundle live and a skill delete removes the skill's bundles; off, neither touches a bundle.
++	bundleRetention bool
+ }
+ 
+ // NewSkillsHandler constructs the handler.
+ func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
+ 	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
+-		authoredKinds: AuthoredKindsFromLookup(os.Getenv)}
++		authoredKinds: AuthoredKindsFromLookup(os.Getenv), draftPublish: DraftPublishFromLookup(os.Getenv),
++		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv)}
++}
++
++const draftPublishEnv = "SKILL_DRAFT_PUBLISH"
++
++// DraftPublishFromLookup reads SKILL_DRAFT_PUBLISH strictly: only the literal "true" puts edits of
++// accepted skills behind a draft, so a typo or a stray "1" leaves every edit live as before.
++func DraftPublishFromLookup(lookup func(string) string) bool {
++	return lookup(draftPublishEnv) == "true"
+ }
+ 
+ const authoredKindsEnv = "AUTHORED_KINDS_ENABLED"
+@@ -103,6 +119,12 @@ func (h *SkillsHandler) Register(mux *http.ServeMux) {
+ 	if h.versionsAPI {
+ 		mux.HandleFunc("/api/v1/skills/{id}/versions", h.versions)
+ 	}
++	// EP-11 S5: off, these paths fall to the subtree above and answer as before.
++	if h.draftPublish {
++		mux.HandleFunc("/api/v1/skills/{id}/publish", h.publish)
++		mux.HandleFunc("/api/v1/skills/{id}/draft", h.discardDraft)
++		mux.HandleFunc("/api/v1/skills/{id}/versions/{version}/restore", h.restore)
++	}
+ }
+ 
+ type skillRow struct {
+@@ -146,6 +168,14 @@ type skillRow struct {
+ 	// so with it off a body is as it was.
+ 	Kind     string          `json:"kind,omitempty"`
+ 	Settings json.RawMessage `json:"settings,omitempty"`
++
++	// Draft, DraftUpdatedAt and DraftBy (EP-11 S5) are the skill's unpublished edit: the same
++	// fields as a version body, when it was last saved and by whom. Read only (a PATCH writes the
++	// draft, never this field), and read only while SKILL_DRAFT_PUBLISH is on, so with it off a
++	// body is as it was. Absent when the skill has no draft.
++	Draft          json.RawMessage `json:"draft,omitempty"`
++	DraftUpdatedAt *time.Time      `json:"draft_updated_at,omitempty"`
++	DraftBy        string          `json:"draft_by,omitempty"`
+ }
+ 
+ // skillScanTargets are the destinations of a skill read, in the order of the SELECTs in list and
+@@ -162,11 +192,15 @@ func (h *SkillsHandler) skillScanTargets(s *skillRow) []any {
+ 	if h.authoredKinds {
+ 		targets = append(targets, &s.Kind, &s.Settings)
+ 	}
++	if h.draftPublish {
++		targets = append(targets, &s.Draft, &s.DraftUpdatedAt, &s.DraftBy)
++	}
+ 	return targets
+ }
+ 
+ // skillVersionColumns are the columns a skill read adds while the versions API is on, then
+-// kind and settings while authored kinds are on (the order of skillScanTargets).
++// kind and settings while authored kinds are on, then the draft while drafts are on (the order
++// of skillScanTargets).
+ func (h *SkillsHandler) skillVersionColumns() string {
+ 	columns := ""
+ 	if h.versionsAPI {
+@@ -175,6 +209,9 @@ func (h *SkillsHandler) skillVersionColumns() string {
+ 	if h.authoredKinds {
+ 		columns += ", kind, settings"
+ 	}
++	if h.draftPublish {
++		columns += ", draft, draft_updated_at, draft_by"
++	}
+ 	return columns
+ }
+ 
+@@ -483,11 +520,15 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 			}
+ 			skills = append(skills, s)
+ 		}
++		body := map[string]any{"skills": skills}
+ 		if h.authoredKinds {
+-			writeJSON(w, map[string]any{"skills": skills, "kinds_enabled": true})
+-			return
++			body["kinds_enabled"] = true
++		}
++		// EP-11 S5: the Skills page offers draft controls only when the listing says drafts are on.
++		if h.draftPublish {
++			body["drafts_enabled"] = true
+ 		}
+-		writeJSON(w, map[string]any{"skills": skills})
++		writeJSON(w, body)
+ 	case http.MethodPost:
+ 		var s skillRow
+ 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+@@ -747,6 +788,7 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 	lintPatch := h.lintMode != skilllint.ModeOff &&
+ 		(update.Description != "" || update.Content != "" || (update.Enabled != nil && *update.Enabled))
+ 	var lintFindings []skilllint.Finding
++	drafted := false
+ 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+ 		// A user-owned skill changes only for its owner or an admin. The check takes the row
+ 		// lock before the statement below, so the check and the write see the same skill.
+@@ -773,6 +815,27 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 				return errSkillLintRefused
+ 			}
+ 		}
++		// EP-11 S5: an edit of an accepted skill's text goes to its draft while drafts are on, so
++		// turns keep the published version until someone publishes it. enabled and sharing are not
++		// versioned and still apply at once; a proposal is edited live, as before (accepting it is
++		// its publish).
++		if h.draftPublish && (update.Description != "" || update.Content != "" || update.Settings != nil) {
++			var accepted bool
++			if err := tx.QueryRow(r.Context(), acceptedSkillRowSQL, id, orgID).Scan(&accepted); err != nil && !errors.Is(err, pgx.ErrNoRows) {
++				return err
++			}
++			if accepted {
++				var settings any
++				if update.Settings != nil {
++					settings = []byte(update.Settings)
++				}
++				var err error
++				result, err = tx.Exec(r.Context(), draftPatchSQL, enabled, update.Description, update.Content,
++					sharedJSON, now, id, orgID, settings, callerID)
++				drafted = err == nil && result.RowsAffected() == 1
++				return err
++			}
++		}
+ 		var err error
+ 		if h.authoredKinds {
+ 			// Settings change only on a preset: kindRulesForPatch refused any other kind.
+@@ -825,7 +888,11 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+ 		return
+ 	}
+-	writeJSON(w, withLintWarnings(map[string]any{"id": id, "updated_at": now}, lintFindings))
++	body := map[string]any{"id": id, "updated_at": now}
++	if drafted {
++		body["draft"] = true
++	}
++	writeJSON(w, withLintWarnings(body, lintFindings))
+ }
+ 
+ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
+@@ -837,6 +904,11 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
+ 		}
+ 		var err error
+ 		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
++		// EP-11 S5: with retention on the skill's bundles go with it (live, draft and kept ones),
++		// so a deleted skill leaves no files behind (register D2-382).
++		if err == nil && h.bundleRetention && result.RowsAffected() == 1 {
++			err = skillbundle.DeleteSkillBundles(r.Context(), tx, orgID, id)
++		}
+ 		return err
+ 	})
+ 	if errors.Is(err, errSkillNotCallersToChange) {
+@@ -849,6 +921,317 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
+ 	w.WriteHeader(http.StatusNoContent)
+ }
+ 
++// ---------------------------------------------------------------------------
++// Skill drafts  publish, discard, restore (EP-11 S5)
++// ---------------------------------------------------------------------------
++
++// acceptedSkillRowSQL says whether the skill is accepted: only an accepted skill has a draft.
++const acceptedSkillRowSQL = `SELECT review_state = 'accepted' FROM agent_skills WHERE id=$1 AND org_id=$2`
++
++// draftPatchSQL is a PATCH of an accepted skill's text while drafts are on. The text goes into the
++// draft, opened from the live fields (session-core's version body, migrations 0108/0109) when there
++// is none; enabled and sharing apply to the live row. No versioned field changes, so no version is
++// cut. Pinned to session-core's draft test by TestDraftStatementsMatchTheSessionCoreTest.
++const draftPatchSQL = `
++	UPDATE agent_skills
++	SET enabled=COALESCE($1, enabled), shared_with=COALESCE($4, shared_with), updated_at=$5,
++	    draft = COALESCE(draft, agent_skill_version_body(agent_skills))
++	        || CASE WHEN $2 <> '' THEN jsonb_build_object('description', $2::text) ELSE '{}'::jsonb END
++	        || CASE WHEN $3 <> '' THEN jsonb_build_object('content', $3::text) ELSE '{}'::jsonb END
++	        || CASE WHEN $8::jsonb IS NOT NULL THEN jsonb_build_object('settings', $8::jsonb) ELSE '{}'::jsonb END,
++	    draft_updated_at = $5, draft_by = $9
++	WHERE id=$6 AND org_id=$7 AND review_state = 'accepted'
++`
++
++// publishSkillSQL copies the draft into the live fields and clears it in one statement; session-core's
++// trigger then cuts the version (when the digest moved) and the revision log records `edited`. The
++// kind never changes. The bundle digest is copied only with retention on: without it the draft's
++// bundle could not be kept, and the live bundle is the only one there is.
++func publishSkillSQL(withBundle bool) string {
++	bundle := ""
++	if withBundle {
++		bundle = `
++	    bundle_sha256 = COALESCE(draft->>'bundle_sha256', bundle_sha256),`
++	}
++	return `
++	UPDATE agent_skills
++	SET name = COALESCE(draft->>'name', name),
++	    description = COALESCE(draft->>'description', description),
++	    content = COALESCE(draft->>'content', content),
++	    trigger_keywords = COALESCE(draft->'trigger_keywords', trigger_keywords),
++	    trigger_file_patterns = COALESCE(draft->'trigger_file_patterns', trigger_file_patterns),
++	    tool_restrictions = COALESCE(draft->'tool_restrictions', tool_restrictions),
++	    settings = COALESCE(draft->'settings', settings),` + bundle + `
++	    draft = NULL, draft_updated_at = NULL, draft_by = '', updated_at = $3
++	WHERE id = $1 AND org_id = $2 AND review_state = 'accepted' AND draft IS NOT NULL
++	RETURNING version, bundle_sha256
++`
++}
++
++// discardDraftSQL drops the draft; the live row is untouched.
++const discardDraftSQL = `
++	UPDATE agent_skills SET draft = NULL, draft_updated_at = NULL, draft_by = ''
++	WHERE id = $1 AND org_id = $2 AND draft IS NOT NULL
++`
++
++// restoreDraftSQL writes an old version's body ($3) into the draft. Its bundle digest is kept only
++// when $4 says the bundle is still held; otherwise the draft keeps the live one, so publishing a
++// restore never points the skill at files that are gone.
++const restoreDraftSQL = `
++	UPDATE agent_skills
++	SET draft = CASE WHEN $4 THEN $3::jsonb ELSE $3::jsonb || jsonb_build_object('bundle_sha256', bundle_sha256) END,
++	    draft_updated_at = $5, draft_by = $6
++	WHERE id = $1 AND org_id = $2 AND review_state = 'accepted'
++`
++
++// skillDraftBody is a draft or version body as the lint reads it.
++type skillDraftBody struct {
++	Name             string          `json:"name"`
++	Description      string          `json:"description"`
++	Content          string          `json:"content"`
++	TriggerKeywords  []string        `json:"trigger_keywords"`
++	ToolRestrictions []string        `json:"tool_restrictions"`
++	Kind             string          `json:"kind"`
++	Settings         json.RawMessage `json:"settings"`
++	BundleSHA256     string          `json:"bundle_sha256"`
++}
++
++// Draft route refusals; each ends a mutation before its statement and is answered with the typed
++// envelope.
++var (
++	errSkillNotFound        = errors.New("skill_not_found")
++	errSkillNotPublished    = errors.New("skill_not_published")
++	errSkillDraftNotFound   = errors.New("skill_draft_not_found")
++	errSkillVersionNotFound = errors.New("skill_version_not_found")
++	errSkillDraftNameTaken  = errors.New("skill_name_taken")
++	errSkillDraftBundleGone = errors.New("skill_draft_bundle_missing")
++	errSkillDraftUnreadable = errors.New("skill_draft_unreadable")
++)
++
++// writeSkillDraftError answers a draft route's failure with the typed envelope; details is always
++// an object. Each refusal's code is its error text. It reports whether err was answered.
++func writeSkillDraftError(w http.ResponseWriter, err error, findings []skilllint.Finding) bool {
++	refuse := func(status int, refusal error, message string) bool {
++		writeTypedError(w, status, refusal.Error(), message)
++		return true
++	}
++	switch {
++	case err == nil:
++		return false
++	case errors.Is(err, errSkillNotCallersToChange):
++		writeTypedError(w, http.StatusForbidden, "forbidden", err.Error())
++		return true
++	case errors.Is(err, errSkillLintRefused):
++		writeSkillLintRefusal(w, findings)
++		return true
++	case errors.Is(err, errSkillNotFound):
++		return refuse(http.StatusNotFound, errSkillNotFound, "The skill was not found.")
++	case errors.Is(err, errSkillNotPublished):
++		return refuse(http.StatusConflict, errSkillNotPublished, "Only an accepted skill has a draft; decide on the proposal first.")
++	case errors.Is(err, errSkillDraftNotFound):
++		return refuse(http.StatusNotFound, errSkillDraftNotFound, "The skill has no draft.")
++	case errors.Is(err, errSkillVersionNotFound):
++		return refuse(http.StatusNotFound, errSkillVersionNotFound, "The skill has no such version.")
++	case errors.Is(err, errSkillDraftNameTaken):
++		return refuse(http.StatusConflict, errSkillDraftNameTaken, "Another skill already has the draft's name.")
++	case errors.Is(err, errSkillDraftBundleGone):
++		return refuse(http.StatusConflict, errSkillDraftBundleGone, "The draft names a bundle the skill no longer holds; upload it again or restore another version.")
++	case errors.Is(err, errSkillDraftUnreadable):
++		return refuse(http.StatusInternalServerError, errSkillDraftUnreadable, "The skill's draft could not be read.")
++	}
++	slog.Error("skill draft change failed", "error", err)
++	writeTypedError(w, http.StatusInternalServerError, "database_unavailable", "The skill could not be changed.")
++	return true
++}
++
++// lockAcceptedSkill runs the owner-or-admin check (which takes the row lock) and refuses a skill
++// that is absent or not accepted.
++func lockAcceptedSkill(r *http.Request, tx registryDatabase, id, orgID string) error {
++	if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
++		return err
++	}
++	var accepted bool
++	err := tx.QueryRow(r.Context(), acceptedSkillRowSQL, id, orgID).Scan(&accepted)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return errSkillNotFound
++	}
++	if err != nil {
++		return err
++	}
++	if !accepted {
++		return errSkillNotPublished
++	}
++	return nil
++}
++
++// publish is POST /api/v1/skills/{id}/publish: the draft becomes the live text, one statement,
++// and session-core's trigger cuts the new version. Owner-or-admin, as a PATCH. The draft is linted
++// as the text it is about to make live. With retention on, the draft's bundle becomes live too.
++func (h *SkillsHandler) publish(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPost {
++		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST publishes a skill draft.")
++		return
++	}
++	id := r.PathValue("id")
++	if !mcpIdentifier.MatchString(id) {
++		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
++		return
++	}
++	orgID := verifiedOrganizationID(r)
++	now := time.Now().UTC()
++	var version int32
++	var findings []skilllint.Finding
++	err := h.mutateSkill(r, "", "draft_published", func(tx registryDatabase) error {
++		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
++			return err
++		}
++		var raw []byte
++		err := tx.QueryRow(r.Context(), `SELECT draft FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID).Scan(&raw)
++		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
++			return err
++		}
++		if len(raw) == 0 {
++			return errSkillDraftNotFound
++		}
++		var draft skillDraftBody
++		if err := json.Unmarshal(raw, &draft); err != nil {
++			return errSkillDraftUnreadable
++		}
++		input := skilllint.Input{
++			Name: draft.Name, Description: draft.Description, Content: draft.Content,
++			TriggerKeywords: draft.TriggerKeywords, ToolRestrictions: draft.ToolRestrictions,
++			Kind: draft.Kind, Settings: decodeSettings(draft.Settings),
++		}
++		if kindFindings := kindRuleRefusal(input); len(kindFindings) > 0 {
++			findings = kindFindings
++			return errSkillLintRefused
++		}
++		lintFindings, refused := lintSkill(r.Context(), h.lintMode, input)
++		findings = lintFindings
++		if refused {
++			return errSkillLintRefused
++		}
++		var bundle string
++		err = tx.QueryRow(r.Context(), publishSkillSQL(h.bundleRetention), id, orgID, now).Scan(&version, &bundle)
++		var pgErr *pgconn.PgError
++		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
++			return errSkillDraftNameTaken
++		}
++		if errors.Is(err, pgx.ErrNoRows) {
++			return errSkillDraftNotFound
++		}
++		if err != nil {
++			return err
++		}
++		if !h.bundleRetention {
++			return nil
++		}
++		_, actorID := skillActor(r)
++		if err := skillbundle.PublishDraftBundle(r.Context(), tx, orgID, id, actorID, bundle); err != nil {
++			if errors.Is(err, skillbundle.ErrDraftBundleMissing) {
++				return errSkillDraftBundleGone
++			}
++			return err
++		}
++		return nil
++	})
++	if writeSkillDraftError(w, err, findings) {
++		return
++	}
++	writeJSON(w, withLintWarnings(map[string]any{"id": id, "version": version, "published": true, "updated_at": now}, findings))
++}
++
++// discardDraft is DELETE /api/v1/skills/{id}/draft: the draft goes and the live text stays.
++// Owner-or-admin, as a PATCH. With retention on, the draft's own bundle upload goes too.
++func (h *SkillsHandler) discardDraft(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodDelete {
++		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only DELETE discards a skill draft.")
++		return
++	}
++	id := r.PathValue("id")
++	if !mcpIdentifier.MatchString(id) {
++		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
++		return
++	}
++	orgID := verifiedOrganizationID(r)
++	err := h.mutateSkill(r, "", "draft_discarded", func(tx registryDatabase) error {
++		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
++			return err
++		}
++		result, err := tx.Exec(r.Context(), discardDraftSQL, id, orgID)
++		if err != nil {
++			return err
++		}
++		if result.RowsAffected() == 0 {
++			return errSkillDraftNotFound
++		}
++		if h.bundleRetention {
++			return skillbundle.DiscardDraftBundle(r.Context(), tx, orgID, id)
++		}
++		return nil
++	})
++	if writeSkillDraftError(w, err, nil) {
++		return
++	}
++	w.WriteHeader(http.StatusNoContent)
++}
++
++// restore is POST /api/v1/skills/{id}/versions/{version}/restore: that version's body becomes the
++// skill's draft. It is never live by itself: publishing it is a second, explicit step that cuts a
++// NEW version (EP-11 D2: nothing re-points to an old version). Owner-or-admin, as a PATCH. The
++// old bundle comes back only with retention on and while the skill still holds it.
++func (h *SkillsHandler) restore(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPost {
++		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST restores a skill version.")
++		return
++	}
++	id := r.PathValue("id")
++	if !mcpIdentifier.MatchString(id) {
++		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
++		return
++	}
++	version, err := strconv.Atoi(r.PathValue("version"))
++	if err != nil || version < 1 {
++		writeTypedError(w, http.StatusBadRequest, "invalid_version", "The version must be a whole number, 1 or more.")
++		return
++	}
++	orgID := verifiedOrganizationID(r)
++	now := time.Now().UTC()
++	bundleRestored := false
++	err = h.mutateSkill(r, "", "draft_restored_from:v"+strconv.Itoa(version), func(tx registryDatabase) error {
++		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
++			return err
++		}
++		var body []byte
++		var bundle string
++		err := tx.QueryRow(r.Context(), `
++			SELECT body, bundle_sha256 FROM agent_skill_versions
++			WHERE org_id = $1 AND skill_id = $2 AND version = $3
++		`, orgID, id, version).Scan(&body, &bundle)
++		if errors.Is(err, pgx.ErrNoRows) {
++			return errSkillVersionNotFound
++		}
++		if err != nil {
++			return err
++		}
++		if h.bundleRetention {
++			held := bundle == ""
++			if !held {
++				if held, err = skillbundle.HeldManifest(r.Context(), tx, orgID, id, bundle); err != nil {
++					return err
++				}
++			}
++			bundleRestored = held
++		}
++		_, err = tx.Exec(r.Context(), restoreDraftSQL, id, orgID, body, bundleRestored, now, verifiedActorID(r))
++		return err
++	})
++	if writeSkillDraftError(w, err, nil) {
++		return
++	}
++	writeJSON(w, map[string]any{"id": id, "draft": true, "restored_from": version, "bundle_restored": bundleRestored, "updated_at": now})
++}
++
+ // ---------------------------------------------------------------------------
+ // Skill versions  GET /api/v1/skills/{id}/versions (EP-11 S2)
+ // ---------------------------------------------------------------------------
+@@ -1040,7 +1423,10 @@ type SkillBundlesHandler struct {
+ func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
+ 	// EP-11 S2: with the versions API on, an upload or a delete also stamps the skill's bundle
+ 	// digest, which cuts a new skill version.
+-	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv))
++	// EP-11 S5: with retention on a replaced bundle is kept while a version names it, and with
++	// drafts on too an upload to an accepted skill is its draft's bundle.
++	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv)).
++		WithRetention(skillbundle.RetentionFromLookup(os.Getenv)).WithDrafts(DraftPublishFromLookup(os.Getenv))
+ 	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+ }
+ 
+@@ -1072,6 +1458,9 @@ type skillBundleSummaryView struct {
+ 	CreatedBy      string    `json:"created_by"`
+ 	CreatedAt      time.Time `json:"created_at"`
+ 	Replaced       bool      `json:"replaced"`
++	// Draft is true when the upload became the skill's draft bundle (EP-11 S5), live once the
++	// draft is published; absent otherwise, so with retention off a body is as it was.
++	Draft bool `json:"draft,omitempty"`
+ 	// Warnings are the skill lint findings of an upload that went ahead; absent while the
+ 	// lint is off.
+ 	Warnings []skilllint.Finding `json:"warnings,omitempty"`
+@@ -1203,7 +1592,7 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
+ 	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
+ 		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
+ 		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
+-		Warnings: lintFindings,
++		Draft: result.Draft, Warnings: lintFindings,
+ 	})
+ }
+ 
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skills_drafts_test.go b/apps/Model Plane/go/services/capability-core/internal/api/skills_drafts_test.go
+new file mode 100644
+index 000000000..45ced6c4b
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skills_drafts_test.go	
+@@ -0,0 +1,367 @@
++package api
++
++import (
++	"encoding/json"
++	"errors"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
++)
++
++// EP-11 S5: draft, publish, discard and restore on the skills registry.
++
++// bytesRow answers a one-column read of a JSON body.
++type bytesRow struct{ value []byte }
++
++func (row bytesRow) Scan(dest ...any) error {
++	if len(dest) != 1 {
++		return errors.New("bytesRow: want one scan destination")
++	}
++	*(dest[0].(*[]byte)) = row.value
++	return nil
++}
++
++// publishedRow answers publish's RETURNING version, bundle_sha256.
++type publishedRow struct {
++	version int32
++	bundle  string
++}
++
++func (row publishedRow) Scan(dest ...any) error {
++	if len(dest) != 2 {
++		return errors.New("publishedRow: want two scan destinations")
++	}
++	*(dest[0].(*int32)) = row.version
++	*(dest[1].(*string)) = row.bundle
++	return nil
++}
++
++// versionBodyRow answers restore's read of a version: its body and bundle digest.
++type versionBodyRow struct {
++	body   []byte
++	bundle string
++}
++
++func (row versionBodyRow) Scan(dest ...any) error {
++	if len(dest) != 2 {
++		return errors.New("versionBodyRow: want two scan destinations")
++	}
++	*(dest[0].(*[]byte)) = row.body
++	*(dest[1].(*string)) = row.bundle
++	return nil
++}
++
++func withDrafts(t *testing.T, on bool) {
++	t.Helper()
++	value := ""
++	if on {
++		value = "true"
++	}
++	t.Setenv(draftPublishEnv, value)
++	t.Setenv(skillbundle.RetentionEnv, "")
++}
++
++func typedErrorCode(t *testing.T, body []byte) string {
++	t.Helper()
++	var envelope struct {
++		Error struct {
++			Code    string         `json:"code"`
++			Details map[string]any `json:"details"`
++		} `json:"error"`
++	}
++	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Details == nil {
++		t.Fatalf("not the typed envelope with an object details: %s", body)
++	}
++	return envelope.Error.Code
++}
++
++func TestDraftPublishReadsOnlyTheLiteralTrue(t *testing.T) {
++	for value, want := range map[string]bool{"true": true, "": false, "1": false, "TRUE": false, "on": false} {
++		if got := DraftPublishFromLookup(func(string) string { return value }); got != want {
++			t.Errorf("SKILL_DRAFT_PUBLISH=%q read as %v, want %v", value, got, want)
++		}
++	}
++}
++
++// Off, the draft paths fall to the skill subtree as before and nothing is read or written.
++func TestDraftRoutesAreAbsentWhileTheSwitchIsOff(t *testing.T) {
++	withDrafts(t, false)
++	for _, test := range []struct{ method, path string }{
++		{http.MethodPost, "/api/v1/skills/sk-1/publish"},
++		{http.MethodPost, "/api/v1/skills/sk-1/versions/1/restore"},
++	} {
++		database := &recordingDatabase{}
++		response := serveSkill(t, database, writeToken, test.method, test.path, "")
++		if response.Code != http.StatusNotFound {
++			t.Errorf("%s %s: status = %d, want 404", test.method, test.path, response.Code)
++		}
++		if database.databaseCalls() != 0 || database.commits != 0 {
++			t.Errorf("%s %s: the registry was touched with the switch off", test.method, test.path)
++		}
++	}
++}
++
++// Off, a PATCH of an accepted skill's text edits the live row as before and never asks whether
++// the skill is accepted.
++func TestPatchEditsLiveWhileTheSwitchIsOff(t *testing.T) {
++	withDrafts(t, false)
++	database := &recordingDatabase{}
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"content":"edited"}`)
++	if response.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.queryRows) != 0 || len(database.execs) != 1 || database.execs[0].query == draftPatchSQL {
++		t.Fatalf("the PATCH must be today's live update: %#v %#v", database.queryRows, database.execs)
++	}
++	if strings.Contains(response.Body.String(), `"draft"`) {
++		t.Fatalf("an off body must be as it was: %s", response.Body.String())
++	}
++}
++
++func TestPatchWritesDraftWhenOn(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	database.nextRows = append(database.nextRows, boolRow{value: true})
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"content":"edited"}`)
++	if response.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.execs) != 1 || database.execs[0].query != draftPatchSQL {
++		t.Fatalf("an accepted skill's edit must write its draft: %#v", database.execs)
++	}
++	args := database.execs[0].args
++	if args[2] != "edited" || args[5] != "sk-1" || args[6] != "org-a" || args[8] != "user-a" {
++		t.Fatalf("draft args = %#v", args)
++	}
++	var body map[string]any
++	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body["draft"] != true {
++		t.Fatalf("body = %s, want draft true", response.Body.String())
++	}
++	if strings.Contains(draftPatchSQL, "content=COALESCE") || strings.Contains(draftPatchSQL, "description=COALESCE") {
++		t.Fatal("a draft write must not touch the live text")
++	}
++}
++
++// A proposal has no draft: its owner edits it live, and accepting it is its publish.
++func TestPatchOfAProposalStaysLiveWhenOn(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	database.nextRows = append(database.nextRows, boolRow{value: false})
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"content":"edited"}`)
++	if response.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.execs) != 1 || database.execs[0].query == draftPatchSQL {
++		t.Fatalf("a proposal's edit must stay live: %#v", database.execs)
++	}
++}
++
++// Switching an accepted skill off or sharing it writes no text, so it needs no draft.
++func TestPatchWithoutTextNeedsNoDraft(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"enabled":false}`)
++	if response.Code != http.StatusOK || len(database.queryRows) != 0 || database.execs[0].query == draftPatchSQL {
++		t.Fatalf("status = %d, reads = %#v, execs = %#v", response.Code, database.queryRows, database.execs)
++	}
++}
++
++func TestPublishCutsOneVersion(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	draft := []byte(`{"name":"deploy","description":"d","content":"new steps","trigger_keywords":[],"tool_restrictions":[],"kind":"skill","settings":{},"bundle_sha256":""}`)
++	database.nextRows = append(database.nextRows, boolRow{value: true}, bytesRow{value: draft}, publishedRow{version: 3})
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/publish", "")
++	if response.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	publishes := 0
++	for _, call := range database.queryRows {
++		if call.query == publishSkillSQL(false) {
++			publishes++
++		}
++	}
++	if publishes != 1 || database.commits != 1 {
++		t.Fatalf("publish statements = %d, commits = %d, want one of each", publishes, database.commits)
++	}
++	if len(database.execs) != 0 {
++		t.Fatalf("with retention off a publish touches no bundle: %#v", database.execs)
++	}
++	if args := database.actorCalls[0].args; args[1] != "user-a" || args[2] != "draft_published" || args[3] != "" {
++		t.Fatalf("actor args = %#v, want the publisher, a reason and no decision (the revision reads edited)", args)
++	}
++	var body struct {
++		Version   int32 `json:"version"`
++		Published bool  `json:"published"`
++	}
++	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Version != 3 || !body.Published {
++		t.Fatalf("body = %s", response.Body.String())
++	}
++	if strings.Contains(publishSkillSQL(false), "bundle_sha256 = COALESCE") || !strings.Contains(publishSkillSQL(true), "bundle_sha256 = COALESCE") {
++		t.Fatal("only a publish with retention on may move the bundle digest")
++	}
++	if strings.Contains(publishSkillSQL(true), "kind =") {
++		t.Fatal("a publish never changes the kind")
++	}
++}
++
++func TestPublishWithoutADraftIsNotFound(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	database.nextRows = append(database.nextRows, boolRow{value: true}, bytesRow{value: nil})
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/publish", "")
++	if response.Code != http.StatusNotFound || typedErrorCode(t, response.Body.Bytes()) != "skill_draft_not_found" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if database.commits != 0 {
++		t.Fatal("nothing to publish must commit nothing")
++	}
++}
++
++func TestPublishRequiresOwnerOrAdmin(t *testing.T) {
++	withDrafts(t, true)
++	database := ownedSkillDatabase("user", "user-b")
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/publish", "")
++	if response.Code != http.StatusForbidden || typedErrorCode(t, response.Body.Bytes()) != "forbidden" {
++		t.Fatalf("status = %d, body=%s, want 403", response.Code, response.Body.String())
++	}
++	if len(database.queryRows) != 0 || len(database.execs) != 0 || database.commits != 0 {
++		t.Fatal("a refused publish must read no draft and write nothing")
++	}
++	admin := ownedSkillDatabase("user", "user-b")
++	admin.nextRows = append(admin.nextRows, boolRow{value: true}, bytesRow{value: []byte(`{"content":"x"}`)}, publishedRow{version: 2})
++	if response := serveSkill(t, admin, adminToken, http.MethodPost, "/api/v1/skills/sk-1/publish", ""); response.Code != http.StatusOK {
++		t.Fatalf("an admin publish: status = %d, body=%s", response.Code, response.Body.String())
++	}
++}
++
++// A proposal is published by its decision, never by this route.
++func TestPublishRefusesAProposal(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	database.nextRows = append(database.nextRows, boolRow{value: false})
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/publish", "")
++	if response.Code != http.StatusConflict || typedErrorCode(t, response.Body.Bytes()) != "skill_not_published" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++}
++
++func TestRestoreWritesDraftNotLive(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	body := []byte(`{"name":"deploy","content":"old steps","bundle_sha256":""}`)
++	database.nextRows = append(database.nextRows, boolRow{value: true}, versionBodyRow{body: body})
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/versions/1/restore", "")
++	if response.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.execs) != 1 || database.execs[0].query != restoreDraftSQL {
++		t.Fatalf("a restore must write only the draft: %#v", database.execs)
++	}
++	args := database.execs[0].args
++	if string(args[2].([]byte)) != string(body) || args[3] != false || args[5] != "user-a" {
++		t.Fatalf("restore args = %#v, want the version body, no bundle without retention, the caller", args)
++	}
++	for _, call := range database.queryRows {
++		if strings.Contains(call.query, "SET name = COALESCE") {
++			t.Fatal("a restore must never publish")
++		}
++	}
++	if strings.Contains(restoreDraftSQL, "content =") || strings.Contains(restoreDraftSQL, "version =") {
++		t.Fatal("restoreDraftSQL must not touch the live text or re-point the version")
++	}
++	if args := database.actorCalls[0].args; args[2] != "draft_restored_from:v1" {
++		t.Fatalf("the revision must say which version the draft came from: %#v", args)
++	}
++}
++
++func TestRestoreOfAMissingVersionIsNotFound(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	database.nextRows = append(database.nextRows, boolRow{value: true})
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills/sk-1/versions/9/restore", "")
++	if response.Code != http.StatusNotFound || typedErrorCode(t, response.Body.Bytes()) != "skill_version_not_found" {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	for _, path := range []string{"/api/v1/skills/sk-1/versions/0/restore", "/api/v1/skills/sk-1/versions/x/restore"} {
++		if response := serveSkill(t, &recordingDatabase{}, writeToken, http.MethodPost, path, ""); response.Code != http.StatusBadRequest {
++			t.Errorf("%s: status = %d, want 400", path, response.Code)
++		}
++	}
++}
++
++func TestDiscardDraftLeavesLiveText(t *testing.T) {
++	withDrafts(t, true)
++	database := &recordingDatabase{}
++	response := serveSkill(t, database, writeToken, http.MethodDelete, "/api/v1/skills/sk-1/draft", "")
++	if response.Code != http.StatusNoContent {
++		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++	}
++	if len(database.execs) != 1 || database.execs[0].query != discardDraftSQL {
++		t.Fatalf("a discard must clear only the draft: %#v", database.execs)
++	}
++	none := &recordingDatabase{execTag: "UPDATE 0"}
++	if response := serveSkill(t, none, writeToken, http.MethodDelete, "/api/v1/skills/sk-1/draft", ""); response.Code != http.StatusNotFound {
++		t.Fatalf("no draft: status = %d, want 404", response.Code)
++	}
++}
++
++// Off, a skill delete leaves its bundles as before; with retention on they go in the same
++// transaction (register D2-382).
++func TestSkillDeleteRemovesBundlesOnlyWithRetention(t *testing.T) {
++	for _, on := range []bool{false, true} {
++		withDrafts(t, false)
++		if on {
++			t.Setenv(skillbundle.RetentionEnv, "true")
++		}
++		database := &recordingDatabase{}
++		response := serveSkill(t, database, writeToken, http.MethodDelete, "/api/v1/skills/sk-1", "")
++		if response.Code != http.StatusNoContent {
++			t.Fatalf("retention %v: status = %d", on, response.Code)
++		}
++		removed := false
++		for _, call := range database.execs {
++			if strings.Contains(call.query, "DELETE FROM skill_bundles") {
++				removed = true
++			}
++		}
++		if removed != on {
++			t.Fatalf("retention %v: bundles removed = %v", on, removed)
++		}
++	}
++}
++
++// The draft write and the publish here are the statements session-core's ignored DB tests apply
++// (tests/skill_drafts.rs), so those tests prove what this service runs.
++func TestDraftStatementsMatchTheSessionCoreTest(t *testing.T) {
++	source, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "rust", "services", "session-core", "tests", "skill_drafts.rs"))
++	if err != nil {
++		t.Skipf("the session-core test is not beside this module: %v", err)
++	}
++	normalize := func(text string) string { return strings.Join(strings.Fields(text), " ") }
++	test := normalize(string(source))
++	for _, column := range []string{"name", "description", "content"} {
++		line := column + " = COALESCE(draft->>'" + column + "', " + column + ")"
++		if !strings.Contains(normalize(publishSkillSQL(false)), line) || !strings.Contains(test, line) {
++			t.Errorf("publish and the session-core test disagree on %q", line)
++		}
++	}
++	for _, column := range []string{"trigger_keywords", "trigger_file_patterns", "tool_restrictions", "settings"} {
++		line := column + " = COALESCE(draft->'" + column + "', " + column + ")"
++		if !strings.Contains(normalize(publishSkillSQL(false)), line) || !strings.Contains(test, line) {
++			t.Errorf("publish and the session-core test disagree on %q", line)
++		}
++	}
++	for _, fragment := range []string{"draft = COALESCE(draft, agent_skill_version_body(agent_skills))", "draft = NULL, draft_updated_at = NULL, draft_by = ''"} {
++		if !strings.Contains(test, fragment) {
++			t.Errorf("the session-core test lacks %q", fragment)
++		}
++	}
++	if !strings.Contains(normalize(draftPatchSQL), "draft = COALESCE(draft, agent_skill_version_body(agent_skills))") {
++		t.Error("draftPatchSQL must open the draft from the version body")
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/server/server.go b/apps/Model Plane/go/services/capability-core/internal/server/server.go
+index 5df0ac550..e37918c27 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/server/server.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/server/server.go	
+@@ -47,6 +47,11 @@ type Server struct {
+ 
+ 	// deckTemplatesEnabled reports which bundles are deck templates (SKILL_DECK_TEMPLATES_ENABLED).
+ 	deckTemplatesEnabled bool
++
++	// skillBundleRetention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, GetSkillBundleManifest
++	// honours manifest_sha256 and reads the bundle a pinned version named; off, the field is
++	// ignored and the live bundle is read, as before.
++	skillBundleRetention bool
+ }
+ 
+ // modelCapabilitySource is the narrow slice of the models registry the
+@@ -67,6 +72,12 @@ type skillBundleReader interface {
+ 	Blob(ctx context.Context, orgID, skillID, digest string) ([]byte, error)
+ }
+ 
++// skillBundleVersionReader reads a skill's bundle by its manifest digest (EP-11 S5).
++// *skillbundle.Store satisfies it; a reader without it serves the live bundle only.
++type skillBundleVersionReader interface {
++	ManifestAt(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error)
++}
++
+ type toolDefinitionSearcher interface {
+ 	Search(context.Context, string, int) ([]lettatools.Match, error)
+ }
+@@ -186,6 +197,13 @@ func (s *Server) WithSkillBundles(store skillBundleReader, enabled bool) *Server
+ 	return s
+ }
+ 
++// WithSkillBundleRetention lets GetSkillBundleManifest read a kept bundle by its manifest digest
++// (EP-11 S5). The switch arrives already parsed by skillbundle.RetentionFromLookup.
++func (s *Server) WithSkillBundleRetention(enabled bool) *Server {
++	s.skillBundleRetention = enabled
++	return s
++}
++
+ // WithDeckTemplates turns on the deck_template flag of ListSkillBundles (EP-5 S6). The switch
+ // arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
+ func (s *Server) WithDeckTemplates(enabled bool) *Server {
+@@ -972,6 +990,7 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
+ 
+ // GetSkillBundleManifest returns the digest and file metadata of the org's bundle for a skill,
+ // never a file body. While SKILL_BUNDLES_ENABLED is off every skill reads as having no bundle.
++// With SKILL_BUNDLE_RETENTION on, a manifest_sha256 in the request names the kept bundle to read.
+ func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillBundleManifestRequest) (*mpv1.SkillBundleManifest, error) {
+ 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBundleManifest")))
+ 	orgID, err := verifiedOrganizationID(ctx)
+@@ -981,7 +1000,7 @@ func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillB
+ 	if !s.skillBundlesEnabled {
+ 		return nil, skillBundleErr(skillbundle.ErrNotFound)
+ 	}
+-	manifest, err := s.skillBundles.Manifest(ctx, orgID, req.SkillId)
++	manifest, err := s.readSkillBundleManifest(ctx, orgID, req.SkillId, req.ManifestSha256)
+ 	if err != nil {
+ 		return nil, skillBundleErr(err)
+ 	}
+@@ -998,6 +1017,33 @@ func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillB
+ 	return &mpv1.SkillBundleManifest{SkillId: req.SkillId, ManifestSha256: manifest.ManifestSHA256, Files: files}, nil
+ }
+ 
++// readSkillBundleManifest reads the live bundle, or with retention on and a manifest digest named,
++// the skill's bundle with that digest (a run pinned to an older version reads its own files). A
++// digest that is not lowercase hex SHA-256 is NotFound before any read.
++func (s *Server) readSkillBundleManifest(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error) {
++	if !s.skillBundleRetention || manifestSHA256 == "" {
++		return s.skillBundles.Manifest(ctx, orgID, skillID)
++	}
++	versions, ok := s.skillBundles.(skillBundleVersionReader)
++	if !ok || !isSHA256Hex(manifestSHA256) {
++		return skillbundle.Manifest{}, skillbundle.ErrNotFound
++	}
++	return versions.ManifestAt(ctx, orgID, skillID, manifestSHA256)
++}
++
++// isSHA256Hex reports whether value is the lowercase hex spelling every bundle digest uses.
++func isSHA256Hex(value string) bool {
++	if len(value) != 64 {
++		return false
++	}
++	for _, character := range value {
++		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
++			return false
++		}
++	}
++	return true
++}
++
+ // GetSkillBlob returns one file body of the org's bundle for a skill, addressed by digest. A
+ // digest the skill's own bundle does not name is NotFound, even when another skill stores the
+ // same bytes.
+diff --git a/apps/Model Plane/go/services/capability-core/internal/server/server_skill_bundle_pin_test.go b/apps/Model Plane/go/services/capability-core/internal/server/server_skill_bundle_pin_test.go
+new file mode 100644
+index 000000000..f6f8289a0
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/server/server_skill_bundle_pin_test.go	
+@@ -0,0 +1,67 @@
++package server
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++// pinnedBundleStub serves the live bundle through Manifest and a kept one through ManifestAt.
++type pinnedBundleStub struct {
++	skillBundleReaderStub
++	pinned    skillbundle.Manifest
++	atCalls   int
++	gotPinned string
++}
++
++func (stub *pinnedBundleStub) ManifestAt(_ context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error) {
++	stub.atCalls++
++	stub.gotOrg = orgID
++	stub.gotSkillID = []string{skillID}
++	stub.gotPinned = manifestSHA256
++	return stub.pinned, nil
++}
++
++// EP-11 S5: with retention on, a manifest digest in the request reads that bundle, so a run pinned
++// to an older version reads its own files; off, or with no digest, the live bundle is read as before.
++func TestGetSkillBundleManifestReadsThePinnedBundleOnlyWithRetention(t *testing.T) {
++	t.Parallel()
++
++	pinned := strings.Repeat("a", 64)
++	store := &pinnedBundleStub{
++		skillBundleReaderStub: skillBundleReaderStub{manifest: skillbundle.Manifest{SkillID: "skill-a", ManifestSHA256: "live",
++			Files: []skillbundle.File{{Path: "SKILL.md", SHA256: "d1", Size: 1}}}},
++		pinned: skillbundle.Manifest{SkillID: "skill-a", ManifestSHA256: pinned,
++			Files: []skillbundle.File{{Path: "SKILL.md", SHA256: "d0", Size: 1}}},
++	}
++	ctx := verifiedGRPCContext(t, "triodelab")
++	request := &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a", ManifestSha256: pinned}
++
++	off := newTestServer().WithSkillBundles(store, true)
++	manifest, err := off.GetSkillBundleManifest(ctx, request)
++	if err != nil || manifest.ManifestSha256 != "live" || store.atCalls != 0 {
++		t.Fatalf("retention off: manifest = %+v, err = %v, pinned reads = %d; want the live bundle", manifest, err, store.atCalls)
++	}
++
++	on := newTestServer().WithSkillBundles(store, true).WithSkillBundleRetention(true)
++	manifest, err = on.GetSkillBundleManifest(ctx, request)
++	if err != nil || manifest.ManifestSha256 != pinned || store.gotPinned != pinned || store.gotOrg != "triodelab" {
++		t.Fatalf("retention on: manifest = %+v, err = %v, read %q for %q", manifest, err, store.gotPinned, store.gotOrg)
++	}
++	if manifest, err = on.GetSkillBundleManifest(ctx, &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a"}); err != nil || manifest.ManifestSha256 != "live" {
++		t.Fatalf("no digest: manifest = %+v, err = %v; want the live bundle", manifest, err)
++	}
++
++	before := store.atCalls
++	if _, err := on.GetSkillBundleManifest(ctx, &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a", ManifestSha256: "../x"}); status.Code(err) != codes.NotFound {
++		t.Fatalf("malformed digest status = %v, want NotFound", status.Code(err))
++	}
++	if store.atCalls != before {
++		t.Fatal("a malformed digest must not reach the store")
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go
+index 3fe08a850..c00719aff 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go	
+@@ -30,6 +30,23 @@ type Store struct {
+ 	// skillVersions is SKILL_VERSIONS_API (EP-11 S2): on, Put and Delete also write the skill's
+ 	// bundle_sha256 in the same transaction, so a bundle change is a new skill version.
+ 	skillVersions bool
++	// retention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, a replaced bundle is kept as
++	// superseded while a skill version names it, instead of being deleted. Off, Put and Delete
++	// run exactly the statements they ran before.
++	retention bool
++	// drafts is SKILL_DRAFT_PUBLISH (EP-11 S5), honoured only with retention on: an upload to an
++	// accepted skill becomes its draft's bundle, live only once the draft is published.
++	drafts bool
++}
++
++// RetentionEnv is the switch for keeping skill bundles per version (EP-11 S5). Only the literal
++// "true" turns it on. It must stay off until bundle read authorization (register D2-379, D2-383)
++// is fixed, because retained bundles stay readable longer.
++const RetentionEnv = "SKILL_BUNDLE_RETENTION"
++
++// RetentionFromLookup reads SKILL_BUNDLE_RETENTION strictly.
++func RetentionFromLookup(lookup func(string) string) bool {
++	return lookup(RetentionEnv) == "true"
+ }
+ 
+ // NewStore wraps the pool.
+@@ -44,6 +61,19 @@ func (s *Store) WithSkillVersions(on bool) *Store {
+ 	return s
+ }
+ 
++// WithRetention turns on per-version bundle retention (EP-11 S5).
++func (s *Store) WithRetention(on bool) *Store {
++	s.retention = on
++	return s
++}
++
++// WithDrafts makes an upload to an accepted skill a draft bundle (EP-11 S5). It has no effect
++// while retention is off: without retention a draft bundle could not outlive the next upload.
++func (s *Store) WithDrafts(on bool) *Store {
++	s.drafts = on
++	return s
++}
++
+ // stampSkillActorSQL names the uploader as the actor of the version the stamp cuts, with the
+ // transaction-local settings session-core's skill triggers read (migration 0064 and 0108). An
+ // upload or delete is always a person's (skillBundleWriter).
+@@ -91,6 +121,9 @@ type Manifest struct {
+ type PutResult struct {
+ 	Replaced bool
+ 	Summary  Summary
++	// Draft is true when the upload became the skill's draft bundle (EP-11 S5): the live bundle
++	// is unchanged until the draft is published. Always false while retention is off.
++	Draft bool
+ }
+ 
+ // lockOrgSQL serializes bundle writes for one org. The blob GC in a write must not race a
+@@ -101,8 +134,12 @@ const lockOrgSQL = `SELECT pg_advisory_xact_lock(hashtextextended('skill_bundles
+ // Put stores a validated bundle for the skill, replacing any bundle it had. The old bundle's
+ // files go with it through the cascade, and any blob no bundle of the org still names is
+ // dropped. The write is one transaction that also appends a registry_audit_log row which
+-// names the digest and the totals, never a path or a body.
++// names the digest and the totals, never a path or a body. With retention on, putRetained keeps
++// the replaced bundle instead.
+ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bundle) (PutResult, error) {
++	if s.retention {
++		return s.putRetained(ctx, orgID, skillID, actor, bundle)
++	}
+ 	tx, err := s.db.Begin(ctx)
+ 	if err != nil {
+ 		return PutResult{}, fmt.Errorf("begin skill bundle write: %w", err)
+@@ -126,7 +163,33 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
+ 	if err != nil {
+ 		return PutResult{}, fmt.Errorf("insert skill bundle: %w", err)
+ 	}
++	if err := storeFiles(ctx, tx, orgID, bundleID, bundle); err != nil {
++		return PutResult{}, err
++	}
++	if _, err := tx.Exec(ctx, gcBlobsSQL, orgID); err != nil {
++		return PutResult{}, fmt.Errorf("collect skill bundle blobs: %w", err)
++	}
++	if err := appendAudit(ctx, tx, "skill_bundle.uploaded", orgID, skillID, actor, bundle.ManifestSHA256,
++		len(bundle.Files), bundle.TotalBytes); err != nil {
++		return PutResult{}, err
++	}
++	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256); err != nil {
++		return PutResult{}, err
++	}
++	if err := tx.Commit(ctx); err != nil {
++		return PutResult{}, fmt.Errorf("commit skill bundle write: %w", err)
++	}
++	return PutResult{
++		Replaced: deleted.RowsAffected() > 0,
++		Summary: Summary{
++			SkillID: skillID, ManifestSHA256: bundle.ManifestSHA256, FileCount: len(bundle.Files),
++			TotalBytes: bundle.TotalBytes, CreatedBy: actor, CreatedAt: createdAt,
++		},
++	}, nil
++}
+ 
++// storeFiles writes a new bundle row's blobs (once per org and digest) and file rows.
++func storeFiles(ctx context.Context, tx pgx.Tx, orgID, bundleID string, bundle Bundle) error {
+ 	blobDigests, blobBodies, blobSizes := make([]string, 0, len(bundle.Files)), make([][]byte, 0, len(bundle.Files)), make([]int32, 0, len(bundle.Files))
+ 	seen := make(map[string]bool, len(bundle.Files))
+ 	paths, digests, sizes, executables := make([]string, 0, len(bundle.Files)), make([]string, 0, len(bundle.Files)), make([]int32, 0, len(bundle.Files)), make([]bool, 0, len(bundle.Files))
+@@ -150,7 +213,7 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
+ 		FROM unnest($2::text[], $3::bytea[], $4::int[]) AS u(sha256, content, size_bytes)
+ 		ON CONFLICT (org_id, sha256) DO NOTHING
+ 	`, orgID, blobDigests, blobBodies, blobSizes); err != nil {
+-		return PutResult{}, fmt.Errorf("store skill bundle blobs: %w", err)
++		return fmt.Errorf("store skill bundle blobs: %w", err)
+ 	}
+ 	if _, err := tx.Exec(ctx, `
+ 		INSERT INTO skill_bundle_files (bundle_id, path, sha256, size_bytes, executable, is_binary)
+@@ -158,23 +221,183 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
+ 		FROM unnest($2::text[], $3::text[], $4::int[], $5::bool[], $6::bool[])
+ 		     AS u(path, sha256, size_bytes, executable, is_binary)
+ 	`, bundleID, paths, digests, sizes, executables, binaries); err != nil {
+-		return PutResult{}, fmt.Errorf("store skill bundle files: %w", err)
++		return fmt.Errorf("store skill bundle files: %w", err)
++	}
++	return nil
++}
++
++// acceptedSkillSQL says whether the skill is an accepted one, whose text and bundle change only
++// through a draft while drafts are on. A proposal's bundle stays live: accepting it is its publish.
++const acceptedSkillSQL = `SELECT EXISTS (SELECT 1 FROM agent_skills WHERE org_id = $1 AND id = $2 AND review_state = 'accepted')`
++
++// stampDraftBundleSQL records manifest as the bundle of the skill's draft, opening the draft from
++// the live fields when there is none (the body function is session-core's, migration 0108/0109).
++// The live fields are untouched, so no version is cut until the draft is published.
++const stampDraftBundleSQL = `
++	UPDATE agent_skills
++	SET draft = COALESCE(draft, agent_skill_version_body(agent_skills)) || jsonb_build_object('bundle_sha256', $3::text),
++	    draft_updated_at = now(), draft_by = $4
++	WHERE org_id = $1 AND id = $2`
++
++// retainedGCSQL drops the org's superseded bundles that neither a version of their skill nor the
++// skill's draft names. Their files cascade; gcBlobsSQL then drops the blobs no bundle names.
++const retainedGCSQL = `
++DELETE FROM skill_bundles sb
++WHERE sb.org_id = $1 AND sb.state = 'superseded'
++  AND NOT EXISTS (
++      SELECT 1 FROM agent_skill_versions v
++      WHERE v.org_id = sb.org_id AND v.skill_id = sb.skill_id AND v.bundle_sha256 = sb.manifest_sha256
++  )
++  AND NOT EXISTS (
++      SELECT 1 FROM agent_skills s
++      WHERE s.org_id = sb.org_id AND s.id = sb.skill_id AND s.draft->>'bundle_sha256' = sb.manifest_sha256
++  )
++`
++
++// collectRetained runs both collections, superseded bundles first so their blobs go with them.
++func collectRetained(ctx context.Context, tx Execer, orgID string) error {
++	if _, err := tx.Exec(ctx, retainedGCSQL, orgID); err != nil {
++		return fmt.Errorf("collect superseded skill bundles: %w", err)
+ 	}
+ 	if _, err := tx.Exec(ctx, gcBlobsSQL, orgID); err != nil {
+-		return PutResult{}, fmt.Errorf("collect skill bundle blobs: %w", err)
++		return fmt.Errorf("collect skill bundle blobs: %w", err)
+ 	}
+-	if err := appendAudit(ctx, tx, "skill_bundle.uploaded", orgID, skillID, actor, bundle.ManifestSHA256,
+-		len(bundle.Files), bundle.TotalBytes); err != nil {
++	return nil
++}
++
++// Execer is the statement side of a transaction; the registry's skill transaction and a pgx.Tx
++// both satisfy it.
++type Execer interface {
++	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
++	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
++}
++
++// stampDraft records manifest as the draft's bundle, naming the uploader as the actor the
++// revision trigger reads (opening a draft is an `edited` revision).
++func stampDraft(ctx context.Context, tx Execer, orgID, skillID, actor, manifest string) error {
++	if _, err := tx.Exec(ctx, stampSkillActorSQL, actor); err != nil {
++		return fmt.Errorf("name skill bundle actor: %w", err)
++	}
++	if _, err := tx.Exec(ctx, stampDraftBundleSQL, orgID, skillID, manifest, actor); err != nil {
++		return fmt.Errorf("stamp skill draft bundle: %w", err)
++	}
++	return nil
++}
++
++// draftMode says whether a bundle write to the skill goes to its draft.
++func (s *Store) draftMode(ctx context.Context, tx Execer, orgID, skillID string) (bool, error) {
++	if !s.drafts {
++		return false, nil
++	}
++	var accepted bool
++	if err := tx.QueryRow(ctx, acceptedSkillSQL, orgID, skillID).Scan(&accepted); err != nil {
++		return false, fmt.Errorf("read skill review state: %w", err)
++	}
++	return accepted, nil
++}
++
++// liveManifest is the digest of the skill's live bundle, "" when it has none.
++func liveManifest(ctx context.Context, tx Execer, orgID, skillID string) (string, error) {
++	var manifest string
++	err := tx.QueryRow(ctx, `
++		SELECT manifest_sha256 FROM skill_bundles WHERE org_id = $1 AND skill_id = $2 AND state = 'live'
++	`, orgID, skillID).Scan(&manifest)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return "", nil
++	}
++	if err != nil {
++		return "", fmt.Errorf("read live skill bundle: %w", err)
++	}
++	return manifest, nil
++}
++
++// putRetained is Put with retention on (EP-11 S5). The replaced live bundle becomes superseded
++// and stays while a version of the skill names it; an upload of bytes the skill already holds
++// takes that row back instead of storing them twice. With drafts on, an upload to an accepted
++// skill is its draft's bundle and the live bundle stays until the draft is published.
++func (s *Store) putRetained(ctx context.Context, orgID, skillID, actor string, bundle Bundle) (PutResult, error) {
++	tx, err := s.db.Begin(ctx)
++	if err != nil {
++		return PutResult{}, fmt.Errorf("begin skill bundle write: %w", err)
++	}
++	defer func() { _ = tx.Rollback(ctx) }()
++
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return PutResult{}, fmt.Errorf("lock skill bundles: %w", err)
++	}
++	draft, err := s.draftMode(ctx, tx, orgID, skillID)
++	if err != nil {
+ 		return PutResult{}, err
+ 	}
+-	if err := s.stampSkill(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256); err != nil {
++	live, err := liveManifest(ctx, tx, orgID, skillID)
++	if err != nil {
++		return PutResult{}, err
++	}
++	target := "live"
++	if draft {
++		target = "draft"
++		// One draft bundle per skill: an earlier draft upload of other bytes goes.
++		if _, err := tx.Exec(ctx, `
++			DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2 AND state = 'draft' AND manifest_sha256 <> $3
++		`, orgID, skillID, bundle.ManifestSHA256); err != nil {
++			return PutResult{}, fmt.Errorf("replace skill draft bundle: %w", err)
++		}
++	} else if live != bundle.ManifestSHA256 {
++		if _, err := tx.Exec(ctx, `
++			UPDATE skill_bundles SET state = 'superseded' WHERE org_id = $1 AND skill_id = $2 AND state = 'live'
++		`, orgID, skillID); err != nil {
++			return PutResult{}, fmt.Errorf("supersede skill bundle: %w", err)
++		}
++	}
++	// A row with these bytes already: a live upload takes it back into live. A draft leaves its
++	// state alone: a live or superseded row a draft names is kept by the draft (retainedGCSQL), and
++	// discarding the draft must not delete a bundle an older version still names.
++	var createdAt time.Time
++	err = tx.QueryRow(ctx, `
++		UPDATE skill_bundles SET state = CASE WHEN $4 = 'draft' THEN state ELSE 'live' END
++		WHERE org_id = $1 AND skill_id = $2 AND manifest_sha256 = $3
++		RETURNING created_at
++	`, orgID, skillID, bundle.ManifestSHA256, target).Scan(&createdAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		bundleID := "skb_" + uuid.NewString()
++		err = tx.QueryRow(ctx, `
++			INSERT INTO skill_bundles (id, org_id, skill_id, manifest_sha256, file_count, total_bytes, created_by, state)
++			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
++			RETURNING created_at
++		`, bundleID, orgID, skillID, bundle.ManifestSHA256, len(bundle.Files), bundle.TotalBytes, actor, target).Scan(&createdAt)
++		if err != nil {
++			return PutResult{}, fmt.Errorf("insert skill bundle: %w", err)
++		}
++		if err := storeFiles(ctx, tx, orgID, bundleID, bundle); err != nil {
++			return PutResult{}, err
++		}
++	} else if err != nil {
++		return PutResult{}, fmt.Errorf("reuse skill bundle: %w", err)
++	}
++	action := "skill_bundle.uploaded"
++	if draft {
++		action = "skill_bundle.drafted"
++		err = stampDraft(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256)
++	} else {
++		err = s.stampSkill(ctx, tx, orgID, skillID, actor, bundle.ManifestSHA256)
++	}
++	if err != nil {
++		return PutResult{}, err
++	}
++	// After the stamp, so the version it cut already names the new bundle.
++	if err := collectRetained(ctx, tx, orgID); err != nil {
++		return PutResult{}, err
++	}
++	if err := appendAudit(ctx, tx, action, orgID, skillID, actor, bundle.ManifestSHA256,
++		len(bundle.Files), bundle.TotalBytes); err != nil {
+ 		return PutResult{}, err
+ 	}
+ 	if err := tx.Commit(ctx); err != nil {
+ 		return PutResult{}, fmt.Errorf("commit skill bundle write: %w", err)
+ 	}
+ 	return PutResult{
+-		Replaced: deleted.RowsAffected() > 0,
++		Replaced: live != "",
++		Draft:    draft,
+ 		Summary: Summary{
+ 			SkillID: skillID, ManifestSHA256: bundle.ManifestSHA256, FileCount: len(bundle.Files),
+ 			TotalBytes: bundle.TotalBytes, CreatedBy: actor, CreatedAt: createdAt,
+@@ -183,8 +406,12 @@ func (s *Store) Put(ctx context.Context, orgID, skillID, actor string, bundle Bu
+ }
+ 
+ // Delete removes the org's bundle for the skill. Its files cascade, and blobs no bundle still
+-// names are dropped. ErrNotFound when there is no bundle to remove.
++// names are dropped. ErrNotFound when there is no bundle to remove. With retention on,
++// deleteRetained keeps the removed bundle while a version names it.
+ func (s *Store) Delete(ctx context.Context, orgID, skillID, actor string) error {
++	if s.retention {
++		return s.deleteRetained(ctx, orgID, skillID, actor)
++	}
+ 	tx, err := s.db.Begin(ctx)
+ 	if err != nil {
+ 		return fmt.Errorf("begin skill bundle delete: %w", err)
+@@ -222,6 +449,169 @@ func (s *Store) Delete(ctx context.Context, orgID, skillID, actor string) error
+ 	return nil
+ }
+ 
++// deleteRetained is Delete with retention on (EP-11 S5). The live bundle becomes superseded, so a
++// run pinned to a version that named it still reads it. With drafts on, removing an accepted
++// skill's bundle is a draft change (the draft names no bundle), live once published.
++func (s *Store) deleteRetained(ctx context.Context, orgID, skillID, actor string) error {
++	tx, err := s.db.Begin(ctx)
++	if err != nil {
++		return fmt.Errorf("begin skill bundle delete: %w", err)
++	}
++	defer func() { _ = tx.Rollback(ctx) }()
++
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return fmt.Errorf("lock skill bundles: %w", err)
++	}
++	draft, err := s.draftMode(ctx, tx, orgID, skillID)
++	if err != nil {
++		return err
++	}
++	var manifest string
++	var fileCount int
++	var totalBytes int64
++	action := "skill_bundle.deleted"
++	if draft {
++		// The bundle the draft would publish: its own upload, else the live one.
++		err = tx.QueryRow(ctx, `
++			SELECT manifest_sha256, file_count, total_bytes FROM skill_bundles
++			WHERE org_id = $1 AND skill_id = $2 AND state IN ('draft', 'live')
++			ORDER BY state = 'draft' DESC LIMIT 1
++		`, orgID, skillID).Scan(&manifest, &fileCount, &totalBytes)
++		if errors.Is(err, pgx.ErrNoRows) {
++			return ErrNotFound
++		}
++		if err != nil {
++			return fmt.Errorf("read skill bundle: %w", err)
++		}
++		if _, err := tx.Exec(ctx, `
++			DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2 AND state = 'draft'
++		`, orgID, skillID); err != nil {
++			return fmt.Errorf("delete skill draft bundle: %w", err)
++		}
++		action = "skill_bundle.draft_deleted"
++		err = stampDraft(ctx, tx, orgID, skillID, actor, "")
++	} else {
++		err = tx.QueryRow(ctx, `
++			UPDATE skill_bundles SET state = 'superseded' WHERE org_id = $1 AND skill_id = $2 AND state = 'live'
++			RETURNING manifest_sha256, file_count, total_bytes
++		`, orgID, skillID).Scan(&manifest, &fileCount, &totalBytes)
++		if errors.Is(err, pgx.ErrNoRows) {
++			return ErrNotFound
++		}
++		if err != nil {
++			return fmt.Errorf("supersede skill bundle: %w", err)
++		}
++		err = s.stampSkill(ctx, tx, orgID, skillID, actor, "")
++	}
++	if err != nil {
++		return err
++	}
++	if err := collectRetained(ctx, tx, orgID); err != nil {
++		return err
++	}
++	if err := appendAudit(ctx, tx, action, orgID, skillID, actor, manifest, fileCount, totalBytes); err != nil {
++		return err
++	}
++	if err := tx.Commit(ctx); err != nil {
++		return fmt.Errorf("commit skill bundle delete: %w", err)
++	}
++	return nil
++}
++
++// ErrDraftBundleMissing means a draft names a bundle the skill no longer holds, so publishing it
++// would point the skill at files that are not there.
++var ErrDraftBundleMissing = errors.New("skill draft bundle missing")
++
++// PublishDraftBundle makes manifest the skill's live bundle inside the publish transaction tx
++// (EP-11 S5): the live bundle becomes superseded, the row with manifest becomes live ("" leaves
++// the skill with no live bundle), and any other draft bundle goes. It runs after the publish
++// statement, so the version that statement cut already names the new bundle when the collection
++// runs. Call it only with retention on.
++func PublishDraftBundle(ctx context.Context, tx Execer, orgID, skillID, actor, manifest string) error {
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return fmt.Errorf("lock skill bundles: %w", err)
++	}
++	live, err := liveManifest(ctx, tx, orgID, skillID)
++	if err != nil {
++		return err
++	}
++	if live != manifest {
++		if _, err := tx.Exec(ctx, `
++			UPDATE skill_bundles SET state = 'superseded' WHERE org_id = $1 AND skill_id = $2 AND state = 'live'
++		`, orgID, skillID); err != nil {
++			return fmt.Errorf("supersede skill bundle: %w", err)
++		}
++		if manifest != "" {
++			result, err := tx.Exec(ctx, `
++				UPDATE skill_bundles SET state = 'live'
++				WHERE org_id = $1 AND skill_id = $2 AND manifest_sha256 = $3
++			`, orgID, skillID, manifest)
++			if err != nil {
++				return fmt.Errorf("publish skill bundle: %w", err)
++			}
++			if result.RowsAffected() == 0 {
++				return ErrDraftBundleMissing
++			}
++		}
++	}
++	if _, err := tx.Exec(ctx, `
++		DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2 AND state = 'draft'
++	`, orgID, skillID); err != nil {
++		return fmt.Errorf("clear skill draft bundle: %w", err)
++	}
++	if err := collectRetained(ctx, tx, orgID); err != nil {
++		return err
++	}
++	if live == manifest {
++		return nil
++	}
++	return appendAudit(ctx, tx, "skill_bundle.published", orgID, skillID, actor, manifest, 0, 0)
++}
++
++// DiscardDraftBundle removes the skill's draft bundle inside the discard transaction tx, after the
++// draft itself was cleared, and collects what nothing names any more. Call it only with retention on.
++func DiscardDraftBundle(ctx context.Context, tx Execer, orgID, skillID string) error {
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return fmt.Errorf("lock skill bundles: %w", err)
++	}
++	if _, err := tx.Exec(ctx, `
++		DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2 AND state = 'draft'
++	`, orgID, skillID); err != nil {
++		return fmt.Errorf("discard skill draft bundle: %w", err)
++	}
++	return collectRetained(ctx, tx, orgID)
++}
++
++// DeleteSkillBundles removes every bundle of a skill that is being deleted, in the skill delete's
++// transaction tx (closes register D2-382 for new deletes), and collects the blobs nothing names
++// any more. The skill's versions go with the skill (session-core 0108), so nothing can pin them.
++func DeleteSkillBundles(ctx context.Context, tx Execer, orgID, skillID string) error {
++	if _, err := tx.Exec(ctx, lockOrgSQL, orgID); err != nil {
++		return fmt.Errorf("lock skill bundles: %w", err)
++	}
++	if _, err := tx.Exec(ctx, `DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2`, orgID, skillID); err != nil {
++		return fmt.Errorf("delete skill bundles: %w", err)
++	}
++	if _, err := tx.Exec(ctx, gcBlobsSQL, orgID); err != nil {
++		return fmt.Errorf("collect skill bundle blobs: %w", err)
++	}
++	return nil
++}
++
++// HeldManifest says whether the skill still holds a bundle with manifest (live or superseded), so
++// a restore can name it in a draft. A draft bundle does not count: it is not a published one.
++func HeldManifest(ctx context.Context, tx Execer, orgID, skillID, manifest string) (bool, error) {
++	var held bool
++	err := tx.QueryRow(ctx, `
++		SELECT EXISTS (SELECT 1 FROM skill_bundles
++		WHERE org_id = $1 AND skill_id = $2 AND manifest_sha256 = $3 AND state <> 'draft')
++	`, orgID, skillID, manifest).Scan(&held)
++	if err != nil {
++		return false, fmt.Errorf("read skill bundle: %w", err)
++	}
++	return held, nil
++}
++
+ // gcBlobsSQL drops the org's blobs that no bundle file names any more.
+ const gcBlobsSQL = `
+ DELETE FROM skill_bundle_blobs b
+@@ -257,7 +647,7 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
+ 		SELECT b.skill_id, b.manifest_sha256, b.file_count, b.total_bytes, b.created_by, b.created_at,
+ 		       EXISTS (SELECT 1 FROM skill_bundle_files f WHERE f.bundle_id = b.id AND f.path = $3)
+ 		FROM skill_bundles b
+-		WHERE b.org_id = $1 AND ($2::text[] IS NULL OR b.skill_id = ANY($2::text[]))
++		WHERE b.org_id = $1 AND ($2::text[] IS NULL OR b.skill_id = ANY($2::text[])) AND b.state = 'live'
+ 		ORDER BY b.skill_id
+ 	`, orgID, filter, ThemePath)
+ 	if err != nil {
+@@ -282,13 +672,31 @@ func (s *Store) List(ctx context.Context, orgID string, skillIDs []string) ([]Su
+ // Manifest returns the org's bundle for the skill: its digest and every file's metadata.
+ // ErrNotFound when the org has no bundle for the skill.
+ func (s *Store) Manifest(ctx context.Context, orgID, skillID string) (Manifest, error) {
+-	rows, err := s.db.Query(ctx, `
++	return s.readManifest(ctx, skillID, `
+ 		SELECT b.manifest_sha256, f.path, f.sha256, f.size_bytes, f.executable, f.is_binary
+ 		FROM skill_bundles b
+ 		JOIN skill_bundle_files f ON f.bundle_id = b.id
+-		WHERE b.org_id = $1 AND b.skill_id = $2
++		WHERE b.org_id = $1 AND b.skill_id = $2 AND b.state = 'live'
+ 		ORDER BY f.path
+ 	`, orgID, skillID)
++}
++
++// ManifestAt returns the skill's bundle whose manifest digest is manifestSHA256, live or kept for a
++// version (EP-11 S5), so a run pinned to an older version reads that version's files. A draft
++// bundle is never returned: it is not published. ErrNotFound when the skill holds no such bundle.
++func (s *Store) ManifestAt(ctx context.Context, orgID, skillID, manifestSHA256 string) (Manifest, error) {
++	return s.readManifest(ctx, skillID, `
++		SELECT b.manifest_sha256, f.path, f.sha256, f.size_bytes, f.executable, f.is_binary
++		FROM skill_bundles b
++		JOIN skill_bundle_files f ON f.bundle_id = b.id
++		WHERE b.org_id = $1 AND b.skill_id = $2 AND b.manifest_sha256 = $3 AND b.state <> 'draft'
++		ORDER BY f.path
++	`, orgID, skillID, manifestSHA256)
++}
++
++// readManifest runs one manifest query and gathers its file rows.
++func (s *Store) readManifest(ctx context.Context, skillID, query string, args ...any) (Manifest, error) {
++	rows, err := s.db.Query(ctx, query, args...)
+ 	if err != nil {
+ 		return Manifest{}, fmt.Errorf("read skill bundle manifest: %w", err)
+ 	}
+@@ -323,7 +731,7 @@ func (s *Store) Blob(ctx context.Context, orgID, skillID, sha256 string) ([]byte
+ 		  AND EXISTS (
+ 		      SELECT 1 FROM skill_bundle_files f
+ 		      JOIN skill_bundles sb ON sb.id = f.bundle_id
+-		      WHERE sb.org_id = $1 AND sb.skill_id = $2 AND f.sha256 = $3
++		      WHERE sb.org_id = $1 AND sb.skill_id = $2 AND f.sha256 = $3 AND sb.state <> 'draft'
+ 		  )
+ 	`, orgID, skillID, sha256).Scan(&content)
+ 	if errors.Is(err, pgx.ErrNoRows) {
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_retention_test.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_retention_test.go
+new file mode 100644
+index 000000000..e91c46f7f
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/store_retention_test.go	
+@@ -0,0 +1,231 @@
++package skillbundle
++
++import (
++	"context"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++)
++
++// retentionTx records every statement of a retained bundle write and answers the few reads the
++// store makes. accepted is the skill's review state; live is its live bundle's digest ("" none).
++type retentionTx struct {
++	pgx.Tx
++	accepted  bool
++	live      string
++	execs     []string
++	committed bool
++}
++
++func (tx *retentionTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
++	tx.execs = append(tx.execs, sql)
++	return pgconn.NewCommandTag("UPDATE 1"), nil
++}
++
++func (tx *retentionTx) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
++	switch {
++	case strings.Contains(sql, "review_state = 'accepted'"):
++		return retentionRow{value: tx.accepted}
++	case strings.Contains(sql, "SELECT manifest_sha256 FROM skill_bundles"):
++		if tx.live == "" {
++			return retentionRow{err: pgx.ErrNoRows}
++		}
++		return retentionRow{value: tx.live}
++	case strings.Contains(sql, "UPDATE skill_bundles SET state = CASE"):
++		tx.execs = append(tx.execs, sql)
++		return retentionRow{err: pgx.ErrNoRows}
++	case strings.Contains(sql, "INSERT INTO skill_bundles"):
++		tx.execs = append(tx.execs, sql)
++		return retentionRow{value: time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)}
++	}
++	return retentionRow{err: pgx.ErrNoRows}
++}
++
++func (tx *retentionTx) Commit(context.Context) error {
++	tx.committed = true
++	return nil
++}
++
++func (tx *retentionTx) Rollback(context.Context) error { return nil }
++
++type retentionRow struct {
++	value any
++	err   error
++}
++
++func (row retentionRow) Scan(dest ...any) error {
++	if row.err != nil {
++		return row.err
++	}
++	switch typed := dest[0].(type) {
++	case *bool:
++		*typed = row.value.(bool)
++	case *string:
++		*typed = row.value.(string)
++	case *time.Time:
++		*typed = row.value.(time.Time)
++	}
++	return nil
++}
++
++type retentionDB struct{ tx *retentionTx }
++
++func (d retentionDB) Begin(context.Context) (pgx.Tx, error) { return d.tx, nil }
++func (d retentionDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
++	return pgconn.CommandTag{}, nil
++}
++func (d retentionDB) Query(context.Context, string, ...any) (pgx.Rows, error) { return nil, nil }
++func (d retentionDB) QueryRow(context.Context, string, ...any) pgx.Row       { return nil }
++
++func retentionBundle() Bundle {
++	return Bundle{
++		ManifestSHA256: strings.Repeat("b", 64),
++		TotalBytes:     5,
++		Files:          []File{{Path: "SKILL.md", SHA256: strings.Repeat("c", 64), Size: 5, Body: []byte("hello")}},
++	}
++}
++
++func executed(execs []string, fragment string) bool {
++	for _, sql := range execs {
++		if strings.Contains(sql, fragment) {
++			return true
++		}
++	}
++	return false
++}
++
++func TestRetentionFromLookupIsStrict(t *testing.T) {
++	for value, want := range map[string]bool{"true": true, "": false, "1": false, "TRUE": false, "yes": false} {
++		got := RetentionFromLookup(func(name string) string {
++			if name == RetentionEnv {
++				return value
++			}
++			return ""
++		})
++		if got != want {
++			t.Errorf("RetentionFromLookup(%q) = %v, want %v", value, got, want)
++		}
++	}
++}
++
++// With retention on, a new upload keeps the old live bundle as superseded instead of deleting it,
++// so a run pinned to the version that named it can still read it.
++func TestBundleSupersededNotDeleted(t *testing.T) {
++	tx := &retentionTx{accepted: true, live: strings.Repeat("a", 64)}
++	result, err := NewStore(retentionDB{tx: tx}).WithRetention(true).Put(context.Background(), "org-a", "skill-1", "user-a", retentionBundle())
++	if err != nil {
++		t.Fatalf("Put: %v", err)
++	}
++	if !tx.committed || !result.Replaced || result.Draft {
++		t.Fatalf("result = %+v, committed = %v", result, tx.committed)
++	}
++	for _, sql := range tx.execs {
++		if strings.Contains(sql, "DELETE FROM skill_bundles") && !strings.Contains(sql, "state") {
++			t.Fatalf("a retained upload must not delete the skill's bundles: %s", sql)
++		}
++	}
++	if !executed(tx.execs, "SET state = 'superseded'") {
++		t.Fatal("the replaced live bundle must become superseded")
++	}
++	if !executed(tx.execs, retainedGCSQL) {
++		t.Fatal("a retained upload must still collect superseded bundles no version names")
++	}
++}
++
++// With drafts on, an upload to an accepted skill is its draft's bundle: the live bundle stays and
++// no version is cut until the draft is published.
++func TestDraftUploadLeavesTheLiveBundle(t *testing.T) {
++	tx := &retentionTx{accepted: true, live: strings.Repeat("a", 64)}
++	store := NewStore(retentionDB{tx: tx}).WithRetention(true).WithDrafts(true).WithSkillVersions(true)
++	result, err := store.Put(context.Background(), "org-a", "skill-1", "user-a", retentionBundle())
++	if err != nil {
++		t.Fatalf("Put: %v", err)
++	}
++	if !result.Draft {
++		t.Fatal("an upload to an accepted skill with drafts on must be a draft")
++	}
++	if executed(tx.execs, "SET state = 'superseded'") {
++		t.Fatal("a draft upload must leave the live bundle live")
++	}
++	if executed(tx.execs, stampSkillBundleSQL) {
++		t.Fatal("a draft upload must not stamp the live bundle digest (that cuts a version)")
++	}
++	if !executed(tx.execs, stampDraftBundleSQL) {
++		t.Fatal("a draft upload must name its bundle in the skill's draft")
++	}
++}
++
++// A proposal has no draft: accepting it is its publish, so its bundle stays live as before.
++func TestDraftsLeaveAProposalsBundleLive(t *testing.T) {
++	tx := &retentionTx{accepted: false}
++	result, err := NewStore(retentionDB{tx: tx}).WithRetention(true).WithDrafts(true).Put(context.Background(), "org-a", "skill-1", "user-a", retentionBundle())
++	if err != nil {
++		t.Fatalf("Put: %v", err)
++	}
++	if result.Draft || executed(tx.execs, stampDraftBundleSQL) {
++		t.Fatal("a proposal's upload must not open a draft")
++	}
++}
++
++// Drafts without retention change nothing: the store runs today's statements.
++func TestDraftsNeedRetention(t *testing.T) {
++	store := NewStore(nil).WithDrafts(true)
++	if store.retention {
++		t.Fatal("WithDrafts must not turn retention on")
++	}
++}
++
++// The collection keeps a superseded bundle while any version of its skill, or the skill's draft,
++// names its manifest digest, and never touches a live or draft bundle.
++func TestRetainedGCKeepsBundlesNamedByVersions(t *testing.T) {
++	for _, fragment := range []string{
++		"sb.state = 'superseded'",
++		"FROM agent_skill_versions v",
++		"v.skill_id = sb.skill_id AND v.bundle_sha256 = sb.manifest_sha256",
++		"s.draft->>'bundle_sha256' = sb.manifest_sha256",
++	} {
++		if !strings.Contains(retainedGCSQL, fragment) {
++			t.Errorf("retainedGCSQL lacks %q", fragment)
++		}
++	}
++}
++
++// Deleting a skill removes every bundle it has, in any state, and the blobs only they named.
++func TestSkillDeleteRemovesBundles(t *testing.T) {
++	tx := &retentionTx{}
++	if err := DeleteSkillBundles(context.Background(), tx, "org-a", "skill-1"); err != nil {
++		t.Fatalf("DeleteSkillBundles: %v", err)
++	}
++	if !executed(tx.execs, "DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = $2") {
++		t.Fatal("the skill's bundles must be deleted whatever their state")
++	}
++	if executed(tx.execs, "state") {
++		t.Fatal("a skill delete must not filter its bundles by state")
++	}
++	if !executed(tx.execs, gcBlobsSQL) {
++		t.Fatal("the blobs only the skill's bundles named must go")
++	}
++}
++
++// Publishing a draft that names a bundle the skill no longer holds is refused, so the skill is
++// never pointed at files that are not there.
++func TestPublishDraftBundleRefusesAMissingBundle(t *testing.T) {
++	tx := &missingBundleTx{retentionTx: retentionTx{live: strings.Repeat("a", 64)}}
++	err := PublishDraftBundle(context.Background(), tx, "org-a", "skill-1", "user-a", strings.Repeat("d", 64))
++	if err != ErrDraftBundleMissing {
++		t.Fatalf("PublishDraftBundle = %v, want ErrDraftBundleMissing", err)
++	}
++}
++
++// missingBundleTx answers the publish flip with no row.
++type missingBundleTx struct{ retentionTx }
++
++func (tx *missingBundleTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
++	if strings.Contains(sql, "SET state = 'live'") {
++		return pgconn.NewCommandTag("UPDATE 0"), nil
++	}
++	return tx.retentionTx.Exec(ctx, sql, args...)
++}
+diff --git a/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.down.sql b/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.down.sql
+new file mode 100644
+index 000000000..64b36c348
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.down.sql	
+@@ -0,0 +1,27 @@
++-- Reverses 0037_skill_bundle_retention.up.sql.
++--
++-- DESTROYS every draft and superseded bundle (their files cascade) and every blob only they
++-- named. A run pinned to an older skill version then reads no bundle for it. The live bundles
++-- stay. Turn SKILL_BUNDLE_RETENTION off and roll capability-core back to a build that does not
++-- read the state column first; with the switch off nothing writes a draft or superseded row.
++--
++-- The full (org_id, skill_id) unique index of 0021 comes back under its own name, so 0021's
++-- re-run at boot stays a no-op.
++
++DELETE FROM skill_bundles WHERE state <> 'live';
++
++DELETE FROM skill_bundle_blobs b
++WHERE NOT EXISTS (
++    SELECT 1 FROM skill_bundle_files f
++    JOIN skill_bundles sb ON sb.id = f.bundle_id
++    WHERE sb.org_id = b.org_id AND f.sha256 = b.sha256
++);
++
++DROP INDEX IF EXISTS skill_bundles_org_skill_manifest_uq;
++DROP INDEX IF EXISTS skill_bundles_org_skill_draft_uq;
++DROP INDEX IF EXISTS skill_bundles_org_skill_uq;
++CREATE UNIQUE INDEX IF NOT EXISTS skill_bundles_org_skill_uq
++    ON skill_bundles (org_id, skill_id);
++
++ALTER TABLE skill_bundles DROP CONSTRAINT IF EXISTS skill_bundles_state_check;
++ALTER TABLE skill_bundles DROP COLUMN IF EXISTS state;
+diff --git a/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.up.sql b/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.up.sql
+new file mode 100644
+index 000000000..df7875298
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.up.sql	
+@@ -0,0 +1,61 @@
++-- 0037_skill_bundle_retention.up.sql
++--
++-- Skill bundles kept per version (EP-11 S5). Reserved as 0034 in round B; 0034 and 0036 are
++-- taken in the tree and 0035 is EP-5 S6's, so this is the next free number.
++--
++-- A bundle row gains a state:
++--   live        the bundle a skill's turns read today (at most one per skill)
++--   draft       an upload made while the skill has an unpublished draft (at most one per skill);
++--               publishing the draft makes it live
++--   superseded  a bundle a newer upload replaced, kept while a version of the skill names its
++--               manifest digest (agent_skill_versions.bundle_sha256), so a run pinned to that
++--               version still reads its own files
++-- Only capability-core's SKILL_BUNDLE_RETENTION writes draft or superseded. With it off, an
++-- upload deletes the skill's bundles as before and every row stays live, so the reads (which
++-- now ask for state = 'live') answer exactly as they did.
++--
++-- RE-RUN SAFETY. capability-core re-applies every *.up.sql at every boot, in name order, so
++-- 0021 runs again before this file. 0021 creates skill_bundles_org_skill_uq on (org_id,
++-- skill_id) with IF NOT EXISTS, which matches by NAME: this file therefore keeps the name and
++-- swaps the index for its partial form (live rows only). On every later boot 0021 finds the
++-- name and does nothing, so a retained superseded row can never make the boot fail.
++-- Everything else here is idempotent too.
++--
++-- contract: skill_bundles_org_skill_uq narrows from every row to live rows (an older capability-core whose Put deletes all of a skill's bundles still runs over this schema; roll back with 0037_skill_bundle_retention.down.sql, which deletes the kept rows first)
++--
++-- Content: retained bundles are org configuration (D9), never conversation content; a ZDR
++-- principal cannot upload one (authz.go refuses its writes). They go with their skill: a skill
++-- delete removes every bundle of the skill while the switch is on.
++
++ALTER TABLE skill_bundles
++    ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'live';
++
++DO $$
++BEGIN
++    IF NOT EXISTS (
++        SELECT 1 FROM pg_constraint WHERE conname = 'skill_bundles_state_check'
++    ) THEN
++        ALTER TABLE skill_bundles
++            ADD CONSTRAINT skill_bundles_state_check
++            CHECK (state IN ('live', 'draft', 'superseded'));
++    END IF;
++    -- Swap the full unique index for the partial one under the same name (see RE-RUN SAFETY).
++    IF EXISTS (
++        SELECT 1 FROM pg_indexes
++        WHERE indexname = 'skill_bundles_org_skill_uq' AND indexdef NOT LIKE '%WHERE%'
++    ) THEN
++        DROP INDEX skill_bundles_org_skill_uq;
++    END IF;
++END
++$$;
++
++CREATE UNIQUE INDEX IF NOT EXISTS skill_bundles_org_skill_uq
++    ON skill_bundles (org_id, skill_id) WHERE state = 'live';
++
++CREATE UNIQUE INDEX IF NOT EXISTS skill_bundles_org_skill_draft_uq
++    ON skill_bundles (org_id, skill_id) WHERE state = 'draft';
++
++-- One row per manifest of a skill: an upload of bytes the skill already holds flips that row's
++-- state instead of storing them twice.
++CREATE UNIQUE INDEX IF NOT EXISTS skill_bundles_org_skill_manifest_uq
++    ON skill_bundles (org_id, skill_id, manifest_sha256);
+diff --git a/apps/Model Plane/proto/model_plane/v1/capabilities.proto b/apps/Model Plane/proto/model_plane/v1/capabilities.proto
+index 69910ccef..1a5c66c28 100644
+--- a/apps/Model Plane/proto/model_plane/v1/capabilities.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/capabilities.proto	
+@@ -354,6 +354,11 @@ message SkillBundleSummary {
+ // Request to read one skill bundle manifest, by skill ID.
+ message GetSkillBundleManifestRequest {
+   string skill_id = 1;
++  // SHA-256 manifest digest of the bundle to read (EP-11 S5): a run pinned to an older skill
++  // version names that version's bundle_sha256 and reads its own files. Empty reads the live
++  // bundle, as before. Honoured only while capability-core's SKILL_BUNDLE_RETENTION is on;
++  // otherwise ignored and the live bundle is read. Additive.
++  string manifest_sha256 = 2;
+ }
+ 
+ // Manifest of one skill bundle: its files with their digests and sizes.
+diff --git a/apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs b/apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs
+index 0df40a717..84e202de8 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs	
+@@ -233,8 +233,17 @@ fn check_manifest(manifest: &SkillBundleManifest, mount: &SkillMount) -> Result<
+ /// Where a bundle is read from: capability-core in production, a fake in tests.
+ #[tonic::async_trait]
+ pub trait SkillBundleSource: Send + Sync {
+-    /// The manifest of `skill_id`'s bundle, read for `org_id`.
+-    async fn manifest(&self, org_id: &str, skill_id: &str) -> Result<SkillBundleManifest, Status>;
++    /// The manifest of `skill_id`'s bundle whose digest is `manifest_sha256` (the one the gateway
++    /// named), read for `org_id`. capability-core reads that kept bundle while its
++    /// `SKILL_BUNDLE_RETENTION` is on, so a run pinned to an older skill version mounts its own
++    /// files (EP-11 S5); with it off it reads the live bundle and [`check_manifest`] refuses a
++    /// different one, as before.
++    async fn manifest(
++        &self,
++        org_id: &str,
++        skill_id: &str,
++        manifest_sha256: &str,
++    ) -> Result<SkillBundleManifest, Status>;
+     /// The bytes that hash to `sha256` in `skill_id`'s bundle, read for `org_id`.
+     async fn blob(&self, org_id: &str, skill_id: &str, sha256: &str) -> Result<Vec<u8>, Status>;
+ }
+@@ -280,12 +289,18 @@ impl GrpcSkillBundleSource {
+ 
+ #[tonic::async_trait]
+ impl SkillBundleSource for GrpcSkillBundleSource {
+-    async fn manifest(&self, org_id: &str, skill_id: &str) -> Result<SkillBundleManifest, Status> {
++    async fn manifest(
++        &self,
++        org_id: &str,
++        skill_id: &str,
++        manifest_sha256: &str,
++    ) -> Result<SkillBundleManifest, Status> {
+         let request = self
+             .authorized(
+                 org_id,
+                 GetSkillBundleManifestRequest {
+                     skill_id: skill_id.to_owned(),
++                    manifest_sha256: manifest_sha256.to_owned(),
+                 },
+             )
+             .await?;
+@@ -502,7 +517,7 @@ pub async fn materialise(
+     // contents exist.
+     let mut directories = vec![tree.root.clone()];
+     for mount in mounts {
+-        let manifest = source.manifest(org_id, &mount.skill_id).await?;
++        let manifest = source.manifest(org_id, &mount.skill_id, &mount.manifest_sha256).await?;
+         check_manifest(&manifest, mount)?;
+         let mount_dir = tree.root.join(&mount.name);
+         std::fs::create_dir(&mount_dir).map_err(io_status)?;
+@@ -684,6 +699,8 @@ mod tests {
+         manifests: HashMap<String, SkillBundleManifest>,
+         blobs: HashMap<String, Vec<u8>>,
+         tamper: Option<String>,
++        /// The manifest digests materialise asked for, in order.
++        asked: Mutex<Vec<String>>,
+     }
+ 
+     #[tonic::async_trait]
+@@ -692,7 +709,9 @@ mod tests {
+             &self,
+             _org_id: &str,
+             skill_id: &str,
++            manifest_sha256: &str,
+         ) -> Result<SkillBundleManifest, Status> {
++            self.asked.lock().unwrap().push(manifest_sha256.to_owned());
+             self.manifests
+                 .get(skill_id)
+                 .cloned()
+@@ -778,6 +797,27 @@ mod tests {
+         assert_eq!(validate(&[], "shell", true), Ok(()));
+     }
+ 
++    /// EP-11 S5: the manifest read names the bundle the gateway named, so capability-core can
++    /// serve the kept bundle of the version a run pinned rather than whatever is live now.
++    #[tokio::test]
++    async fn materialise_asks_for_the_bundle_the_gateway_named() {
++        let bundle = manifest("skill-1", vec![file("SKILL.md", b"pinned", false)]);
++        let source = source_with(&bundle, &[("SKILL.md", b"pinned")]);
++        let base = scratch_base("skill-mount-pinned");
++        let tree = materialise(
++            &source,
++            &BlobCache::new(4, 1 << 20),
++            ORG,
++            &[mount_for(&bundle, "docx")],
++            &base,
++        )
++        .await
++        .expect("the named bundle mounts");
++        assert_eq!(*source.asked.lock().unwrap(), vec![bundle.manifest_sha256.clone()]);
++        drop(tree);
++        std::fs::remove_dir_all(&base).unwrap();
++    }
++
+     #[tokio::test]
+     async fn a_blob_with_a_wrong_digest_is_refused() {
+         let bundle = manifest("skill-1", vec![file("SKILL.md", b"hello", false)]);
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 19d1886bf..c146dc2c5 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -3266,17 +3266,111 @@ async fn pinned_skill_recovery(
+     )))
+ }
+ 
++/// Which bundle `skill_file` reads for a skill in this run (EP-11 S5).
++#[derive(Debug, PartialEq, Eq)]
++enum PinnedBundle {
++    /// The live bundle: pins off, no pin for this skill in this run, or the skill
++    /// unchanged since the run pinned it.
++    Live,
++    /// The bundle the pinned version named, by its manifest digest.
++    At(String),
++    /// The pinned version had no bundle.
++    NoBundle,
++    /// The pinned version no longer exists (the skill was deleted or erased).
++    Gone,
++}
++
++/// Whether the skill moved since the run pinned it, so the pinned version's
++/// bundle must be looked up. A pin without a version (a builtin, or a row from
++/// before versions) has nothing to look up.
++fn pin_moved(
++    pin: &mp_contracts::model_plane::v1::SkillPin,
++    skill: &mp_contracts::model_plane::v1::Skill,
++) -> bool {
++    pin.version > 0 && pin.skill_id == skill.id && pin.digest != skill.digest
++}
++
++/// The bundle a pinned version names, from session-core's answer.
++fn bundle_of_version(
++    gone: bool,
++    version: Option<&mp_contracts::model_plane::v1::AgentSkillVersion>,
++) -> PinnedBundle {
++    match version.filter(|_| !gone) {
++        None => PinnedBundle::Gone,
++        Some(version) if version.bundle_sha256.is_empty() => PinnedBundle::NoBundle,
++        Some(version) => PinnedBundle::At(version.bundle_sha256.clone()),
++    }
++}
++
++/// The bundle `skill_file` reads for `skill` in this run (EP-11 S5): the live one
++/// unless the run pinned a version of the skill that has since changed, in which
++/// case the bundle that version named. Off (`MODEL_GATEWAY_SKILL_PINS` unset) it is
++/// always the live one, with no read. A failed version read is an error, never the
++/// live bundle, because the live files may not be the ones the run started with.
++async fn pinned_bundle(
++    state: &AppState,
++    org_id: &str,
++    run_id: &str,
++    session_bearer: &str,
++    skill: &mp_contracts::model_plane::v1::Skill,
++) -> Result<PinnedBundle, &'static str> {
++    use mp_contracts::model_plane::v1::GetAgentSkillVersionRequest;
++
++    if !crate::skills::skill_pins_enabled() {
++        return Ok(PinnedBundle::Live);
++    }
++    let Some(pin) = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &skill.id) else {
++        return Ok(PinnedBundle::Live);
++    };
++    if !pin_moved(&pin, skill) {
++        return Ok(PinnedBundle::Live);
++    }
++    let request = with_authorization(
++        GetAgentSkillVersionRequest {
++            org_id: org_id.to_owned(),
++            skill_id: pin.skill_id.clone(),
++            version: pin.version,
++            for_user_id: String::new(),
++        },
++        session_bearer,
++    );
++    match state
++        .skill_version_client
++        .clone()
++        .get_agent_skill_version(request)
++        .await
++    {
++        Ok(response) => {
++            let response = response.into_inner();
++            Ok(bundle_of_version(response.gone, response.version.as_ref()))
++        }
++        Err(error) => {
++            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "skill_file: pinned version read failed");
++            Err("skill_file could not read the version of this skill this run used right now")
++        }
++    }
++}
++
++/// What `skill_file` says when the bundle of the version this run pinned is not
++/// kept any more. The model must not read the current files as if they were it.
++const PINNED_BUNDLE_GONE: &str = "the bundle of the version of this skill this run used is no \
++     longer available; do not guess at its files";
++
+ /// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
+ ///
+ /// Every refusal that needs no I/O comes first (the switch, the name, the path,
+ /// the credential), so a bad call costs no capability-core read. The path is
+ /// checked against the bundle's own manifest, so only a file the bundle holds can
+-/// be read, and bytes whose digest differs from the manifest are refused.
++/// be read, and bytes whose digest differs from the manifest are refused. A run
++/// that pinned an older version of the skill reads that version's bundle (EP-11 S5).
++#[allow(clippy::too_many_arguments)]
+ async fn skill_file_outcome(
+     state: &AppState,
+     enabled: bool,
+     org_id: &str,
+     user_id: &str,
++    run_id: &str,
++    session_bearer: &str,
+     capability_bearer: Option<&str>,
+     call: &ToolCall,
+ ) -> ToolOutcome {
+@@ -3325,24 +3419,50 @@ async fn skill_file_outcome(
+             "no skill by that name is available to this user; use a skill name exactly as its block shows it",
+         ));
+     };
++    let no_bundle = || {
++        answer(crate::skills::render_bundle_status(
++            "no_bundle",
++            &skill.name,
++            "this skill has no bundle; its instructions are all there is",
++        ))
++    };
++    let pinned_gone = || {
++        answer(crate::skills::render_bundle_status(
++            "not_available",
++            &skill.name,
++            PINNED_BUNDLE_GONE,
++        ))
++    };
++    let pinned = match pinned_bundle(state, org_id, run_id, session_bearer, &skill).await {
++        Ok(PinnedBundle::Live) => String::new(),
++        Ok(PinnedBundle::At(digest)) => digest,
++        Ok(PinnedBundle::NoBundle) => return no_bundle(),
++        Ok(PinnedBundle::Gone) => return pinned_gone(),
++        Err(message) => return err_outcome(call, message),
++    };
+     let manifest = match state
+         .capability_client
+         .clone()
+         .get_skill_bundle_manifest(with_authorization(
+             GetSkillBundleManifestRequest {
+                 skill_id: skill.id.clone(),
++                manifest_sha256: pinned.clone(),
+             },
+             bearer,
+         ))
+         .await
+     {
++        // A capability-core that does not keep bundles answers with the live one: that is
++        // not the pinned version's, so it is not read.
++        Ok(response) if !pinned.is_empty() && response.get_ref().manifest_sha256 != pinned => {
++            return pinned_gone();
++        }
+         Ok(response) => response.into_inner(),
++        Err(status) if status.code() == tonic::Code::NotFound && !pinned.is_empty() => {
++            return pinned_gone();
++        }
+         Err(status) if status.code() == tonic::Code::NotFound => {
+-            return answer(crate::skills::render_bundle_status(
+-                "no_bundle",
+-                &skill.name,
+-                "this skill has no bundle; its instructions are all there is",
+-            ));
++            return no_bundle();
+         }
+         Err(status) => {
+             tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle manifest read failed");
+@@ -4778,6 +4898,8 @@ async fn dispatch_tool_with_cost(
+                 mp_contracts::skill_bundle::enabled(),
+                 org_id,
+                 user_id,
++                run_id,
++                session_bearer,
+                 capability_bearer,
+                 call,
+             )
+@@ -16132,6 +16254,8 @@ mod tests {
+             true,
+             "org_test",
+             "user_test",
++            "run_test",
++            "session-bearer",
+             Some("capability-bearer"),
+             &tool_call(
+                 "skill_file",
+@@ -16155,6 +16279,8 @@ mod tests {
+             false,
+             "org_test",
+             "user_test",
++            "run_test",
++            "session-bearer",
+             Some("capability-bearer"),
+             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+         )
+@@ -16173,6 +16299,8 @@ mod tests {
+             true,
+             "org_test",
+             "user_test",
++            "run_test",
++            "session-bearer",
+             None,
+             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+         )
+@@ -16193,6 +16321,8 @@ mod tests {
+             true,
+             "org_test",
+             "user_test",
++            "run_test",
++            "session-bearer",
+             Some("capability-bearer"),
+             &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+         )
+@@ -16202,6 +16332,65 @@ mod tests {
+         assert_eq!(output["status"], "not_found");
+     }
+ 
++    /// EP-11 S5: a run that pinned a version of a skill that has since changed
++    /// reads the bundle that version named; an unchanged skill, a builtin pin and
++    /// another skill's pin read the live bundle.
++    #[test]
++    fn skill_file_reads_pinned_bundle() {
++        use mp_contracts::model_plane::v1::{AgentSkillVersion, Skill, SkillPin};
++
++        let skill = Skill {
++            id: "sk-1".into(),
++            name: "Deploy Runbook".into(),
++            version: 3,
++            digest: "c".repeat(64),
++            ..Default::default()
++        };
++        let pin = |skill_id: &str, version: i32, digest: String| SkillPin {
++            skill_id: skill_id.into(),
++            version,
++            digest,
++            source: "matched".into(),
++        };
++        assert!(pin_moved(&pin("sk-1", 2, "b".repeat(64)), &skill));
++        assert!(!pin_moved(&pin("sk-1", 3, "c".repeat(64)), &skill));
++        assert!(!pin_moved(&pin("sk-1", 0, "b".repeat(64)), &skill));
++        assert!(!pin_moved(&pin("sk-2", 2, "b".repeat(64)), &skill));
++
++        let version = |bundle: &str| AgentSkillVersion {
++            skill_id: "sk-1".into(),
++            version: 2,
++            bundle_sha256: bundle.into(),
++            ..Default::default()
++        };
++        let kept_bundle = "a".repeat(64);
++        assert_eq!(
++            bundle_of_version(false, Some(&version(&kept_bundle))),
++            PinnedBundle::At(kept_bundle.clone())
++        );
++        assert_eq!(bundle_of_version(false, Some(&version(""))), PinnedBundle::NoBundle);
++        assert_eq!(bundle_of_version(true, Some(&version(&kept_bundle))), PinnedBundle::Gone);
++        assert_eq!(bundle_of_version(false, None), PinnedBundle::Gone);
++    }
++
++    /// With pins off the live bundle is read and no version is looked up, so a
++    /// deployment without `MODEL_GATEWAY_SKILL_PINS` reads bundles as before.
++    #[tokio::test]
++    async fn skill_file_reads_the_live_bundle_while_pins_are_off() {
++        if crate::skills::skill_pins_enabled() {
++            return;
++        }
++        let state = crate::state::AppState::new();
++        let skill = mp_contracts::model_plane::v1::Skill {
++            id: "sk-1".into(),
++            ..Default::default()
++        };
++        assert_eq!(
++            pinned_bundle(&state, "org_test", "run_test", "session-bearer", &skill).await,
++            Ok(PinnedBundle::Live)
++        );
++    }
++
+     #[test]
+     fn sha256_hex_is_the_spelling_the_manifest_records() {
+         assert_eq!(
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0110_agent_skill_drafts.sql b/apps/Model Plane/rust/services/session-core/migrations/0110_agent_skill_drafts.sql
+new file mode 100644
+index 000000000..0fa11272f
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0110_agent_skill_drafts.sql	
+@@ -0,0 +1,95 @@
++-- 0110: a draft beside the live text of a skill (Wave 3 EP-11 S5).
++--
++-- Reserved as 0097 in round B; numbered 0110 so it applies after 0108 (versions) and 0109
++-- (authored kinds), whose revision snapshot function this file replaces (on a fresh database
++-- 0097 would run first and 0109 would put its own snapshot back without the draft marker).
++--
++-- With capability-core's SKILL_DRAFT_PUBLISH on, an edit of an accepted skill's text writes
++-- `draft` and leaves the live fields alone, so turns keep using the published version until its
++-- author publishes. Publishing copies the draft into the live fields and clears it in one
++-- statement; 0108's trigger then cuts the new version. A restore writes an old version's body
++-- into `draft`, so a restore is never live until it is published as a new version (EP-11 D2).
++-- With the switch off nothing writes these columns and every row keeps draft NULL.
++--
++--   draft             the edited body, the same field set as agent_skill_version_body (name,
++--                     description, content, trigger_keywords, trigger_file_patterns,
++--                     tool_restrictions, kind, settings, bundle_sha256). NULL when the skill has
++--                     no draft. Draft writes touch no versioned field, so they cut no version.
++--   draft_updated_at  when the draft was last written; NULL with no draft.
++--   draft_by          the person who last wrote the draft ('' with no draft).
++--
++-- Revisions: the snapshot (0064, as 0109 left it) gains `has_draft`, a boolean, never the draft
++-- text, so starting, publishing or discarding a draft records an `edited` revision while a
++-- revision stays bounded by the live text it already carried. Saving a draft over a draft records
++-- nothing: the live row a person sees has not changed. Snapshots written before this file lack
++-- the key, and the restore (session-core RESTORE_SKILL_SQL) never reads it, so an undo restores
++-- the live text and leaves any draft as it is.
++--
++-- Content: a draft is authored skill text, the same class as the live row, and goes with it (skill
++-- delete, org purge in gdpr.rs, owner erasure through owner_user_id). Zero Data Retention: ZDR
++-- credentials cannot write agent_skills at either writer, so no ZDR content reaches a draft.
++
++ALTER TABLE agent_skills
++    ADD COLUMN IF NOT EXISTS draft JSONB,
++    ADD COLUMN IF NOT EXISTS draft_updated_at TIMESTAMPTZ,
++    ADD COLUMN IF NOT EXISTS draft_by TEXT NOT NULL DEFAULT '';
++
++-- A draft is an object or absent; publish reads its keys and a scalar would publish nothing.
++DO $$
++BEGIN
++    IF NOT EXISTS (
++        SELECT 1 FROM pg_constraint WHERE conname = 'agent_skills_draft_object_check'
++    ) THEN
++        ALTER TABLE agent_skills
++            ADD CONSTRAINT agent_skills_draft_object_check
++            CHECK (draft IS NULL OR jsonb_typeof(draft) = 'object') NOT VALID;
++    END IF;
++END
++$$;
++ALTER TABLE agent_skills VALIDATE CONSTRAINT agent_skills_draft_object_check;
++
++-- 0109's snapshot with has_draft added last, in both the full and the truncated shape, so a draft
++-- starting or ending on a large skill is still a visible change.
++CREATE OR REPLACE FUNCTION agent_skill_revision_snapshot(s agent_skills) RETURNS JSONB AS $$
++DECLARE
++    snapshot JSONB;
++BEGIN
++    snapshot := jsonb_build_object(
++        'id', s.id,
++        'org_id', s.org_id,
++        'name', s.name,
++        'description', s.description,
++        'content', s.content,
++        'trigger_keywords', s.trigger_keywords,
++        'trigger_file_patterns', s.trigger_file_patterns,
++        'tool_restrictions', s.tool_restrictions,
++        'enabled', s.enabled,
++        'origin', s.origin,
++        'scope', s.scope,
++        'owner_user_id', s.owner_user_id,
++        'shared_with', s.shared_with,
++        'review_state', s.review_state,
++        'source_run_id', s.source_run_id,
++        'source_thread_id', s.source_thread_id,
++        'proposal_reason', s.proposal_reason,
++        'kind', s.kind,
++        'settings', s.settings,
++        'has_draft', s.draft IS NOT NULL
++    );
++    IF pg_column_size(snapshot) > 65536 THEN
++        RETURN jsonb_build_object(
++            'truncated', true,
++            'id', s.id,
++            'org_id', s.org_id,
++            'name', s.name,
++            'enabled', s.enabled,
++            'scope', s.scope,
++            'owner_user_id', s.owner_user_id,
++            'review_state', s.review_state,
++            'kind', s.kind,
++            'has_draft', s.draft IS NOT NULL
++        );
++    END IF;
++    RETURN snapshot;
++END
++$$ LANGUAGE plpgsql IMMUTABLE;
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0110_agent_skill_drafts.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0110_agent_skill_drafts.down.sql
+new file mode 100644
+index 000000000..aa8c9d64a
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0110_agent_skill_drafts.down.sql	
+@@ -0,0 +1,75 @@
++-- Reverses 0110_agent_skill_drafts.sql.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate!
++-- reads only the top level of migrations/. Run it by hand, against the database
++-- only, inside one transaction.
++--
++-- DESTROYS every unpublished draft (the draft, draft_updated_at and draft_by
++-- columns). Live skill text, versions and revisions are untouched: a draft was
++-- never live, so no turn and no pinned run read it. Export the drafts first if
++-- they matter:
++--
++--   SELECT id, org_id, draft_by, draft_updated_at, draft FROM agent_skills
++--   WHERE draft IS NOT NULL;
++--
++-- The revision snapshot goes back to 0109's field list; revisions written
++-- meanwhile keep their has_draft key, which the restore ignores.
++--
++-- ORDER, all three steps:
++--   1. set SKILL_DRAFT_PUBLISH unset (or not `true`) for capability-core, and
++--      roll capability-core back to a build that does not read the columns;
++--   2. run this file;
++--   3. delete the 0110 row from _sqlx_migrations so the next boot re-applies it.
++--
++-- Safe to run twice (IF EXISTS).
++
++BEGIN;
++-- 0109's revision snapshot, without has_draft. Replaced before the column goes,
++-- so no trigger call can reach a function that names a dropped column.
++CREATE OR REPLACE FUNCTION agent_skill_revision_snapshot(s agent_skills) RETURNS JSONB AS $$
++DECLARE
++    snapshot JSONB;
++BEGIN
++    snapshot := jsonb_build_object(
++        'id', s.id,
++        'org_id', s.org_id,
++        'name', s.name,
++        'description', s.description,
++        'content', s.content,
++        'trigger_keywords', s.trigger_keywords,
++        'trigger_file_patterns', s.trigger_file_patterns,
++        'tool_restrictions', s.tool_restrictions,
++        'enabled', s.enabled,
++        'origin', s.origin,
++        'scope', s.scope,
++        'owner_user_id', s.owner_user_id,
++        'shared_with', s.shared_with,
++        'review_state', s.review_state,
++        'source_run_id', s.source_run_id,
++        'source_thread_id', s.source_thread_id,
++        'proposal_reason', s.proposal_reason,
++        'kind', s.kind,
++        'settings', s.settings
++    );
++    IF pg_column_size(snapshot) > 65536 THEN
++        RETURN jsonb_build_object(
++            'truncated', true,
++            'id', s.id,
++            'org_id', s.org_id,
++            'name', s.name,
++            'enabled', s.enabled,
++            'scope', s.scope,
++            'owner_user_id', s.owner_user_id,
++            'review_state', s.review_state,
++            'kind', s.kind
++        );
++    END IF;
++    RETURN snapshot;
++END
++$$ LANGUAGE plpgsql IMMUTABLE;
++ALTER TABLE agent_skills DROP CONSTRAINT IF EXISTS agent_skills_draft_object_check;
++ALTER TABLE agent_skills
++    DROP COLUMN IF EXISTS draft_by,
++    DROP COLUMN IF EXISTS draft_updated_at,
++    DROP COLUMN IF EXISTS draft;
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/tests/skill_drafts.rs b/apps/Model Plane/rust/services/session-core/tests/skill_drafts.rs
+new file mode 100644
+index 000000000..7c8c1e984
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/tests/skill_drafts.rs	
+@@ -0,0 +1,216 @@
++//! EP-11 S5: the draft beside a skill's live text (migration 0110).
++//!
++//! The source tests pin what the migration must keep from 0109: the revision snapshot it
++//! replaces names every key 0109 named, plus a `has_draft` boolean and never the draft text. The
++//! ignored tests run against a Postgres with session-core's migrations (scripts/tests/
++//! session-core-db-tests.sh) and prove the two promises capability-core's draft routes rely on:
++//! a draft write cuts no version, and capability-core's publish statement cuts exactly one,
++//! attributed to the person who published.
++
++const MIGRATION: &str = include_str!("../migrations/0110_agent_skill_drafts.sql");
++const KIND_MIGRATION: &str = include_str!("../migrations/0109_authored_behaviour_kind.sql");
++const REVERT: &str = include_str!("../migrations/revert/0110_agent_skill_drafts.down.sql");
++
++/// The keys of the first `jsonb_build_object(` after `function` in `sql`, in order.
++fn snapshot_keys(sql: &str, function: &str) -> Vec<String> {
++    let start = sql.find(function).expect("the snapshot function");
++    let body = &sql[start..];
++    let body = &body[body.find("jsonb_build_object(").expect("the snapshot object")..];
++    let body = &body[..body.find(");").expect("the object's end")];
++    body.lines()
++        .filter_map(|line| line.trim().strip_prefix('\''))
++        .filter_map(|line| line.split('\'').next())
++        .map(str::to_owned)
++        .collect()
++}
++
++const SNAPSHOT_FN: &str = "CREATE OR REPLACE FUNCTION agent_skill_revision_snapshot(s agent_skills)";
++
++#[test]
++fn draft_snapshot_keeps_every_0109_key_and_adds_only_has_draft() {
++    let before = snapshot_keys(KIND_MIGRATION, SNAPSHOT_FN);
++    let after = snapshot_keys(MIGRATION, SNAPSHOT_FN);
++    let mut expected = before.clone();
++    expected.push("has_draft".to_owned());
++    assert_eq!(after, expected, "0110 must extend 0109's snapshot, not reorder or drop a key");
++    assert!(
++        MIGRATION.contains("'has_draft', s.draft IS NOT NULL"),
++        "a revision carries only whether a draft exists"
++    );
++    assert!(
++        !MIGRATION.contains("'draft', s.draft"),
++        "the draft text must stay out of revisions, which keep 50 entries of live text"
++    );
++}
++
++#[test]
++fn draft_revert_restores_the_0109_snapshot() {
++    assert_eq!(
++        snapshot_keys(REVERT, SNAPSHOT_FN),
++        snapshot_keys(KIND_MIGRATION, SNAPSHOT_FN),
++        "the revert must put back exactly 0109's snapshot"
++    );
++    let replaced = REVERT.find(SNAPSHOT_FN).expect("the snapshot function");
++    let dropped = REVERT.find("DROP COLUMN IF EXISTS draft").expect("the column drop");
++    assert!(
++        replaced < dropped,
++        "the snapshot must stop naming draft before the column goes"
++    );
++}
++
++#[test]
++fn draft_columns_never_feed_the_version_digest() {
++    // 0108/0109's body function is the digest's only input; 0110 must not replace it.
++    assert!(!MIGRATION.contains("agent_skill_version_body(s agent_skills)"));
++    assert!(!MIGRATION.contains("agent_skill_digest"));
++}
++
++#[cfg(test)]
++mod db {
++    /// A pool on a migrated database, or `None` (the test then skips) without DATABASE_URL.
++    async fn pool() -> Option<sqlx::PgPool> {
++        let Ok(url) = std::env::var("DATABASE_URL") else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return None;
++        };
++        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
++        sqlx::migrate!("./migrations")
++            .run(&pool)
++            .await
++            .expect("migrate");
++        Some(pool)
++    }
++
++    /// Runs `statement` as capability-core's registry does: one transaction that first names the
++    /// person as the actor, with the settings the revision and version triggers read.
++    async fn as_person(pool: &sqlx::PgPool, actor: &str, statement: &str, binds: &[&str]) {
++        let mut tx = pool.begin().await.expect("begin");
++        sqlx::query(
++            "SELECT set_config('mp.actor_kind', 'user', true), set_config('mp.actor_id', $1, true)",
++        )
++        .bind(actor)
++        .execute(&mut *tx)
++        .await
++        .expect("name the actor");
++        let mut query = sqlx::query(statement);
++        for value in binds {
++            query = query.bind(*value);
++        }
++        query.execute(&mut *tx).await.expect("registry statement");
++        tx.commit().await.expect("commit");
++    }
++
++    async fn accepted_skill(pool: &sqlx::PgPool) -> (String, String) {
++        let org = format!("skd-{}", mp_ids::new_ulid());
++        let id = format!("sk-{}", mp_ids::new_ulid());
++        as_person(
++            pool,
++            "admin-1",
++            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at)
++             VALUES ($1, $2, 'Drafted', 'live body', 'org', '', now(), now())",
++            &[&id, &org],
++        )
++        .await;
++        (id, org)
++    }
++
++    async fn version_and_content(pool: &sqlx::PgPool, id: &str) -> (i32, String) {
++        sqlx::query_as("SELECT version, content FROM agent_skills WHERE id = $1")
++            .bind(id)
++            .fetch_one(pool)
++            .await
++            .expect("the skill")
++    }
++
++    /// The draft write capability-core's PATCH makes while SKILL_DRAFT_PUBLISH is on.
++    const DRAFT_WRITE: &str = "UPDATE agent_skills
++        SET draft = COALESCE(draft, agent_skill_version_body(agent_skills)) || jsonb_build_object('content', $3::text),
++            draft_updated_at = now(), draft_by = 'admin-1'
++        WHERE id = $1 AND org_id = $2";
++
++    /// The live columns capability-core's publish copies out of the draft, clearing it.
++    const PUBLISH: &str = "UPDATE agent_skills
++        SET name = COALESCE(draft->>'name', name),
++            description = COALESCE(draft->>'description', description),
++            content = COALESCE(draft->>'content', content),
++            trigger_keywords = COALESCE(draft->'trigger_keywords', trigger_keywords),
++            trigger_file_patterns = COALESCE(draft->'trigger_file_patterns', trigger_file_patterns),
++            tool_restrictions = COALESCE(draft->'tool_restrictions', tool_restrictions),
++            settings = COALESCE(draft->'settings', settings),
++            draft = NULL, draft_updated_at = NULL, draft_by = '', updated_at = now()
++        WHERE id = $1 AND org_id = $2 AND review_state = 'accepted' AND draft IS NOT NULL";
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn draft_edit_cuts_no_version() {
++        let Some(pool) = pool().await else {
++            return;
++        };
++        let (id, org) = accepted_skill(&pool).await;
++        assert_eq!(version_and_content(&pool, &id).await, (1, "live body".to_owned()));
++        as_person(&pool, "admin-1", DRAFT_WRITE, &[&id, &org, "draft one"]).await;
++        as_person(&pool, "admin-1", DRAFT_WRITE, &[&id, &org, "draft two"]).await;
++        assert_eq!(
++            version_and_content(&pool, &id).await,
++            (1, "live body".to_owned()),
++            "a draft must leave the live text and the version alone"
++        );
++        let versions: i64 =
++            sqlx::query_scalar("SELECT count(*) FROM agent_skill_versions WHERE skill_id = $1")
++                .bind(&id)
++                .fetch_one(&pool)
++                .await
++                .expect("count versions");
++        assert_eq!(versions, 1);
++        // Starting the draft is one `edited` revision; saving over it records nothing.
++        let drafted: Vec<(String, bool)> = sqlx::query_as(
++            "SELECT action, COALESCE((after->>'has_draft')::boolean, false)
++             FROM skill_revisions WHERE skill_id = $1 ORDER BY revision",
++        )
++        .bind(&id)
++        .fetch_all(&pool)
++        .await
++        .expect("revisions");
++        assert_eq!(
++            drafted,
++            vec![("created".to_owned(), false), ("edited".to_owned(), true)]
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn publish_from_capability_core_sql_cuts_version_with_actor() {
++        let Some(pool) = pool().await else {
++            return;
++        };
++        let (id, org) = accepted_skill(&pool).await;
++        as_person(&pool, "admin-1", DRAFT_WRITE, &[&id, &org, "published body"]).await;
++        as_person(&pool, "member-2", PUBLISH, &[&id, &org]).await;
++        assert_eq!(
++            version_and_content(&pool, &id).await,
++            (2, "published body".to_owned())
++        );
++        let (actor_kind, actor_id, content): (String, String, String) = sqlx::query_as(
++            "SELECT actor_kind, actor_id, body->>'content' FROM agent_skill_versions
++             WHERE skill_id = $1 AND version = 2",
++        )
++        .bind(&id)
++        .fetch_one(&pool)
++        .await
++        .expect("version 2");
++        assert_eq!(
++            (actor_kind.as_str(), actor_id.as_str(), content.as_str()),
++            ("user", "member-2", "published body")
++        );
++        let draft_left: bool =
++            sqlx::query_scalar("SELECT draft IS NOT NULL FROM agent_skills WHERE id = $1")
++                .bind(&id)
++                .fetch_one(&pool)
++                .await
++                .expect("the skill");
++        assert!(!draft_left, "publish clears the draft in the same statement");
++        // A second publish has no draft to copy and cuts nothing.
++        as_person(&pool, "member-2", PUBLISH, &[&id, &org]).await;
++        assert_eq!(version_and_content(&pool, &id).await.0, 2);
++    }
++}

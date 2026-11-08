@@ -1,0 +1,66 @@
+{
+ "WS05-S4": [
+  [
+   "r1",
+   "shared-edit docs/decisions/ledger.md: WS05-S4 review ruling D0: the gateway's ListMcpTools forwards x-capability-authorization to capability-core only from a service identity (it cannot verify the bearer without a grpc_auth.rs change). hydrate_mcp_registry fetches first and replaces the org's registry, ownership sidecar and discovery catalog only on a successful answer, so a refused bearer or an outage leaves the replica's cache as it was. A revoked server therefore leaves a replica only on the next successful hydration, not on a failed one."
+  ],
+  [
+   "r1",
+   "shared-edit docs/decisions/ledger.md: WS05-S4 review ruling D1: a governed MCP call is compared at dispatch with the class and floor in its signed policy decision. A difference, or a decision that names no class, refuses the call as class_changed (counter mcp_tool_class_changed_total), before any credential or network call. The offer's snapshot is never the only authority."
+  ],
+  [
+   "r1",
+   "shared-edit docs/decisions/ledger.md: WS05-S4 review ruling D2: the effect ledger classifies through the run's RunGate (effect_class_for_run / entry_for_run_call), the same classifier the retry policy asks. As a safety net, a call holding an effectful reservation, or the release's pre-reserve, is never retried (ledger_fences_retry). The name-based effect_class_of remains for resume.rs reconciliation, where it is only ever the stricter answer."
+  ],
+  [
+   "r1",
+   "shared-edit docs/decisions/ledger.md: WS05-S4 review ruling D3: a waived route is treated exactly like ZDR at the offer. The offer makes no gateway token, listing, binding lookup or prefetch and counts withheld{reason=zdr}. This also means a ZDR or waived run under TOOL_CLASS_GATE=enforce no longer learns built-in classes from the registry; it keeps the legacy name classification, which the seeded-class parity tests pin as equal."
+  ],
+  [
+   "r1",
+   "shared-edit docs/decisions/ledger.md: WS05-S4 review ruling D4: the effective MCP_DO_TOOL_CAP is clamped to MAX_VIEWS_PER_RUN minus the built-in views. Built-in names are never truncated from the registry lookup; MCP names are bounded instead. Overflow is counted withheld{over_cap} and never offered."
+  ],
+  [
+   "r1",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: execution-core owns the per-call comparison of the offered tool class with the signed decision class (mcp_gateway::SignedToolClass); the class registry and signing stay with capability-core."
+  ],
+  [
+   "r1",
+   "shared-edit WS05-S4 lead_todo (live proof): add that Auth Core's capability-core audience token for execution-core has the same principal as its model-gateway audience token. This is not needed now that D0 is service-only, but would be if the gateway later verifies the bearer in the interceptor."
+  ],
+  [
+   "r2",
+   "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: a retention-bound run (ZDR, or a waived route) skips only the MCP half of the offer (the listing, the MCP names in the binding lookup, the prefetch and the gateway token). It still resolves the BUILT-IN names whenever TOOL_CLASS_GATE != off and records those views, so the gate classifies it by the same declared classes as a non-ZDR run of the org instead of the looser legacy name heuristic. No MCP name or MCP-derived data reaches any call for such a run. Tests: a ZDR run and a waived run with a registry row tightening a built-in tool are refused at the read-only rung exactly as the non-ZDR run is; they still make no listing, no MCP binding lookup and no prefetch."
+  ],
+  [
+   "r2",
+   "shared-edit apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs: McpRegistry::replace_org is a merge (upsert the answer, then remove only keys absent from it) and returns the removed ids. A discovery-catalog entry is kept while the server's url, transport, allowlist, enabled flag and token are unchanged, and dropped when it changed or the server is new or gone. hydrate_mcp_registry swaps the ownership sidecar the same way (upsert first, remove after the row is gone), through apply_mcp_projection, so a server in both the old and the new answer is never missing at any instant. The ownership sidecar has no way to list its keys, so only the ownership of rows the registry dropped is removed; an ownership record with no registry row behind it is not cleaned by a successful refresh (it is by a clear)."
+  ],
+  [
+   "r2",
+   "shared-edit apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs: hydrate_mcp_registry fails closed again. A transport error, any non-success status other than 401/403, an unparseable body, or an empty or invalid registry URL clears the org's registry, ownership sidecar and discovery catalog, so an outage cannot leave an admin-revoked MCP server callable from stale process memory (dispatch_tool, proxy_mcp_tool). Only 401/403 (a bearer capability-core refused, which only a service identity can now send) and a blank bearer leave the cache untouched. A successful fetch replaces. Tests for each failure class."
+  ]
+ ],
+ "WS04-S4": [
+  [
+   "r1",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: WS04 S4 review rulings (all implemented, flag off by default). (0) A failed read of the thread grant (timeout past 5 s, Unavailable, Unimplemented from an older session-core, a refusal) is NOT 'no grant': with MODEL_GATEWAY_DURABLE_PLAN_GRANT on, a non-execute run states READ_ONLY (the narrowest rung; Unspecified would mean unconstrained to execution-core) and an execute run is refused plan_grant_unavailable. Only an Ok answer that says none is no grant. One warn per failure with the status code only, counted in plan_grant_read_failed_total. (1) plan_approval with the flag on retries SetRunMode (first attempt, then retries after about 100, 300 and 900 ms, transient codes only); on final failure the plan stays APPROVED, the answer is persisted:false, and the approving replica records the grant in its in-memory PlanModeStore and keeps honouring it: the run start uses it only when Session Core answers 'no grant', Session Core's own grant always wins, and an unreadable read never consults memory. (2) session-core checks ONCE at boot (information_schema) that the five 0050 grant columns exist. With them absent a stated grant is skipped with a warn (the run UPDATE proceeds) and GetThreadGrant answers 'no grant' without naming the columns. Revert order: gateway flag off, drop the columns, RESTART session-core. (3) The durable exit uses was_active = durable run mode OR this replica's flag (mark_run_plan_mode's durable write is best-effort), and the raw gRPC ExitPlanMode goes through handle_exit_plan_mode_durable when the flag is on. (4) SetRunMode refuses a waived credential that states a grant (durable_mutation_forbidden, FailedPrecondition), as record_run_context does; a waived credential's mode change that states no grant is unchanged."
+  ],
+  [
+   "r1",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: row 26 and section 4.1, append to the WS04 S4 sentence: 'Session-core gates the thread grant write and the GetThreadGrant read on the 0050 columns existing, checked once at boot; a gateway replica whose approval could not be recorded durably keeps that one grant in its in-memory PlanModeStore and honours it only when Session Core holds none.'"
+  ],
+  [
+   "r1",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: rollback line of the WS04 S4 entry becomes: 'Rollback: flag off on every gateway replica, run revert/0050, then RESTART session-core (it checks the columns at boot).'"
+  ],
+  [
+   "r2",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: WS04 S4 second-review rulings (flag off by default). (0) Every in-memory plan-grant fallback is keyed on the run's OWN thread (GetRun's thread_id), never on a caller-supplied session_id. With the durable-grant flag on, gRPC ExitPlanMode refuses a session_id that differs from the run's thread (PermissionDenied) before anything is published or recorded, and answers Unavailable if the run row cannot be read while a session_id is named. The fallback is kept in memory ONLY after a transient SetRunMode failure (Unavailable, DeadlineExceeded, Aborted, ResourceExhausted, Internal), in plan_approval and in gRPC ExitPlanMode; a refusal (FailedPrecondition, PermissionDenied, Unauthenticated, InvalidArgument, NotFound) records no copy. (1) plan_approval sends a waived credential's SetRunMode with the mode change alone (no granted_rung, justification or approved_plan_id), so the run leaves plan mode as before durable grants. The answer is persisted:false, with the flag on the approving replica keeps the grant in memory on the run's own thread, and session-core keeps refusing a waived caller that states a grant as defence in depth. Consequence: a waived approval no longer writes the runs.metadata autonomy_rung/justification copy. The waiver is read through zdr_posture::claims_view."
+  ],
+  [
+   "r2",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md (open item): with the flag OFF, gRPC ExitPlanMode (coordinator::handle_exit_plan_mode) still records the in-memory grant keyed on the request's session_id, unverified against the run's thread. The same plant is possible on one replica, and it predates WS04 S4. Not fixed here because the flag-off path makes no GetRun call and the existing mocks answer get_run Unimplemented for run-owned. Recommend a tolerant check in a later slice: refuse when get_run is readable and the thread differs."
+  ]
+ ]
+}

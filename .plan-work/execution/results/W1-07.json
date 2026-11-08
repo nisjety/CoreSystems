@@ -1,0 +1,492 @@
+{
+ "batchId": "W1-07",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS06-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/audit-core/.env.example",
+    "apps/Control Plane/audit-core/cmd/server/main.go",
+    "apps/Control Plane/audit-core/cmd/server/main_test.go",
+    "apps/Control Plane/audit-core/internal/chain/sign.go",
+    "apps/Control Plane/audit-core/internal/chain/sign_test.go",
+    "apps/Control Plane/audit-core/internal/store/attest.go",
+    "apps/Control Plane/audit-core/internal/store/export_test.go",
+    "apps/Control Plane/audit-core/internal/store/migrate.go",
+    "apps/Control Plane/audit-core/internal/store/migrations/008_audit_chain_checkpoints.sql",
+    "apps/Control Plane/audit-core/internal/store/migrations/revert/008_audit_chain_checkpoints.down.sql",
+    "apps/Control Plane/audit-core/internal/store/purge_chain_test.go",
+    "apps/Control Plane/audit-core/internal/store/store.go",
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Control Plane/scripts/validate-release-credentials.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/audit-core\" && go vet ./...",
+     "outcome": "clean"
+    },
+    {
+     "command": "go test -count=1 ./internal/chain/",
+     "outcome": "pass (new sign_test.go: both key encodings, seed and expanded key, bad config, tampered attestation and checkpoint, wrong key id, rotation, public-only ring, no key material in errors)"
+    },
+    {
+     "command": "go test -count=1 ./cmd/server/ (new config tests)",
+     "outcome": "pass (strict prune switches, dry-run wins over enable, key rules incl. production boot failure, attest interval, example env and compose default-off)"
+    },
+    {
+     "command": "go test -count=1 ./internal/... ./cmd/...",
+     "outcome": "pass; the Postgres tests, including the new purge_chain_test.go, skipped because TEST_DATABASE_URL is unset and no Postgres is available here"
+    },
+    {
+     "command": "bash -n on run-control-plane.sh and validate-release-credentials.sh",
+     "outcome": "syntax ok; neither script was executed"
+    }
+   ],
+   "db_tests_written": [
+    "TestPurgeWritesSignedCheckpointAndChainStillVerifies",
+    "TestPurgeBatchesWriteOneCheckpointEach",
+    "TestPurgeRefusesATamperedPrefixAndDeletesNothing",
+    "TestPurgeDuringConcurrentInserts",
+    "TestTwoRacingPurgersCutTheSamePrefixOnce",
+    "TestPurgeOfAnEntirelyExpiredChainLeavesTheHeadUsable",
+    "TestPruneOffKeepsExpiredChainedRowsAndPruneOnNeedsAKey",
+    "TestPurgeDryRunVerifiesAndPlansButChangesNothing",
+    "TestPurgeBlocksOnACheckpointItCannotTrustAndRotationUnblocksIt",
+    "TestAttestSignsEachHeadOnceAndSkipsBrokenOnes"
+   ],
+   "lead_todo": [
+    "Run the audit-core DB tests: docker run --rm -d --name ac-pg -p 55432:5432 -e POSTGRES_PASSWORD=t postgres:16, then cd \"apps/Control Plane/audit-core\" && TEST_DATABASE_URL=\"postgres://postgres:t@localhost:55432/postgres?sslmode=disable\" go vet ./... && go test ./... . The 10 new tests in internal/store/purge_chain_test.go have never executed, so fix any SQL or typing slips from the first run. Also confirm the existing chain_insert_test.go and store_test.go tests stay green.",
+    "shared-edit apps/Control Plane/docker-compose.yml: add to the audit-core environment block (near the AUDIT_CORE_SERVICE_CREDENTIALS line, ~826-833): AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-} ; AUDIT_CHAIN_PRIVATE_KEY_BASE64: ${AUDIT_CHAIN_PRIVATE_KEY_BASE64:-} ; AUDIT_CHAIN_PUBLIC_KEY_BASE64: ${AUDIT_CHAIN_PUBLIC_KEY_BASE64:-} ; AUDIT_CHAIN_VERIFY_KEYS: ${AUDIT_CHAIN_VERIFY_KEYS:-} ; AUDIT_CHAIN_ATTEST_INTERVAL: ${AUDIT_CHAIN_ATTEST_INTERVAL:-60s} ; AUDIT_CHAIN_PRUNE_ENABLED: ${AUDIT_CHAIN_PRUNE_ENABLED:-0} ; AUDIT_CHAIN_PRUNE_DRYRUN: ${AUDIT_CHAIN_PRUNE_DRYRUN:-0}. These lines are inert until a switch is on.",
+    "shared-edit apps/Control Plane/docker-compose.yml (and docker-compose.production.yml if it sets the environment per service): pass ENVIRONMENT to audit-core (for example ENVIRONMENT: ${ENVIRONMENT:-development}). Without it the 'chain on in production without a key fails boot' rule can never fire. Check what other Control services use for this variable. Also confirm audit-core's compose block still contains AUDIT_CHAIN_ENABLED: ${AUDIT_CHAIN_ENABLED:-0} from the S2 compose edit; main_test.go requires the :-0 defaults.",
+    "Live proof (S3 DoD), after the DB tests are green: rebuild audit-core with scripts/run-control-plane.sh up -d --build audit-core (never bare compose build). Let run-control-plane.sh mint the AUDIT_CHAIN_* keypair. Set AUDIT_CHAIN_ENABLED=1 with pruning off, then seed backdated rows via psql with SET audit.maintenance='on' (rechain them, since row_hash covers ingested_at). Run with AUDIT_CHAIN_PRUNE_DRYRUN=1 and capture the dry-run log. Then run with AUDIT_CHAIN_PRUNE_ENABLED=1 and capture the audit_chain_checkpoints rows and the sweep log. Also capture that audit-core refuses to boot with ENVIRONMENT=production, the chain on and no key. Verifier output before and after, and the public key endpoint, come with S4 and S5.",
+    "Back up the DB before the first run with AUDIT_CHAIN_PRUNE_ENABLED=1: it deletes audit evidence after verification, and the first sweep is the dangerous moment."
+   ],
+   "deviations": [
+    "The new switches (AUDIT_CHAIN_PRUNE_ENABLED, AUDIT_CHAIN_PRUNE_DRYRUN) accept only the literal 1, not true. I matched audit-core's existing AUDIT_CHAIN_ENABLED parser and the plan row, which both use 1.",
+    "I edited internal/store/migrate.go, which is not in the owned list, to embed migration 008. The plan row says 'migrate.go embed' and the migration cannot apply without it. The change is 4 lines.",
+    "The chain-safe purge code lives in attest.go rather than store.go, to keep store.go edits minimal. store.go only gained the struct fields, the PurgeResult fields and the purgeChained call.",
+    "I added internal/store/export_test.go, a test-only shim so tests can shrink the purge batch to cross batch boundaries.",
+    "backdateAndRechain in the purge tests recomputes row hashes after backdating, because row_hash covers ingested_at and a bare backdating UPDATE would make the prefix fail verification. The plan's 'backdate via GUC' wording does not hold for the verified purge.",
+    "No Prometheus metrics for purge or attest outcomes: internal/metrics/server.go is not owned. Outcomes show in logs, in audit_chain_incidents rows, and in the PurgeResult counts."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/docker-compose.yml (audit-core env block; see lead_todo)",
+    "apps/Control Plane/audit-core/internal/metrics/server.go (purge and attest counters, optional)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The 10 new DB tests in internal/store/purge_chain_test.go have never executed. The lead must run the plan's docker harness (postgres:16 on 55432, TEST_DATABASE_URL, go vet ./... && go test ./...) and fix any first-run SQL or typing slips.",
+     "The existing chain_insert_test.go and store_test.go tests must be confirmed green against Postgres.",
+     "Shared edit, apps/Control Plane/docker-compose.yml (audit-core env block): add AUDIT_CHAIN_KEY_ID, AUDIT_CHAIN_PRIVATE_KEY_BASE64, AUDIT_CHAIN_PUBLIC_KEY_BASE64, AUDIT_CHAIN_VERIFY_KEYS (default empty), AUDIT_CHAIN_ATTEST_INTERVAL (default 60s), AUDIT_CHAIN_PRUNE_ENABLED (default 0) and AUDIT_CHAIN_PRUNE_DRYRUN (default 0). Also pass ENVIRONMENT to audit-core, or the production boot-failure rule can never fire.",
+     "Live proof: back up the DB, then capture a dry-run sweep, then a prune-on sweep with the audit_chain_checkpoints rows, and show that boot refuses with ENVIRONMENT=production, the chain on and no key. The verifier output and the public key endpoint come with S4 and S5."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The purge verifies only the rows it is about to delete, linked to the newest signed checkpoint. It does not check that the head or the newest attested sequence still agree with the retained suffix, so a tampered retained row is caught only by S4's verifier, not by purge."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Attestations are never pruned and the attestor writes one per head change per org. On a hot org that is a row per interval at most. S4 or S9 should decide a retention rule (keep the newest per day) before the table grows."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The purge detects a tampered prefix but does not alert on it: there is no purge, incident or attestation metric (internal/metrics is not owned here), and S4 owns the rules. Add audit_core_chain_purge_blocked_total and an incident-count alert, or the incident table is only visible by querying it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Replicas each run Attest and Purge. Attest is idempotent via ON CONFLICT DO NOTHING. A purge that loses the advisory lock skips that org until the next daily sweep, so a purger that stalls leaves expired rows for a day."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Checkpoint signatures cover created_at at microsecond precision, written by the Go side and stored verbatim. S4's verifier and the offline audit-verify CLI must format it with chain.SignedTimeLayout in UTC or every checkpoint will look invalid."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a purge whose first remaining row links to a checkpoint hash that was altered together with a re-signed checkpoint (attacker holds the key). That is the DB-owner plus key-theft case honest-limits must state."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the unchained, catch-up-pending expired rows (chain_seq NULL with ingested_at >= activated_at) that Purge deletes by ingested_at before CatchUp chains them. This is pre-existing behaviour from S2 and is not changed here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The erasure hook (DEC-35 D8) is design only: checkpoint reason 'erasure' is allowed by the migration's CHECK but no code path writes it. A purge-through-head entry point is still needed when the erasure flow lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The public key is not served anywhere yet (S5's GET /keys). Until then the AUDIT_CHAIN_PUBLIC_KEY_BASE64 value in the secrets store is the only copy outside the process."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "run-control-plane.sh persists the key id, private and public halves independently via persist_if_missing, so a store holding only one half would mint a mismatched pair. The Space-decision block has the same trait. audit-core refuses to boot on a mismatched public key, so it is safe but noisy."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Appendix B.4 says retention needs more than the 5-7 d range and gives no figure. The AUDIT_RETENTION_DAYS default (365) is unchanged. The owner should set the retention for chained rows before AUDIT_CHAIN_PRUNE_ENABLED is ever turned on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The purge, checkpoint and attest SQL has never run against Postgres. The plan's DoD (a purge leaves verification green, plus the live evidence) needs the DB tests and a dev-stack sweep before AUDIT_CHAIN_PRUNE_ENABLED is ever set to 1."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Purge verifies only the prefix it is about to delete, linked to the newest signed checkpoint. It does not compare the head or the newest attested sequence with the retained suffix, so a tampered retained row is caught only by S4's verifier."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No purge, incident or attestation metrics or alerts exist (internal/metrics is not owned here). Blocked purges are visible only in logs and in audit_chain_incidents. S4 should add audit_core_chain_purge_blocked_total and an incident alert, and a blocked org writes a new incident row on every daily sweep."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Attestation rows are never pruned and one is written per head change per org per interval, so the table grows without bound. S4 or S9 should set a retention rule, for example the newest per day."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Checkpoint and attestation signatures cover created_at and signed_at at microsecond precision, stored verbatim. S4's verifier and the offline CLI must format them with chain.SignedTimeLayout in UTC, or every signature will fail."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Appendix B.4 says retention needs more than the 5-7 d range, but AUDIT_RETENTION_DAYS stays at 365 and no figure was set for chained rows. The owner must choose it before pruning is enabled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers an attacker who holds the key and re-signs a checkpoint together with an altered through_hash. That is the DB-owner plus key-theft case the honest-limits text (S9) must state."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The erasure hook (DEC-35 D8) is design only: the migration's CHECK allows reason 'erasure' but no code writes it, and a purge-through-head entry point is still needed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The public key is served nowhere until S5's GET /keys, so the secrets store holds the only copy outside the process."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "run-control-plane.sh persists the key id, private half and public half independently, so a store holding only one half could mint a mismatched pair. audit-core refuses to boot on a mismatch, so this is safe but noisy."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "audit"
+   ],
+   "notes": "Status is partial because the purge, checkpoint and attestation behaviour is only proven by Postgres tests I could not run (no Postgres here, docker is forbidden). They compile and vet clean but have never executed, so expect to fix the first run.\n\nWhat was built:\n- chain/sign.go: Ed25519 key ring. It accepts base64url and standard base64, padded or not, for a 32-byte seed or a 64-byte key (Appendix B K2-9). It holds an active key plus VerifyKeys (retired public keys, \"id:pub,id2:pub\"), and has sign and verify for attestations and checkpoints.\n- Migration 008 (number reserved in 4.4) adds audit_chain_checkpoints, audit_chain_attestations and audit_chain_incidents, with a revert file. It is additive and embedded in migrate.go.\n- store/attest.go has the work in three parts:\n  - Attest signs the head of each org chain whose state is ok and not yet attested at that sequence.\n  - The chain-safe purge works per org, one 5000-row batch per transaction. It takes pg_try_advisory_xact_lock, finds X = min(chain_seq with ingested_at >= cutoff) - 1 (or the max chain_seq when all rows are expired), verifies the signed checkpoint, and recomputes every row in the batch. Only then does it delete under the maintenance GUC and insert a signed checkpoint in the same transaction. On any verification failure it deletes nothing and writes an incident from the pool. The incident kinds are: chain_marked_broken, checkpoint_key_unknown, checkpoint_signature_invalid, sequence_gap, prev_hash_mismatch, row_hash_mismatch, unsupported_chain_version, unhashable_row, checkpoint_link_mismatch.\n  - PruneOff / PruneDryRun / PruneOn modes. Dry run verifies and logs the plan without deleting or writing a checkpoint.\n- store.go: Purge calls purgeChained last, and returns the partial result together with any chained-purge error. PurgeResult gains CheckpointsWritten, OrgsBlocked and ChainedPlanned (an addition beyond the plan). Unchained rows still purge by ingested_at.\n- main.go:\n  - Key loading happens only when the chain or pruning is on; with everything off the key variables are never read.\n  - Boot fails on an undecodable key, on a public key that does not match the private key, on prune on without a signing key, and on chain on with ENVIRONMENT=production without a signing key.\n  - runAttestor signs heads every AUDIT_CHAIN_ATTEST_INTERVAL (default 60s).\n- run-control-plane.sh mints AUDIT_CHAIN_KEY_ID, AUDIT_CHAIN_PRIVATE_KEY_BASE64 and AUDIT_CHAIN_PUBLIC_KEY_BASE64 once, as base64url, like the Space-decision pair. validate-release-credentials.sh requires them only when the chain or pruning is on. .env.example lists the variables with prune at 0 and no key values.\n\nEvery new switch defaults off. With the chain and prune switches off, behaviour is byte-identical to before."
+  },
+  {
+   "id": "WS02-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/cache_telemetry.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.up.sql",
+    "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.down.sql",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/analytics.go",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/analytics_cache_test.go",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/ledger_test.go",
+    "apps/Model Plane/go/services/cost-core/internal/postgres/analytics.go",
+    "apps/Model Plane/go/services/cost-core/internal/postgres/store.go",
+    "apps/Model Plane/go/services/cost-core/internal/postgres/store_integration_test.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/analytics.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/server_test.go",
+    "apps/Model Plane/go/services/cost-core/cmd/main.go",
+    "apps/Model Plane/go/services/cost-core/cmd/main_test.go",
+    "apps/Frontend Plane/verevonv3/src/shared/api/cost-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/insights/lib/usage-analytics.ts",
+    "apps/Frontend Plane/verevonv3/src/features/insights/lib/usage-analytics.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/insights/components/UsageAnalyticsSection.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "[apps/Model Plane/go/services/cost-core] go vet ./... ; go vet -tags integration ./... ; go test ./...",
+     "outcome": "all packages pass (cmd, ledger, postgres, server, etc.); integration-tagged test compiles and skips without a DB URL"
+    },
+    {
+     "command": "[apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib cache_telemetry",
+     "outcome": "13 passed"
+    },
+    {
+     "command": "[apps/Model Plane/rust] cargo test -q -p model-gateway --lib usage_ ; --lib sse::tests",
+     "outcome": "29 passed; 80 passed (existing usage-envelope and sse tests unaffected)"
+    },
+    {
+     "command": "[apps/Frontend Plane/verevonv3] pnpm vitest run src/features/insights/lib/usage-analytics.test.ts",
+     "outcome": "5 passed"
+    },
+    {
+     "command": "[apps/Frontend Plane/verevonv3] pnpm typecheck (filtered to insights, cost-client, usage-analytics)",
+     "outcome": "no errors in touched files"
+    },
+    {
+     "command": "[apps/Model Plane] bash scripts/tests/migration-expand-contract-test.sh",
+     "outcome": "migration expand/contract lint ok (0011 accepted as additive)"
+    },
+    {
+     "command": "[apps/Frontend Plane/verevonv3] node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+     "outcome": "FAILS, but not from this slice. It reports registered actions (approvals.decide, chat.answer_question, and others) that have no dispatcher. I added no action and touched neither the action registry nor ag_ui.rs."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: optionally add `pub mod cache_telemetry;` (alphabetical, after `budget`/`calibration`) and delete the `#[path = \"cache_telemetry.rs\"] pub mod cache_telemetry;` lines in `sse.rs`. The call sites use `cache_telemetry::...` and would need `crate::cache_telemetry::` instead. Leaving it as is also works.",
+    "Rebuild and deploy: `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build cost-core model-gateway`. cost-core applies migration 0011 on boot. Deploy cost-core first, since an older cost-core ignores the new payload key.",
+    "Run the Postgres test with `COST_CORE_TEST_DATABASE_URL` set: `cd \"apps/Model Plane/go/services/cost-core\" && go test -tags integration -run TestPostgresLedger_CacheMissReasonRoundTrip ./internal/postgres/`.",
+    "Live proof for the plan's DoD: a 6-turn thread on Anthropic and one pinned to `openai`. Capture the `GET /api/v1/cost/analytics?scope=organization` JSON (`buckets[].cache_*`, `cache_breakdown`) and an Insights screenshot. Record the baseline numbers for S8/S9.",
+    "Optionally add `cargo test -p model-gateway --lib cache_telemetry` and `go test ./...` for cost-core to the build ledger entry for WS02-S2, and add 0011 as consumed in the plan's section 4.4 if not already marked."
+   ],
+   "deviations": [
+    "The module is declared in `sse.rs` with `#[path = \"cache_telemetry.rs\"] pub mod cache_telemetry;` instead of in `lib.rs`, because `lib.rs` is not an owned file. The lead can replace that line with `pub mod cache_telemetry;` in `lib.rs` (shared-edit, see lead_todo).",
+    "The classifier is a process-wide `OnceLock` (`cache_telemetry::global()`), not a field on `AppState`, because `state.rs` is not owned.",
+    "`cache_reported_input_tokens` was added to `UsageBucket` beyond the three fields the plan lists. A token-weighted hit rate needs the denominator restricted to turns where the provider showed cache activity.",
+    "Miss reasons use a separate query and an optional `CacheMissReader` interface (a second `GROUP BY cache_miss_reason` query) rather than a `CacheMissBucket` field inside `UsageBucket`. That keeps the existing bucket grouping and the 10000-bucket limit unchanged.",
+    "The HTTP `/cost/record` path in `server.go` (not owned) does not accept a cache miss reason. Only the NATS usage envelope path stamps it.",
+    "No CSS edit: `usage-analytics.css` is not owned. The new tile wraps onto a second row of the existing 4-column meter grid."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: 6-turn Anthropic and pinned-openai threads on rebuilt cost-core (0011) and model-gateway, with the cost/analytics JSON (cache_* fields and cache_breakdown) and an Insights screenshot, plus baseline numbers for S8/S9.",
+     "Postgres integration test TestPostgresLedger_CacheMissReasonRoundTrip must be run with a database URL (needs docker or a database the lead controls).",
+     "Deploy order: cost-core first, then model-gateway, via compose.sh up -d --no-deps --build cost-core model-gateway.",
+     "The action-surface-contract node test is red on the tree for reasons outside this slice and needs its owner.",
+     "The lead should add the ledger entry for WS02-S2 and mark 0011 consumed in plan section 4.4."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needed before this slice can be switched on or relied on: run the 6-turn Anthropic and pinned-openai threads on a rebuilt cost-core (applies 0011) and model-gateway. Then capture `GET /api/v1/cost/analytics?scope=organization` showing `cache_breakdown` and the SPA tile, and check that real `provider_used` strings and the Anthropic and OpenAI idle windows match the 300 s ttl guess."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "`TestPostgresLedger_CacheMissReasonRoundTrip` (integration tag, skips without `COST_CORE_TEST_DATABASE_URL`) has only been compiled, not run against Postgres, so the SQL in `UsageAnalytics` and `CacheMissAnalytics` is untested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-replica classifier reports `no_baseline` falsely behind a load balancer and after a restart. It is labelled advisory in the API (`advisory: true`) but the UI line says only 'estimated'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`min_cacheable_tokens` in `cache_telemetry.rs` copies inference-core's table and can drift. A cross-service contract test, like `cross_service_loop_contract.rs`, would pin it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The agentic (Do) usage envelope at the `build_usage_envelope` call near line 11084 gets no miss reason. Do rounds only reach the ledger after WS02-S3 and its billing decision (DEC-18)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No gateway test asserts that `cache_miss_reason` is absent from the envelope for ZDR and subscription turns. The behaviour rests on `cache_prefix` being `None` and on the `CostBasis::Subscription` filter at the two call sites."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "`apps/gateway/scripts/action-surface-contract.test.mjs` fails on the current tree: registered actions such as `approvals.decide` and `chat.answer_question` have no dispatcher. It predates this slice and needs its owner; the plan row names this test as an S2 check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The miss-reason filter in the Insights view cannot distinguish metered from unknown basis, because the miss buckets carry no basis. Only the subscription filter empties the reasons."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Norwegian strings (`Buffer-treff`, `Treffrate for prompt-buffer` and the reason labels) are untranslated-review quality and should be checked by a native speaker."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "`rustfmt --check --edition 2021` on cache_telemetry.rs reports diffs, mainly long assert_eq! lines in the tests. `cargo fmt --all -- --check` (a plan common command) will flag the file until `cargo fmt` is run on it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before relying on the view, run 6-turn threads on Anthropic and on a pinned openai route against rebuilt cost-core (applies 0011) and model-gateway. Capture GET /api/v1/cost/analytics?scope=organization showing buckets[].cache_* and cache_breakdown, plus the Insights screenshot. Check that the real provider_used strings and the 300 s TTL guess hold."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Postgres SQL for UsageAnalytics and CacheMissAnalytics (FILTER clauses, the cache_miss_reason round-trip) has only been compiled under the integration tag, not run against Postgres. The lead must run TestPostgresLedger_CacheMissReasonRoundTrip with COST_CORE_TEST_DATABASE_URL set."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No gateway test asserts that cache_miss_reason is absent from the usage envelope for ZDR and subscription turns. That behaviour rests on cache_prefix being None at the two call sites in sse.rs, with no test pinning it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-replica classifier reports no_baseline falsely behind a load balancer and after a restart. The API labels it advisory, but the UI line says only 'estimated'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "min_cacheable_tokens in cache_telemetry.rs is a copy of inference-core's table. A cross-service source-reading contract test would stop the two drifting."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The agentic (Do) usage envelope gets no miss reason. This is acceptable until WS02-S3 and DEC-18."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/gateway/scripts/action-surface-contract.test.mjs fails on the current tree because registered actions have no dispatcher. The plan row names it as a check, so its owner must fix it before the row's test set can be recorded as green."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The miss-reason filter in the Insights view cannot split metered from unknown basis, because CacheMissBucket carries no basis. Only the subscription filter empties the reasons."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The HTTP /cost/record path (server.go, not owned) does not accept cache_miss_reason. Only the NATS envelope path stamps it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The module is declared via #[path] in sse.rs rather than lib.rs. The lead should move it to lib.rs and update the call sites to crate::cache_telemetry:: (the lead_todo shared-edit)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The new Norwegian strings in UsageAnalyticsSection.tsx need review by a native speaker."
+    }
+   ],
+   "unreviewed_risk": [
+    "money",
+    "zdr"
+   ],
+   "notes": "Built to the plan row with no new switch; the payload and API changes are additive only.\n\n- **Gateway:** `cache_telemetry.rs` is an advisory per-replica classifier.\n  - Its state is an in-memory LRU of 4096 threads keyed by a blake3 hash of org, thread and model.\n  - A baseline is only a 16-byte blake3 digest of the leading system messages, plus a timestamp.\n  - The five reasons are `below_minimum`, `prefix_changed`, `ttl_expired` (idle over 300 s), `no_baseline` and `unexplained`.\n  - The minimum-prefix table is a local copy of inference-core's.\n  - ZDR turns are never observed (no digest is taken). Subscription turns get no reason.\n  - `sse.rs` adds `cache_miss_reason` to the usage envelope payload only when classified, at the streaming site and at `run_infer_fallback`. The `build_usage_envelope` signature is unchanged, so its existing test calls still compile.\n- **cost-core:**\n  - Migration 0011 adds the nullable `cache_miss_reason` column (idempotent, with a revert file).\n  - `Entry.CacheMissReason` is a closed set, validated at the ledger. The NATS decoder drops an unknown value to empty instead of losing the tokens.\n  - `UsageBucket` gains cache-read, cache-write and `cache_reported_input_tokens`.\n    - `cache_reported_input_tokens` is the hit-rate denominator: the input tokens of turns with a read, a write, or a classified miss other than `below_minimum`.\n    - Subscription turns are excluded from all three.\n    - Hit rate is read divided by reported.\n  - A new `CacheMissAnalytics` read, in memory and in Postgres, returns miss counts per day, model, provider and reason. The `/api/v1/cost/analytics` response carries them as `data.cache_breakdown = {miss_reasons, advisory: true}`.\n  - The Go files are CRLF and were kept that way; the new SQL files are LF.\n- **Frontend:**\n  - `cost-client.ts` adds zod defaults for the new fields.\n  - `usage-analytics.ts` adds `cacheHitRate`, `cachePercent`, `cacheMissTotals` and three CSV columns.\n  - `UsageAnalyticsSection.tsx` adds a hit-rate tile, a \"No cache activity reported\" note, a miss-reason line, and a per-row cache-hit column. It reuses existing CSS classes because the CSS file is not owned."
+  },
+  {
+   "id": "WS01-S13.code",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/zdr-attestation-check-test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md"
+   ],
+   "tests_run": [
+    {
+     "command": "bash 'apps/Model Plane/scripts/tests/zdr-attestation-check-test.sh'",
+     "outcome": "passed: 'zdr attestation check contract (fixture, non-production): ok'"
+    },
+    {
+     "command": "bash 'apps/Model Plane/scripts/tests/release-runtime-partition-test.sh'",
+     "outcome": "not runnable on Windows (platform lacks O_NOFOLLOW; documented Linux/macOS only); not counted as a pass"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/ZDR.md: after a real attestation, record the six fields' non-secret values (surface, resource id, approval ref, effective date, review-by, reviewer, digest) and the zdr-attestation-check.sh output line in the Z-40 row, and mark the Z-60 pass 2 row with the evidence file name. Do not edit before the written contract exists.",
+    "shared-edit docs/compliance/evidence/live-reads-zdr-<date>.txt: pass 2 appends the preflight/before/after output of zdr-live-proof.sh plus the Playwright report path. Not created by this slice (no real attestation, no live run).",
+    "Run on Linux or macOS: bash 'apps/Model Plane/scripts/tests/zdr-attestation-check-test.sh' (also passed here on Windows git-bash) and release-runtime-partition-test.sh (cannot run on Windows).",
+    "Pass 2 live steps once a written contract exists: fill the six fields in the signed public policy, run bash 'apps/Model Plane/scripts/zdr-attestation-check.sh' <policy>, build a candidate with ZDR_RETENTION_PATH=zdr-provider-route-attested (S12), deploy, confirm /api/v1/models lists zdr, then runbook sections 3-5 with the spec expecting an answer on the ZDR-TEST org, then switch the org back off."
+   ],
+   "deviations": [
+    "Pass 2 turn expectation (ZDR_LIVE_TURN_EXPECT=answer in zdr-live-turn.spec.ts) and a pass 2 preflight phase in zdr-live-proof.sh were not written: those files are outside this slice's ownership, so they are listed in needs_other_files. The existing before/after counter phases of zdr-live-proof.sh already serve pass 2 unchanged.",
+    "RELEASE_EVIDENCE line :1049 (the plan's anchor) was edited only for the attestation register row; the final disposition flip belongs after the real attestation and live proof."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/zdr-live-turn.spec.ts (ZDR_LIVE_TURN_EXPECT=answer: expect a streamed answer, no typed refusal, still ZDR-TEST org only)",
+    "apps/Model Plane/scripts/tests/zdr-live-proof.sh (optional pass 2 preflight: /api/v1/models lists zdr on the covered model, ZDR_RETENTION_PATH is zdr-provider-route-attested)",
+    "apps/Model Plane/scripts/tests/zdr-live-proof-test.sh (stub-docker cases for any such phase)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Real written ZDR contract (ZDR.md Step 0) and owner-named reviewer do not exist; the six *_ZDR_* fields cannot be filled in the signed policy",
+     "Candidate with ZDR_RETENTION_PATH=zdr-provider-route-attested, deploy, /api/v1/models lists zdr, and pass 2 live proof with zero deltas on the ZDR-TEST org need docker/live (lead)",
+     "shared-edit apps/Model Plane/docs/ZDR.md (Z-40 and Z-60 pass 2 rows) and docs/compliance/evidence/live-reads-zdr-<date>.txt only after the real attestation and live run",
+     "zdr-live-turn.spec.ts expectation for an answer and any pass 2 preflight in zdr-live-proof.sh are outside this slice's ownership and still unwritten",
+     "release-runtime-partition-test.sh and the signed-policy gate path were not run (Windows lacks O_NOFOLLOW); run on Linux/macOS",
+     "New test file is untracked with a non-executable mode here; sibling tests are 100755, so set the executable bit when committing"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Z-40 cannot be attested without a real written Microsoft or Anthropic ZDR contract and an owner-named reviewer; no fixture or script may stand in for it, and the check cannot tell a fixture from a real attestation (the policy grammar forbids comments), so a fixture-marked resource id must never be copied into a signed policy."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Pass 2 proof is not yet scripted end to end: zdr-live-turn.spec.ts only expects the typed refusal, and zdr-live-proof.sh has no phase asserting zdr appears in /api/v1/models; both are needed before pass 2 can run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr-attestation-check-test.sh and release-runtime-partition-test.sh run only on Linux or macOS in CI terms; the partition test fails on Windows for lack of O_NOFOLLOW, so the signed-policy gate path was not re-run here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The operator check prints days left but has no warn threshold (review-due under 14 days, critical under 3) of its own; the plan puts that in alerts ZdrAttestationReviewDue and ZdrAttestationLapsed, which are not confirmed built."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Z-40 must not be attested without a real written contract; the check cannot tell the fixture (resource id fixture-non-production) from a real attestation, so the fixture values must never be copied into a signed policy."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Pass 2 is not scripted end to end: zdr-live-turn.spec.ts only expects the typed refusal and zdr-live-proof.sh has no phase asserting zdr in /api/v1/models; both are needed before pass 2 can run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZdrAttestationReviewDue and ZdrAttestationLapsed alerts are unconfirmed, and the operator check prints days left but applies no warn threshold."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The test hardcodes TODAY=2026-10-23 with --today, which is deterministic and fine, but the fixture dates would need refreshing only if the check ever drops --today."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "The attestation check script (zdr-attestation-check.sh, via release-artifact.sh check-zdr-attestation) and the Z-60 pass 1 proof (zdr-live-proof.sh, zdr-live-turn.spec.ts, runbook) were already committed by S5 and S7.code, so the code half needed only fixture coverage of the Azure OpenAI operator check and the evidence-register note. I added a new test, zdr-attestation-check-test.sh, which runs the real check against an invented fixture whose resource id says fixture-non-production and which attests nothing. It covers a valid Azure OpenAI claim with days left, the review-by day itself (0 days left) and the day after (lapsed), both surfaces claimed, no claim, a legacy boolean with no fields, each of the six fields missing, an edited field (digest mismatch), lapsed, not yet in force, review-by before effective, a hostile dotenv, and usage errors. I also updated the 'independently ZDR-attested' row in MODEL_PLANE_RELEASE_EVIDENCE.md (CRLF preserved) to name the check and fixture test and keep it a release blocker. Nothing in the repository attests a real provider: that needs a written contract (ZDR.md Step 0). ZDR_WAIVER_ENABLED is untouched and no new switch was added."
+  }
+ ]
+}

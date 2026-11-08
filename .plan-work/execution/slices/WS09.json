@@ -1,0 +1,360 @@
+{
+  "ws": "WS09",
+  "header_decisions": [
+    "DEC-29 (WS09 D4): ListConversation cursor and field ownership; gates S8 and S9.",
+    "DEC-39: integrator assigns proto tag numbers; gates S8. Proposed tags (next free at HEAD): ListConversationRequest.limit=6, before_message_id=7; ListConversationResponse.has_more=2. WS17 proposes include_inactive=8 on the same request ([RECONCILE]).",
+    "D1 (WS09-local): benchmark placement and S1 wording.",
+    "D2 (WS09-local): nodeKey default (node.kind) and id keys for repeating node kinds, S2.",
+    "D3 (WS09-local): snapshot cadence, S3 (1000 ms default, VITE_CHAT_SNAPSHOT_THROTTLE_MS).",
+    "D5 (WS09-local, owner sign-off): numeric triggers for S4, S6, S7, S8, S10.",
+    "D6 (WS09-local): chunk policy for S5 (one reload, 30 s window, never over a dirty guard).",
+    "D7 (WS09-local): no action contract for load-earlier, S9.",
+    "D8 (WS09-local): Trace collapse, first message.delta per turn only, S3; replaceable by the WS15 taxonomy."
+  ],
+  "slices": [
+    {
+      "id": "WS09-S1",
+      "title": "Measure first: render, churn and cold-open budgets",
+      "tag": "BUILD",
+      "summary": "Adds the measurement layer before any behaviour change: a render-budget vitest (MarkdownBlockView and AnswerRegion mounts, parse count per token), a stream-churn vitest (transcript setItem counts and sizes, uiEvents length, taskSteps identity) and a synthetic-fixture Playwright spec whose budget JSON is asserted only when PERF_ENFORCE=1. Test code only; no runtime change.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.render-budget.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.stream-churn.test.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-transcript-performance.spec.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-fixtures.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-budget.json",
+        "apps/Frontend Plane/verevonv3/playwright.config.ts",
+        "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.render-budget.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.stream-churn.test.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-transcript-performance.spec.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-fixtures.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-perf-budget.json"
+      ],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": ["D1"],
+      "flag": "PERF_ENFORCE",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat/components/ChatMessages.render-budget.test.tsx src/features/chat/components/use-chat-controller.stream-churn.test.ts src/shared/chat-nodes/derive.budget.test.ts",
+        "pnpm exec playwright test --project=chat tests/e2e/chat-transcript-performance.spec.ts"
+      ]
+    },
+    {
+      "id": "WS09-S2",
+      "title": "Incremental Markdown parse and keyed node list",
+      "tag": "FINISH",
+      "summary": "Makes per-token Markdown rendering incremental: parseMarkdownIncremental freezes sealed prefix blocks (FROZEN_TAIL_BLOCKS = 2) so only the trailing block re-renders, ChatMessages keys its node list by nodeKey instead of an unkeyed For, and the node registry gains an additive renderLive accessor. The old path stays behind VITE_CHAT_RENDER_LEGACY=true for one release.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.incremental.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.incremental.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1", "WS01-S0"],
+      "decisions": ["D2"],
+      "flag": "VITE_CHAT_RENDER_LEGACY",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat/components/chat-markdown.test.ts src/features/chat/components/ChatMessages.codeblock.test.tsx src/features/chat/components/ChatMessages.chart.test.tsx src/features/chat/components/ChatMessages.render-budget.test.tsx src/shared/chat-nodes",
+        "pnpm exec vitest run src/features/chat/components/chat-markdown.incremental.test.ts"
+      ]
+    },
+    {
+      "id": "WS09-S3",
+      "title": "Throttle snapshot writes and remove per-token churn",
+      "tag": "FINISH",
+      "summary": "Routes the per-flush local transcript snapshot through createSnapshotWriter (at most one write per second while streaming; flushed on terminal, visibilitychange, pagehide, thread switch and cleanup), makes upsertTaskStep a no-op on shallow-equal steps and keeps only the first message.delta per turn in the Trace. Terminal writes stay synchronous and the ZDR, temporary and foreign-thread guards still run before every write.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.snapshot-throttle.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.snapshot-throttle.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1", "WS01-S0"],
+      "decisions": ["D3", "D8"],
+      "flag": "VITE_CHAT_SNAPSHOT_THROTTLE_MS",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "data-loss"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat"
+      ]
+    },
+    {
+      "id": "WS09-S4",
+      "title": "Frame-batched chunk deltas (conditional)",
+      "tag": "BUILD",
+      "summary": "Coalesces chunk deltas per animation frame inside chat-client dispatchEvent case 'chunk' through a new delta-coalescer, flushing before any non-chunk event and on done, stopped, error and abort (hidden-tab setTimeout(100) fallback). Built only if the S1 spec shows more than one flush per frame.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1", "WS09-S2"],
+      "decisions": ["D5"],
+      "flag": "VITE_CHAT_DELTA_FRAME_BATCH",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner sign-off on the D5 numeric trigger (S1 must show more than one flush per frame)",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "pnpm exec vitest run src/shared/api/delta-coalescer.test.ts src/shared/api/chat-client.test.ts src/features/chat/components/use-chat-controller.resume-replay.test.ts"
+      ]
+    },
+    {
+      "id": "WS09-S5",
+      "title": "Stale-chunk recovery with one reload and notice",
+      "tag": "BUILD",
+      "summary": "Adds installChunkRecovery on vite:preloadError (production builds): one automatic reload inside a 30 s window tracked in sessionStorage, a StaleBuildNotice on the second failure, and no reload while a registered guard reports a dirty composer (text, streaming or pending attachments). Installed in index.tsx before render, with a Playwright project chunk-recovery.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.ts",
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.test.ts",
+        "apps/Frontend Plane/verevonv3/src/app/shell/StaleBuildNotice.tsx",
+        "apps/Frontend Plane/verevonv3/src/app/shell/AppShell.tsx",
+        "apps/Frontend Plane/verevonv3/src/index.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chunk-recovery.spec.ts",
+        "apps/Frontend Plane/verevonv3/playwright.config.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.ts",
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.test.ts",
+        "apps/Frontend Plane/verevonv3/src/app/shell/StaleBuildNotice.tsx",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chunk-recovery.spec.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS12-S12"],
+      "decisions": ["D6"],
+      "flag": "VITE_CHUNK_RECOVERY_DISABLED",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["data-loss"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "pnpm exec vitest run src/app/chunk-recovery.test.ts",
+        "pnpm exec vite build",
+        "pnpm exec vite preview --port 5176 --strictPort",
+        "pnpm exec playwright test --project=chunk-recovery"
+      ]
+    },
+    {
+      "id": "WS09-S6",
+      "title": "Parallel cold-open thread load (conditional)",
+      "tag": "BUILD",
+      "summary": "Runs getThreadMessages concurrently with listChatThreads in loadThread, drops the duplicate getChatThreadTranscript call once ChatThreadSession.updatedAt is verified, and single-flights listChatThreads. Built only if the S1 request budget is missed; readSavedAnswer and the BFF /transcript route stay for their other callers.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.recovery.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.plan-reload.test.ts"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1"],
+      "decisions": ["D5"],
+      "flag": "VITE_CHAT_PARALLEL_THREAD_LOAD",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner sign-off on the D5 numeric trigger (S1 request budget)",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat/components/use-chat-controller.recovery.test.ts src/features/chat/components/use-chat-controller.plan-reload.test.ts"
+      ]
+    },
+    {
+      "id": "WS09-S7",
+      "title": "CSS containment for off-screen turns (conditional)",
+      "tag": "BUILD",
+      "summary": "Adds a content-visibility: auto rule with contain-intrinsic-size to non-latest chat messages in global.css, guarded by a rule-presence test; deleting the rule is the rollback. Built only per the D5 trigger.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/styles/global.css",
+        "apps/Frontend Plane/verevonv3/src/styles/global.test.js"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1"],
+      "decisions": ["D5"],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner sign-off on the D5 numeric trigger",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "pnpm test"
+      ]
+    },
+    {
+      "id": "WS09-S8",
+      "title": "Tail-first paged ListConversation across planes (conditional)",
+      "tag": "BUILD",
+      "summary": "Adds opt-in tail-first paging to the transcript read across session-core, model-gateway and the BFF: add-only ListConversationRequest.limit=6 and before_message_id=7 with ListConversationResponse.has_more=2, a clamped query that keeps audience_ceiling in the same WHERE, and validated limit and before forwarding. limit=0 (the default) keeps every other caller byte-identical; no migration; conditional per D5.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+        "apps/Model Plane/go/gen/model_plane/v1/sessions_grpc.pb.go",
+        "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+        "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+        "apps/Model Plane/scripts/tests/transcript-paging-proof.sh"
+      ],
+      "new_files": [
+        "apps/Model Plane/scripts/tests/transcript-paging-proof.sh"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS17", "WS12-S2"],
+      "decisions": ["DEC-29", "DEC-39", "D5"],
+      "flag": "MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT",
+      "migration": false,
+      "proto_change": true,
+      "optional": true,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-29 owner ruling on cursor and field ownership (D4); DEC-39 integrator assigns the proto tag numbers (proposed 6, 7 and 2); owner sign-off on the D5 numeric trigger",
+      "risk": ["zdr", "auth", "authority"],
+      "effort_days_low": 6,
+      "effort_days_high": 9,
+      "test_commands": [
+        "cargo test -q -p session-core --all-targets",
+        "cargo test -p session-core --bin session-core list_conversation_pages -- --ignored --test-threads=1",
+        "cargo test -q -p model-gateway --all-targets thread_messages",
+        "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets canonical_messages thread_messages_url",
+        "buf lint",
+        "buf breaking \"apps/Model Plane/proto\" --against \"apps/Model Plane/proto/baseline.binpb\"",
+        "git diff HEAD -- \"apps/Model Plane/proto/model_plane/v1/sessions.proto\"",
+        "cd \"apps/Model Plane/go/services/capability-core\" && go build ./... && go test ./internal/sessionreview/..."
+      ]
+    },
+    {
+      "id": "WS09-S9",
+      "title": "SPA paged transcript with load-earlier (conditional)",
+      "tag": "BUILD",
+      "summary": "Consumes S8 in the SPA: getThreadMessages takes limit and beforeMessageId and returns hasMore, loadThread opens on a 100-message tail, and loadEarlier() prepends older turns with a scroll anchor; readSavedAnswer reads a 4-message tail. Behind VITE_CHAT_PAGED_TRANSCRIPT; the 120-turn local snapshot is unchanged.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.paged-transcript.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.paged-transcript.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S8", "WS09-S1"],
+      "decisions": ["DEC-29", "D7"],
+      "flag": "VITE_CHAT_PAGED_TRANSCRIPT",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-29 owner ruling (cursor and field ownership) recorded before S8 and S9 build",
+      "risk": ["zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat/components/use-chat-controller.paged-transcript.test.ts src/features/chat/components/chat-normalizers.test.ts"
+      ]
+    },
+    {
+      "id": "WS09-S10",
+      "title": "JS-virtualised timeline, last resort (optional)",
+      "tag": "BUILD",
+      "summary": "Adds an in-house transcript window (transcript-window.ts with measured heights) that always renders the streaming turn, the last N turns and the focused turn, with aria-setsize and aria-posinset for screen readers. Behind VITE_CHAT_VIRTUALIZE (default off) and built only as the last resort.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-window.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-window.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-window.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-window.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS09-S1", "WS09-S2", "WS09-S7"],
+      "decisions": ["D5"],
+      "flag": "VITE_CHAT_VIRTUALIZE",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner sign-off on the D5 numeric trigger; Solid 2.0 rc and @tanstack/solid-virtual compatibility are undetermined and must be decided before build",
+      "risk": ["none"],
+      "effort_days_low": 8,
+      "effort_days_high": 12,
+      "test_commands": [
+        "pnpm exec vitest run src/features/chat/lib/transcript-window.test.ts"
+      ]
+    }
+  ],
+  "notes": "Source: docs/plans/model-plane-chat-build-plan-2026-10-14.md. WS09 section read at lines 672-715 (header 674-683, slice table 686-697, provides and consumes 701-703, ZDR clause 706-707, top risks 709-711). Appendix B read at lines 2253-2322. Appendix B rows applied to WS09: (1) B.1 N2: buf breaking is vacuous until WS12-S2 because apps/Model Plane/proto/baseline.binpb is 0 bytes at HEAD, so S8 adds WS12-S2 to depends_on and its proto proof is the tag-number diff against HEAD (git diff HEAD on sessions.proto in test_commands). (2) B.1 N3: chat-client.ts, ChatMessages.tsx, use-chat-controller.ts, chat-normalizers.ts and index.tsx carry WS01-S0 live-only hunks; S2, S3 and S5 depend on WS01-S0 per the section header, and S4, S6, S9 and S10 edit the same files, so they rebase onto the WS01-S0 commit even though their Deps column does not name it. (3) B.1 N4: the ListConversation tags 6, 7 and 2 are proposals; section 4.3 and DEC-39 hold the finals, and WS17 proposes include_inactive=8 on the same request ([RECONCILE]). (4) B.1 N1: no WS09 slice is CI-only or doc-only, so each needs rebuilt-stack or running-stack evidence; S1 is test code but its DoD needs running dev-server specs. (5) B.1 N7 does not apply to S8 (a read adds no durable mutation), but a new golden case must not change the vendored posture matrix without updating its sha256 (apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json and .sha256). (6) B.2 K1-22: chat-transcript-performance.spec.ts and chat-perf-budget.json are new (S1). (7) B.4 K2-22: S1 changes CHAT_WORKSPACE_SPECS in apps/Frontend Plane/verevonv3/playwright.config.ts (line 58 at HEAD is /chat-(?:workspace|voice-mode)\\.spec\\.ts/) to /chat-(?:workspace|voice-mode|transcript-performance)\\.spec\\.ts/, and the plan file is apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md. (8) B.2 K1-14: the D5 numeric triggers become release gates for the 300-turn fixture once the S1 baseline replaces them. BUILT STATUS: none of S1 to S10 is built at HEAD (git log --oneline afb83928..HEAD lists 101 commits, head 12dd8cb7; none is a WS09 slice commit, they are WS03 durable-loop, WS14 S2a and S8-A park work). Checked with git ls-files and Glob: every NEW file in the table is absent, and so are the VITE_CHAT_* flags of this plan, parseMarkdownIncremental, renderLive, nodeKey, createSnapshotWriter, installChunkRecovery, vite:preloadError, beforeMessageId, loadEarlier, the content-visibility rule in global.css, before_message_id and has_more in sessions.proto, and any limit or before parameter on ThreadMessagesQuery. The baseline is still the old code: ChatMessages.tsx keeps the unkeyed For at line 667 over nodeEntries (createMemo at 532); use-chat-controller.ts still calls getChatThreadTranscript in loadThread (line 1127) and writes the snapshot on every flush (writeThreadSnapshot at 629); chat-client.ts dispatches each chunk unbatched (case 'chunk' at 1545); index.tsx renders App directly with no boot wrapper (the plan describes boot() as live-only). The FINISH tags on S2 and S3 mean finishing the audit items, not reuse of existing code; parseMarkdownBlocks (chat-media-markdown.tsx line 751) is the only existing parser to refactor. LINE ANCHORS HAVE DRIFTED at HEAD (readSavedAnswer is at 1313, not 1241; getThreadMessages at 2230, not 2110; listChatThreads at 2256, not 2136; dispatchEvent case 'chunk' at 1545, not 1466). Implementers should locate code by symbol; the file lists here carry no line numbers. REPOSITORY CORRECTIONS: B.1 N8(b) says zdr_posture_matrix.rs exists only in the live tree, but at HEAD it is tracked (apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs), so S8 edits an existing file. apps/Frontend Plane/verevonv3/src/demo/ (install.ts, the fetch-fixture pattern S1 copies) is not tracked at HEAD, so chat-perf-fixtures.ts must be written fresh or copied from the live tree. apps/Model Plane/scripts/rebuild-service.sh (WS01-S2) is absent; S8 evidence uses compose.sh until WS01-S2 lands. ASSUMPTIONS AND GAPS: (a) Test files named NEW in the Tests column are included in files and new_files: chat-markdown.incremental.test.ts (S2), snapshot-throttle.test.ts and use-chat-controller.snapshot-throttle.test.ts (S3), delta-coalescer.test.ts (S4, absent and required by its command), use-chat-controller.paged-transcript.test.ts (S9), transcript-window.test.ts (S10). (b) Locations not stated in the table: chat-perf-fixtures.ts is assumed beside the spec in tests/e2e; transcript-window.test.ts is assumed beside transcript-window.ts in src/features/chat/lib. (c) The second S2 command, and the commands for S6, S9 and S10, are derived from the Tests column, which names files but no full command; they are derived, not quoted. (d) S9 (1,000-message Playwright extension) and S10 (variable-height, selection, screen-reader and live-follow extension) name no spec file; to be decided at implementation, the S1 spec is the candidate. (e) S8's new session-core DB test list_conversation_pages (DATABASE_URL) and the EXPLAIN ANALYZE evidence name no file. (f) S8 callers that must stay byte-identical at limit=0 (sse.rs around 5219-5300 and 7520, tool_loop.rs around 3261, capability-core internal/sessionreview/transcript.go) are not change targets; model-gateway src/grpc.rs stays unchanged. (g) S3 checks the Steps panel consumers at ChatPage.tsx 651 and 662 but does not list ChatPage.tsx as a change target for that. (h) S6 keeps readSavedAnswer and the BFF /transcript route (other callers OutboundVerevonRail.tsx:96 and SupportVerevonComposer.tsx:62). (i) S5 installs installChunkRecovery in src/index.tsx before render; the Space composer registers its guard later (registerReloadGuard and staleBuildNotice are shared with the Space session). DECISIONS: DEC-29 (WS09 D4) gates S8 and S9; DEC-39 gates the S8 proto tags; D5 (numeric triggers for S4, S6, S7, S8, S10) needs owner sign-off; D1, D2, D3, D6, D7 and D8 are WS09-local and carry no external sign-off in the table. ZDR: S3 is a ZDR-gated content-persisting boundary; the throttled writer only delays calls to writeThreadSnapshot, so isTemporaryThread, isForeignOriginThread and isLocalRetentionAllowed still gate every write, and a pending trailing write is dropped if the thread turns temporary or ZDR. S8: a paged read of a ZDR or temporary thread returns the same refusal as the unpaged read (golden case); the cursor is a message id validated inside the thread; no new store. S9 relies on that refusal surface. S2, S4, S5, S6, S7 and S10 persist nothing (S5 stores one timestamp); S1 fixtures are synthetic and the setItem wrapper records counts and lengths only. SOFT LINKS NOT IN depends_on: S3's D8 is replaceable by the WS15 taxonomy; S8 and WS17 share the ListConversation function, first to start lands and the second rebases (the header lists WS17 for S8); WS12-S12 gives the CI home for S5's Playwright project. PROVIDES: S2 gives ConversationNodeRegistry.renderLive and nodeKey(node) to WS13-WS16 (a node kind that repeats per turn must add an id key); S1 gives chat-perf-budget.json and the perf specs to WS12; S8 fields limit=6, before_message_id=7 and has_more=2 go to WS17, which extends them after 7 and 2 and never renames them; S5 gives registerReloadGuard and staleBuildNotice to the Space session; S3's D8 rule goes to WS15. EDIT ORDER (plan): WS09 S2 merges first in ChatMessages.tsx (hunks at 667, 1084 and the registry); small local hunks in use-chat-controller.ts (snapshot writer, upsertTaskStep, loadThread); S4 touches only case 'chunk'; WS09 virtualisation (S10) keeps trays outside the virtual list (plan line 911). EFFORT (header): committed core S1, S2, S3, S5 = 12-17 days; conditional S4, S6, S7 = 3-6 days; paging S8 plus S9 = 11-16 days; S10 = 8-12 days; expected total about 15-23 days. TOP RISKS (plan): Solid 2.0 rc For behaviour is read, not run (S1 counter pins it before S2); the largest per-token cost may be snapshot, step and Trace work rather than Markdown (S1 attributes cost per source before S2-S4); incremental-parse divergence (differential test at every prefix); S9 metadata mis-merge on partial pages; S10 Solid 2 rc and @tanstack/solid-virtual compatibility undetermined."
+}

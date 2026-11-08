@@ -1,0 +1,336 @@
+[
+ {
+  "id": "WS05-S1",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go",
+   "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/src/tool_class.rs",
+   "apps/Model Plane/rust/services/execution-core/tests/tool_class_registry_parity.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.up.sql",
+   "apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.down.sql",
+   "apps/Model Plane/go/services/capability-core/internal/models/tool_class.go",
+   "apps/Model Plane/go/services/capability-core/internal/models/tool_class_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/models/capability.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_store.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_store.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_availability_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_class_floor_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_seed_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_integration_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/registry/class_floor_integration_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/capabilities_class_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+   "apps/Model Plane/api/openapi.yaml",
+   "apps/Model Plane/api/sdk/typescript/src/models/Capability.ts"
+  ],
+  "tests_run": [
+   {
+    "command": "cd \"apps/Model Plane/rust\" && cargo check -q --workspace --all-targets",
+    "outcome": "exit 0, zero errors (warnings only, all pre-existing dead-code/irrefutable-pattern ones). The model-gateway lib test target now type-checks with the CapabilityDetail literal fixed."
+   },
+   {
+    "command": "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib gateway_preserves",
+    "outcome": "NOT run to completion: the test-profile build died with 'rustc-LLVM ERROR: IO failure on output stream: no space on device' (STATUS_ACCESS_VIOLATION). The disk is full; I did not delete anything to free space. Compilation correctness is confirmed by cargo check, but the test itself was not executed."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Free disk space, then run: cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib gateway_preserves (the test build hit 'no space on device').",
+   "Stage only the 2-line test-literal hunk of apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (git add -p); the rest of that file is another session's work.",
+   "Run the integration tests against Postgres: cd 'apps/Model Plane/go/services/capability-core' && go test -tags integration ./internal/registry/... (capability_tools_integration_test.go: 4 tests; class_floor_integration_test.go: 1 test); confirm migration 0016 applies cleanly twice.",
+   "Rebuild capability-core via the compose.sh recipe and check GET /api/v1/capabilities and /api/v1/capabilities/tools show the classes; run capability-health-proof.sh.",
+   "Optional scoped buf generate for the Python (mp_events) and verevon TS outputs if they should carry CapabilityDetail 18/19.",
+   "Update the build ledger and harness count (2 integration test files added); commit only the WS05-S1 files, not other sessions' changes."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/go/services/capability-core/internal/registry/capabilities_source.go: the 2 SELECT/scan sites feeding the in-memory registry still do not read side_effect_class or approval_floor (store-less deployments read unclassified).",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (capability JSON around lines 5380-5400): to emit side_effect_class and approval_floor on the public HTTP Capability that openapi.yaml and the SDK now document. Only the test literal was touched.",
+   "apps/Model Plane/docs/capability-ownership-matrix.md and docs/decisions/ledger.md: S1 matrix row for capability_tools and the plan.propose=read ruling are not recorded.",
+   "apps/Model Plane/go/services/capability-core/internal/api/availability.go: capabilityView wraps capabilityWireView in capabilities.go; fold the class pair into capabilityWireView if it should be on every wire view."
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Postgres-backed tests cannot run in this session (no Docker, by rule). Not executed: capability_tools_integration_test.go (4 tests) and class_floor_integration_test.go (1 test). The lead must run `go test -tags integration ./internal/registry/...` on a working engine. The same run must show migration 0016 applying cleanly twice, which is what the seed re-run test checks.",
+    "Live evidence still missing: rebuild capability-core with the compose.sh recipe, migrate on a running Postgres, show `GET /api/v1/capabilities` and `/api/v1/capabilities/tools` carrying the classes, and run capability-health-proof.sh.",
+    "`cargo test -q -p model-gateway --lib gateway_preserves` did not run. The C: drive is full (0 to 444 MB free) and rustc died with 'no space on device'. `grep` shows the two CapabilityDetail literals in http_routes.rs are updated (one with explicit fields, one with `..default()`), and the implementer's `cargo check --workspace --all-targets` passed. Free disk and re-run.",
+    "I could not re-link the capability-core `api` and `server` test binaries (disk full). `go test ./...` reported both as `ok (cached)` against the current files, and a fresh run of models, registry and policy passed. Re-run `go test -count=1 ./internal/api/ ./internal/server/` once disk is free.",
+    "Staging: http_routes.rs holds another session's uncommitted hunks. Stage only the 2-line `side_effect_class`/`approval_floor` test-literal hunk (`git add -p`). capabilities.pb.go is a scoped regeneration with 29 insertions and 3 deletions, so stage it with this slice. docs/gap-analysis.md (WS13-S0) is not part of this slice. Generated Python and TypeScript outputs for CapabilityDetail 18/19 were not regenerated; run a scoped `buf generate` if consumers need them.",
+    "Ledger and docs are not written: the capability_tools row in docs/capability-ownership-matrix.md, and a docs/decisions/ledger.md entry for the `plan.propose = read` ruling. The plan row says `context_write`, but the shipped S0 oracle (LEGACY_CLASSIFICATION_GOLDEN) says `restricted=no rung=read_only`. The parity test enforces the oracle, so `read` is correct and the plan text is stale.",
+    "Two read-surface gaps are known and safe, since both read as unclassified (the strictest class), but should be tracked. (a) capabilities_source.go's two SELECTs feed the store-less in-memory registry and do not read the class pair. Production runs with a store, so gRPC and HTTP read the stored pair. The file is outside the owned list, though the plan row counts it among its 7 sites. (b) openapi.yaml and the TypeScript SDK document `side_effect_class` and `approval_floor` on the public Capability, but model-gateway's HTTP JSON does not emit them yet. Both fields are optional in the SDK, so nothing breaks, but the doc runs ahead of the gateway."
+   ]
+  },
+  "review_defects": [
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/models/tool_class.go:181 (MinimumApprovalFloor), :207 (EffectiveApprovalFloor); apps/Model Plane/rust/crates/mp-contracts/src/tool_class.rs:153 (minimum_floor); capabilities_store.go:152 and :317 (new-row default unclassified/none)",
+    "scenario": "The slice says unknown is strictest, but that holds only for the class. Both twins give `unclassified` the weakest floor, `none`, and every new or unread row defaults to unclassified/none. Under the posture model the slice's own parity test encodes (tool_class_registry_parity.rs declared_posture), floor `none` plus `auto` posture gives Allow. So an unclassified tool that is really an owner effect would run without the durable owner approval a classified owner_effect row must have. Concrete wire result: GET /api/v1/capabilities for any new tenant row, and gRPC GetCapability/ListCapabilities on a store-less capability-core (in-memory registry, where SideEffectClass and ApprovalFloor are \"\"), report cap.tool.ticket.create as side_effect_class=unclassified, approval_floor=none. A durable-owner capability is advertised with no floor. It also leaves a generic-surface way to lower a floor: soft-delete a row whose floor is ask or durable_owner, then POST the same (org, kind, name) under a new id. enforceClassFloor's prior read filters deleted_at IS NULL, so the recreated row comes back at unclassified/none. The plan's own S3 engine floors unclassified to ask, so the shared contract the gate will read contradicts the plan. Not reachable in S1 for classified tenant rows, because no API path sets a class.",
+    "fix": "Make MinimumApprovalFloor(unclassified) / SideEffectClass::Unclassified.minimum_floor() return `ask`, so EffectiveApprovalFloor reports at least ask for an unclassified row. Add the vector to both known-answer tables. Optionally have enforceClassFloor also compare against the most recent soft-deleted row for the same (org, kind, name)."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/models/tool_class.go:207-212 vs :103 and apps/Model Plane/rust/crates/mp-contracts/src/tool_class.rs:180 (ApprovalFloor::from_wire)",
+    "scenario": "The Go and Rust twins disagree about an empty floor. Rust ApprovalFloor::from_wire(\"\") is DurableOwner, and Go NormalizeApprovalFloor(\"\") is durable_owner too. But Go EffectiveApprovalFloor, the only function the wire uses (capabilityView, listTools, toDetail), rewrites \"\" to `none` before raising. Scenario: store-less capability-core, or the in-memory registry fed by capabilities_source.go, which does not scan the new columns. toDetail emits approval_floor=\"none\" for every capability. A pre-S1 server emits \"\" for proto field 19, and a Rust consumer parses that as DurableOwner. The same row gets the strictest or the weakest floor depending on which server version answered. The known-answer tables do not pin the empty-floor case on the Go side.",
+    "fix": "Have EffectiveApprovalFloor go through NormalizeApprovalFloor (\"\" -> durable_owner), or treat \"\" the same way in both twins. Add an empty-floor vector to TestSideEffectClassKnownAnswers and to the Rust known_answers test."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.up.sql:115-118,134",
+    "scenario": "plan.propose is seeded as `read`/`none`, but it writes a plan durably through session-core. The comment at capability_policy.rs:745-749 says it has the same shape as save_memory. The plan's S1 seed table says `plan.propose context_write`. The implementer picked `read` so the S0 oracle parity would hold, and per the implementation report the ruling is not in docs/decisions/ledger.md. Any consumer that trusts the declared class will treat this durable write as a read. WS20 unattended allowlists use \"read only by default\" ceilings, and K3-3 thread grants are grantable for read. Scenario: an unattended scheduled run with a read-only class ceiling is allowed plan.propose and writes durable plan state, which a context_write class would have refused.",
+    "fix": "Get an owner ruling and record it in the decision ledger. Either seed context_write and accept the plan-mode behaviour change, or add a distinct class or refinement for approval-surface writes, so a durable write is never declared `read`. Do not leave it as an unrecorded deviation from the plan table."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/capabilities.go:179-184 (upsert) with registry.CapabilityRow (capabilities_store.go:43-84, no json tags)",
+    "scenario": "The code comment says a body that carries a class is refused rather than ignored. CapabilityRow has no json tags, so encoding/json matches only case-insensitive Go field names. A caller sending the documented snake_case `{\"side_effect_class\":\"read\",\"approval_floor\":\"none\", ...}` has those keys silently dropped and gets 201 Created. The check only fires for `SideEffectClass`/`sideeffectclass` spellings. Nothing is written, so this fails safe, but the caller can believe it set a class, which the comment and the openapi readOnly note say cannot happen.",
+    "fix": "Decode into a map or a strict struct (DisallowUnknownFields, or explicitly reject the snake_case keys side_effect_class and approval_floor) before decoding into CapabilityRow."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/api/openapi.yaml:1582-1598 and apps/Model Plane/api/sdk/typescript/src/models/Capability.ts (sideEffectClass/approvalFloor); apps/Model Plane/rust/services/model-gateway/src/http_routes.rs capability JSON builder",
+    "scenario": "The public Model Plane Capability schema and the TS SDK now document side_effect_class and approval_floor. model-gateway's public capability JSON never emits them, and only the test literal was touched. Every SDK consumer reads undefined. A client that treats undefined as \"no floor\" sees a weaker posture than the registry holds, the opposite of the \"unknown is strictest\" contract the schema describes.",
+    "fix": "Emit both fields from model-gateway's capability JSON, mapped from CapabilityDetail 18/19. If that is deferred, hold the openapi/SDK change back or mark it as not yet served."
+   }
+  ],
+  "notes": "Only change this round: in model-gateway/src/http_routes.rs, test gateway_preserves_authoritative_capability_availability_semantics, the CapabilityDetail literal gained side_effect_class: String::new() and approval_floor: String::new() (after residency). Explicit fields rather than ..default(), matching the rest of the literal. The file is CRLF throughout and stays CRLF (11945 CRLF = 11945 LF). Staging: this file also holds another session's uncommitted browser-challenge hunks, so the lead must stage only this one 2-line hunk (git add -p). The rest of the slice is unchanged from the previous report (all earlier deviations, needs_other_files and DB-test notes still apply, except that http_routes.rs is now touched for the literal fix only; the public HTTP JSON still does not emit the class pair)."
+ },
+ {
+  "id": "WS11-S4.code",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p inference-core --lib codex_subscription",
+    "outcome": "60 passed, 0 failed"
+   },
+   {
+    "command": "cargo test -q -p inference-core --lib",
+    "outcome": "471 passed, 0 failed"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Rebuild inference-core (bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core). With a real Codex connection, send Quick and Deep and check that the broker log shows reasoningEffort low and high. Without a connection, record it as \"not proven live\".",
+   "Medium to low and the new tier eligibility are only reachable after WS11-S5 sends a level, so the live proof of the full ladder waits for S5."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Live proof is open: rebuild inference-core (bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core). With a real Codex connection, send Quick and Deep and check that the broker log shows reasoningEffort low and high. Without a connection, record \"not proven live\".",
+    "The full ladder (explicit Medium to low, and the new priority eligibility on Low) cannot be reached live until WS11-S5 sends a level.",
+    "The ledger entry for this slice is the lead's to write. No ledger change is part of the owned file."
+   ]
+  },
+  "review_defects": [],
+  "notes": "No partial work was present; the owned file was clean in git. request_body now resolves the level through the ladder (effort::support(Family::Codex) / resolve): an explicit InferRequest.reasoning_effort wins, otherwise the legacy budget is mapped. The broker gets the applied level, so Minimal, Low and Medium go to low and High, XHigh and Max go to high. The priority tier is keyed on the resolved level being Low, no longer on a budget of exactly 1024. Standard (no level, budget 0) is still low with no priority. prefer_priority_service_tier is unchanged. An effort_resolved info log is emitted, same fields as the OpenAI adapter. CRLF preserved (1956/1956). Plan tests added: every_level_clamps_into_low_or_high, legacy_budgets_map_identically (0, 1024, 2048, 4096), quick_keeps_priority_tier_only_on_the_five_models, standard_is_low_without_priority, plus an explicit-level-wins test. Existing codex tests were adapted to the new helper signatures. Two judgement calls. (1) The plan says to map the legacy 2048 budget through the ladder, but that would give Medium and so low, while it was high before. I map any legacy budget above 1024 to High, so all four legacy budgets keep the wire value they had. (2) An explicit Medium request clamps to Low and therefore now gets the priority tier on the five models, per the plan's \"resolved Low\". Medium is only reachable once WS11-S5 sends a level (gateway flag), and a budget of 1 to 1023, which the gateway never sends, now also gets priority where it did not before. If you want priority only for an explicitly requested Low, change codex_service_tier to check resolved.requested == Low."
+ },
+ {
+  "id": "WS09-S2",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.incremental.test.ts (new)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.render-budget.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.live.test.ts (new)"
+  ],
+  "tests_run": [
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/chat-markdown.test.ts src/features/chat/components/ChatMessages.codeblock.test.tsx src/features/chat/components/ChatMessages.chart.test.tsx src/features/chat/components/ChatMessages.render-budget.test.tsx src/shared/chat-nodes",
+    "outcome": "10 files, 168 tests passed"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/chat-markdown.incremental.test.ts",
+    "outcome": "38 tests passed (differential at every prefix of 14 documents plus CRLF variants, 40 seeded random chunkings, sealed identity, non-prefix fallback, CRLF)"
+   },
+   {
+    "command": "mutation check: FROZEN_TAIL_BLOCKS temporarily 0, then restored to 2",
+    "outcome": "13 tests failed as intended, so the differential test detects a too-small freeze"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat src/shared/chat-nodes",
+    "outcome": "84 of 85 files pass; 1 failure in use-chat-controller.zdr-refusal.test.ts (feature-name wording, unrelated to these files; not compared against HEAD)"
+   },
+   {
+    "command": "pnpm exec tsc -b (filtered to the touched files) and pnpm exec eslint on the touched files",
+    "outcome": "no tsc errors in the touched files; eslint 0 errors, only pre-existing-style solid/reactivity warnings"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit the nine files (git applies LF normalisation via autocrlf; registry.ts and the render-budget test are CRLF in the working copy).",
+   "Rebuild or restart the frontend per verevonv3-vite-needs-restart (restart the :5173 container, or run a second dev server with `pnpm dev --port 5174 --strictPort`). Do not run the Playwright spec 3x here; the lead runs it: `pnpm exec playwright test --project=chat tests/e2e/chat-transcript-performance.spec.ts` with LOCAL_E2E_BASE_URL=http://localhost:5174, before and after (set VITE_CHAT_RENDER_LEGACY=true on the dev server for the before run). Record in tests/e2e/chat-perf-budget.json and capture one Chromium Performance-panel trace of a streamed answer.",
+   "Manual live check on the rebuilt frontend: stream a long answer containing a table, a closed code fence, a closed mermaid fence and a list. Confirm the closed blocks do not flicker, the code-block copy confirmation survives later tokens, and Stop/regenerate still render.",
+   "Optional: add nodeKey to the chat-nodes barrel (index.ts), then switch ChatMessages to import it from '@/shared/chat-nodes'.",
+   "Remove VITE_CHAT_RENDER_LEGACY and the legacy branches (chatRenderLegacy in ChatMessages.tsx and the legacy tests in ChatMessages.render-budget.test.tsx) one release after this ships."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/index.ts (CRLF barrel): add nodeKey and the ConversationNodeEntry type to the exports; ChatMessages imports nodeKey from chat-nodes/derive until then",
+   "apps/Frontend Plane/verevonv3/src/vite-env.d.ts: optional readonly VITE_CHAT_RENDER_LEGACY?: string declaration (typechecks without it via vite/client's index signature)",
+   "docs/plans/model-plane-chat-build-plan-2026-10-14.md Build ledger: add the WS09-S2 line (lead does the ledger and commits)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Evidence only the lead can produce: S1 Playwright spec (tests/e2e/chat-transcript-performance.spec.ts) before/after JSON on a rebuilt frontend, with VITE_CHAT_RENDER_LEGACY=true for the before run, recorded in tests/e2e/chat-perf-budget.json.",
+    "One Chromium Performance-panel capture of a streamed answer on the rebuilt frontend.",
+    "Manual live check on the rebuilt frontend with a streamed long answer containing a table, a closed code fence, a closed mermaid fence and a list. Confirm closed blocks do not flicker, the code-block copy confirmation survives later tokens, and Stop/regenerate still render. Restart the :5173 container or run a second dev server on 5174 first, because the Vite bind mount does not see host edits.",
+    "Build ledger line for WS09-S2 in the plan, and the commit of the nine files.",
+    "Non-blocking: nodeKey and ConversationNodeEntry are not yet in the chat-nodes barrel (index.ts, not owned). ChatMessages imports nodeKey from chat-nodes/derive as a workaround; WS13-WS16 consume it, so add it to the barrel when the file is next touched.",
+    "Non-blocking: VITE_CHAT_RENDER_LEGACY has no declaration in vite-env.d.ts (not owned). It typechecks through the vite/client index signature. Remove the flag and the legacy branches one release after shipping."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built from clean state (nothing partial found).\n\nMeasured, from ChatMessages.render-budget.test.tsx (84 tokens, 19 blocks):\n- AnswerRegion mounts 1 (was 84).\n- Sealed-block mounts 0 (was blocks-1 per token).\n- Parse calls 1 per token (was 2).\n- Parsed chars 22,357 over the stream, bounded by the last 3 blocks per token. The test asserts the bound and that the total is under the quadratic baseline, but the 22,357 was not run against a baseline here.\n- New DOM elements per token <= the last two blocks.\n\nWhat was built:\n- parseMarkdownBlocks is now a thin wrapper over parseBlocksFrom(lines, start). Added the exports FROZEN_TAIL_BLOCKS = 2, ParsedMarkdown and parseMarkdownIncremental(prev, source).\n- Restart points are recorded per block. A block that starts on the remainder of a comment line the parser rewrote has a null restart point, so a restart steps back to an earlier block.\n- A re-read tail block that comes out deep-equal keeps the previous object. This stops the block just before the one being typed from rebuilding its DOM each token (MarkdownList rebuilds its <ul> whenever its block object changes).\n- ChatMarkdown keeps a per-instance parse and renders with <For keyed={false}>. ChatMessages keys node rows by nodeKey and renders them through registry.renderLive. The stale comment at the old :653-657 is replaced.\n- nodeKey(node) is added in derive.ts, default node.kind.\n- ConversationNodeEntry is added in types.ts. renderLive(entry) is added in registry.ts. It passes the unchanged renderers Proxy views backed by one memo per property, so a field that did not change does not notify its readers. It reads the row kind untracked.\n- VITE_CHAT_RENDER_LEGACY=true is read through an exact-string check. It restores the old keyed-by-reference rows and the full reparse per token. Tests pin the legacy path and show that \"1\", \"TRUE\", \"yes\" and \"\" do not enable it.\n\nDeviations and findings:\n- Defect found and fixed: parseMarkdownBlocks looped forever on a line like \"## x\\r\". The paragraph branch re-tested the first line with isMarkdownBlockStart, whose unanchored patterns match while the anchored heading and list patterns do not (because of a trailing \"\\r\" or U+2028). It pushed empty paragraphs without advancing. A stream chunk ending between CR and LF can trigger this. The first line is now taken unconditionally. Output is identical for every input that terminated before, and a regression test is added.\n- exportDocument in AssistantMessage now returns null while the turn is streaming. It called answerExportSize, which fully parsed the message on every token; that was the second parse call per token the S1 test had attributed to remounting. showExportButton is already false while streaming and the action row is hidden, so there is no visible change. This applies to the legacy path too, so the legacy pin in the render-budget test is now 1 parse call per token, down from 2.\n- The S1 baseline asserts in ChatMessages.render-budget.test.tsx are flipped to the S2 targets. Sealed is now defined as \"already followed by another block at the previous token\". The parse measure for parseMarkdownIncremental is the text from its resume line. The file is still CRLF.\n- nodeKey is imported from '@/shared/chat-nodes/derive' because the barrel is not owned.\n- The new test files are LF; registry.ts and the render-budget test stay CRLF."
+ },
+ {
+  "id": "WS13-S0",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/gap-analysis.md"
+  ],
+  "tests_run": [
+   {
+    "command": "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib approval (final source)",
+    "outcome": "test result: ok. 74 passed; 0 failed; 0 ignored; 1090 filtered out; exit 0. Six of the 74 are the new WS13-S0 pins."
+   },
+   {
+    "command": "cargo test -p execution-core --lib approval -- --list",
+    "outcome": "lists 74 tests, including approval_kind_labels_a_disclosure_permission_and_every_other_gate_destructive, approval_reason_names_what_a_disclosure_brings_and_otherwise_only_the_mechanism, a_gated_call_under_ask_is_raised_as_a_destructive_approval, a_disclosure_read_pauses_under_auto_as_a_permission_approval, an_ask_posture_provider_write_pauses_as_a_destructive_approval_with_no_decision, an_auto_posture_provider_write_records_a_granted_decision_on_its_own_approval"
+   },
+   {
+    "command": "same filter, run before the final formatting and rename edits",
+    "outcome": "74 passed, 0 failed; superseded by the rerun on the final source"
+   },
+   {
+    "command": "rustfmt --edition 2021 --check agent.rs",
+    "outcome": "agent.rs was not rustfmt-clean at HEAD (329 pre-existing hunks now). No hunk falls inside the new test block or the edited mock. The one hunk near the new Recorder field is the pre-existing decisions: line alignment, left unchanged."
+   },
+   {
+    "command": "byte check of apps/Model Plane/docs/gap-analysis.md; git diff --stat",
+    "outcome": "CRLF 336 = LF 336 after the edit; diff is 4 insertions and 2 deletions in gap-analysis.md"
+   },
+   {
+    "command": "grep checks for approval emitters, Temporal signal senders, and handlers.go proxying",
+    "outcome": "no APPROVAL_DECIDED emitter and no Temporal approval signal sender in the tree; all twelve section 13.1 RPCs call h.client in handlers.go; DecideApproval is implemented in session-core and model-gateway"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: append at the END of the file. The file is pure CRLF, so write CRLF line endings. Exact text: '## Approvals v2: closed cause vocabulary, decision provenance, a session-core grant store, scope eligibility, and no reuse of the rung carrier (2026-10-21) \u2014 **decided at the plan defaults; S0 pins only**' / '' / '**State:** The plan (docs/plans/model-plane-chat-build-plan-2026-10-14.md, WS13) was approved 2026-10-15. Built so far: WS13-S0 characterisation pins in execution-core/src/runtime_loop/agent.rs, no runtime change. S1-S8 not started. ADR-0011 (scope vocabulary and grant carrier) is not yet written; S6 and S7 wait for it.' / '' / 'Decided:' / '1. Closed cause vocabulary. Every approval pause carries one typed cause code from a closed list, stored in approvals.metadata.cause. An unknown code degrades to unclassified_gate. The reason a person reads is derived from the code, not written at each gate.' / '2. Decision provenance. Each decision records decision_source (USER, POSTURE_AUTO, STANDING_GRANT, TIMEOUT, SYSTEM); a client cannot supply it. The auto-posture record keeps its behaviour (DEC-10) and is labelled POSTURE_AUTO, not USER.' / '3. One scope vocabulary, ApprovalScope {ONCE, THREAD, RUN}, with tool grants in a session-core table keyed by (org, user, thread) (DEC-08). The plan-mode rung grant is not the approval carrier: it is an autonomy rung whose durable carrier is session-core thread columns (WS04 S4). This closes the 2026-08-26 durable thread-scoped carrier item for tool-approval grants only.' / '4. Eligibility. Provider writes, destructive and owner-effect calls, and browser actions are ONCE only. THREAD or RUN scope applies only to the classes in the WS13-S6 table, as refined by K3-3. hook_ask and capability_policy_ask never take a grant, and capability_deny beats any grant. Space threads refuse grant scopes (scope_not_available_in_space, DEC-06).' / '5. Step-up is identity, not scope. A Control-minted, short-lived claim (DEC-09) gates only high-risk grants (WS13-S5). The claim is never stored.' / '6. ZDR. No approval, cause, grant, denial memory or audit row exists for a ZDR run. Waived runs count as ZDR for new stores (DEC-32).'",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: insert two rows after line 55 (the row beginning '| Plans / steps / todos / approvals / subagent-lineage'). The file is pure CRLF. Exact rows: '| Approval cause, decision provenance and scope (`approvals.metadata.cause`, `metadata.decision`, `approval_scope_grants`) | **session-core** (record, provenance, grant store); **execution-core** derives the cause at the gate (`runtime_loop/agent.rs` `approval_kind_for`, `approval_reason_for`; `runtime_loop/mod.rs` `resolve_write_approval`); **model-gateway** projects and validates scope and never grants | Postgres (`approvals`; grants from WS13-S6) | gateway decide route (`rust/services/model-gateway/src/http_routes.rs`); BFF validates the shape | `orchestration_nats.rs` | planned WS13 S1-S6; S0 pins today's kinds and reasons |' and '| Approval step-up claim (WS13-S5) | **Control Plane** (auth-core mints `step_up` on re-verify) | none; the claim is never stored | model-gateway reads it at the decide edge | \u2014 | planned, WS13-S5 (DEC-09) |'",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: replace line 84 ('- **Owner:** session-core (durability) + orchestrator-core (Temporal lifecycle/recovery).') with: '- **Owner:** session-core (durability: plans, todos, approvals, grants, decision provenance) + orchestrator-core (Temporal lifecycle and recovery). Tie-break: apps/master-ownership-matrix.md:129 lists approvals under orchestrator-core, but in the Model Plane the approval record and decisions are session-core\u2019s, and the Go approval handlers only pass through (go/services/orchestrator-core/internal/orchestration/handlers.go:82-120). That master row needs its own editor (plan Appendix B, K1-12).'",
+   "Not created: ADR-0011 (apps/APPROVAL_SCOPE_AND_GRANTS_ADR_<date>.md) is assigned to WS13 S0 in the plan's decisions table (docs/plans/model-plane-chat-build-plan-2026-10-14.md line 292), but the S0 row lists no new files. Decide whether S0 writes it or S6 waits for it.",
+   "Commit only apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs and apps/Model Plane/docs/gap-analysis.md. The worktree holds other sessions' uncommitted edits (browser_agent.rs, quarry_agent.rs, tool_bridge/mod.rs, llm_planner.rs, browser_agent_e2e.rs, capabilities.proto, inference-core codex_subscription.rs, verevonv3 chat-media-markdown.tsx). A warm build failed once while quarry_agent.rs and browser_agent.rs were mid-edit (BrowserObservation.challenge), so re-run the filter if those files change again.",
+   "The test run used the working tree, which includes those uncommitted edits. It is not a clean HEAD run. For a clean proof, re-run the filter after committing or in a clean checkout.",
+   "gap-analysis.md section 13.1: the other eleven rows are also stale at the handler layer, and the quoted source comment at line 288 no longer appears in handlers.go. These were left unchanged and were not re-audited against session-core.",
+   "No docker, live proof, rebuilt image or DB test is needed for S0, because there is no runtime change. Evidence is source-verified only. The slice dependency WS01-S0 was not verified from the build ledger in this slice. Full execution-core --lib suite not run; only the approval filter was run."
+  ],
+  "deviations": [
+   "The auto-posture record is pinned through run_agent_with_tools. Its decide call is made in runtime_loop/mod.rs resolve_write_approval, which is outside agent.rs.",
+   "Test-only additions beyond the new tests: a decision_requests field on the test Recorder and its push in the mock decide_approval. No runtime code changed.",
+   "continuation_mode is not pinned. The loop switch is not set explicitly in the test setup, so pinning it could depend on process environment order.",
+   "The current inconsistency is pinned, not fixed: the same provider write is DESTRUCTIVE under ask and TOOL_CALL under auto. WS13-S1 changes this.",
+   "Two consent pins were added beyond the slice row: the disclosure pause is checked end to end under auto, and the direct label and reason tests cover the same functions."
+  ],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The ledger entry (apps/Model Plane/docs/decisions/ledger.md) and the capability-ownership-matrix rows and Owner-line tie-break are not applied. Both files were barred to the implementer, so the lead must apply the exact lines in the implementer's lead_todo (CRLF files). The slice row's DoD says 'ledger merged', so it is not met until then.",
+    "ADR-0011 (apps/APPROVAL_SCOPE_AND_GRANTS_ADR_<date>.md) is assigned to WS13 S0 in the plan decisions table (line 292), but the S0 row and this task list no new file. The lead must decide whether S0 writes it now or S6/S7 wait for it. Neither the ledger text nor any file records the ADR as written.",
+    "The tests ran on the working tree, which holds other sessions' uncommitted edits (browser_agent.rs, quarry_agent.rs, tool_bridge/mod.rs and others). The slice DoD says 'characterisation green on HEAD', so it needs a rerun after commit or in a clean checkout. This is source-verified only; the slice needs no docker or live proof.",
+    "WS01-S0 landing was not checked against the Build ledger. The commit must stage only agent.rs and gap-analysis.md, because other sessions' edits sit in the same worktree."
+   ]
+  },
+  "review_defects": [],
+  "notes": "WS13-S0 is done on the source side. Changes: (1) agent.rs test module gains six approval pins, all passing: two direct pins on approval_kind_for and approval_reason_for, a gated ask call as a destructive approval, a disclosure read paused under auto as a Permission approval, an ask-posture provider write paused as Destructive with no decision, and the auto-posture record (ToolCall kind, reason, GRANTED decision by user_test with the chat reason). The Recorder gains decision_requests, captured by the mock decide_approval; no runtime code changed. (2) gap-analysis.md: the DecideApproval row is corrected to Implemented, with a dated note under the table. Verified: session-core decides in one transaction; the gateway route is POST /v1/orchestration/approvals/:approval_id/decide; APPROVAL_DECIDED (EVENT_TYPE 123) is never emitted; no Temporal approval signal is sent in this tree. The 13.1 heading now says 12 listed as Unimplemented. The matrix and ledger edits are not applied; they are in lead_todo. Line endings: agent.rs is pure LF at HEAD and in the worktree, so the git LF-to-CRLF warning (core.autocrlf=true) does not mean the edit changed line endings.\"]"
+ },
+ {
+  "id": "WS3J-MP",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs",
+   "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs",
+   "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs",
+   "apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+   "apps/Model Plane/rust/services/execution-core/tests/browser_agent_e2e.rs",
+   "apps/Model Plane/rust/services/execution-core/tests/browser_challenge_rule_contract.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p execution-core --lib quarry_agent",
+    "outcome": "15 passed"
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib llm_planner",
+    "outcome": "34 passed"
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib browser_agent",
+    "outcome": "68 passed"
+   },
+   {
+    "command": "cargo test -q -p execution-core --test browser_agent_e2e --test browser_challenge_rule_contract",
+    "outcome": "e2e 11 passed, 2 ignored (live); contract 4 passed"
+   },
+   {
+    "command": "cargo check -q -p model-gateway --lib",
+    "outcome": "compiles, no errors"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib http_routes",
+    "outcome": "NOT RUN: the test target fails to compile on http_routes.rs ~line 10038 (CapabilityDetail initializer missing approval_floor and side_effect_class). That comes from another slice's capabilities.proto change (uncommitted in the tree), not from this slice. My gateway test (browser_planner_prompt_carries_the_bot_wall_rule_after_its_instructions) has therefore not run."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Run `cargo test -q -p model-gateway --lib http_routes` once the CapabilityDetail initializer in http_routes.rs (~line 10038, missing approval_floor and side_effect_class from the capabilities.proto slice) is fixed. My gateway test browser_planner_prompt_carries_the_bot_wall_rule_after_its_instructions has not run.",
+   "Live proof still owed (Quarry side, needs a live stack with QUARRY_CHALLENGE_ENFORCE=enforce): a third attempt on a walled host is refused 403 CHALLENGE_DETECTED by Quarry, and the run ends blocked in the Model Plane. The execution-core loop is proven against wiremock only. A model-driven run's own Quarry session still shows no notice in the SPA (the Model Plane half noted in Quarry RUNBOOKS).",
+   "Rebuild the execution-core and model-gateway images when this batch is deployed. The change is always on, with no flag, as the brief says. Behaviour differs only when Quarry sends a challenge field, and the planner system prompt gains the rule text.",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: add 'implemented 2026-10-21 WS3J-MP: a Quarry 403 CHALLENGE_DETECTED on a browser step (details.block_reason, or details.reason on the agent path) is read as AgentClientError::Challenge and becomes an ObservationStatus::Blocked observation carrying challenge{strong, block_reason, recovery exhausted}, so the loop stops blocked and does not retry it as a transient Status error; any other 403 stays Status. The planner rule (one recovery step: one wait up to 5 s or one reload; never solve a captcha or change identity; then report blocked via action=done) is one constant in execution-core llm_planner.rs and one in model-gateway http_routes.rs, pinned equal by execution-core tests/browser_challenge_rule_contract.rs. A planner done over a still-strong signal fails the run as blocked.'",
+   "shared-edit the Build ledger at the end of docs/plans/model-plane-chat-build-plan-2026-10-14.md: 'WS3J-MP built 2026-10-21: execution-core --lib quarry_agent 15, llm_planner 34, browser_agent 68, browser_agent_e2e 11 (+2 live ignored), browser_challenge_rule_contract 4 passed; model-gateway test not yet run (blocked by another slice's compile error); live proof owed.'",
+   "The plan file has no WS3J section (grep for WS3J, WS3.J and challenge finds nothing relevant). I worked from the task text and the Quarry quarryv2-next contract (challenge-signal.schema.json, CONTRACTS 9.2, ERROR_REASONS). Add the WS3J row to the plan if the ledger needs one."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "model-gateway test target does not compile: http_routes.rs ~line 10038 CapabilityDetail initializer lacks approval_floor and side_effect_class (another slice's capabilities.proto change, not this slice). So `cargo test -q -p model-gateway --lib http_routes`, including browser_planner_prompt_carries_the_bot_wall_rule_after_its_instructions, has not run. `cargo check -p model-gateway --lib` is clean and the contract test reads the gateway source, so the constant and its use are verified. Re-run once the other slice fixes the initializer.",
+    "Live proof owed: a third attempt on a walled host refused 403 CHALLENGE_DETECTED by Quarry (needs QUARRY_CHALLENGE_ENFORCE=enforce on a live stack), ending the Model Plane run blocked. Proven here only against wiremock.",
+    "Rebuild the execution-core and model-gateway images at deploy; the change is always on (no flag), as the brief said.",
+    "Ledger and plan entries are the lead's (docs/decisions/ledger.md and the Build ledger); the implementer's lead_todo shared-edit lines are accurate against what I verified."
+   ]
+  },
+  "review_defects": [],
+  "notes": "DONE\n- BrowserObservation.challenge: Option<BrowserChallenge> with closed enums ChallengeKind, ChallengeStrength, BlockReason, ChallengeRecovery, confidence_per_mille. Every construction site now has challenge: None. Display renders typed fields only.\n- quarry_agent: WireObservation.challenge uses a lenient deserializer. An older Quarry without the field parses, a legacy signal with no strength reads as strong, and a malformed challenge is dropped without failing the observation. Unknown vocabulary values degrade: kind to Unknown, strength to Weak (a hint, never a verdict), block_reason to None, recovery to NotApplicable. Evidence strings are never read, since they are page text.\n- llm_planner: BROWSER_CHALLENGE_RULE is appended to the planner system prompt. observation_text adds a \"challenge:\" line for strong and weak signals only. non_signal (login, consent, paywall, rate limit) and no signal give no line, so the prompt is byte-identical to before in those cases.\n- model-gateway: the same text is a const BROWSER_CHALLENGE_RULE, used through browser_suggest_system_prompt() in browser_suggest_action.\n- tests/browser_challenge_rule_contract.rs reads both sources. It checks the texts are equal, that anchor phrases are kept, that each constant is actually sent in its prompt, and that CRLF is not drift. It is mutation-tested (loosened budget on either side, a sentence lost on both, constant renamed or commented out, use removed).\n- DECISION TAKEN: a 403 with error.code CHALLENGE_DETECTED on a browser step maps to AgentClientError::Challenge, and the loop turns it into an ObservationStatus::Blocked observation carrying challenge{strong, block_reason, exhausted}. plan_next_action already stops on any Blocked observation (\"action blocked: ...\"), so the run ends blocked with no retry. Any other 403 (FORBIDDEN, SECURITY_BLOCKED, USER_TOOK_OVER) and any other status stay AgentClientError::Status. block_reason is read from details.block_reason, then details.reason. Reason: a refused wall is Quarry's final verdict (retryable:false), and a Status error is what the loop and the MCP path treat as a generic failure. Tested through the real loop with wiremock (the step mock has expect(1), so there is no retry).\n- Addition beyond the brief: the planner schema has no \"blocked\" action, so the rule says to report blocked as action=done. blocked_by_bot_wall() makes a planner \"done\" over a page whose last observation is still strong fail the run (\"blocked: the site refuses automation (...)\") instead of completing it. Weak, non_signal and no signal still complete normally.\n\nDEVIATIONS\n- The brief says \"ONE wait ... and ONE reload\". Quarry grants one recovery per host and run, either a wait or a reload, and refuses the second. The rule therefore says ONE recovery step: a single wait of up to 5 seconds, or a single reload of the same page.\n- The refusal observation carries confidence_per_mille 1000 and kind Unknown, since the refusal body has neither.\n- The rule text is a single-line raw string (r\"...\") so the contract test is independent of line endings.\n\nCAVEATS\n- The gateway browser_suggest_action planner is handed the whole Quarry observation JSON by its caller. That is pre-existing, but with WS3.J it can now include challenge.evidence strings, which are page-derived. Only the execution-core planner has the typed-fields-only guarantee. Consider stripping evidence in the gateway or the SPA, in a later slice.\n- The MCP path (execution_quarry_browser_mcp) serializes WireObservation, so it now also carries the typed challenge fields when Quarry sends them (typed only, no evidence). A refused MCP step returns the error text \"bot challenge (kind=... block_reason=...)\".\n- Pre-existing clippy warnings in these files are untouched."
+ }
+]

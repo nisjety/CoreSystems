@@ -1,0 +1,429 @@
+{
+  "events": [
+    {
+      "eventId": "1",
+      "eventTime": "2026-11-01T09:00:00Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "1048576",
+      "workflowExecutionStartedEventAttributes": {
+        "workflowType": {
+          "name": "ScheduledJobWF"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzY2hlZHVsZV9pZCI6InNjaF9yZWNvcmRlZCIsIm9yZ19pZCI6Im9yZ19hIiwiY3JlYXRlZF9ieSI6InVzZXJfMSIsImtpbmQiOiJjcmF3bCIsInBhcmFtcyI6eyJtYXhfZGVwdGgiOjIsIm1heF9wYWdlcyI6NSwib3JnX2lkIjoib3JnX2EiLCJ1cmwiOiJodHRwczovL2V4YW1wbGUuY29tIiwidXNlcl9pZCI6InVzZXJfMSJ9LCJvdmVybGFwX3BvbGljeSI6InNraXAiLCJleGVjdXRpb25fdGltZW91dF9zIjozNjAwfQ=="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "3600s",
+        "workflowRunTimeout": "3600s",
+        "workflowTaskTimeout": "10s",
+        "originalExecutionRunId": "7c1d6a52-0f3e-4c3b-9a0e-5b2f8d4e9a11",
+        "identity": "schedule",
+        "firstExecutionRunId": "7c1d6a52-0f3e-4c3b-9a0e-5b2f8d4e9a11",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "2",
+      "eventTime": "2026-11-01T09:00:00.100Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1048577",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "3",
+      "eventTime": "2026-11-01T09:00:00.200Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1048578",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "2",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-wft-2"
+      }
+    },
+    {
+      "eventId": "4",
+      "eventTime": "2026-11-01T09:00:00.300Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1048579",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "2",
+        "startedEventId": "3",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "5",
+      "eventTime": "2026-11-01T09:00:00.400Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1048580",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "5",
+        "activityType": {
+          "name": "PreflightFire"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzY2hlZHVsZV9pZCI6InNjaF9yZWNvcmRlZCIsIm9yZ19pZCI6Im9yZ19hIn0="
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "4",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        }
+      }
+    },
+    {
+      "eventId": "6",
+      "eventTime": "2026-11-01T09:00:00.500Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1048581",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "5",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-act-5",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "7",
+      "eventTime": "2026-11-01T09:00:00.600Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1048582",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJhbGxvdyI6dHJ1ZSwicG9zdHVyZSI6InVuY2hlY2tlZCIsImVudGl0bGVtZW50IjoiZmxvb3IifQ=="
+            }
+          ]
+        },
+        "scheduledEventId": "5",
+        "startedEventId": "6",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "8",
+      "eventTime": "2026-11-01T09:00:00.700Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1048583",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "9",
+      "eventTime": "2026-11-01T09:00:00.800Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1048584",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "8",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-wft-8"
+      }
+    },
+    {
+      "eventId": "10",
+      "eventTime": "2026-11-01T09:00:00.900Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1048585",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "8",
+        "startedEventId": "9",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "11",
+      "eventTime": "2026-11-01T09:00:01Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+      "taskId": "1048586",
+      "activityTaskScheduledEventAttributes": {
+        "activityId": "11",
+        "activityType": {
+          "name": "RegisterScheduledRun"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJzY2hlZHVsZV9pZCI6InNjaF9yZWNvcmRlZCIsInJ1bl9rZXkiOiJydW5fN2MxZDZhNTIwZjNlNGMzYjlhMGU1YjJmOGQ0ZTlhMTEiLCJydW5faWQiOiJydW5fN2MxZDZhNTIwZjNlNGMzYjlhMGU1YjJmOGQ0ZTlhMTEiLCJzdGF0dXMiOiJydW5uaW5nIiwid29ya2Zsb3dfaWQiOiJzY2hfcmVjb3JkZWQtZmlyZSJ9"
+            }
+          ]
+        },
+        "scheduleToCloseTimeout": "0s",
+        "scheduleToStartTimeout": "0s",
+        "startToCloseTimeout": "300s",
+        "workflowTaskCompletedEventId": "10",
+        "retryPolicy": {
+          "initialInterval": "1s",
+          "backoffCoefficient": 2,
+          "maximumInterval": "60s",
+          "maximumAttempts": 5
+        }
+      }
+    },
+    {
+      "eventId": "12",
+      "eventTime": "2026-11-01T09:00:01.100Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+      "taskId": "1048587",
+      "activityTaskStartedEventAttributes": {
+        "scheduledEventId": "11",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-act-11",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "13",
+      "eventTime": "2026-11-01T09:00:01.200Z",
+      "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+      "taskId": "1048588",
+      "activityTaskCompletedEventAttributes": {
+        "result": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJqb2JfaWQiOiJqb2JfcmVjb3JkZWQiLCJzdGF0dXMiOiJydW5uaW5nIn0="
+            }
+          ]
+        },
+        "scheduledEventId": "11",
+        "startedEventId": "12",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "14",
+      "eventTime": "2026-11-01T09:00:01.300Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1048589",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "15",
+      "eventTime": "2026-11-01T09:00:01.400Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1048590",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "14",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-wft-14"
+      }
+    },
+    {
+      "eventId": "16",
+      "eventTime": "2026-11-01T09:00:01.500Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1048591",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "14",
+        "startedEventId": "15",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "17",
+      "eventTime": "2026-11-01T09:00:01.600Z",
+      "eventType": "EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED",
+      "taskId": "1048592",
+      "startChildWorkflowExecutionInitiatedEventAttributes": {
+        "namespace": "default",
+        "workflowId": "quarry-job-job_recorded",
+        "workflowType": {
+          "name": "CrawlJobWF"
+        },
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "input": {
+          "payloads": [
+            {
+              "metadata": {
+                "encoding": "anNvbi9wbGFpbg=="
+              },
+              "data": "eyJqb2JfaWQiOiJqb2JfcmVjb3JkZWQifQ=="
+            }
+          ]
+        },
+        "workflowExecutionTimeout": "3600s",
+        "parentClosePolicy": "PARENT_CLOSE_POLICY_REQUEST_CANCEL",
+        "workflowTaskCompletedEventId": "16",
+        "workflowIdReusePolicy": "WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY"
+      }
+    },
+    {
+      "eventId": "18",
+      "eventTime": "2026-11-01T09:00:01.700Z",
+      "eventType": "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED",
+      "taskId": "1048593",
+      "childWorkflowExecutionStartedEventAttributes": {
+        "namespace": "default",
+        "initiatedEventId": "17",
+        "workflowExecution": {
+          "workflowId": "quarry-job-job_recorded",
+          "runId": "b3f1c9a4-2d7e-4f60-8a15-6e0c3d9b7f22"
+        },
+        "workflowType": {
+          "name": "CrawlJobWF"
+        }
+      }
+    },
+    {
+      "eventId": "19",
+      "eventTime": "2026-11-01T09:00:01.800Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1048594",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "20",
+      "eventTime": "2026-11-01T09:00:01.900Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1048595",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "19",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-wft-19"
+      }
+    },
+    {
+      "eventId": "21",
+      "eventTime": "2026-11-01T09:00:02Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1048596",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "19",
+        "startedEventId": "20",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "22",
+      "eventTime": "2026-11-01T09:00:02.100Z",
+      "eventType": "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED",
+      "taskId": "1048597",
+      "childWorkflowExecutionCompletedEventAttributes": {
+        "namespace": "default",
+        "workflowExecution": {
+          "workflowId": "quarry-job-job_recorded",
+          "runId": "b3f1c9a4-2d7e-4f60-8a15-6e0c3d9b7f22"
+        },
+        "workflowType": {
+          "name": "CrawlJobWF"
+        },
+        "initiatedEventId": "17",
+        "startedEventId": "18"
+      }
+    },
+    {
+      "eventId": "23",
+      "eventTime": "2026-11-01T09:00:02.200Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+      "taskId": "1048598",
+      "workflowTaskScheduledEventAttributes": {
+        "taskQueue": {
+          "name": "quarry-orchestrator",
+          "kind": "TASK_QUEUE_KIND_NORMAL"
+        },
+        "startToCloseTimeout": "10s",
+        "attempt": 1
+      }
+    },
+    {
+      "eventId": "24",
+      "eventTime": "2026-11-01T09:00:02.300Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+      "taskId": "1048599",
+      "workflowTaskStartedEventAttributes": {
+        "scheduledEventId": "23",
+        "identity": "quarry-orchestrator@worker",
+        "requestId": "req-wft-23"
+      }
+    },
+    {
+      "eventId": "25",
+      "eventTime": "2026-11-01T09:00:02.400Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+      "taskId": "1048600",
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "23",
+        "startedEventId": "24",
+        "identity": "quarry-orchestrator@worker"
+      }
+    },
+    {
+      "eventId": "26",
+      "eventTime": "2026-11-01T09:00:02.500Z",
+      "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+      "taskId": "1048601",
+      "workflowExecutionCompletedEventAttributes": {
+        "workflowTaskCompletedEventId": "25"
+      }
+    }
+  ]
+}

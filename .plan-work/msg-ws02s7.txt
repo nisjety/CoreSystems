@@ -1,0 +1,19 @@
+feat(execution-core): a Do run seeds its context in tier order and sorts its tool segments (WS02-S7)
+
+fresh_history becomes seed_messages over a pure seed_order: system preamble (Stable), the authored instructions (Context,
+inherited by subagents), history (Conversation, root only, user and assistant turns only), the memory block (Volatile,
+root only), skills (moved behind memory only when the run carries a run context; otherwise they stay at index 1 and the
+seed is byte-identical to before), then the goal (Current). The approved plan already travels inside the goal, so it is
+not a separate message. merged_tool_defs sorts the MCP and client tool segments by name (a built-in name still wins on
+a collision), so the tool list is deterministic. One content-free log line, "run_agent: seeded run context", records
+sizes and counts, never text.
+
+Tests: execution-core lib 1144 passed (11 new or extended: no run context is unchanged, tier order, a history turn can
+never become a system message, hostile run-context text cannot change the permission posture, deterministic tool order,
+the subagent keeps instructions but not history or memory, the log never contains the text); the three contract tests
+(cross_service_loop_contract 11, compaction_parity_contract 7, prompt_tier_contract 6, two of them new) pass.
+Not shown: a live Do run. The rebuilt-executor run with MODEL_GATEWAY_RUN_CONTEXT=full is a lead step, and how
+budget compaction treats the seeded memory message is unverified.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+

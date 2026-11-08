@@ -1,0 +1,42 @@
+{
+ "packets": [
+  {
+   "key": "capcore-0021-binary-reserved-word",
+   "rows": ["D1-754"],
+   "title": "capability-core: migration 0021 applies on Postgres (the skill bundle file column is no longer the reserved word binary)",
+   "brief": "Context: apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.up.sql (WS19-S6) declares `binary BOOLEAN NOT NULL DEFAULT FALSE` in skill_bundle_files (about line 39). BINARY is a reserved keyword in PostgreSQL (type_func_name_keyword), which a column definition cannot use unquoted, so the CREATE TABLE fails with: syntax error at or near \"binary\" (SQLSTATE 42601). Measured by the lead 2026-10-26 with go test -tags integration (testcontainers, postgres:16): every integration test that applies the migrations fails at 0021 in internal/api, internal/registry, internal/server and internal/skillbundle. The release migrator (scripts/release-artifact.sh and its migration manifest) would stop at 0021 the same way.\n\nDo: rename the column to is_binary in 0021_skill_bundles.up.sql, and change every SQL statement that names it: internal/skillbundle/store.go (the INSERT ... SELECT ... FROM unnest(...) AS u(..., binary) at about lines 120-123 and the SELECT at about line 243; the unnest alias column can be renamed too). Check 0021_skill_bundles.down.sql and any later migration for the name. Keep the Go field and the JSON/API field names unchanged: only the database column changes. Editing 0021 in place is the right fix because the file cannot have been applied anywhere (its CREATE TABLE fails); before doing so, read how the release path applies migrations (scripts/release-artifact.sh, scripts/tests/release-contract-test.sh, scripts/tests/migration-expand-contract-test.sh: capability-core is additive_from 17) and whether a checksum or manifest pins 0021's bytes. If one does, update it by its own recipe and say so; if the expand-contract test forbids editing an existing file, stop and report under needs_other_files instead of working around it.\n\nRegression test (runs without docker): add internal/skillbundle/migration_reserved_words_test.go, a plain go test that reads every ../../migrations/*.up.sql file, finds the column definitions inside CREATE TABLE (...) and ALTER TABLE ... ADD COLUMN, and fails when a column name is an unquoted PostgreSQL reserved or type_func_name keyword (use the keyword lists from the PostgreSQL appendix 'SQL Key Words': the 'reserved' and 'reserved (can be function or type)' entries, for example ALL, ANALYSE, ANALYZE, AND, ANY, ARRAY, AS, ASC, ASYMMETRIC, AUTHORIZATION, BINARY, BOTH, CASE, CAST, CHECK, COLLATE, COLLATION, COLUMN, CONCURRENTLY, CONSTRAINT, CREATE, CROSS, CURRENT_CATALOG, CURRENT_DATE, CURRENT_ROLE, CURRENT_SCHEMA, CURRENT_TIME, CURRENT_TIMESTAMP, CURRENT_USER, DEFAULT, DEFERRABLE, DESC, DISTINCT, DO, ELSE, END, EXCEPT, FALSE, FETCH, FOR, FOREIGN, FREEZE, FROM, FULL, GRANT, GROUP, HAVING, ILIKE, IN, INITIALLY, INNER, INTERSECT, INTO, IS, ISNULL, JOIN, LATERAL, LEADING, LEFT, LIKE, LIMIT, LOCALTIME, LOCALTIMESTAMP, NATURAL, NOT, NOTNULL, NULL, OFFSET, ON, ONLY, OR, ORDER, OUTER, OVERLAPS, PLACING, PRIMARY, REFERENCES, RETURNING, RIGHT, SELECT, SESSION_USER, SIMILAR, SOME, SYMMETRIC, SYSTEM_USER, TABLE, TABLESAMPLE, THEN, TO, TRAILING, TRUE, UNION, UNIQUE, USER, USING, VARIADIC, VERBOSE, WHEN, WHERE, WINDOW, WITH). Skip constraint lines (CONSTRAINT, PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY, EXCLUDE) and comments. It must fail on the old 0021 and pass after the rename, and must pass for every other capability-core migration today (if it flags another migration, report it rather than editing that migration). Also run go vet -tags integration ./... so the integration tests still compile.\n\nYou cannot run docker or testcontainers here: list the integration tests that prove the fix (the internal/skillbundle store_integration_test.go tests at minimum) under db_tests; the lead runs go test -tags integration. Must NOT change: any other migration, the skill bundle API, behaviour with any switch.",
+   "files": [
+    "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.up.sql",
+    "apps/Model Plane/go/services/capability-core/migrations/0021_skill_bundles.down.sql",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go"
+   ],
+   "new_files": [
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/migration_reserved_words_test.go"
+   ],
+   "tests": [
+    "go build ./...",
+    "go vet ./...",
+    "go vet -tags integration ./...",
+    "go test -count=1 ./internal/skillbundle/ ./internal/api/ ./internal/registry/ ./internal/server/"
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "high"
+  },
+  {
+   "key": "capcore-taskexec-template-digest-scratch-schema",
+   "rows": ["D1-755"],
+   "title": "capability-core: the template-digest JSONB integration test's scratch schema matches what the cron sweeper writes today",
+   "brief": "Context: internal/taskexec/workflow_dispatcher_template_digest_integration_test.go (build tag integration, written 2026-10-08) creates a hand-made scratch schema (templateRoundTripSchema: cron_schedules, tasks, cron_fires with only the columns the stages touched then) and runs the real cron.NewSweeper(pool, allowEveryFire{}).RunOnce. Measured by the lead 2026-10-26 (testcontainers, postgres:16-alpine): all 11 subtests fail with 'sweeper fired 0 schedules, err = commit unexpectedly resulted in rollback; want exactly 1', and the service log shows 'WARN cron task creation failed schedule=cron-N error=ERROR: current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)'. So an earlier statement inside the sweeper's transaction failed, and its error was not logged. The cron package was changed since by WS20-S1 (d642fb252, persist result and truthful fire status) and WS20-S2 (0a3a21909, consent contract), which likely added columns or tables the scratch schema lacks.\n\nDo: read every statement cron.Sweeper.RunOnce issues (internal/cron: the sweeper, the fire/claim/insert paths and anything they call with the transaction), list the tables and columns they read or write, and compare with templateRoundTripSchema. Find where the real tables are created (search the Model Plane migrations: capability-core/migrations and rust/services/session-core/migrations for cron_schedules, cron_fires and tasks) and add to the scratch schema exactly the missing columns or tables, with the real migrations' types and defaults, and update the comment that names the source migrations. Do not change the sweeper or its SQL in this packet. If a statement references a column or table that exists in NO real migration, that is a product defect, not test staleness: do not paper over it in the scratch schema; report it under needs_other_files with the statement and the file:line.\n\nAlso report (do not fix, it is another file) whether the sweeper's error handling loses the first failing statement's error: name the place under needs_other_files with a one-line suggested change, so a later packet can make the root cause visible in the log.\n\nYou cannot run docker or testcontainers here: make sure go vet -tags integration ./internal/taskexec/ passes and list TestScheduleTemplateDigestSurvivesJSONB under db_tests; the lead runs it.",
+   "files": [
+    "apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_template_digest_integration_test.go"
+   ],
+   "new_files": [],
+   "tests": [
+    "go vet -tags integration ./internal/taskexec/",
+    "go test -count=1 ./internal/taskexec/ ./internal/cron/"
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "medium"
+  }
+ ]
+}

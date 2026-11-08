@@ -1,0 +1,1936 @@
+diff --git a/apps/Model Plane/proto/model_plane/v1/thread_shares.proto b/apps/Model Plane/proto/model_plane/v1/thread_shares.proto
+new file mode 100644
+index 000000000..702968926
+--- /dev/null
++++ b/apps/Model Plane/proto/model_plane/v1/thread_shares.proto	
+@@ -0,0 +1,109 @@
++syntax = "proto3";
++
++package model_plane.v1;
++
++option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
++
++import "google/protobuf/timestamp.proto";
++import "model_plane/v1/thread_export.proto";
++
++// Thread share snapshots (Wave 3 EP-12 S14, decision D10; ADR
++// docs/decisions/conversation-share-model.md, proposed).
++//
++// The owner of a thread takes an immutable copy of its active branch: the
++// thread export (EP-12 S9) with the redacted profile, stored in session-core.
++// Later turns never reach a snapshot, and reading one calls no model,
++// connector or tool. Creating one follows the export's refusals: a
++// zero-retention or waived caller is refused (`zdr_feature_not_supported`,
++// feature `conversation_share`), and so is a thread that holds any run whose
++// retention class is not `persistent` or that belongs to a Space
++// (`failed_precondition` `thread_not_exportable`, the reason in the
++// `x-mp-error-reason` trailer). Revoking deletes the body; a revoked snapshot
++// reads as not found to everyone. A snapshot is erased with its thread and
++// with the org purge.
++//
++// Reads are owner-only in this version: Control has no grant decision for the
++// `conversation_snapshot` type that session-core can verify yet, so another
++// member's read is not found. A separate file and service (integration round
++// B, C-B6) so that SessionCore and every implementation or test double of it
++// stay source-compatible. Switch `SESSION_THREAD_SHARES_ENABLED`, default off;
++// while it is off every RPC answers `unavailable` `thread_shares_disabled`.
++
++// EP-12 S14. One snapshot as its owner sees it, without its body.
++message ThreadShareSnapshot {
++  // The snapshot's id, `snap_<ulid>`; the resource id a Control grant on
++  // `conversation_snapshot` names.
++  string snapshot_id = 1;
++  // The thread the snapshot copies.
++  string thread_id = 2;
++  // The thread's title when the snapshot was taken; empty when it had none.
++  string title = 3;
++  // When the snapshot was taken.
++  google.protobuf.Timestamp created_at = 4;
++  // `sha256:<hex>` of the stored body; empty once revoked.
++  string body_digest = 5;
++  // When the owner revoked the snapshot; unset while it is live.
++  google.protobuf.Timestamp revoked_at = 6;
++}
++
++// EP-12 S14. Take a snapshot of one thread the caller owns.
++message CreateSnapshotRequest {
++  // The thread to copy, in the caller's own org.
++  string thread_id = 1;
++}
++
++// EP-12 S14. The snapshot just taken.
++message CreateSnapshotResponse {
++  // The new snapshot, without its body.
++  ThreadShareSnapshot snapshot = 1;
++}
++
++// EP-12 S14. List the caller's live snapshots of one thread.
++message ListSnapshotsRequest {
++  // The thread whose snapshots to list; another person's thread lists none.
++  string thread_id = 1;
++}
++
++// EP-12 S14. The caller's live snapshots of the thread, newest first.
++message ListSnapshotsResponse {
++  // At most 20 snapshots, the per-thread cap; revoked ones are left out.
++  repeated ThreadShareSnapshot snapshots = 1;
++}
++
++// EP-12 S14. Read one live snapshot with its body.
++message GetSnapshotRequest {
++  // The snapshot to read.
++  string snapshot_id = 1;
++}
++
++// EP-12 S14. One snapshot and the copy it holds.
++message GetSnapshotResponse {
++  // The snapshot, without its body.
++  ThreadShareSnapshot snapshot = 1;
++  // The redacted export the snapshot froze, exactly as it was taken.
++  ExportThreadResponse body = 2;
++}
++
++// EP-12 S14. Revoke one of the caller's snapshots.
++message RevokeSnapshotRequest {
++  // The snapshot to revoke; another person's or a revoked one is not found.
++  string snapshot_id = 1;
++}
++
++// EP-12 S14. The snapshot as revoked: no digest, `revoked_at` set.
++message RevokeSnapshotResponse {
++  // The revoked snapshot; its body is already deleted.
++  ThreadShareSnapshot snapshot = 1;
++}
++
++// EP-12 S14. The snapshot store. See the file comment for every refusal.
++service ThreadShareService {
++  // Take an immutable, redacted snapshot of a thread the caller owns.
++  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
++  // List the caller's live snapshots of one thread.
++  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
++  // Read one live snapshot with its body; owner-only in this version.
++  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
++  // Revoke a snapshot: its body and digest are deleted in the same statement.
++  rpc RevokeSnapshot(RevokeSnapshotRequest) returns (RevokeSnapshotResponse);
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/build.rs b/apps/Model Plane/rust/crates/mp-contracts/build.rs
+index 24c5a39e1..14d6a4dde 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/build.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/build.rs	
+@@ -75,6 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+         "model_plane/v1/skill_versions.proto",
+         // EP-12 S9: ThreadExportService (session-core's owner-only thread export).
+         "model_plane/v1/thread_export.proto",
++        // EP-12 S14: ThreadShareService (session-core's owner-only share snapshots).
++        "model_plane/v1/thread_shares.proto",
+     ];
+ 
+     let dp_protos = &[
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 745d1d5fd..aaffdff0b 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -361,6 +361,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
+         .merge(crate::thread_goal_routes::router())
+         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
+         .merge(crate::thread_export_routes::router())
++        // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
++        .merge(crate::thread_share_routes::router())
+         // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
+         .merge(crate::artifact_edit_routes::router())
+         // Read-only replay of Session Core's canonical event log. The route
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 2ba465c9c..a520ff10e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -127,6 +127,7 @@ pub mod thread_goal;
+ pub mod thread_goal_routes;
+ pub mod thread_reference_tools;
+ pub mod thread_search_routes;
++pub mod thread_share_routes;
+ pub mod tool_loop;
+ pub mod tool_result_handles;
+ pub mod tool_retry;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs
+new file mode 100644
+index 000000000..a126a022e
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs	
+@@ -0,0 +1,642 @@
++//! Share snapshot routes (Wave 3 EP-12 S14, decision D10; ADR
++//! `docs/decisions/conversation-share-model.md`, proposed):
++//!
++//! - `POST /v1/threads/:thread_id/snapshots`: take an immutable, redacted snapshot of a thread the
++//!   caller owns (201).
++//! - `GET /v1/threads/:thread_id/snapshots`: the caller's live snapshots of the thread.
++//! - `GET /v1/snapshots/:snapshot_id`: one live snapshot with the copy it holds.
++//! - `DELETE /v1/snapshots/:snapshot_id`: revoke a snapshot; its body is deleted.
++//!
++//! Session Core's `ThreadShareService` is the authority: it takes the snapshot from the export read
++//! in the transaction that decides whether the thread may leave (EP-12 S9), and it decides who may
++//! read one. The gateway forwards the caller's session bearer only, never an owner from the path.
++//! Reads are owner-only in this version, because Control has no grant decision for
++//! `conversation_snapshot` that Session Core can verify; the gateway writes no grant and never
++//! holds an `authz:*` scope. Snapshots are for people: the route policy refuses a key principal
++//! before these handlers run.
++//!
++//! Every route answers 404 `thread_shares_disabled` while `MODEL_GATEWAY_THREAD_SHARES` is not the
++//! literal `true`. Taking a snapshot refuses a zero-retention or waived caller first (feature
++//! `conversation_share`), as the export does; revoking and reading do not, since neither makes a
++//! copy. Errors are the typed envelope `{error:{code,message,details}}` with `details` an object,
++//! except a ZDR refusal, which keeps its catalogue body. A snapshot read is `Cache-Control:
++//! no-store`, because its body is the owner's conversation.
++
++use axum::{
++    extract::{Path, State},
++    http::{header, StatusCode},
++    response::{IntoResponse, Response},
++    Extension, Json,
++};
++use mp_contracts::model_plane::v1::{
++    CreateSnapshotRequest, ExportThreadResponse, ExportedMessage, ExportedRun, GetSnapshotRequest,
++    ListSnapshotsRequest, RevokeSnapshotRequest, ThreadShareSnapshot,
++};
++use mp_contracts::zdr_refusal::Refusal;
++use serde_json::{json, Value};
++
++use crate::auth::{Claims, VerifiedSessionBearer};
++use crate::http_routes::{authenticated_session_request, timestamp_to_rfc3339, HttpJsonError};
++use crate::state::AppState;
++
++/// The gateway's switch for the snapshot routes. Opt-in: only the literal `true` enables it. Read
++/// at each call, as the other thread switches are.
++pub const ENABLED_ENV: &str = "MODEL_GATEWAY_THREAD_SHARES";
++
++/// The ZDR feature key a snapshot refusal names (`zdr-refusals.json`, EP-12 S3).
++const ZDR_FEATURE: &str = "conversation_share";
++
++/// The typed code while the switch is off. Session Core answers `Unavailable` with the same word
++/// while its own store switch is off, and the routes give the same 404 for both.
++const DISABLED: &str = "thread_shares_disabled";
++const DISABLED_MESSAGE: &str = "conversation sharing is not enabled on this deployment";
++
++/// The typed codes Session Core puts on its trailers, and the trailers that carry them.
++const NOT_EXPORTABLE: &str = "thread_not_exportable";
++const LIMIT_REACHED: &str = "snapshot_limit_reached";
++const TOO_LARGE: &str = "snapshot_too_large";
++const ERROR_CODE_TRAILER: &str = "x-mp-error-code";
++const ERROR_REASON_TRAILER: &str = "x-mp-error-reason";
++
++/// Whether the snapshot routes are on in this process.
++#[must_use]
++pub fn enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// The routes, merged into the authed router beside the export.
++pub(crate) fn router() -> axum::Router<AppState> {
++    axum::Router::new()
++        .route(
++            "/v1/threads/:thread_id/snapshots",
++            axum::routing::post(create_snapshot).get(list_snapshots),
++        )
++        .route(
++            "/v1/snapshots/:snapshot_id",
++            axum::routing::get(get_snapshot).delete(revoke_snapshot),
++        )
++}
++
++/// What a refusal of a route names when Session Core reports that nothing was found.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Subject {
++    Thread,
++    Snapshot,
++}
++
++impl Subject {
++    const fn not_found(self) -> (&'static str, &'static str) {
++        match self {
++            Self::Thread => ("thread_not_found", "thread not found"),
++            Self::Snapshot => ("snapshot_not_found", "snapshot not found"),
++        }
++    }
++}
++
++/// `POST /v1/threads/:thread_id/snapshots`. The switch and the ZDR gate come first, then Session
++/// Core's export read and write.
++pub(crate) async fn create_snapshot(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: VerifiedSessionBearer,
++    Path(thread_id): Path<String>,
++) -> Result<Response, HttpJsonError> {
++    switch_gate()?;
++    share_gate(&claims)?;
++    let created = state
++        .thread_share_client
++        .clone()
++        .create_snapshot(authenticated_session_request(
++            CreateSnapshotRequest {
++                thread_id: thread_id.trim().to_owned(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| share_error(&error, Subject::Thread))?
++        .into_inner();
++    let snapshot = created.snapshot.as_ref().ok_or_else(share_failed)?;
++    Ok((
++        StatusCode::CREATED,
++        Json(json!({ "data": { "snapshot": snapshot_json(snapshot) } })),
++    )
++        .into_response())
++}
++
++/// `GET /v1/threads/:thread_id/snapshots`.
++pub(crate) async fn list_snapshots(
++    State(state): State<AppState>,
++    bearer: VerifiedSessionBearer,
++    Path(thread_id): Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    switch_gate()?;
++    let listed = state
++        .thread_share_client
++        .clone()
++        .list_snapshots(authenticated_session_request(
++            ListSnapshotsRequest {
++                thread_id: thread_id.trim().to_owned(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| share_error(&error, Subject::Thread))?
++        .into_inner();
++    let snapshots: Vec<Value> = listed.snapshots.iter().map(snapshot_json).collect();
++    Ok(Json(json!({ "data": { "snapshots": snapshots } })))
++}
++
++/// `GET /v1/snapshots/:snapshot_id`. The body is the copy as it was taken; nothing here calls a
++/// model, connector or tool.
++pub(crate) async fn get_snapshot(
++    State(state): State<AppState>,
++    bearer: VerifiedSessionBearer,
++    Path(snapshot_id): Path<String>,
++) -> Result<Response, HttpJsonError> {
++    switch_gate()?;
++    let read = state
++        .thread_share_client
++        .clone()
++        .get_snapshot(authenticated_session_request(
++            GetSnapshotRequest {
++                snapshot_id: snapshot_id.trim().to_owned(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| share_error(&error, Subject::Snapshot))?
++        .into_inner();
++    let snapshot = read.snapshot.as_ref().ok_or_else(share_failed)?;
++    let body = read.body.as_ref().ok_or_else(share_failed)?;
++    let data = json!({
++        "snapshot": snapshot_json(snapshot),
++        "body": body_json(body)?,
++    });
++    Ok((
++        [(header::CACHE_CONTROL, "no-store")],
++        Json(json!({ "data": data })),
++    )
++        .into_response())
++}
++
++/// `DELETE /v1/snapshots/:snapshot_id`. Revoking makes no copy, so a zero-retention owner may
++/// revoke what they shared before.
++pub(crate) async fn revoke_snapshot(
++    State(state): State<AppState>,
++    bearer: VerifiedSessionBearer,
++    Path(snapshot_id): Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    switch_gate()?;
++    let revoked = state
++        .thread_share_client
++        .clone()
++        .revoke_snapshot(authenticated_session_request(
++            RevokeSnapshotRequest {
++                snapshot_id: snapshot_id.trim().to_owned(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| share_error(&error, Subject::Snapshot))?
++        .into_inner();
++    let snapshot = revoked.snapshot.as_ref().ok_or_else(share_failed)?;
++    Ok(Json(json!({ "data": { "snapshot": snapshot_json(snapshot) } })))
++}
++
++/// The switch first: a deployment without the feature answers the same for every caller.
++fn switch_gate() -> Result<(), HttpJsonError> {
++    gate_for(enabled())
++}
++
++/// The switch's answer, with the switch passed in so the rule is testable without the environment.
++fn gate_for(enabled: bool) -> Result<(), HttpJsonError> {
++    if enabled {
++        Ok(())
++    } else {
++        Err(disabled())
++    }
++}
++
++fn disabled() -> HttpJsonError {
++    envelope(StatusCode::NOT_FOUND, DISABLED, DISABLED_MESSAGE, json!({}))
++}
++
++/// A zero-retention caller may not make a durable copy of a conversation (DEC-32). A waived caller
++/// is refused here too, as a route mismatch, because its waiver names one route and this is not
++/// it. Session Core refuses both again behind this gate.
++fn share_gate(claims: &Claims) -> Result<(), HttpJsonError> {
++    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))? {
++        return Err(crate::zdr_posture::http(&Refusal::feature_not_supported(
++            ZDR_FEATURE,
++        )));
++    }
++    Ok(())
++}
++
++/// Session Core's refusals as the routes answer them. A refusal the ZDR catalogue names keeps its
++/// catalogue body; a thread that may not leave names its reason; something another person owns
++/// reads as something that does not exist.
++fn share_error(error: &tonic::Status, subject: Subject) -> HttpJsonError {
++    if let Some(refusal) = Refusal::from_status(error) {
++        return crate::zdr_posture::http(&refusal);
++    }
++    let code = trailer_text(error, ERROR_CODE_TRAILER);
++    match error.code() {
++        tonic::Code::Unavailable if error.message() == DISABLED => disabled(),
++        tonic::Code::FailedPrecondition if code == Some(NOT_EXPORTABLE) => {
++            let reason = trailer_text(error, ERROR_REASON_TRAILER);
++            envelope(
++                StatusCode::PRECONDITION_FAILED,
++                NOT_EXPORTABLE,
++                not_shareable_message(reason),
++                reason.map_or_else(|| json!({}), |reason| json!({ "reason": reason })),
++            )
++        }
++        tonic::Code::FailedPrecondition if code == Some(LIMIT_REACHED) => envelope(
++            StatusCode::CONFLICT,
++            LIMIT_REACHED,
++            "this conversation already has the most live snapshots; revoke one first",
++            json!({}),
++        ),
++        tonic::Code::FailedPrecondition if code == Some(TOO_LARGE) => envelope(
++            StatusCode::PAYLOAD_TOO_LARGE,
++            TOO_LARGE,
++            "the conversation is too large to share as one snapshot",
++            json!({}),
++        ),
++        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
++            let (code, message) = subject.not_found();
++            envelope(StatusCode::NOT_FOUND, code, message, json!({}))
++        }
++        tonic::Code::InvalidArgument => envelope(
++            StatusCode::BAD_REQUEST,
++            "invalid_request",
++            "the snapshot request is not valid",
++            json!({}),
++        ),
++        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => envelope(
++            StatusCode::SERVICE_UNAVAILABLE,
++            "thread_shares_unavailable",
++            "snapshots cannot be reached right now; try again",
++            json!({}),
++        ),
++        _ => share_failed(),
++    }
++}
++
++/// A trailer's text, when Session Core set it.
++fn trailer_text<'a>(error: &'a tonic::Status, name: &str) -> Option<&'a str> {
++    error.metadata().get(name)?.to_str().ok()
++}
++
++/// The sentence a refused thread shows, by the closed reason word Session Core names.
++fn not_shareable_message(reason: Option<&str>) -> &'static str {
++    match reason {
++        Some("space_thread") => "a Space conversation cannot be shared",
++        Some("non_persistent_run") => {
++            "a run here was kept outside retention, so the conversation cannot be shared in full"
++        }
++        _ => "this conversation cannot be shared in full",
++    }
++}
++
++/// A typed error body: `{error:{code,message,details}}`, with `details` always an object.
++fn envelope(status: StatusCode, code: &str, message: &str, details: Value) -> HttpJsonError {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": details } })),
++    )
++}
++
++/// Session Core answered with something the routes cannot show whole: a missing snapshot, or a
++/// copy field that is not the JSON it should be. Refused rather than shown in part.
++fn share_failed() -> HttpJsonError {
++    envelope(
++        StatusCode::BAD_GATEWAY,
++        "thread_share_failed",
++        "the snapshot could not be read",
++        json!({}),
++    )
++}
++
++/// One snapshot without its body. An absent digest or revocation time is `null`.
++fn snapshot_json(snapshot: &ThreadShareSnapshot) -> Value {
++    json!({
++        "id": snapshot.snapshot_id,
++        "thread_id": snapshot.thread_id,
++        "title": snapshot.title,
++        "created_at": timestamp_to_rfc3339(snapshot.created_at.clone()),
++        "body_digest": non_empty(&snapshot.body_digest),
++        "revoked_at": snapshot.revoked_at.clone().map(|at| timestamp_to_rfc3339(Some(at))),
++    })
++}
++
++fn non_empty(text: &str) -> Option<&str> {
++    (!text.is_empty()).then_some(text)
++}
++
++/// The copy a snapshot holds, in the shape of the export document's thread, messages, runs and
++/// truncation flag, so the replay viewer reads both the same way.
++fn body_json(body: &ExportThreadResponse) -> Result<Value, HttpJsonError> {
++    let messages = body
++        .messages
++        .iter()
++        .map(message_json)
++        .collect::<Result<Vec<_>, _>>()?;
++    let runs: Vec<Value> = body.runs.iter().map(run_json).collect();
++    Ok(json!({
++        "thread": {
++            "id": body.thread_id,
++            "title": body.title,
++            "created_at": timestamp_to_rfc3339(body.created_at.clone()),
++        },
++        "messages": messages,
++        "runs": runs,
++        "truncated": body.truncated,
++    }))
++}
++
++fn message_json(message: &ExportedMessage) -> Result<Value, HttpJsonError> {
++    Ok(json!({
++        "id": message.message_id,
++        "role": message.role,
++        "content": message.content,
++        "created_at": timestamp_to_rfc3339(message.created_at.clone()),
++        "artifacts": json_field(&message.artifacts_json, Value::is_array, json!([]))?,
++        "citations": json_field(&message.citations_json, Value::is_array, json!([]))?,
++        "metadata": json_field(&message.metadata_json, Value::is_object, json!({}))?,
++    }))
++}
++
++fn run_json(run: &ExportedRun) -> Value {
++    json!({
++        "id": run.run_id,
++        "status": run.status,
++        "origin": run.origin,
++        "model": run.model,
++        "input_tokens": run.input_tokens,
++        "output_tokens": run.output_tokens,
++        "created_at": timestamp_to_rfc3339(run.created_at.clone()),
++    })
++}
++
++/// A field the copy carries as JSON text: `empty` when there is none, refused when it is not JSON
++/// of the expected kind.
++fn json_field(raw: &str, kind: fn(&Value) -> bool, empty: Value) -> Result<Value, HttpJsonError> {
++    if raw.is_empty() {
++        return Ok(empty);
++    }
++    match serde_json::from_str::<Value>(raw) {
++        Ok(value) if kind(&value) => Ok(value),
++        _ => Err(share_failed()),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use axum::{body::Body, http::Request, middleware};
++    use mp_contracts::zdr_refusal::code;
++    use tonic::metadata::MetadataValue;
++    use tower::ServiceExt;
++
++    fn claims(zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": "user-a",
++            "iss": "auth-core",
++            "exp": 4_102_444_800_i64,
++            "org_id": "org-a",
++            "user_id": "user-a",
++            "zdr": zdr,
++            "scopes": ["session:read"],
++        }))
++        .expect("a user token decodes")
++    }
++
++    fn key_claims() -> Claims {
++        serde_json::from_value(json!({
++            "sub": "apikey:key-1",
++            "iss": "auth-core",
++            "exp": 4_102_444_800_i64,
++            "org_id": "org-a",
++            "zdr": false,
++            "principal_type": "api_key",
++            "key_id": "key-1",
++            "acting_user_id": "user-a",
++            "scopes": ["agent:runs"],
++        }))
++        .expect("an api key token decodes")
++    }
++
++    fn with_code(status: tonic::Status, code: &'static str) -> tonic::Status {
++        let mut status = status;
++        status
++            .metadata_mut()
++            .insert(ERROR_CODE_TRAILER, MetadataValue::from_static(code));
++        status
++    }
++
++    #[test]
++    fn switch_off_routes_answer_disabled() {
++        let (status_code, Json(body)) = gate_for(false).expect_err("a switched-off route refuses");
++        assert_eq!(status_code, StatusCode::NOT_FOUND);
++        assert_eq!(body["error"]["code"], DISABLED);
++        assert!(body["error"]["details"].is_object());
++        assert!(gate_for(true).is_ok());
++
++        let store_off = tonic::Status::unavailable(DISABLED);
++        let (status_code, Json(body)) = share_error(&store_off, Subject::Snapshot);
++        assert_eq!(status_code, StatusCode::NOT_FOUND);
++        assert_eq!(body["error"]["code"], DISABLED, "the store's switch reads the same");
++    }
++
++    #[test]
++    fn zdr_caller_is_refused_before_any_snapshot() {
++        let (status_code, Json(body)) =
++            share_gate(&claims(true)).expect_err("a ZDR caller is refused");
++        assert_eq!(status_code, StatusCode::PRECONDITION_FAILED);
++        assert_eq!(body["error"]["feature"], ZDR_FEATURE);
++        assert!(share_gate(&claims(false)).is_ok());
++    }
++
++    #[test]
++    fn zdr_refusal_keeps_its_catalogue_body() {
++        let status = Refusal::feature_not_supported(ZDR_FEATURE)
++            .grpc_status(tonic::Code::FailedPrecondition);
++        let (status_code, Json(body)) = share_error(&status, Subject::Thread);
++        assert_eq!(status_code, StatusCode::PRECONDITION_FAILED);
++        assert_eq!(body["error"]["code"], code::FEATURE_NOT_SUPPORTED);
++        assert_eq!(body["error"]["feature"], ZDR_FEATURE);
++    }
++
++    #[test]
++    fn refusals_are_typed_envelopes_with_object_details() {
++        let mut not_exportable = with_code(
++            tonic::Status::failed_precondition(NOT_EXPORTABLE),
++            NOT_EXPORTABLE,
++        );
++        not_exportable.metadata_mut().insert(
++            ERROR_REASON_TRAILER,
++            MetadataValue::from_static("space_thread"),
++        );
++        let cases = [
++            (
++                not_exportable,
++                Subject::Thread,
++                StatusCode::PRECONDITION_FAILED,
++                NOT_EXPORTABLE,
++            ),
++            (
++                with_code(tonic::Status::failed_precondition("cap"), LIMIT_REACHED),
++                Subject::Thread,
++                StatusCode::CONFLICT,
++                LIMIT_REACHED,
++            ),
++            (
++                with_code(tonic::Status::failed_precondition("big"), TOO_LARGE),
++                Subject::Thread,
++                StatusCode::PAYLOAD_TOO_LARGE,
++                TOO_LARGE,
++            ),
++            (
++                tonic::Status::not_found("thread not found"),
++                Subject::Thread,
++                StatusCode::NOT_FOUND,
++                "thread_not_found",
++            ),
++            (
++                tonic::Status::permission_denied("not the owner"),
++                Subject::Snapshot,
++                StatusCode::NOT_FOUND,
++                "snapshot_not_found",
++            ),
++            (
++                tonic::Status::invalid_argument("snapshot_id is required"),
++                Subject::Snapshot,
++                StatusCode::BAD_REQUEST,
++                "invalid_request",
++            ),
++            (
++                tonic::Status::unavailable("connection refused"),
++                Subject::Snapshot,
++                StatusCode::SERVICE_UNAVAILABLE,
++                "thread_shares_unavailable",
++            ),
++            (
++                tonic::Status::internal("snapshot body is unreadable"),
++                Subject::Snapshot,
++                StatusCode::BAD_GATEWAY,
++                "thread_share_failed",
++            ),
++        ];
++        for (status, subject, expected_status, expected_code) in cases {
++            let (status_code, Json(body)) = share_error(&status, subject);
++            assert_eq!(status_code, expected_status, "{expected_code}");
++            assert_eq!(body["error"]["code"], expected_code);
++            assert!(body["error"]["message"].is_string());
++            assert!(body["error"]["details"].is_object(), "{expected_code}");
++        }
++    }
++
++    #[test]
++    fn a_refused_thread_names_its_reason() {
++        let mut status = with_code(
++            tonic::Status::failed_precondition(NOT_EXPORTABLE),
++            NOT_EXPORTABLE,
++        );
++        status.metadata_mut().insert(
++            ERROR_REASON_TRAILER,
++            MetadataValue::from_static("non_persistent_run"),
++        );
++        let (_, Json(body)) = share_error(&status, Subject::Thread);
++        assert_eq!(body["error"]["details"]["reason"], "non_persistent_run");
++    }
++
++    #[test]
++    fn snapshot_json_names_absent_digest_and_revocation_as_null() {
++        let live = ThreadShareSnapshot {
++            snapshot_id: "snap_1".to_owned(),
++            thread_id: "thread-1".to_owned(),
++            title: "Notes".to_owned(),
++            created_at: None,
++            body_digest: "sha256:ab".to_owned(),
++            revoked_at: None,
++        };
++        let value = snapshot_json(&live);
++        assert_eq!(value["id"], "snap_1");
++        assert_eq!(value["body_digest"], "sha256:ab");
++        assert!(value["revoked_at"].is_null());
++
++        let revoked = ThreadShareSnapshot {
++            body_digest: String::new(),
++            revoked_at: Some(prost_types::Timestamp {
++                seconds: 1_793_000_000,
++                nanos: 0,
++            }),
++            ..live
++        };
++        let value = snapshot_json(&revoked);
++        assert!(value["body_digest"].is_null());
++        assert!(value["revoked_at"].is_string());
++    }
++
++    #[test]
++    fn body_json_parses_copy_fields_and_refuses_broken_ones() {
++        let message = ExportedMessage {
++            message_id: "m1".to_owned(),
++            role: "assistant".to_owned(),
++            content: "Answer".to_owned(),
++            created_at: None,
++            artifacts_json: r#"[{"id":"a1","content":"Text"}]"#.to_owned(),
++            citations_json: String::new(),
++            metadata_json: String::new(),
++        };
++        let body = ExportThreadResponse {
++            thread_id: "thread-1".to_owned(),
++            title: "Notes".to_owned(),
++            created_at: None,
++            messages: vec![message.clone()],
++            runs: Vec::new(),
++            truncated: false,
++        };
++        let value = body_json(&body).expect("the copy renders");
++        assert_eq!(value["thread"]["id"], "thread-1");
++        assert_eq!(value["messages"][0]["artifacts"][0]["content"], "Text");
++        assert_eq!(value["messages"][0]["citations"], json!([]));
++        assert_eq!(value["messages"][0]["metadata"], json!({}));
++        assert_eq!(value["truncated"], false);
++
++        let broken = ExportThreadResponse {
++            messages: vec![ExportedMessage {
++                metadata_json: "[]".to_owned(),
++                ..message
++            }],
++            ..body
++        };
++        let (status_code, Json(error)) = body_json(&broken).expect_err("an array is not metadata");
++        assert_eq!(status_code, StatusCode::BAD_GATEWAY);
++        assert_eq!(error["error"]["code"], "thread_share_failed");
++    }
++
++    #[tokio::test]
++    async fn api_key_principal_is_refused() {
++        for (method, uri) in [
++            ("POST", "/v1/threads/thread-1/snapshots"),
++            ("GET", "/v1/threads/thread-1/snapshots"),
++            ("GET", "/v1/snapshots/snap_1"),
++            ("DELETE", "/v1/snapshots/snap_1"),
++        ] {
++            let app = router()
++                .layer(middleware::from_fn(crate::auth::authorize_principal_route))
++                .layer(Extension(key_claims()))
++                .with_state(AppState::new());
++            let request = Request::builder()
++                .method(method)
++                .uri(uri)
++                .body(Body::empty())
++                .expect("a request");
++            let response = app.oneshot(request).await.expect("the router answers");
++            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
++        }
++    }
++}
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0106_thread_share_snapshots.sql b/apps/Model Plane/rust/services/session-core/migrations/0106_thread_share_snapshots.sql
+new file mode 100644
+index 000000000..255c84d63
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0106_thread_share_snapshots.sql	
+@@ -0,0 +1,42 @@
++-- 0106: thread share snapshots (Wave 3 EP-12 S14; number reserved for EP-12-S14 in the EP-12 design and
++-- kept free by the 0107 renumber).
++--
++-- A snapshot is an immutable copy of one thread's active branch, taken by its owner from the S9 export read
++-- with the redacted profile (EP-12 D10, ADR docs/decisions/conversation-share-model.md, proposed). Later turns
++-- never reach it. Reading one calls no model, connector or tool.
++--
++-- Zero Data Retention: the body is user content in a new durable store. A zero-retention or waived caller is
++-- refused at the RPC (feature `conversation_share`), and a thread with any non-persistent run or in a Space is
++-- refused (`thread_not_exportable`), so no ZDR content is ever here. Revoking deletes the body and its digest in
++-- the same statement. Erasure: rows go with their thread (ON DELETE CASCADE, and an explicit statement in
++-- delete_thread_rows) and with their org (the gdpr.rs purge deletes the threads).
++--
++-- Additive only: a new, empty table. The reversal is in revert/0106_thread_share_snapshots.down.sql.
++
++CREATE TABLE IF NOT EXISTS thread_share_snapshots (
++    id TEXT PRIMARY KEY CHECK (id LIKE 'snap\_%' AND length(id) <= 64),
++    org_id TEXT NOT NULL CHECK (length(org_id) BETWEEN 1 AND 128),
++    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
++    -- The thread owner's user id at the time of the snapshot; the only reader while no grant path exists.
++    owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 256),
++    title TEXT NOT NULL DEFAULT '' CHECK (char_length(title) <= 1000),
++    -- The redacted export as JSON; NULL once revoked.
++    body JSONB NULL
++        CHECK (body IS NULL OR (jsonb_typeof(body) = 'object' AND octet_length(body::text) <= 8388608)),
++    -- `sha256:<hex>` of the stored body text; NULL once revoked.
++    body_digest TEXT NULL CHECK (body_digest IS NULL OR body_digest ~ '^sha256:[0-9a-f]{64}$'),
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    revoked_at TIMESTAMPTZ NULL,
++    -- A live snapshot has its body and digest; a revoked one has neither.
++    CHECK ((revoked_at IS NULL) = (body IS NOT NULL)),
++    CHECK ((body IS NULL) = (body_digest IS NULL))
++);
++
++-- An owner's snapshots (the listing) and the org purge.
++CREATE INDEX IF NOT EXISTS thread_share_snapshots_owner_idx
++    ON thread_share_snapshots (org_id, owner_id);
++
++-- A thread's live snapshots (the listing, the per-thread cap and the thread erase).
++CREATE INDEX IF NOT EXISTS thread_share_snapshots_thread_idx
++    ON thread_share_snapshots (thread_id, created_at DESC)
++    WHERE revoked_at IS NULL;
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0106_thread_share_snapshots.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0106_thread_share_snapshots.down.sql
+new file mode 100644
+index 000000000..7bf7ed308
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0106_thread_share_snapshots.down.sql	
+@@ -0,0 +1,19 @@
++-- Reverses 0106_thread_share_snapshots.sql: drops the thread share snapshot table and its indexes.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate! reads only the top level of
++-- migrations/. Run it by hand, against the database only, inside one transaction.
++--
++-- ORDER: set SESSION_THREAD_SHARES_ENABLED to anything but true (or roll session-core back to a build without
++-- src/thread_shares.rs) first, or the snapshot RPCs fail on the missing table. The rows are copies of threads
++-- that still exist, so nothing is copied first; their Control grants, if any were written, name snapshot ids
++-- that no longer resolve and read as not found.
++--
++-- Safe to run twice (every DROP is IF EXISTS).
++
++BEGIN;
++
++DROP INDEX IF EXISTS thread_share_snapshots_thread_idx;
++DROP INDEX IF EXISTS thread_share_snapshots_owner_idx;
++DROP TABLE IF EXISTS thread_share_snapshots;
++
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 226bbe6bd..3bfc344aa 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -41,6 +41,7 @@ use mp_contracts::model_plane::v1::{
+     thread_fork_service_server::ThreadForkServiceServer,
+     thread_reference_service_server::ThreadReferenceServiceServer,
+     thread_goal_service_server::ThreadGoalServiceServer,
++    thread_share_service_server::ThreadShareServiceServer,
+ };
+ use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
+ use mp_contracts::retention::{space_zdr_mode, SpaceZdrMode};
+@@ -933,6 +934,8 @@ pub(crate) async fn delete_thread_rows(
+         "DELETE FROM artifact_revisions WHERE thread_id = $1",
+         // EP-7 S1: also ON DELETE CASCADE from threads; named here so the erase list is complete.
+         "DELETE FROM thread_goals WHERE thread_id = $1",
++        // EP-12 S14: also ON DELETE CASCADE from threads; named here so the erase list is complete.
++        "DELETE FROM thread_share_snapshots WHERE thread_id = $1",
+     ] {
+         sqlx::query(query)
+             .bind(thread_id)
+@@ -12476,6 +12479,7 @@ pub async fn serve(
+     let artifact_revision_pool = pool.clone();
+     let thread_reference_pool = pool.clone();
+     let thread_goal_pool = pool.clone();
++    let thread_share_pool = pool.clone();
+     let skill_version_pool = pool.clone();
+ 
+     // Space event stream (WS02-S3): its own small read pool, built before `pool` moves.
+@@ -12561,6 +12565,11 @@ pub async fn serve(
+             thread_export,
+             auth.clone(),
+         ))
++        // EP-12 S14: the owner's share snapshots; answers `unavailable` until its switch is on.
++        .add_service(ThreadShareServiceServer::with_interceptor(
++            crate::thread_shares::ThreadShareGrpc { pool: thread_share_pool },
++            auth.clone(),
++        ))
+         // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
+         .add_service(ThreadReferenceServiceServer::with_interceptor(
+             crate::thread_reference::ThreadReferenceGrpc { pool: thread_reference_pool },
+diff --git a/apps/Model Plane/rust/services/session-core/src/main.rs b/apps/Model Plane/rust/services/session-core/src/main.rs
+index c2071bb6b..d780dea1b 100644
+--- a/apps/Model Plane/rust/services/session-core/src/main.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/main.rs	
+@@ -66,6 +66,7 @@ mod terminalization;
+ mod thread_export;
+ mod thread_fork;
+ mod thread_reference;
++mod thread_shares;
+ mod thread_goals;
+ mod tool_ledger;
+ mod trace_nats;
+diff --git a/apps/Model Plane/rust/services/session-core/src/thread_shares.rs b/apps/Model Plane/rust/services/session-core/src/thread_shares.rs
+new file mode 100644
+index 000000000..b8dfccc52
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/src/thread_shares.rs	
+@@ -0,0 +1,1003 @@
++//! Share snapshots: an owner's immutable, redacted copy of one thread (Wave 3 EP-12 S14, decision
++//! D10; ADR `docs/decisions/conversation-share-model.md`, proposed until the owner accepts OD-5).
++//!
++//! A snapshot is the S9 export with the `REDACTED` profile, frozen at the moment it is taken and
++//! stored in `thread_share_snapshots`. Later turns never reach it, and reading it calls no model,
++//! connector or tool. Taking one follows the export's rules, because it is the export's read:
++//!
++//! * a zero-retention or waived caller is refused with `zdr_feature_not_supported`
++//!   (`conversation_share`) before anything is read (DEC-32: a waived credential counts as
++//!   zero-retention for every new durable store);
++//! * a Space thread, or a thread holding any run that is not `persistent`, is refused with the
++//!   export's `thread_not_exportable` and its reason on the trailer, so a shared transcript is
++//!   never silently incomplete;
++//! * another person's thread reads as not found, and a service principal is refused.
++//!
++//! Reads are owner-only. The ADR lets a member holding a Control grant on
++//! `conversation_snapshot:<id>` read one too, but Control has no grant decision for that type that
++//! session-core can verify (no owner service is registered for it and session-core holds no
++//! authz-facade credential), so a reader who is not the owner reads not found, exactly as a
++//! snapshot that does not exist.
++//!
++//! Revoking sets `revoked_at` and deletes the body and its digest in the same statement; a revoked
++//! snapshot reads as not found to everyone. A snapshot is erased with its thread (`ON DELETE
++//! CASCADE` and `delete_thread_rows`) and with the org purge. The switch is [`ENABLED_ENV`],
++//! default off; while it is off every RPC answers `unavailable` `thread_shares_disabled`.
++
++use chrono::{DateTime, Utc};
++use mp_contracts::model_plane::v1::{self as pb, thread_share_service_server::ThreadShareService};
++use mp_contracts::zdr_refusal::Refusal;
++use mp_ids::new_ulid;
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++use sha2::{Digest as _, Sha256};
++use sqlx::PgPool;
++use std::time::Instant;
++use tonic::metadata::MetadataValue;
++use tonic::{Request, Response, Status};
++
++use crate::auth::{authorize_operation, authorize_owner_housekeeping, identity, VerifiedIdentity};
++use crate::grpc::{record_metrics, to_proto_timestamp};
++use crate::run_phase::ERROR_CODE_TRAILER;
++
++/// The environment switch for the snapshot store. Default off, read by the strict parser the
++/// other switches share, so only the literal `true` turns it on.
++pub(crate) const ENABLED_ENV: &str = "SESSION_THREAD_SHARES_ENABLED";
++
++/// What every RPC answers while the switch is off; the gateway maps it to its own 404.
++pub(crate) const DISABLED: &str = "thread_shares_disabled";
++
++/// The ZDR feature key a snapshot refusal names (`zdr-refusals.json`, EP-12 S3).
++pub(crate) const ZDR_FEATURE: &str = "conversation_share";
++
++/// The most live snapshots one thread holds. Each can be up to [`MAX_SNAPSHOT_BODY_BYTES`], so the
++/// cap bounds what one thread can grow the store by; revoking one frees its place.
++pub(crate) const MAX_LIVE_SNAPSHOTS_PER_THREAD: i64 = 20;
++
++/// The largest stored body, matching the table's CHECK. The export caps its text at 8 MiB, but the
++/// JSON around the text can carry a capped export past it, which is refused rather than cut.
++pub(crate) const MAX_SNAPSHOT_BODY_BYTES: usize = 8 * 1024 * 1024;
++
++/// The longest title a snapshot keeps, matching the table's CHECK.
++const MAX_TITLE_CHARS: usize = 1_000;
++
++/// The typed codes of the two store limits, on [`ERROR_CODE_TRAILER`].
++pub(crate) const LIMIT_REACHED_CODE: &str = "snapshot_limit_reached";
++pub(crate) const TOO_LARGE_CODE: &str = "snapshot_too_large";
++
++/// The version of the stored body's shape. A body of any other version is not read.
++const BODY_VERSION: u32 = 1;
++
++/// Read where it is used, as the export's switch is.
++pub(crate) fn thread_shares_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++fn switch_gate() -> Result<(), Status> {
++    if thread_shares_enabled() {
++        Ok(())
++    } else {
++        Err(Status::unavailable(DISABLED))
++    }
++}
++
++/// The snapshot RPCs. They hold the pool and nothing else; the rules are in this module.
++pub struct ThreadShareGrpc {
++    pub(crate) pool: PgPool,
++}
++
++#[tonic::async_trait]
++impl ThreadShareService for ThreadShareGrpc {
++    async fn create_snapshot(
++        &self,
++        request: Request<pb::CreateSnapshotRequest>,
++    ) -> Result<Response<pb::CreateSnapshotResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            // Named before the write scope, which would refuse a ZDR credential without the feature.
++            refuse_retention_exempt(&caller)?;
++            authorize_operation(&caller, "session:write")?;
++            switch_gate()?;
++            create_snapshot(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("create_share_snapshot", started, result.is_ok());
++        result
++    }
++
++    async fn list_snapshots(
++        &self,
++        request: Request<pb::ListSnapshotsRequest>,
++    ) -> Result<Response<pb::ListSnapshotsResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:read")?;
++            switch_gate()?;
++            list_snapshots(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("list_share_snapshots", started, result.is_ok());
++        result
++    }
++
++    async fn get_snapshot(
++        &self,
++        request: Request<pb::GetSnapshotRequest>,
++    ) -> Result<Response<pb::GetSnapshotResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:read")?;
++            switch_gate()?;
++            get_snapshot(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("get_share_snapshot", started, result.is_ok());
++        result
++    }
++
++    async fn revoke_snapshot(
++        &self,
++        request: Request<pb::RevokeSnapshotRequest>,
++    ) -> Result<Response<pb::RevokeSnapshotResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            // Revoking deletes content, so a zero-retention owner may do it (owner decision 17).
++            authorize_owner_housekeeping(&caller, "session:write")?;
++            switch_gate()?;
++            revoke_snapshot(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("revoke_share_snapshot", started, result.is_ok());
++        result
++    }
++}
++
++/// A snapshot is a new durable copy of conversation text, which a zero-retention or waived
++/// credential may never make.
++fn refuse_retention_exempt(caller: &VerifiedIdentity) -> Result<(), Status> {
++    if caller.zdr() || caller.zdr_waiver().is_some() {
++        return Err(Refusal::feature_not_supported(ZDR_FEATURE)
++            .grpc_status(tonic::Code::FailedPrecondition));
++    }
++    Ok(())
++}
++
++/// The person acting. A snapshot is the owner's own act, and only its owner reads it, so a service
++/// or a key principal is refused.
++fn person(caller: &VerifiedIdentity) -> Result<&str, Status> {
++    caller
++        .user_id()
++        .ok_or_else(|| Status::permission_denied("a snapshot belongs to the thread's owner"))
++}
++
++fn required<'a>(value: &'a str, name: &str) -> Result<&'a str, Status> {
++    let value = value.trim();
++    if value.is_empty() {
++        return Err(Status::invalid_argument(format!("{name} is required")));
++    }
++    Ok(value)
++}
++
++/// A store limit: `failed_precondition` with its typed code on the trailer.
++fn limit_status(code: &'static str, message: &str) -> Status {
++    let mut status = Status::failed_precondition(message);
++    status
++        .metadata_mut()
++        .insert(ERROR_CODE_TRAILER, MetadataValue::from_static(code));
++    status
++}
++
++/// Take a snapshot. The export decides whether the thread may leave and reads it in one
++/// transaction; the store then writes that read in a second one, re-checking that the thread is
++/// still the caller's. A turn that lands between the two is simply not in the snapshot.
++pub(crate) async fn create_snapshot(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::CreateSnapshotRequest,
++) -> Result<pb::CreateSnapshotResponse, Status> {
++    refuse_retention_exempt(caller)?;
++    let owner = person(caller)?;
++    let thread_id = required(&req.thread_id, "thread_id")?;
++    let export = crate::thread_export::export_thread(
++        pool,
++        caller,
++        pb::ExportThreadRequest {
++            thread_id: thread_id.to_owned(),
++            profile: pb::ExportProfile::Redacted as i32,
++        },
++    )
++    .await?;
++    let title: String = export.title.chars().take(MAX_TITLE_CHARS).collect();
++    let body = body_value(&export)?;
++    let text = body.to_string();
++    if text.len() > MAX_SNAPSHOT_BODY_BYTES {
++        return Err(limit_status(
++            TOO_LARGE_CODE,
++            "the conversation is too large to share as one snapshot",
++        ));
++    }
++    let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
++    let snapshot_id = format!("snap_{}", new_ulid());
++
++    let mut tx = pool.begin().await.map_err(internal)?;
++    // One writer per thread at a time, so the cap holds across replicas.
++    sqlx::query(
++        "SELECT pg_advisory_xact_lock(hashtextextended('thread_share_snapshots:' || $1, 0))",
++    )
++    .bind(thread_id)
++    .execute(&mut *tx)
++    .await
++    .map_err(internal)?;
++    let live: i64 = sqlx::query_scalar(
++        "SELECT COUNT(*) FROM thread_share_snapshots WHERE thread_id = $1 AND revoked_at IS NULL",
++    )
++    .bind(thread_id)
++    .fetch_one(&mut *tx)
++    .await
++    .map_err(internal)?;
++    if live >= MAX_LIVE_SNAPSHOTS_PER_THREAD {
++        return Err(limit_status(
++            LIMIT_REACHED_CODE,
++            "this conversation already has the most live snapshots; revoke one first",
++        ));
++    }
++    // The owner, org and thread come from the thread row, never from the request, and the row must
++    // still be the caller's: a thread deleted or moved since the export read inserts nothing.
++    let row: Option<SnapshotRow> = sqlx::query_as(
++        "INSERT INTO thread_share_snapshots (id, org_id, thread_id, owner_id, title, body, body_digest)
++         SELECT $1, t.org_id, t.id, t.user_id, $5, $6, $7
++           FROM threads t
++          WHERE t.id = $2 AND t.org_id = $3 AND t.user_id = $4
++         RETURNING id, thread_id, title, body_digest, created_at, revoked_at",
++    )
++    .bind(&snapshot_id)
++    .bind(thread_id)
++    .bind(caller.org_id())
++    .bind(owner)
++    .bind(&title)
++    .bind(&body)
++    .bind(&digest)
++    .fetch_optional(&mut *tx)
++    .await
++    .map_err(internal)?;
++    let row = row.ok_or_else(|| Status::not_found("thread not found"))?;
++    tx.commit().await.map_err(internal)?;
++    Ok(pb::CreateSnapshotResponse {
++        snapshot: Some(row.into_proto()),
++    })
++}
++
++/// The caller's live snapshots of one thread, newest first. Another person's thread lists none,
++/// so the listing confirms nothing about it.
++pub(crate) async fn list_snapshots(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::ListSnapshotsRequest,
++) -> Result<pb::ListSnapshotsResponse, Status> {
++    let owner = person(caller)?;
++    let thread_id = required(&req.thread_id, "thread_id")?;
++    let rows: Vec<SnapshotRow> = sqlx::query_as(
++        "SELECT id, thread_id, title, body_digest, created_at, revoked_at
++           FROM thread_share_snapshots
++          WHERE thread_id = $1 AND org_id = $2 AND owner_id = $3 AND revoked_at IS NULL
++          ORDER BY created_at DESC, id DESC
++          LIMIT $4",
++    )
++    .bind(thread_id)
++    .bind(caller.org_id())
++    .bind(owner)
++    .bind(MAX_LIVE_SNAPSHOTS_PER_THREAD)
++    .fetch_all(pool)
++    .await
++    .map_err(internal)?;
++    Ok(pb::ListSnapshotsResponse {
++        snapshots: rows.into_iter().map(SnapshotRow::into_proto).collect(),
++    })
++}
++
++/// One live snapshot with its body. Owner-only: see the module comment for the grant read that
++/// does not exist yet.
++pub(crate) async fn get_snapshot(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::GetSnapshotRequest,
++) -> Result<pb::GetSnapshotResponse, Status> {
++    let owner = person(caller)?;
++    let snapshot_id = required(&req.snapshot_id, "snapshot_id")?;
++    let row: Option<(String, String, String, Option<String>, DateTime<Utc>, Value)> =
++        sqlx::query_as(
++            "SELECT id, thread_id, title, body_digest, created_at, body
++               FROM thread_share_snapshots
++              WHERE id = $1 AND org_id = $2 AND owner_id = $3 AND revoked_at IS NULL",
++        )
++        .bind(snapshot_id)
++        .bind(caller.org_id())
++        .bind(owner)
++        .fetch_optional(pool)
++        .await
++        .map_err(internal)?;
++    let (id, thread_id, title, body_digest, created_at, body) =
++        row.ok_or_else(|| Status::not_found("snapshot not found"))?;
++    let snapshot = SnapshotRow {
++        id,
++        thread_id,
++        title,
++        body_digest,
++        created_at,
++        revoked_at: None,
++    };
++    Ok(pb::GetSnapshotResponse {
++        snapshot: Some(snapshot.into_proto()),
++        body: Some(body_from_value(body)?),
++    })
++}
++
++/// Revoke one of the caller's live snapshots: the body and its digest go in the same statement that
++/// marks it revoked. Another person's snapshot, or one already revoked, is not found.
++pub(crate) async fn revoke_snapshot(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::RevokeSnapshotRequest,
++) -> Result<pb::RevokeSnapshotResponse, Status> {
++    let owner = person(caller)?;
++    let snapshot_id = required(&req.snapshot_id, "snapshot_id")?;
++    let row: Option<SnapshotRow> = sqlx::query_as(
++        "UPDATE thread_share_snapshots
++            SET revoked_at = now(), body = NULL, body_digest = NULL
++          WHERE id = $1 AND org_id = $2 AND owner_id = $3 AND revoked_at IS NULL
++         RETURNING id, thread_id, title, body_digest, created_at, revoked_at",
++    )
++    .bind(snapshot_id)
++    .bind(caller.org_id())
++    .bind(owner)
++    .fetch_optional(pool)
++    .await
++    .map_err(internal)?;
++    let row = row.ok_or_else(|| Status::not_found("snapshot not found"))?;
++    Ok(pb::RevokeSnapshotResponse {
++        snapshot: Some(row.into_proto()),
++    })
++}
++
++/// One snapshot row without its body.
++#[derive(sqlx::FromRow)]
++struct SnapshotRow {
++    id: String,
++    thread_id: String,
++    title: String,
++    body_digest: Option<String>,
++    created_at: DateTime<Utc>,
++    revoked_at: Option<DateTime<Utc>>,
++}
++
++impl SnapshotRow {
++    fn into_proto(self) -> pb::ThreadShareSnapshot {
++        pb::ThreadShareSnapshot {
++            snapshot_id: self.id,
++            thread_id: self.thread_id,
++            title: self.title,
++            created_at: Some(to_proto_timestamp(self.created_at)),
++            body_digest: self.body_digest.unwrap_or_default(),
++            revoked_at: self.revoked_at.map(to_proto_timestamp),
++        }
++    }
++}
++
++/// The stored body: the export message field for field, so a read returns exactly what was taken.
++/// The JSON fields stay JSON text, as the export carries them, and timestamps keep their seconds
++/// and nanoseconds, so nothing is reparsed or rounded on the way through the store.
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct SnapshotBody {
++    version: u32,
++    thread_id: String,
++    title: String,
++    created_at: Option<Stamp>,
++    messages: Vec<BodyMessage>,
++    runs: Vec<BodyRun>,
++    truncated: bool,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct BodyMessage {
++    message_id: String,
++    role: String,
++    content: String,
++    created_at: Option<Stamp>,
++    artifacts_json: String,
++    citations_json: String,
++    metadata_json: String,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct BodyRun {
++    run_id: String,
++    status: String,
++    origin: String,
++    model: String,
++    input_tokens: u64,
++    output_tokens: u64,
++    created_at: Option<Stamp>,
++}
++
++#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Stamp {
++    seconds: i64,
++    nanos: i32,
++}
++
++impl From<&prost_types::Timestamp> for Stamp {
++    fn from(value: &prost_types::Timestamp) -> Self {
++        Self {
++            seconds: value.seconds,
++            nanos: value.nanos,
++        }
++    }
++}
++
++impl From<Stamp> for prost_types::Timestamp {
++    fn from(value: Stamp) -> Self {
++        Self {
++            seconds: value.seconds,
++            nanos: value.nanos,
++        }
++    }
++}
++
++/// The export as the body the store keeps.
++fn body_value(export: &pb::ExportThreadResponse) -> Result<Value, Status> {
++    let body = SnapshotBody {
++        version: BODY_VERSION,
++        thread_id: export.thread_id.clone(),
++        title: export.title.clone(),
++        created_at: export.created_at.as_ref().map(Stamp::from),
++        messages: export
++            .messages
++            .iter()
++            .map(|message| BodyMessage {
++                message_id: message.message_id.clone(),
++                role: message.role.clone(),
++                content: message.content.clone(),
++                created_at: message.created_at.as_ref().map(Stamp::from),
++                artifacts_json: message.artifacts_json.clone(),
++                citations_json: message.citations_json.clone(),
++                metadata_json: message.metadata_json.clone(),
++            })
++            .collect(),
++        runs: export
++            .runs
++            .iter()
++            .map(|run| BodyRun {
++                run_id: run.run_id.clone(),
++                status: run.status.clone(),
++                origin: run.origin.clone(),
++                model: run.model.clone(),
++                input_tokens: run.input_tokens,
++                output_tokens: run.output_tokens,
++                created_at: run.created_at.as_ref().map(Stamp::from),
++            })
++            .collect(),
++        truncated: export.truncated,
++    };
++    serde_json::to_value(body).map_err(|error| Status::internal(error.to_string()))
++}
++
++/// A stored body as the export message. A body of another version or shape is a store fault, not
++/// something to show half of.
++fn body_from_value(value: Value) -> Result<pb::ExportThreadResponse, Status> {
++    let body: SnapshotBody = serde_json::from_value(value)
++        .map_err(|_| Status::internal("snapshot body is unreadable"))?;
++    if body.version != BODY_VERSION {
++        return Err(Status::internal("snapshot body version is not supported"));
++    }
++    Ok(pb::ExportThreadResponse {
++        thread_id: body.thread_id,
++        title: body.title,
++        created_at: body.created_at.map(Into::into),
++        messages: body
++            .messages
++            .into_iter()
++            .map(|message| pb::ExportedMessage {
++                message_id: message.message_id,
++                role: message.role,
++                content: message.content,
++                created_at: message.created_at.map(Into::into),
++                artifacts_json: message.artifacts_json,
++                citations_json: message.citations_json,
++                metadata_json: message.metadata_json,
++            })
++            .collect(),
++        runs: body
++            .runs
++            .into_iter()
++            .map(|run| pb::ExportedRun {
++                run_id: run.run_id,
++                status: run.status,
++                origin: run.origin,
++                model: run.model,
++                input_tokens: run.input_tokens,
++                output_tokens: run.output_tokens,
++                created_at: run.created_at.map(Into::into),
++            })
++            .collect(),
++        truncated: body.truncated,
++    })
++}
++
++fn internal(error: sqlx::Error) -> Status {
++    Status::internal(error.to_string())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    const ORG: &str = "org-share";
++    const OWNER: &str = "user-share-owner";
++    const MEMBER: &str = "user-share-member";
++
++    fn sample_export() -> pb::ExportThreadResponse {
++        let at = prost_types::Timestamp {
++            seconds: 1_793_000_000,
++            nanos: 123_456_789,
++        };
++        pb::ExportThreadResponse {
++            thread_id: "thread-1".to_owned(),
++            title: "Quarterly notes".to_owned(),
++            created_at: Some(at.clone()),
++            messages: vec![pb::ExportedMessage {
++                message_id: "m1".to_owned(),
++                role: "assistant".to_owned(),
++                content: "the answer".to_owned(),
++                created_at: Some(at.clone()),
++                artifacts_json: r#"[{"id":"a1","kind":"document","content":"text"}]"#.to_owned(),
++                citations_json: String::new(),
++                metadata_json: r#"{"attachments":[{"name":"attachment-1"}]}"#.to_owned(),
++            }],
++            runs: vec![pb::ExportedRun {
++                run_id: "r1".to_owned(),
++                status: "completed".to_owned(),
++                origin: "chat".to_owned(),
++                model: "m-1".to_owned(),
++                input_tokens: 0,
++                output_tokens: 0,
++                created_at: Some(at),
++            }],
++            truncated: true,
++        }
++    }
++
++    #[test]
++    fn body_round_trips_exactly() {
++        let export = sample_export();
++        let stored = body_value(&export).unwrap();
++        assert_eq!(stored["version"], BODY_VERSION);
++        assert_eq!(
++            stored["messages"][0]["artifacts_json"],
++            r#"[{"id":"a1","kind":"document","content":"text"}]"#,
++            "the JSON fields stay text, so the read returns them byte for byte"
++        );
++        assert_eq!(body_from_value(stored).unwrap(), export);
++    }
++
++    #[test]
++    fn a_body_of_another_version_or_shape_is_not_read() {
++        let mut stored = body_value(&sample_export()).unwrap();
++        stored["version"] = json!(2);
++        assert_eq!(
++            body_from_value(stored).unwrap_err().code(),
++            tonic::Code::Internal
++        );
++
++        let mut stored = body_value(&sample_export()).unwrap();
++        stored["extra"] = json!("field");
++        assert!(body_from_value(stored).is_err(), "an unknown field is refused");
++        assert!(body_from_value(json!([])).is_err());
++    }
++
++    #[test]
++    fn row_projects_digest_and_revocation() {
++        let now = Utc::now();
++        let live = SnapshotRow {
++            id: "snap_1".to_owned(),
++            thread_id: "thread-1".to_owned(),
++            title: "t".to_owned(),
++            body_digest: Some("sha256:00".to_owned()),
++            created_at: now,
++            revoked_at: None,
++        }
++        .into_proto();
++        assert_eq!(live.body_digest, "sha256:00");
++        assert!(live.revoked_at.is_none());
++
++        let revoked = SnapshotRow {
++            id: "snap_1".to_owned(),
++            thread_id: "thread-1".to_owned(),
++            title: "t".to_owned(),
++            body_digest: None,
++            created_at: now,
++            revoked_at: Some(now),
++        }
++        .into_proto();
++        assert!(revoked.body_digest.is_empty());
++        assert_eq!(revoked.revoked_at, Some(to_proto_timestamp(now)));
++    }
++
++    #[test]
++    fn zero_retention_and_waived_callers_are_refused_with_the_share_key() {
++        for caller in [
++            VerifiedIdentity::user_for_test_with_zdr(ORG, OWNER, true),
++            VerifiedIdentity::user_for_test_with_waiver(ORG, OWNER, "conn-1", "ack-1"),
++        ] {
++            let refused = refuse_retention_exempt(&caller).unwrap_err();
++            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++            assert_eq!(
++                Refusal::from_status(&refused),
++                Some(Refusal::feature_not_supported(ZDR_FEATURE))
++            );
++        }
++        assert!(refuse_retention_exempt(&VerifiedIdentity::user_for_test(ORG, OWNER)).is_ok());
++    }
++
++    #[test]
++    fn a_service_principal_is_not_a_snapshot_owner() {
++        let service = VerifiedIdentity::service_for_test(ORG, &["session:read"], false);
++        assert_eq!(
++            person(&service).unwrap_err().code(),
++            tonic::Code::PermissionDenied
++        );
++        assert_eq!(
++            person(&VerifiedIdentity::user_for_test(ORG, OWNER)).unwrap(),
++            OWNER
++        );
++    }
++
++    #[test]
++    fn limits_name_their_code_on_the_trailer() {
++        for code in [LIMIT_REACHED_CODE, TOO_LARGE_CODE] {
++            let status = limit_status(code, "limit");
++            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
++            assert_eq!(
++                status
++                    .metadata()
++                    .get(ERROR_CODE_TRAILER)
++                    .and_then(|value| value.to_str().ok()),
++                Some(code)
++            );
++        }
++    }
++
++    #[test]
++    fn the_switch_is_off_unless_it_reads_true() {
++        assert!(!mp_contracts::loop_fold::switch_from(None));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++    }
++
++    #[test]
++    fn blank_ids_are_refused() {
++        assert_eq!(
++            required("  ", "thread_id").unwrap_err().code(),
++            tonic::Code::InvalidArgument
++        );
++        assert_eq!(required(" t1 ", "thread_id").unwrap(), "t1");
++    }
++
++    // The database tests below run with `--ignored` against a disposable Postgres, as the other
++    // session-core database tests do. They call the store functions directly, so the switch is not
++    // needed; the switch is tested by `snapshots_are_refused_while_the_switch_is_off`.
++
++    async fn connect() -> PgPool {
++        let pool =
++            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
++                .await
++                .unwrap();
++        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
++        pool
++    }
++
++    async fn seed_thread(pool: &PgPool, thread: &str) {
++        sqlx::query(
++            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
++        )
++        .bind(thread)
++        .bind(ORG)
++        .bind(OWNER)
++        .execute(pool)
++        .await
++        .unwrap();
++    }
++
++    async fn append(pool: &PgPool, thread: &str, role: &str, content: &str) {
++        let mut tx = pool.begin().await.unwrap();
++        let request = pb::AppendMessageRequest {
++            thread_id: thread.to_owned(),
++            role: role.to_owned(),
++            content: content.to_owned(),
++            ..Default::default()
++        };
++        crate::grpc::append_message_in_tx(&mut tx, &request, OWNER)
++            .await
++            .unwrap();
++        tx.commit().await.unwrap();
++    }
++
++    async fn seed_run(pool: &PgPool, thread: &str, retention: &str) {
++        let waived = retention == "zdr_waived";
++        sqlx::query(
++            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, metadata,
++                               retention_class, waiver_ack_id, waiver_connection_id)
++             VALUES ($1, $2, 'g', $3, $4, 'completed', '{}'::jsonb, $5, $6, $7)",
++        )
++        .bind(new_ulid())
++        .bind(thread)
++        .bind(ORG)
++        .bind(OWNER)
++        .bind(retention)
++        .bind(waived.then_some("ack-1"))
++        .bind(waived.then_some("conn-1"))
++        .execute(pool)
++        .await
++        .unwrap();
++    }
++
++    fn owner() -> VerifiedIdentity {
++        VerifiedIdentity::user_for_test(ORG, OWNER)
++    }
++
++    async fn create(
++        pool: &PgPool,
++        caller: &VerifiedIdentity,
++        thread: &str,
++    ) -> Result<pb::ThreadShareSnapshot, Status> {
++        create_snapshot(
++            pool,
++            caller,
++            pb::CreateSnapshotRequest {
++                thread_id: thread.to_owned(),
++            },
++        )
++        .await
++        .map(|created| created.snapshot.expect("a created snapshot"))
++    }
++
++    async fn get(
++        pool: &PgPool,
++        caller: &VerifiedIdentity,
++        snapshot: &str,
++    ) -> Result<pb::GetSnapshotResponse, Status> {
++        get_snapshot(
++            pool,
++            caller,
++            pb::GetSnapshotRequest {
++                snapshot_id: snapshot.to_owned(),
++            },
++        )
++        .await
++    }
++
++    async fn stored_body(pool: &PgPool, snapshot: &str) -> (Option<Value>, Option<String>) {
++        sqlx::query_as("SELECT body, body_digest FROM thread_share_snapshots WHERE id = $1")
++            .bind(snapshot)
++            .fetch_one(pool)
++            .await
++            .unwrap()
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn snapshot_of_waived_thread_refused() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        seed_thread(&pool, &thread).await;
++        append(&pool, &thread, "user", "question").await;
++        seed_run(&pool, &thread, "persistent").await;
++        seed_run(&pool, &thread, "zdr_waived").await;
++
++        let refused = create(&pool, &owner(), &thread).await.unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(
++            refused
++                .metadata()
++                .get(crate::thread_export::ERROR_REASON_TRAILER)
++                .and_then(|value| value.to_str().ok()),
++            Some("non_persistent_run")
++        );
++        let stored: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM thread_share_snapshots WHERE thread_id = $1")
++                .bind(&thread)
++                .fetch_one(&pool)
++                .await
++                .unwrap();
++        assert_eq!(stored, 0, "a refused snapshot writes nothing");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn revoked_snapshot_returns_not_found_and_has_no_body() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        seed_thread(&pool, &thread).await;
++        append(&pool, &thread, "user", "question").await;
++        let snapshot = create(&pool, &owner(), &thread).await.unwrap();
++        assert!(snapshot.body_digest.starts_with("sha256:"));
++
++        let revoked = revoke_snapshot(
++            &pool,
++            &owner(),
++            pb::RevokeSnapshotRequest {
++                snapshot_id: snapshot.snapshot_id.clone(),
++            },
++        )
++        .await
++        .unwrap()
++        .snapshot
++        .unwrap();
++        assert!(revoked.revoked_at.is_some());
++        assert!(revoked.body_digest.is_empty());
++        assert_eq!(stored_body(&pool, &snapshot.snapshot_id).await, (None, None));
++
++        let read = get(&pool, &owner(), &snapshot.snapshot_id).await.unwrap_err();
++        assert_eq!(read.code(), tonic::Code::NotFound);
++        let again = revoke_snapshot(
++            &pool,
++            &owner(),
++            pb::RevokeSnapshotRequest {
++                snapshot_id: snapshot.snapshot_id.clone(),
++            },
++        )
++        .await
++        .unwrap_err();
++        assert_eq!(again.code(), tonic::Code::NotFound, "a revoked snapshot is gone");
++        let listed = list_snapshots(
++            &pool,
++            &owner(),
++            pb::ListSnapshotsRequest {
++                thread_id: thread.clone(),
++            },
++        )
++        .await
++        .unwrap();
++        assert!(listed.snapshots.is_empty());
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn non_granted_member_cannot_read() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        seed_thread(&pool, &thread).await;
++        append(&pool, &thread, "user", "question").await;
++        let snapshot = create(&pool, &owner(), &thread).await.unwrap();
++
++        let member = VerifiedIdentity::user_for_test(ORG, MEMBER);
++        let read = get(&pool, &member, &snapshot.snapshot_id).await.unwrap_err();
++        assert_eq!(read.code(), tonic::Code::NotFound);
++        let revoke = revoke_snapshot(
++            &pool,
++            &member,
++            pb::RevokeSnapshotRequest {
++                snapshot_id: snapshot.snapshot_id.clone(),
++            },
++        )
++        .await
++        .unwrap_err();
++        assert_eq!(revoke.code(), tonic::Code::NotFound);
++        let listed = list_snapshots(
++            &pool,
++            &member,
++            pb::ListSnapshotsRequest {
++                thread_id: thread.clone(),
++            },
++        )
++        .await
++        .unwrap();
++        assert!(listed.snapshots.is_empty(), "another person lists none");
++
++        let foreign = VerifiedIdentity::user_for_test("org-elsewhere", OWNER);
++        let read = get(&pool, &foreign, &snapshot.snapshot_id).await.unwrap_err();
++        assert_eq!(read.code(), tonic::Code::NotFound, "another org reads nothing");
++        let taken = create(&pool, &member, &thread).await.unwrap_err();
++        assert_eq!(taken.code(), tonic::Code::NotFound, "only the owner takes one");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn snapshot_is_immutable_after_new_turns() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        seed_thread(&pool, &thread).await;
++        append(&pool, &thread, "user", "question").await;
++        append(&pool, &thread, "assistant", "first answer").await;
++        let snapshot = create(&pool, &owner(), &thread).await.unwrap();
++        append(&pool, &thread, "user", "a later turn").await;
++
++        let read = get(&pool, &owner(), &snapshot.snapshot_id).await.unwrap();
++        let contents: Vec<&str> = read
++            .body
++            .as_ref()
++            .unwrap()
++            .messages
++            .iter()
++            .map(|message| message.content.as_str())
++            .collect();
++        assert_eq!(contents, ["question", "first answer"]);
++        assert_eq!(read.snapshot.unwrap().snapshot_id, snapshot.snapshot_id);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn thread_delete_cascades_snapshot() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        // A thread without turns or runs, so the bare thread delete below has no other child row.
++        seed_thread(&pool, &thread).await;
++        let snapshot = create(&pool, &owner(), &thread).await.unwrap();
++        sqlx::query("DELETE FROM threads WHERE id = $1")
++            .bind(&thread)
++            .execute(&pool)
++            .await
++            .unwrap();
++        let left: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM thread_share_snapshots WHERE id = $1")
++                .bind(&snapshot.snapshot_id)
++                .fetch_one(&pool)
++                .await
++                .unwrap();
++        assert_eq!(left, 0);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn live_snapshots_per_thread_are_capped() {
++        let pool = connect().await;
++        let thread = new_ulid();
++        seed_thread(&pool, &thread).await;
++        for _ in 0..MAX_LIVE_SNAPSHOTS_PER_THREAD {
++            create(&pool, &owner(), &thread).await.unwrap();
++        }
++        let refused = create(&pool, &owner(), &thread).await.unwrap_err();
++        assert_eq!(
++            refused
++                .metadata()
++                .get(ERROR_CODE_TRAILER)
++                .and_then(|value| value.to_str().ok()),
++            Some(LIMIT_REACHED_CODE)
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn snapshots_are_refused_while_the_switch_is_off() {
++        let pool = connect().await;
++        // The switch is read from the environment; the suite runs with it unset, which is the
++        // default this test proves.
++        let mut request = Request::new(pb::GetSnapshotRequest {
++            snapshot_id: "snap_missing".to_owned(),
++        });
++        request.extensions_mut().insert(owner());
++        let refused = ThreadShareGrpc { pool }
++            .get_snapshot(request)
++            .await
++            .unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::Unavailable);
++        assert_eq!(refused.message(), DISABLED);
++    }
++}

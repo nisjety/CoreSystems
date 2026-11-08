@@ -1,0 +1,990 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.present-gate.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.present-gate.test.tsx
+new file mode 100644
+index 000000000..c2da4ab25
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.present-gate.test.tsx	
+@@ -0,0 +1,107 @@
++// @vitest-environment jsdom
++
++import { readFileSync } from 'node:fs'
++import { dirname, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { ArtifactDeckView } from './ArtifactDeckView'
++import type { ChatArtifact } from './chat-types'
++
++const here = dirname(fileURLToPath(import.meta.url))
++const fixture = readFileSync(join(here, '..', '..', '..', 'shared', 'api', 'contracts', 'deck_manifest_v1.json'), 'utf8')
++
++type Json = Record<string, unknown>
++
++function manifestWith(change: (manifest: Json) => void): string {
++  const manifest = JSON.parse(fixture) as Json
++  change(manifest)
++  return JSON.stringify(manifest)
++}
++
++/** The fixture with each slide's state set in order. The present gate reads nothing else of a slide. */
++function withStates(...states: string[]): string {
++  return manifestWith((manifest) => {
++    const slides = manifest.slides as Json[]
++    manifest.slides = slides.map((slide, index) => ({ ...slide, state: states[index] }))
++  })
++}
++
++function artifact(content: string): ChatArtifact {
++  return { content, id: 'artifact-deck', kind: 'deck', title: 'Kvartalstall Q3', version: 5 }
++}
++
++function renderDeck(content: string) {
++  return render(() => (
++    <I18nProvider>
++      <ArtifactDeckView artifact={artifact(content)} />
++    </I18nProvider>
++  ))
++}
++
++function presenter(): HTMLButtonElement {
++  return screen.getByRole('button', { name: 'Present' }) as HTMLButtonElement
++}
++
++describe('ArtifactDeckView present gate', () => {
++  beforeEach(() => {
++    window.localStorage.setItem(localeStorageKey, 'en')
++  })
++
++  afterEach(() => {
++    cleanup()
++    window.localStorage.removeItem(localeStorageKey)
++  })
++
++  it('blocks Presenter while a slide has an error or was never built, and says why', () => {
++    renderDeck(fixture)
++    expect(presenter().disabled).toBe(true)
++    const reason = screen.getByText(
++      '1 slide has an error. 1 slide is not built. Ask in the chat to fix and build the slides before you present.',
++    )
++    expect(presenter().getAttribute('aria-describedby')).toBe(reason.id)
++  })
++
++  it('blocks Presenter for a slide that was never built, when no slide has an error', () => {
++    renderDeck(withStates('ok', 'ok', 'draft', 'ok'))
++    expect(presenter().disabled).toBe(true)
++    expect(
++      screen.getByText('1 slide is not built. Ask in the chat to fix and build the slides before you present.'),
++    ).toBeTruthy()
++  })
++
++  it('lets Presenter open with warnings only, and counts the warnings', () => {
++    renderDeck(withStates('ok', 'warn', 'ok', 'ok'))
++    expect(presenter().disabled).toBe(false)
++    expect(presenter().getAttribute('aria-describedby')).toBeNull()
++    expect(screen.getByText('1 slide has warnings')).toBeTruthy()
++
++    fireEvent.click(presenter())
++    flush()
++    expect(screen.getByRole('dialog', { name: 'Presentation: Kvartalstall Q3' })).toBeTruthy()
++  })
++
++  it('gives the focus back to Presenter when the presentation closes', () => {
++    renderDeck(withStates('ok', 'warn', 'ok', 'ok'))
++    presenter().focus()
++    fireEvent.click(presenter())
++    flush()
++    fireEvent.keyDown(document, { key: 'Escape' })
++    flush()
++    expect(screen.queryByRole('dialog')).toBeNull()
++    expect(document.activeElement).toBe(presenter())
++  })
++
++  it('keeps Presenter off for a deck with no slides, and says what is missing', () => {
++    renderDeck(
++      manifestWith((manifest) => {
++        manifest.slides = []
++      }),
++    )
++    expect(presenter().disabled).toBe(true)
++    expect(screen.getByText('A presentation needs at least one slide.')).toBeTruthy()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx
+index 2a6e1d98c..2eee41181 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx	
+@@ -9,7 +9,7 @@
+  */
+ import type { JSX } from '@solidjs/web'
+ import { Dynamic } from '@solidjs/web'
+-import { For, Show, createMemo, createSignal } from 'solid-js'
++import { For, Show, createMemo, createSignal, createUniqueId } from 'solid-js'
+ import {
+   AlertTriangle,
+   ChevronDown,
+@@ -21,6 +21,7 @@ import {
+   Image as ImageIcon,
+   LayoutTemplate,
+   List,
++  Maximize2,
+   Presentation,
+   Type,
+ } from '@/shared/icons'
+@@ -35,6 +36,7 @@ import {
+   parseDeckManifest,
+   slideLines,
+ } from './deck-manifest'
++import { DeckPresentMode, presentGate } from './DeckPresentMode'
+ 
+ type Translate = (noText: string, enText: string) => string
+ 
+@@ -73,9 +75,44 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
+   const manifest = createMemo(() => parseDeckManifest(props.artifact.content))
+   const [pickedIndex, setPickedIndex] = createSignal(0)
+   const [notesOpen, setNotesOpen] = createSignal(false)
++  const [presenting, setPresenting] = createSignal(false)
++  let presenterRef: HTMLButtonElement | undefined
++  const reasonId = `verevon-deck-present-reason-${createUniqueId()}`
+   // A newer revision can have fewer slides than the pick, so the pick stays on a slide that exists.
+   const current = createMemo(() => Math.min(pickedIndex(), Math.max(0, (manifest()?.slides.length ?? 0) - 1)))
+   const selected = createMemo(() => manifest()?.slides[current()])
++  const gate = createMemo(() => presentGate(manifest()?.slides ?? []))
++
++  // Why Presenter is off: the blockers by count, then what to do about them. Slides are changed in the chat.
++  const blockReason = () => {
++    const counts = gate()
++    if (counts.slides === 0) {
++      return i18n.tr('En presentasjon trenger minst ett lysbilde.', 'A presentation needs at least one slide.')
++    }
++    const lines: string[] = []
++    if (counts.errors > 0) {
++      lines.push(counts.errors === 1
++        ? i18n.tr('1 lysbilde har feil.', '1 slide has an error.')
++        : i18n.tr(`${counts.errors} lysbilder har feil.`, `${counts.errors} slides have errors.`))
++    }
++    if (counts.drafts > 0) {
++      lines.push(counts.drafts === 1
++        ? i18n.tr('1 lysbilde er ikke bygget.', '1 slide is not built.')
++        : i18n.tr(`${counts.drafts} lysbilder er ikke bygget.`, `${counts.drafts} slides are not built.`))
++    }
++    lines.push(i18n.tr(
++      'Be om å rette og bygge lysbildene i chatten før du presenterer.',
++      'Ask in the chat to fix and build the slides before you present.',
++    ))
++    return lines.join(' ')
++  }
++  // A warning never holds presenting back, so it is counted here and not refused.
++  const warningLine = () => {
++    const warnings = gate().warnings
++    return warnings === 1
++      ? i18n.tr('1 lysbilde har advarsler', '1 slide has warnings')
++      : i18n.tr(`${warnings} lysbilder har advarsler`, `${warnings} slides have warnings`)
++  }
+ 
+   return (
+     <Show
+@@ -129,6 +166,29 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
+               </For>
+             </ol>
+           </Show>
++          <div class="verevon-deck__present">
++            <Show when={gate().warnings > 0}>
++              <p class="verevon-deck__warned" role="status">{warningLine()}</p>
++            </Show>
++            <button
++              ref={presenterRef}
++              type="button"
++              class="verevon-deck__present-button"
++              disabled={!gate().allowed}
++              aria-describedby={gate().allowed ? undefined : reasonId}
++              onClick={() => {
++                // Focused first, so the presentation can give the focus back to this button when it closes.
++                presenterRef?.focus()
++                setPresenting(true)
++              }}
++            >
++              <Maximize2 size={14} />
++              {i18n.tr('Presenter', 'Present')}
++            </button>
++            <Show when={!gate().allowed}>
++              <p id={reasonId} class="verevon-deck__reason">{blockReason()}</p>
++            </Show>
++          </div>
+           <Show when={selected()}>
+             {(slide) => (
+               <div class="verevon-deck__detail">
+@@ -170,6 +230,15 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
+           <Show when={props.file?.preview}>
+             {(preview) => <ArtifactOfficePreview title={props.artifact.title} preview={preview()} />}
+           </Show>
++          <Show when={presenting()}>
++            <DeckPresentMode
++              slides={deck().slides}
++              title={props.artifact.title}
++              preview={props.file?.preview}
++              startIndex={current()}
++              onClose={() => setPresenting(false)}
++            />
++          </Show>
+         </div>
+       )}
+     </Show>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.css b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.css
+new file mode 100644
+index 000000000..3e159af87
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.css	
+@@ -0,0 +1,190 @@
++/* The Presenter row under a deck's strip, and the present mode itself (EP-5 S5). Colours are tokens, so light and dark
++   both hold. The overlay is portalled to the body, so its fixed box is not moved by the artifact panel. */
++
++.verevon-deck__present {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 8px 12px;
++}
++
++.verevon-deck__present-button {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  min-height: var(--verevon-touch-target, 44px);
++  padding: 0 14px;
++  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
++  border-radius: 8px;
++  background: var(--verevon-surface-soft);
++  color: var(--verevon-j-text);
++  font: inherit;
++  font-size: 13px;
++  font-weight: 600;
++  cursor: pointer;
++}
++
++.verevon-deck__present-button:disabled {
++  cursor: default;
++  opacity: 0.6;
++}
++
++.verevon-deck__warned,
++.verevon-deck__reason {
++  margin: 0;
++  font-size: 12px;
++}
++
++.verevon-deck__warned {
++  color: var(--warning-ink);
++}
++
++.verevon-deck__reason {
++  flex-basis: 100%;
++  color: var(--verevon-e-muted);
++}
++
++.verevon-deck-present {
++  position: fixed;
++  inset: 0;
++  z-index: 1000;
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  padding: 12px 16px;
++  background: var(--verevon-surface-muted);
++  color: var(--verevon-j-text);
++  animation: verevon-deck-present-in 160ms ease-out;
++}
++
++@keyframes verevon-deck-present-in {
++  from {
++    opacity: 0;
++  }
++}
++
++.verevon-deck-present__bar,
++.verevon-deck-present__controls {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++}
++
++.verevon-deck-present__counter {
++  margin: 0;
++  color: var(--verevon-e-muted);
++  font-size: 13px;
++  font-variant-numeric: tabular-nums;
++}
++
++/* A size container, so a slide fits the space the bars leave at any window size: 16:9, as wide as the stage allows. */
++.verevon-deck-present__stage {
++  display: grid;
++  flex: 1 1 auto;
++  min-height: 0;
++  place-items: center;
++  container-type: size;
++}
++
++.verevon-deck-present__slide,
++.verevon-deck-present__page {
++  width: min(100cqw, calc(100cqh * 16 / 9));
++  aspect-ratio: 16 / 9;
++  border: 0;
++  border-radius: 10px;
++  background: var(--verevon-surface);
++  box-shadow: var(--verevon-chat-shadow-raised);
++}
++
++/* The rendered frame takes no pointer or key presses, so the dialog keeps the keys and the focus. */
++.verevon-deck-present__page {
++  pointer-events: none;
++}
++
++.verevon-deck-present__slide {
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++  padding: clamp(14px, 3.5cqw, 48px);
++  overflow: hidden;
++  color: var(--verevon-j-text);
++}
++
++.verevon-deck-present__draft,
++.verevon-deck-present__empty {
++  margin: 0;
++  color: var(--verevon-e-muted);
++  font-size: 12px;
++}
++
++.verevon-deck-present__title {
++  margin: 0;
++  font-size: clamp(20px, 4.2cqw, 44px);
++  font-weight: 650;
++  line-height: 1.15;
++  overflow-wrap: anywhere;
++}
++
++.verevon-deck-present__lines {
++  margin: 0;
++  padding-left: 1.2em;
++  font-size: clamp(14px, 2.4cqw, 26px);
++  line-height: 1.35;
++  overflow: hidden;
++}
++
++.verevon-deck-present__icon,
++.verevon-deck-present__step,
++.verevon-deck-present__notes-toggle {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  min-width: var(--verevon-touch-target, 44px);
++  min-height: var(--verevon-touch-target, 44px);
++  padding: 0 12px;
++  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
++  border-radius: 8px;
++  background: var(--verevon-surface-soft);
++  color: var(--verevon-j-text);
++  font: inherit;
++  font-size: 13px;
++  cursor: pointer;
++}
++
++.verevon-deck-present__step:disabled {
++  cursor: default;
++  opacity: 0.4;
++}
++
++.verevon-deck-present__notes-toggle[aria-expanded='true'] {
++  border-color: var(--accent);
++}
++
++.verevon-deck-present__notes {
++  max-height: 22vh;
++  overflow: auto;
++  padding: 10px 12px;
++  border-radius: 8px;
++  background: var(--verevon-surface);
++  font-size: 14px;
++}
++
++.verevon-deck-present__notes p {
++  margin: 0;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++
++.verevon-deck-present__hint {
++  margin: 0;
++  color: var(--verevon-e-muted);
++  font-size: 12px;
++  text-align: center;
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .verevon-deck-present {
++    animation: none;
++  }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.test.tsx
+new file mode 100644
+index 000000000..4dc1960aa
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.test.tsx	
+@@ -0,0 +1,213 @@
++// @vitest-environment jsdom
++
++import { readFileSync } from 'node:fs'
++import { dirname, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import type { GeneratedFilePreview } from './chat-types'
++import { type DeckSlide, type DeckSlideState, parseDeckManifest } from './deck-manifest'
++import { DeckPresentMode, pagesForSlides, presentGate } from './DeckPresentMode'
++
++const here = dirname(fileURLToPath(import.meta.url))
++const fixture = readFileSync(join(here, '..', '..', '..', 'shared', 'api', 'contracts', 'deck_manifest_v1.json'), 'utf8')
++
++// The fixture's four slides in order: ok, warn (with notes), draft and error.
++const slides = parseDeckManifest(fixture)?.slides ?? []
++const PDF = 'data:application/pdf;base64,JVBERi0='
++
++function preview(pages: number): GeneratedFilePreview {
++  return { mime: 'application/pdf', url: PDF, pages, fontsSubstituted: false, thumbs: [] }
++}
++
++function slide(state: DeckSlideState): DeckSlide {
++  return {
++    id: 's1',
++    layout: 'title_only',
++    title: 'Lysbilde',
++    bullets: [],
++    left: [],
++    right: [],
++    image: null,
++    notes: null,
++    state,
++    findings: [],
++  }
++}
++
++function renderPresentation(
++  options: { slides?: readonly DeckSlide[]; preview?: GeneratedFilePreview; startIndex?: number; onClose?: () => void } = {},
++) {
++  return render(() => (
++    <I18nProvider>
++      <DeckPresentMode
++        slides={options.slides ?? slides}
++        title="Kvartalstall Q3"
++        preview={options.preview}
++        startIndex={options.startIndex}
++        onClose={options.onClose ?? (() => undefined)}
++      />
++    </I18nProvider>
++  ))
++}
++
++/** The slide counter's text: the slide number over the count. */
++function counter(): string | null | undefined {
++  return document.querySelector('.verevon-deck-present__counter')?.textContent
++}
++
++/** The rendered frame, which is there only when the presentation draws the slides from the PDF. */
++function frame(): HTMLIFrameElement | null {
++  return document.querySelector<HTMLIFrameElement>('.verevon-deck-present__page')
++}
++
++/** A key press on the page, which the presentation sees before anything else. */
++function press(key: string, init: KeyboardEventInit = {}): void {
++  fireEvent.keyDown(document, { key, ...init })
++  flush()
++}
++
++describe('DeckPresentMode', () => {
++  beforeEach(() => {
++    window.localStorage.setItem(localeStorageKey, 'en')
++  })
++
++  afterEach(() => {
++    cleanup()
++    window.localStorage.removeItem(localeStorageKey)
++  })
++
++  it('opens on the first slide as a modal dialog named after the deck', () => {
++    renderPresentation()
++    const dialog = screen.getByRole('dialog', { name: 'Presentation: Kvartalstall Q3' })
++    expect(dialog.getAttribute('aria-modal')).toBe('true')
++    expect(counter()).toBe('1 / 4')
++    expect(screen.getByRole('heading', { name: 'Kvartalstall Q3' })).toBeTruthy()
++    expect(screen.getByText('Draft from manifest')).toBeTruthy()
++  })
++
++  it('moves one slide with the arrow and page keys, and stops at the first and the last', () => {
++    renderPresentation()
++    press('ArrowRight')
++    expect(counter()).toBe('2 / 4')
++    press('PageDown')
++    expect(counter()).toBe('3 / 4')
++    press('ArrowDown')
++    expect(counter()).toBe('4 / 4')
++    press('ArrowRight')
++    expect(counter()).toBe('4 / 4')
++    press('ArrowLeft')
++    expect(counter()).toBe('3 / 4')
++    press('PageUp')
++    expect(counter()).toBe('2 / 4')
++    press('ArrowUp')
++    expect(counter()).toBe('1 / 4')
++    press('ArrowLeft')
++    expect(counter()).toBe('1 / 4')
++  })
++
++  it('jumps to the first and the last slide with Home and End', () => {
++    renderPresentation({ startIndex: 1 })
++    expect(counter()).toBe('2 / 4')
++    press('End')
++    expect(counter()).toBe('4 / 4')
++    press('Home')
++    expect(counter()).toBe('1 / 4')
++  })
++
++  it('shows the speaker notes of a slide only while they are open, and N toggles them', () => {
++    renderPresentation({ startIndex: 1 })
++    expect(screen.queryByText('Kilde: regnskapsrapport Q3, side 4.')).toBeNull()
++    press('n')
++    expect(screen.getByText('Kilde: regnskapsrapport Q3, side 4.')).toBeTruthy()
++    press('N')
++    expect(screen.queryByText('Kilde: regnskapsrapport Q3, side 4.')).toBeNull()
++  })
++
++  it('offers no notes on a slide without them, so N does nothing there', () => {
++    renderPresentation()
++    press('n')
++    expect(screen.queryByRole('region', { name: 'Notes' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Show notes (N)' })).toBeNull()
++  })
++
++  it('closes on Escape, and keeps that key from reaching the page behind', () => {
++    const onClose = vi.fn()
++    renderPresentation({ onClose })
++    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
++    document.dispatchEvent(escape)
++    expect(onClose).toHaveBeenCalledTimes(1)
++    expect(escape.defaultPrevented).toBe(true)
++  })
++
++  it('draws the rendered page of each slide when the render has one page per slide', () => {
++    renderPresentation({ preview: preview(4) })
++    expect(frame()?.getAttribute('src')).toBe(`${PDF}#page=1`)
++    press('ArrowRight')
++    expect(frame()?.getAttribute('src')).toBe(`${PDF}#page=2`)
++    expect(document.querySelector('.verevon-deck-present__slide')).toBeNull()
++  })
++
++  it('draws the slides from the manifest when the page count is not the slide count', () => {
++    renderPresentation({ preview: preview(3) })
++    expect(frame()).toBeNull()
++    expect(screen.getByRole('heading', { name: 'Kvartalstall Q3' })).toBeTruthy()
++    expect(screen.getByText('Draft from manifest')).toBeTruthy()
++  })
++
++  it('keeps Tab inside the dialog, from the last control to the first and back', () => {
++    renderPresentation()
++    const close = screen.getByRole('button', { name: 'Close presentation' })
++    const next = screen.getByRole('button', { name: 'Next slide' })
++    next.focus()
++    fireEvent.keyDown(document, { key: 'Tab' })
++    expect(document.activeElement).toBe(close)
++    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
++    expect(document.activeElement).toBe(next)
++  })
++
++  it('says a deck with no slides has none to show, and does not move', () => {
++    renderPresentation({ slides: [] })
++    expect(screen.getByText('No slides yet')).toBeTruthy()
++    expect(counter()).toBe('')
++    press('ArrowRight')
++    press('n')
++    expect(counter()).toBe('')
++  })
++})
++
++describe('presentGate', () => {
++  it('holds presenting back for an error or a slide never built, and never for a warning', () => {
++    expect(presentGate([slide('ok'), slide('warn'), slide('warn')])).toEqual({
++      slides: 3,
++      errors: 0,
++      drafts: 0,
++      warnings: 2,
++      allowed: true,
++    })
++    expect(presentGate([slide('ok'), slide('error')])).toMatchObject({ errors: 1, allowed: false })
++    expect(presentGate([slide('ok'), slide('draft')])).toMatchObject({ drafts: 1, allowed: false })
++  })
++
++  it('does not allow a deck without slides', () => {
++    expect(presentGate([])).toEqual({ slides: 0, errors: 0, drafts: 0, warnings: 0, allowed: false })
++  })
++})
++
++describe('pagesForSlides', () => {
++  it('draws from the render only when its pages are the slides, one for one', () => {
++    const rendered = preview(4)
++    expect(pagesForSlides(rendered, 4)).toBe(rendered)
++    expect(pagesForSlides(preview(3), 4)).toBeUndefined()
++    expect(pagesForSlides(undefined, 4)).toBeUndefined()
++    expect(pagesForSlides(preview(0), 0)).toBeUndefined()
++  })
++
++  it('frames only a PDF data URI, never a link of another kind', () => {
++    expect(pagesForSlides({ ...preview(4), url: 'https://example.test/deck.pdf' }, 4)).toBeUndefined()
++    expect(pagesForSlides({ ...preview(4), url: 'javascript:alert(1)' }, 4)).toBeUndefined()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.tsx
+new file mode 100644
+index 000000000..e53725656
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.tsx	
+@@ -0,0 +1,258 @@
++/**
++ * The present mode of a deck artifact (EP-5 S5): the slides full screen, one at a time, in a dialog over the page.
++ *
++ * A slide is drawn from the rendered PDF when the render has one page per slide, so page N is slide N. Any other
++ * count would put a page under the wrong slide, so the slides are drawn from the manifest at 16:9 instead, and say
++ * they are a draft. Either way this is a viewer, not a check: nothing here says the deck was verified in PowerPoint,
++ * and a warning does not hold presenting back. Errors and slides that were never built do (EP-5 decision D7).
++ */
++import type { JSX } from '@solidjs/web'
++import { Portal } from '@solidjs/web'
++import { For, Show, createEffect, createSignal, onCleanup, untrack } from 'solid-js'
++import { ChevronLeft, ChevronRight, X } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import type { GeneratedFilePreview } from './chat-types'
++import { type DeckSlide, type DeckSlideState, slideLines } from './deck-manifest'
++import './DeckPresentMode.css'
++
++/** What Tab can land on inside the dialog. The rendered frame is left out: it takes no key presses (see the CSS). */
++const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
++
++/** What the present gate counts on a deck. Errors and never-built slides hold presenting back; warnings do not. */
++export type PresentGate = {
++  slides: number
++  errors: number
++  drafts: number
++  warnings: number
++  /** True when the deck has a slide and none has an error or has never been built. */
++  allowed: boolean
++}
++
++export function presentGate(slides: readonly DeckSlide[]): PresentGate {
++  const count = (state: DeckSlideState) => slides.filter((slide) => slide.state === state).length
++  const errors = count('error')
++  const drafts = count('draft')
++  return {
++    slides: slides.length,
++    errors,
++    drafts,
++    warnings: count('warn'),
++    allowed: slides.length > 0 && errors === 0 && drafts === 0,
++  }
++}
++
++/**
++ * The preview whose pages draw the slides, or `undefined` when its page count is not the slide count. A slide is
++ * never drawn with another slide's page.
++ */
++export function pagesForSlides(
++  preview: GeneratedFilePreview | undefined,
++  slideCount: number,
++): GeneratedFilePreview | undefined {
++  if (!preview || slideCount <= 0 || preview.pages !== slideCount) return undefined
++  // Only a PDF data URI is framed, so the frame is never handed a link of another kind.
++  return preview.url.startsWith('data:application/pdf;') ? preview : undefined
++}
++
++export type DeckPresentModeProps = {
++  /** The slides in order, as the panel holds them, so a newer revision shows while the deck is up. */
++  slides: readonly DeckSlide[]
++  /** The artifact's title, for the dialog's name and the rendered frame's. */
++  title: string
++  /** The rendered file, when the turn has one. */
++  preview?: GeneratedFilePreview
++  /** The slide to open on: the one the strip had picked. */
++  startIndex?: number
++  onClose: () => void
++}
++
++export function DeckPresentMode(props: DeckPresentModeProps): JSX.Element {
++  const i18n = useI18n()
++  const [index, setIndex] = createSignal(untrack(() => props.startIndex ?? 0))
++  const [notesOpen, setNotesOpen] = createSignal(false)
++  let dialogRef: HTMLDivElement | undefined
++  let closeRef: HTMLButtonElement | undefined
++  // The control that opened the presentation gets the focus back when it closes. The caller focuses it first,
++  // because Safari does not focus a button on click.
++  const opener = document.activeElement as HTMLElement | null
++
++  const count = () => props.slides.length
++  const current = () => Math.min(index(), Math.max(0, count() - 1))
++  const slide = () => props.slides[current()]
++  const pages = () => pagesForSlides(props.preview, count())
++  const go = (target: number) => setIndex(Math.max(0, Math.min(target, count() - 1)))
++
++  // Tab stays inside the dialog: from the last control it goes to the first, and back from the first to the last.
++  const keepFocusInside = (event: KeyboardEvent) => {
++    const focusable = dialogRef ? Array.from(dialogRef.querySelectorAll<HTMLElement>(FOCUSABLE)) : []
++    const first = focusable[0]
++    const last = focusable[focusable.length - 1]
++    if (!first || !last) {
++      event.preventDefault()
++      return
++    }
++    const active = document.activeElement
++    const outside = !dialogRef?.contains(active)
++    if (event.shiftKey) {
++      if (active !== first && !outside) return
++      event.preventDefault()
++      last.focus()
++    } else {
++      if (active !== last && !outside) return
++      event.preventDefault()
++      first.focus()
++    }
++  }
++
++  const onKeyDown = (event: KeyboardEvent) => {
++    if (event.key === 'Tab') {
++      keepFocusInside(event)
++      return
++    }
++    // Ctrl, Cmd and Alt belong to the browser and the system, not to the presentation.
++    if (event.ctrlKey || event.metaKey || event.altKey) return
++    switch (event.key) {
++      case 'Escape':
++        event.preventDefault()
++        // The page closes its artifact panel on Escape too; stopping here means one Escape closes one thing.
++        event.stopPropagation()
++        props.onClose()
++        return
++      case 'ArrowRight':
++      case 'ArrowDown':
++      case 'PageDown':
++        event.preventDefault()
++        go(current() + 1)
++        return
++      case 'ArrowLeft':
++      case 'ArrowUp':
++      case 'PageUp':
++        event.preventDefault()
++        go(current() - 1)
++        return
++      case 'Home':
++        event.preventDefault()
++        go(0)
++        return
++      case 'End':
++        event.preventDefault()
++        go(count() - 1)
++        return
++      case 'n':
++      case 'N':
++        if (slide()?.notes) setNotesOpen(!notesOpen())
++        return
++      default:
++        return
++    }
++  }
++
++  // Capture on the document, so the presentation sees each key first, wherever the focus is.
++  document.addEventListener('keydown', onKeyDown, true)
++  onCleanup(() => {
++    document.removeEventListener('keydown', onKeyDown, true)
++    if (opener?.isConnected) opener.focus()
++  })
++  createEffect(() => undefined, () => closeRef?.focus())
++
++  return (
++    <Portal>
++      <div
++        ref={dialogRef}
++        class="verevon-deck-present"
++        role="dialog"
++        aria-modal="true"
++        aria-label={i18n.tr(`Presentasjon: ${props.title}`, `Presentation: ${props.title}`)}
++      >
++        <div class="verevon-deck-present__bar">
++          <p class="verevon-deck-present__counter" aria-live="polite">
++            {count() > 0 ? `${current() + 1} / ${count()}` : ''}
++          </p>
++          <button
++            ref={closeRef}
++            type="button"
++            class="verevon-deck-present__icon"
++            aria-label={i18n.tr('Lukk presentasjon', 'Close presentation')}
++            onClick={() => props.onClose()}
++          >
++            <X size={18} />
++          </button>
++        </div>
++        <div class="verevon-deck-present__stage">
++          <Show
++            when={slide()}
++            fallback={<p class="verevon-deck-present__empty">{i18n.tr('Ingen lysbilder ennå', 'No slides yet')}</p>}
++          >
++            {(drawn) => (
++              <Show
++                when={pages()}
++                fallback={(
++                  <article class="verevon-deck-present__slide">
++                    <p class="verevon-deck-present__draft">{i18n.tr('Utkast fra manifest', 'Draft from manifest')}</p>
++                    <h2 class="verevon-deck-present__title">{drawn().title}</h2>
++                    <ul class="verevon-deck-present__lines">
++                      <For each={slideLines(drawn())}>{(line) => <li>{line}</li>}</For>
++                    </ul>
++                  </article>
++                )}
++              >
++                {(preview) => (
++                  <iframe
++                    class="verevon-deck-present__page"
++                    src={`${preview().url}#page=${current() + 1}`}
++                    title={i18n.tr(`Forhåndsvisning av ${props.title}`, `Preview of ${props.title}`)}
++                    referrerpolicy="no-referrer"
++                    tabindex="-1"
++                  />
++                )}
++              </Show>
++            )}
++          </Show>
++        </div>
++        <Show when={notesOpen() ? slide()?.notes : null}>
++          {(notes) => (
++            <section class="verevon-deck-present__notes" aria-label={i18n.tr('Notater', 'Notes')}>
++              <p>{notes()}</p>
++            </section>
++          )}
++        </Show>
++        <div class="verevon-deck-present__controls">
++          <button
++            type="button"
++            class="verevon-deck-present__step"
++            disabled={current() <= 0}
++            aria-label={i18n.tr('Forrige lysbilde', 'Previous slide')}
++            onClick={() => go(current() - 1)}
++          >
++            <ChevronLeft size={20} />
++          </button>
++          <Show when={slide()?.notes}>
++            <button
++              type="button"
++              class="verevon-deck-present__notes-toggle"
++              aria-expanded={notesOpen() ? 'true' : 'false'}
++              onClick={() => setNotesOpen(!notesOpen())}
++            >
++              {notesOpen() ? i18n.tr('Skjul notater (N)', 'Hide notes (N)') : i18n.tr('Vis notater (N)', 'Show notes (N)')}
++            </button>
++          </Show>
++          <button
++            type="button"
++            class="verevon-deck-present__step"
++            disabled={current() >= count() - 1}
++            aria-label={i18n.tr('Neste lysbilde', 'Next slide')}
++            onClick={() => go(current() + 1)}
++          >
++            <ChevronRight size={20} />
++          </button>
++        </div>
++        <p class="verevon-deck-present__hint">
++          {i18n.tr(
++            'Piltene, PageUp og PageDown bytter lysbilde · N viser notater · Esc lukker',
++            'Arrow keys, PageUp and PageDown change slide · N shows notes · Esc closes',
++          )}
++        </p>
++      </div>
++    </Portal>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 3b856958c..23d4d0e7b 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1029,6 +1029,26 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the deck presentation as a low-risk read the model cannot execute (EP-5-S5)', () => {
++    const present = getActionDescriptor('chat.present_deck')
++
++    expect(present).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.present_deck')).toBe(false)
++    expect(MODEL_ACCESS['chat.present_deck']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
++
++    const schema = present?.inputSchema
++    expect(schema?.safeParse({ artifactId: 'artifact-deck' }).success).toBe(true)
++    for (const input of [
++      { artifactId: '' },
++      // The slides, the pages and the gate come from the panel's manifest: a client never names a slide, an index or a thread.
++      { artifactId: 'artifact-deck', slideId: 's3' },
++      { artifactId: 'artifact-deck', index: 2 },
++      { artifactId: 'artifact-deck', threadId: 'thread-1' },
++    ]) {
++      expect(schema?.safeParse(input).success).toBe(false)
++    }
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1453,7 +1473,8 @@ describe('action registry', () => {
+     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+     // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
+     // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
+-    expect(ids).toHaveLength(295)
++    // +1 after EP-5-S5 registered chat.present_deck, the deck's present mode.
++    expect(ids).toHaveLength(296)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index a557d67fe..161f8ad12 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1230,6 +1230,14 @@ const chatOpenDeckSlideInput = z
+   })
+   .strict()
+ 
++// The deck a person presents full screen (EP-5 S5): the artifact the panel holds. Strict, so nothing else reaches the
++// presentation; its slides, its pages and the present gate are read from the manifest the panel has.
++const chatPresentDeckInput = z
++  .object({
++    artifactId: z.string().min(1).max(128),
++  })
++  .strict()
++
+ // The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
+ // showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
+ // session. The text bound is the gateway's text-artifact limit.
+@@ -4496,6 +4504,17 @@ export const actionRegistry = [
+     inputSchema: chatOpenDeckSlideInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.present_deck',
++    label: 'Present a deck',
++    description: 'Present a deck in the chat\'s artifact panel full screen, one slide at a time: from the rendered pages when the render has one page per slide, and from the slides otherwise. Read only, and nothing is sent to the server: the panel shows the manifest and the render it already holds. Refused, with the reason shown, while the deck has no slide, a slide with an error or a slide that was never built; a warning never holds it back. Never model-executable: a model does not choose what the person presents.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatPresentDeckInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.set_goal',
+     label: 'Set a goal on the conversation',

@@ -1,0 +1,2030 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx
+index 60982d927..bac3c6b78 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
+@@ -10,7 +10,16 @@ import { flush } from 'solid-js'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { ThreadGoal } from '@/shared/api/thread-goal-client'
+ import type { GoalAutoContinueView } from '../lib/goal-pump'
+-import { GoalBar, applyGoalProgress, compactTokens, goalUsageLine } from './GoalBar'
++import {
++  GoalBar,
++  applyGoalProgress,
++  compactTokens,
++  goalAwayCron,
++  goalAwayRuns,
++  goalScheduleTemplate,
++  goalUsageLine,
++  type GoalAwayView,
++} from './GoalBar'
+ import { readGoalDraft } from './GoalDialog'
+ 
+ function goal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
+@@ -263,3 +272,116 @@ describe('readGoalDraft', () => {
+     expect(readGoalDraft('aim', 'x'.repeat(501)).valid).toBe(false)
+   })
+ })
++
++describe('Keep working while away (EP-7 S6)', () => {
++  const tool = { tool: 'web_search', capability: 'cap.tool.web_search' }
++  const now = new Date('2026-11-04T10:00:00.000Z')
++
++  function awayView(overrides: Partial<GoalAwayView> = {}): GoalAwayView {
++    return {
++      available: () => true,
++      tools: () => [tool],
++      scheduled: () => false,
++      runs: () => [],
++      threadHref: (threadId) => `/chat/${threadId}`,
++      onStart: vi.fn(),
++      ...overrides,
++    }
++  }
++
++  function mountAway(current: ThreadGoal, away: GoalAwayView) {
++    const view = render(() => (
++      <GoalBar
++        goal={current}
++        away={away}
++        onContinue={vi.fn()}
++        onEdit={vi.fn()}
++        onPause={vi.fn()}
++        onResume={vi.fn()}
++        onClear={vi.fn()}
++      />
++    ))
++    flush()
++    const toggle = () => view.container.querySelector<HTMLButtonElement>('.verevon-chat-goal-bar__away-toggle')
++    const start = () => view.container.querySelector<HTMLButtonElement>('.verevon-chat-goal-bar__away-start')
++    return { view, toggle, start }
++  }
++
++  it('builds a read-only goal-bound template within the limits, or none', () => {
++    const form = { tools: [tool], maxRuns: 3, everyMinutes: 60, days: 7 }
++    const template = goalScheduleTemplate(goal(), form, now)
++    expect(template).toMatchObject({
++      kind: 'cron',
++      description: 'Ship the quarterly report',
++      purpose: 'goal',
++      goal_id: 'goal_1',
++      goal_max_runs: 3,
++    })
++    const contract = JSON.parse(template!.approval_contract)
++    expect(contract.tools).toEqual([{ ...tool, class: 'read', approved_at: '2026-11-04T10:00:00Z' }])
++    expect(contract.expires_at).toBe('2026-11-11T10:00:00Z')
++    expect(goalScheduleTemplate(goal(), { ...form, tools: [] }, now)).toBeNull()
++    expect(goalScheduleTemplate(goal(), { ...form, maxRuns: 21 }, now)).toBeNull()
++    expect(goalScheduleTemplate(goal(), { ...form, maxRuns: 0 }, now)).toBeNull()
++    expect(goalScheduleTemplate(goal(), { ...form, everyMinutes: 5 }, now)).toBeNull()
++    expect(goalScheduleTemplate(goal(), { ...form, days: 91 }, now)).toBeNull()
++    expect(goalScheduleTemplate(goal({ status: 'paused' }), form, now)).toBeNull()
++    expect(goalAwayCron(30)).toBe('*/30 * * * *')
++    expect(goalAwayCron(15)).toBeNull()
++  })
++
++  it('reads only finished fires that reached a scheduled thread', () => {
++    expect(
++      goalAwayRuns([
++        {
++          id: 'f1',
++          fired_at: '2026-11-04T08:00:00Z',
++          completed_at: '2026-11-04T08:01:00Z',
++          status: 'completed',
++          outcome: 'completed',
++          run_id: 'run-1',
++          thread_id: 'sched-1',
++          withheld_effects: 2,
++        },
++        { id: 'f2', fired_at: '2026-11-04T09:00:00Z', status: 'running', withheld_effects: 0 },
++      ]),
++    ).toEqual([{ runId: 'run-1', threadId: 'sched-1', outcome: 'completed', withheldEffects: 2 }])
++  })
++
++  it('stays hidden unless available, and offers no new schedule while one is set', () => {
++    expect(mountAway(goal(), awayView({ available: () => false })).toggle()).toBeNull()
++    cleanup()
++    expect(mountAway(goal(), awayView({ scheduled: () => true })).toggle()).toBeNull()
++    cleanup()
++    expect(mountAway(goal({ status: 'paused' }), awayView()).toggle()).toBeNull()
++  })
++
++  it('starts only once a read tool is picked, and says it runs read only', () => {
++    const away = awayView()
++    const { view, toggle, start } = mountAway(goal(), away)
++    fireEvent.click(toggle()!)
++    expect(view.container.textContent).toMatch(/Kun lesing|Read only/)
++    expect(start()!.disabled).toBe(true)
++    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
++    expect(start()!.disabled).toBe(false)
++    fireEvent.click(start()!)
++    expect(away.onStart).toHaveBeenCalledWith({ tools: [tool], maxRuns: 3, everyMinutes: 60, days: 7 })
++  })
++
++  it('cannot start without a delegable tool', () => {
++    const { view, toggle, start } = mountAway(goal(), awayView({ tools: () => [] }))
++    fireEvent.click(toggle()!)
++    expect(view.container.querySelector('.verevon-chat-goal-bar__away-none')).not.toBeNull()
++    expect(start()!.disabled).toBe(true)
++  })
++
++  it('lists the runs made while away with links to their scheduled threads', () => {
++    const { view } = mountAway(
++      goal({ status: 'met' }),
++      awayView({ runs: () => [{ runId: 'run-1', threadId: 'sched-1', outcome: 'completed', withheldEffects: 1 }] }),
++    )
++    expect(view.container.textContent).toMatch(/1 (kjøring mens du var borte|run while you were away)/)
++    expect(view.container.querySelector('a')?.getAttribute('href')).toBe('/chat/sched-1')
++    expect(view.container.querySelector('.verevon-chat-goal-bar__away-drafts')).not.toBeNull()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx
+index 76b5b3572..9217c6c24 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
+@@ -1,5 +1,12 @@
+ import { For, Show, createSignal } from 'solid-js'
+ import type { ChatGoalProgressEvent } from '@/shared/api/chat-client'
++import type { CronScheduleFire, CronTaskTemplate } from '@/shared/api/cron-client'
++import {
++  SCHEDULE_CONTRACT_MAX_DAYS,
++  buildScheduleContractText,
++  scheduleContractExpiry,
++  type ScheduleContractTool,
++} from '@/shared/api/schedule-from-chat'
+ import type { ThreadGoal, ThreadGoalStatus } from '@/shared/api/thread-goal-client'
+ import { useI18n } from '@/shared/i18n'
+ import type { GoalAutoContinueView, GoalPumpStopReason } from '../lib/goal-pump'
+@@ -90,6 +97,106 @@ export function applyGoalProgress(goal: ThreadGoal | null, event: ChatGoalProgre
+   return next
+ }
+ 
++/** EP-7 S6 limits, the same as the gateway's admission: at most 20 runs, at most one every 30 minutes. */
++export const GOAL_AWAY_MAX_RUNS = 20
++export const GOAL_AWAY_DEFAULT_RUNS = 3
++export const GOAL_AWAY_DEFAULT_DAYS = 7
++
++/** The intervals the away dialog offers, each with the cron expression the gateway accepts. */
++export const GOAL_AWAY_INTERVALS: readonly { minutes: number; cron: string; no: string; en: string }[] = [
++  { minutes: 30, cron: '*/30 * * * *', no: 'Hver halvtime', en: 'Every 30 minutes' },
++  { minutes: 60, cron: '0 * * * *', no: 'Hver time', en: 'Every hour' },
++  { minutes: 240, cron: '0 */4 * * *', no: 'Hver fjerde time', en: 'Every 4 hours' },
++  { minutes: 1440, cron: '0 8 * * *', no: 'Hver dag kl. 08:00', en: 'Every day at 08:00' },
++]
++
++/** What the person chose in "Keep working while away". */
++export interface GoalAwayForm {
++  readonly tools: readonly ScheduleContractTool[]
++  readonly maxRuns: number
++  readonly everyMinutes: number
++  readonly days: number
++}
++
++/** One run a goal-bound schedule made while the person was away, linked to its scheduled thread (D9). */
++export interface GoalAwayRun {
++  readonly runId: string
++  readonly threadId: string
++  readonly outcome: string
++  readonly withheldEffects: number
++}
++
++/**
++ * "Keep working while away" (EP-7 S6), supplied by the controller. Hidden unless the server reports it
++ * available; `tools` is the delegable read-only list, and with none the dialog cannot start.
++ */
++export interface GoalAwayView {
++  available: () => boolean
++  tools: () => readonly ScheduleContractTool[]
++  /** A goal-bound schedule is set for this goal and still enabled. */
++  scheduled: () => boolean
++  runs: () => readonly GoalAwayRun[]
++  threadHref: (threadId: string) => string
++  onStart: (form: GoalAwayForm) => void
++}
++
++/** The task template of a goal-bound schedule (EP-7 S6): the goal text, its id and the read-only contract. */
++export interface GoalScheduleTemplate extends CronTaskTemplate {
++  purpose: 'goal'
++  goal_id: string
++  goal_max_runs: number
++  approval_contract: string
++}
++
++/**
++ * The template "Keep working while away" sends through the ordinary schedule create, or null while the
++ * form may not start (no tool picked, a limit out of range, a goal that is not active).
++ */
++export function goalScheduleTemplate(
++  goal: ThreadGoal,
++  form: GoalAwayForm,
++  now: Date = new Date(),
++): GoalScheduleTemplate | null {
++  const interval = GOAL_AWAY_INTERVALS.find((candidate) => candidate.minutes === form.everyMinutes)
++  const runsValid = Number.isInteger(form.maxRuns) && form.maxRuns >= 1 && form.maxRuns <= GOAL_AWAY_MAX_RUNS
++  const daysValid = Number.isInteger(form.days) && form.days >= 1 && form.days <= SCHEDULE_CONTRACT_MAX_DAYS
++  if (goal.status !== 'active' || !interval || !runsValid || !daysValid || form.tools.length === 0) return null
++  const approvedAt = now.toISOString().replace(/\.\d{3}Z$/, 'Z')
++  return {
++    kind: 'cron',
++    title: goal.objective.slice(0, 120),
++    description: goal.objective,
++    purpose: 'goal',
++    goal_id: goal.id,
++    goal_max_runs: form.maxRuns,
++    approval_contract: buildScheduleContractText(
++      { tools: form.tools, expiresAt: scheduleContractExpiry(form.days, now) },
++      approvedAt,
++    ),
++  }
++}
++
++/** The cron expression of an interval the dialog offers. */
++export function goalAwayCron(everyMinutes: number): string | null {
++  return GOAL_AWAY_INTERVALS.find((candidate) => candidate.minutes === everyMinutes)?.cron ?? null
++}
++
++/** The finished fires of a goal-bound schedule as away runs: only those that reached a scheduled thread. */
++export function goalAwayRuns(fires: readonly CronScheduleFire[]): GoalAwayRun[] {
++  return fires.flatMap((fire) =>
++    fire.run_id && fire.thread_id && fire.completed_at
++      ? [
++          {
++            runId: fire.run_id,
++            threadId: fire.thread_id,
++            outcome: fire.outcome ?? fire.status,
++            withheldEffects: fire.withheld_effects,
++          },
++        ]
++      : [],
++  )
++}
++
+ /**
+  * The thread goal, docked above the composer (EP-7 S1, decision D1): one line with the objective,
+  * the number of success criteria and a status chip, and the actions Continue, Edit, Pause/Resume
+@@ -116,6 +223,8 @@ export function GoalBar(props: {
+   onClear: () => void
+   /** "Keep going" (EP-7 S4); hidden unless the server reports it available. */
+   autoContinue?: GoalAutoContinueView
++  /** "Keep working while away" (EP-7 S6); hidden unless the server reports it available. */
++  away?: GoalAwayView
+ }) {
+   const i18n = useI18n()
+   const [expanded, setExpanded] = createSignal(false)
+@@ -131,6 +240,7 @@ export function GoalBar(props: {
+       ? STOP_REASON_LABEL[props.goal.statusReason ?? '']
+       : undefined
+   const auto = () => (props.goal.status === 'active' && props.autoContinue?.available() ? props.autoContinue : undefined)
++  const away = () => (props.away?.available() ? props.away : undefined)
+ 
+   return (
+     <div class="verevon-chat-goal-bar" data-status={props.goal.status} aria-busy={props.pending ? 'true' : undefined}>
+@@ -240,6 +350,9 @@ export function GoalBar(props: {
+           </div>
+         )}
+       </Show>
++      <Show when={away()}>
++        {(view) => <GoalAwayControls goal={props.goal} view={view()} pending={props.pending} />}
++      </Show>
+       <Show when={props.error}>
+         {(message) => (
+           <p class="verevon-chat-goal-bar__error" role="status">
+@@ -250,3 +363,138 @@ export function GoalBar(props: {
+     </div>
+   )
+ }
++
++/**
++ * "Keep working while away" and what happened meanwhile (EP-7 S6). The form says plainly that the goal
++ * continues read only, as the service and not as the person, with changes held as drafts. Each away run
++ * links to the service-owned scheduled thread its answer went to (D9).
++ */
++function GoalAwayControls(props: { goal: ThreadGoal; view: GoalAwayView; pending?: boolean }) {
++  const i18n = useI18n()
++  const [open, setOpen] = createSignal(false)
++  const [chosen, setChosen] = createSignal<readonly string[]>([])
++  const [maxRuns, setMaxRuns] = createSignal(GOAL_AWAY_DEFAULT_RUNS)
++  const [everyMinutes, setEveryMinutes] = createSignal(60)
++  const [days, setDays] = createSignal(GOAL_AWAY_DEFAULT_DAYS)
++  const form = (): GoalAwayForm => ({
++    tools: props.view.tools().filter((tool) => chosen().includes(tool.tool)),
++    maxRuns: maxRuns(),
++    everyMinutes: everyMinutes(),
++    days: days(),
++  })
++  const ready = () => goalScheduleTemplate(props.goal, form()) !== null
++  const toggleTool = (name: string) =>
++    setChosen((current) => (current.includes(name) ? current.filter((item) => item !== name) : [...current, name]))
++  const runs = () => props.view.runs()
++
++  return (
++    <div class="verevon-chat-goal-bar__away">
++      <Show when={runs().length > 0}>
++        <p class="verevon-chat-goal-bar__away-summary">
++          {runs().length === 1
++            ? i18n.tr('1 kjøring mens du var borte', '1 run while you were away')
++            : i18n.tr(`${runs().length} kjøringer mens du var borte`, `${runs().length} runs while you were away`)}
++        </p>
++        <ul class="verevon-chat-goal-bar__away-runs">
++          <For each={runs()}>
++            {(run) => (
++              <li data-outcome={run.outcome}>
++                <a href={props.view.threadHref(run.threadId)}>{i18n.tr('Åpne svaret', 'Open the answer')}</a>
++                <Show when={run.withheldEffects > 0}>
++                  <span class="verevon-chat-goal-bar__away-drafts">
++                    {i18n.tr(`${run.withheldEffects} utkast venter`, `${run.withheldEffects} drafts held`)}
++                  </span>
++                </Show>
++              </li>
++            )}
++          </For>
++        </ul>
++      </Show>
++      <Show when={props.goal.status === 'active' && !props.view.scheduled()}>
++        <button
++          type="button"
++          class="verevon-chat-goal-bar__away-toggle"
++          aria-expanded={open() ? 'true' : 'false'}
++          disabled={props.pending}
++          onClick={() => setOpen((value) => !value)}
++        >
++          {i18n.tr('Fortsett mens jeg er borte', 'Keep working while away')}
++        </button>
++        <Show when={open()}>
++          <fieldset class="verevon-chat-goal-bar__away-form">
++            <legend>{i18n.tr('Kun lesing, som tjenesten', 'Read only, as the service')}</legend>
++            <p>
++              {i18n.tr(
++                'Målet kjører uten deg med verktøyene du velger her. Endringer holdes igjen som utkast til du ser på dem.',
++                'The goal runs without you, with the tools you pick here. Changes are held as drafts until you look at them.',
++              )}
++            </p>
++            <Show
++              when={props.view.tools().length > 0}
++              fallback={
++                <p class="verevon-chat-goal-bar__away-none">
++                  {i18n.tr(
++                    'Ingen leseverktøy kan godkjennes ennå, så dette er ikke tilgjengelig.',
++                    'No read-only tools can be approved yet, so this is not available.',
++                  )}
++                </p>
++              }
++            >
++              <For each={props.view.tools()}>
++                {(tool) => (
++                  <label>
++                    <input
++                      type="checkbox"
++                      checked={chosen().includes(tool.tool)}
++                      onChange={() => toggleTool(tool.tool)}
++                    />
++                    {tool.tool}
++                  </label>
++                )}
++              </For>
++            </Show>
++            <label>
++              {i18n.tr('Høyst antall kjøringer', 'At most this many runs')}
++              <input
++                type="number"
++                min="1"
++                max={GOAL_AWAY_MAX_RUNS}
++                value={maxRuns()}
++                onInput={(event) => setMaxRuns(Number(event.currentTarget.value))}
++              />
++            </label>
++            <label>
++              {i18n.tr('Hvor ofte', 'How often')}
++              <select value={everyMinutes()} onChange={(event) => setEveryMinutes(Number(event.currentTarget.value))}>
++                <For each={GOAL_AWAY_INTERVALS}>
++                  {(interval) => <option value={interval.minutes}>{i18n.tr(interval.no, interval.en)}</option>}
++                </For>
++              </select>
++            </label>
++            <label>
++              {i18n.tr('Antall dager', 'For this many days')}
++              <input
++                type="number"
++                min="1"
++                max={SCHEDULE_CONTRACT_MAX_DAYS}
++                value={days()}
++                onInput={(event) => setDays(Number(event.currentTarget.value))}
++              />
++            </label>
++            <button
++              type="button"
++              class="verevon-chat-goal-bar__away-start"
++              disabled={props.pending || !ready()}
++              onClick={() => {
++                props.view.onStart(form())
++                setOpen(false)
++              }}
++            >
++              {i18n.tr('Start', 'Start')}
++            </button>
++          </fieldset>
++        </Show>
++      </Show>
++    </div>
++  )
++}
+diff --git a/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/goal_judge_turn_test.go b/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/goal_judge_turn_test.go
+new file mode 100644
+index 000000000..ff4420ffd
+--- /dev/null
++++ b/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/goal_judge_turn_test.go	
+@@ -0,0 +1,142 @@
++package workflows
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"sort"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/mock"
++	"github.com/stretchr/testify/require"
++	"go.temporal.io/sdk/activity"
++	"go.temporal.io/sdk/testsuite"
++	"go.temporal.io/sdk/workflow"
++
++	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/activities"
++)
++
++// goalFireInput is a goal-bound fire (EP-7 S6): a scheduled run whose template names a goal.
++func goalFireInput(fireKey string) ScheduledRunInput {
++	input := agentLaneInput(fireKey)
++	input.Goal = "collect the release notes for the quarter"
++	input.GoalID = "goal_01JGOALBOUND"
++	return input
++}
++
++// expectScheduledFire mocks the start and the one agent-lane step of a fire that completes.
++func expectScheduledFire(env *testsuite.TestWorkflowEnvironment, input ScheduledRunInput) {
++	env.OnActivity(
++		"StartScheduledRunActivity",
++		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
++		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
++		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
++	).Return(activities.RunMetadata{
++		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
++		UserID: activities.SystemActorID, AgentLane: true,
++	}, nil).Once()
++	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
++		Return(activities.StepResult{StepIndex: 0, ToolName: "scheduled-step", Completed: true, RoundsExecuted: 2}, nil).Once()
++}
++
++// registerGoalJudge stands in for the judge activity and records what it was given.
++func registerGoalJudge(env *testsuite.TestWorkflowEnvironment, result error) *[]GoalJudgeTurnInput {
++	calls := &[]GoalJudgeTurnInput{}
++	env.RegisterActivityWithOptions(func(_ context.Context, in GoalJudgeTurnInput) error {
++		*calls = append(*calls, in)
++		return result
++	}, activity.RegisterOptions{Name: "JudgeGoalTurnActivity"})
++	return calls
++}
++
++// TestScheduledRunSupervisionJudgesGoalTurnBehindVersion verifies that a goal-bound fire asks for
++// its verdict after the run completes, that a history from before the change (DefaultVersion)
++// completes without the activity, and that a fire without a goal never reaches the marker.
++func TestScheduledRunSupervisionJudgesGoalTurnBehindVersion(t *testing.T) {
++	t.Run("new history judges once after completion", func(t *testing.T) {
++		env, _, stub := newTestEnv(t)
++		input := goalFireInput("fire-goal-judged")
++		expectScheduledFire(env, input)
++		calls := registerGoalJudge(env, nil)
++
++		env.ExecuteWorkflow(ScheduledRunSupervision, input)
++
++		require.True(t, env.IsWorkflowCompleted())
++		require.NoError(t, env.GetWorkflowError())
++		_, decoded := decodeOnlyEnvelope(t, stub.Events())
++		assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
++		require.Len(t, *calls, 1)
++		assert.Equal(t, GoalJudgeTurnInput{
++			GoalID: input.GoalID, RunID: input.RunID, OrgID: input.OrgID,
++			ScheduleID: input.ScheduleID, FireKey: input.FireKey,
++		}, (*calls)[0])
++		env.AssertExpectations(t)
++	})
++
++	t.Run("pre-change history is not judged", func(t *testing.T) {
++		env, _, _ := newTestEnv(t)
++		input := goalFireInput("fire-goal-replayed")
++		expectScheduledFire(env, input)
++		calls := registerGoalJudge(env, nil)
++		env.OnGetVersion(goalJudgeTurnChange, workflow.DefaultVersion, goalJudgeTurnVersion).
++			Return(workflow.DefaultVersion)
++
++		env.ExecuteWorkflow(ScheduledRunSupervision, input)
++
++		require.True(t, env.IsWorkflowCompleted())
++		require.NoError(t, env.GetWorkflowError())
++		assert.Empty(t, *calls)
++	})
++
++	t.Run("a fire without a goal is not judged", func(t *testing.T) {
++		env, _, _ := newTestEnv(t)
++		input := agentLaneInput("fire-no-goal")
++		expectScheduledFire(env, input)
++		calls := registerGoalJudge(env, nil)
++
++		env.ExecuteWorkflow(ScheduledRunSupervision, input)
++
++		require.True(t, env.IsWorkflowCompleted())
++		require.NoError(t, env.GetWorkflowError())
++		assert.Empty(t, *calls)
++	})
++
++	t.Run("a failed judge never fails the completed run", func(t *testing.T) {
++		env, _, stub := newTestEnv(t)
++		input := goalFireInput("fire-goal-judge-down")
++		expectScheduledFire(env, input)
++		calls := registerGoalJudge(env, errors.New("judge unavailable"))
++
++		env.ExecuteWorkflow(ScheduledRunSupervision, input)
++
++		require.True(t, env.IsWorkflowCompleted())
++		require.NoError(t, env.GetWorkflowError())
++		_, decoded := decodeOnlyEnvelope(t, stub.Events())
++		assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
++		assert.NotEmpty(t, *calls)
++	})
++}
++
++// TestJudgeGoalTurnActivityCarriesIdsOnly pins the activity input to ids: the objective, the
++// criteria and the answer must never enter Temporal history (register D2-318 is the leak not to
++// copy).
++func TestJudgeGoalTurnActivityCarriesIdsOnly(t *testing.T) {
++	input := goalFireInput("fire-goal-ids")
++	encoded, err := json.Marshal(GoalJudgeTurnInput{
++		GoalID: input.GoalID, RunID: input.RunID, OrgID: input.OrgID,
++		ScheduleID: input.ScheduleID, FireKey: input.FireKey,
++	})
++	require.NoError(t, err)
++
++	var fields map[string]any
++	require.NoError(t, json.Unmarshal(encoded, &fields))
++	keys := make([]string, 0, len(fields))
++	for key := range fields {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	assert.Equal(t, []string{"fire_key", "goal_id", "org_id", "run_id", "schedule_id"}, keys)
++	assert.NotContains(t, string(encoded), input.Goal)
++	assert.NotContains(t, string(encoded), "release notes")
++}
+diff --git a/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go b/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go
+index c374b84f6..72fae1b40 100644
+--- a/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go	
++++ b/apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go	
+@@ -51,6 +51,21 @@ type ScheduledRunInput struct {
+ 	ContractDigest    string               `json:"contract_digest,omitempty"`
+ 	ContractExpiresAt string               `json:"contract_expires_at,omitempty"`
+ 	Retention         activities.Retention `json:"retention"`
++	// GoalID is the thread goal a goal-bound schedule continues (EP-7 S6), read from the
++	// digest-verified template. Set only while ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED is on;
++	// empty, the fire is not judged and its history is what it was before the field existed.
++	GoalID string `json:"goal_id,omitempty"`
++}
++
++// GoalJudgeTurnInput asks model-gateway to judge the goal turn one finished fire spent (EP-7 S6).
++// It carries ids only: Temporal history must never hold the objective, the criteria or the answer,
++// so the judge reads them itself from their owners.
++type GoalJudgeTurnInput struct {
++	GoalID     string `json:"goal_id"`
++	RunID      string `json:"run_id"`
++	OrgID      string `json:"org_id"`
++	ScheduleID string `json:"schedule_id"`
++	FireKey    string `json:"fire_key"`
+ }
+ 
+ const (
+@@ -70,6 +85,11 @@ const (
+ 	// contract (WS20 S6). Histories that predate it keep the step loops below.
+ 	scheduledAgentLaneChange  = "scheduled-agent-lane"
+ 	scheduledAgentLaneVersion = 1
++
++	// goalJudgeTurnChange gates the judge of a goal-bound fire (EP-7 S6). Histories that predate it
++	// complete without the activity.
++	goalJudgeTurnChange  = "goal-judge-turn"
++	goalJudgeTurnVersion = 1
+ )
+ 
+ // InteractiveRunSupervision orchestrates an interactive agent run.
+@@ -276,10 +296,27 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
+ 	if err := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); err != nil {
+ 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("complete scheduled run: %v", err))
+ 	}
++	if input.GoalID != "" &&
++		workflow.GetVersion(ctx, goalJudgeTurnChange, workflow.DefaultVersion, goalJudgeTurnVersion) == goalJudgeTurnVersion {
++		judgeGoalTurn(ctx, actCtx, input)
++	}
+ 	logger.Info("ScheduledRunSupervision completed", "run_id", input.RunID)
+ 	return nil
+ }
+ 
++// judgeGoalTurn asks for the verdict on the goal turn a completed fire spent (EP-7 S6). The run is
++// already complete and its turn already ledgered, so a judge that fails only leaves the turn
++// unjudged: the goal's caps still stop it, and the next fire is judged afresh.
++func judgeGoalTurn(ctx, actCtx workflow.Context, input ScheduledRunInput) {
++	judge := GoalJudgeTurnInput{
++		GoalID: input.GoalID, RunID: input.RunID, OrgID: input.OrgID,
++		ScheduleID: input.ScheduleID, FireKey: input.FireKey,
++	}
++	if err := workflow.ExecuteActivity(actCtx, "JudgeGoalTurnActivity", judge).Get(ctx, nil); err != nil {
++		workflow.GetLogger(ctx).Warn("goal turn not judged", "run_id", input.RunID, "error", err)
++	}
++}
++
+ // handleFailure records run failure via FailRunActivity and returns the error.
+ //
+ // The compensation activity runs on a disconnected context so it executes
+diff --git a/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go b/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go
+index 5b2fd88a7..a325ce4bc 100644
+--- a/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go	
++++ b/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go	
+@@ -7,6 +7,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"io"
++	"os"
+ 	"sort"
+ 	"strings"
+ 	"time"
+@@ -277,6 +278,13 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
+ 	if err != nil {
+ 		return nil, fmt.Errorf("orchestration: scheduled run contract is not bound to its execution input: %w", err)
+ 	}
++	// Off, the goal is never read, so the workflow input stays byte-identical.
++	goalID := ""
++	if goalJudgeActivityEnabled() {
++		if goalID, err = scheduledTemplateGoalID(req.TaskTemplateJSON, req.TemplateDigest); err != nil {
++			return nil, fmt.Errorf("orchestration: scheduled run goal is not bound to its execution input: %w", err)
++		}
++	}
+ 	return workflows.ScheduledRunInput{
+ 		RunID:             t.RunID,
+ 		ThreadID:          strings.TrimSpace(req.ThreadID),
+@@ -294,9 +302,53 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
+ 		ContractDigest:    contract.Digest,
+ 		ContractExpiresAt: contract.ExpiresAt,
+ 		Retention:         t.Retention(),
++		GoalID:            goalID,
+ 	}, nil
+ }
+ 
++// goalJudgeActivityEnabled is ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED (EP-7 S6), read at each
++// start. Only the literal "true" turns it on. A variable so tests can set it without the process
++// environment.
++var goalJudgeActivityEnabled = func() bool {
++	return os.Getenv("ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED") == "true"
++}
++
++// maxGoalIDLength bounds the goal id a template may name: "goal_" and a ulid, with room to spare.
++const maxGoalIDLength = 64
++
++// scheduledTemplateGoalID returns the thread goal a goal-bound template continues (EP-7 S6), or ""
++// for a schedule without one. Only the id is taken: the goal's text already is the template's
++// goal, and the judge reads the objective and criteria from Session Core, never from Temporal.
++func scheduledTemplateGoalID(templateJSON, expectedDigest string) (string, error) {
++	rawTemplate, _, err := verifyScheduledTemplate(templateJSON, expectedDigest)
++	if err != nil {
++		return "", err
++	}
++	raw, present := rawTemplate["goal_id"]
++	if !present {
++		return "", nil
++	}
++	var goalID string
++	if err := json.Unmarshal(raw, &goalID); err != nil || !validGoalID(goalID) {
++		return "", errors.New("goal id is invalid")
++	}
++	return goalID, nil
++}
++
++// validGoalID accepts "goal_" followed by ASCII letters, digits and underscores, bounded.
++func validGoalID(id string) bool {
++	rest, ok := strings.CutPrefix(id, "goal_")
++	if !ok || rest == "" || len(id) > maxGoalIDLength {
++		return false
++	}
++	for _, r := range rest {
++		if !(r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
++			return false
++		}
++	}
++	return true
++}
++
+ // scheduledTemplateGoalAndPolicy verifies the immutable task template against
+ // the Control-bound digest, then derives the only two executable fields the
+ // scheduled workflow accepts. Goal and policy must never be trusted as
+diff --git a/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg_goal_test.go b/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg_goal_test.go
+new file mode 100644
+index 000000000..a8daf4289
+--- /dev/null
++++ b/apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg_goal_test.go	
+@@ -0,0 +1,63 @@
++package orchestration
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/workflows"
++)
++
++// withGoalJudgeActivity sets the EP-7 S6 switch for one test.
++func withGoalJudgeActivity(t *testing.T, on bool) {
++	t.Helper()
++	previous := goalJudgeActivityEnabled
++	goalJudgeActivityEnabled = func() bool { return on }
++	t.Cleanup(func() { goalJudgeActivityEnabled = previous })
++}
++
++func goalBoundTemplate(goalID any) map[string]any {
++	return map[string]any{
++		"title":         "Keep working: release notes",
++		"description":   "collect the release notes for the quarter",
++		"purpose":       "goal",
++		"goal_id":       goalID,
++		"goal_max_runs": 3,
++	}
++}
++
++// TestScheduledRunInputCarriesGoalIDOnlyWhileTheJudgeSwitchIsOn verifies that the goal id of a
++// goal-bound template reaches the workflow input only with ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED
++// on, so with the switch off the input is what it was before EP-7 S6.
++func TestScheduledRunInputCarriesGoalIDOnlyWhileTheJudgeSwitchIsOn(t *testing.T) {
++	tenancy := Tenancy{OrgID: "org-a", RunID: "task_scheduled_1", RetentionAttested: true}
++	templateJSON, templateDigest := scheduledTemplateInput(t, goalBoundTemplate("goal_01JGOALBOUND"))
++
++	withGoalJudgeActivity(t, false)
++	built, err := buildScheduledRunInput(scheduledRunBuildRequest(t, templateJSON, templateDigest), tenancy)
++	require.NoError(t, err)
++	assert.Empty(t, built.(workflows.ScheduledRunInput).GoalID)
++
++	withGoalJudgeActivity(t, true)
++	built, err = buildScheduledRunInput(scheduledRunBuildRequest(t, templateJSON, templateDigest), tenancy)
++	require.NoError(t, err)
++	assert.Equal(t, "goal_01JGOALBOUND", built.(workflows.ScheduledRunInput).GoalID)
++
++	plainJSON, plainDigest := scheduledTemplateInput(t, map[string]any{"title": "Nightly queue review"})
++	built, err = buildScheduledRunInput(scheduledRunBuildRequest(t, plainJSON, plainDigest), tenancy)
++	require.NoError(t, err)
++	assert.Empty(t, built.(workflows.ScheduledRunInput).GoalID)
++}
++
++// TestScheduledRunInputRefusesAnInvalidGoalID verifies that a template naming something that is not
++// a goal id is refused rather than carried into Temporal.
++func TestScheduledRunInputRefusesAnInvalidGoalID(t *testing.T) {
++	tenancy := Tenancy{OrgID: "org-a", RunID: "task_scheduled_1", RetentionAttested: true}
++	withGoalJudgeActivity(t, true)
++	for _, goalID := range []any{"thread-1", "goal_", "goal_has space", 7, "goal_" + string(make([]byte, 80))} {
++		templateJSON, templateDigest := scheduledTemplateInput(t, goalBoundTemplate(goalID))
++		_, err := buildScheduledRunInput(scheduledRunBuildRequest(t, templateJSON, templateDigest), tenancy)
++		assert.Error(t, err, "goal id %v", goalID)
++	}
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/goal_unattended.rs b/apps/Model Plane/rust/services/model-gateway/src/goal_unattended.rs
+new file mode 100644
+index 000000000..ebd379def
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/goal_unattended.rs	
+@@ -0,0 +1,365 @@
++//! Goal-bound schedules: "Keep working while I'm away" (Wave 3 EP-7 S6).
++//!
++//! A thread goal can continue while its owner is away only as a WS20 scheduled run (owner decision
++//! D6 (b), taken by its recommendation): each fire runs read-only under a stored-consent contract,
++//! as the service, in the service-owned scheduled thread (D9), with a fresh Control fire decision.
++//! Nothing runs in the user's identity, and writes are withheld as drafts by the scheduled lane.
++//!
++//! The schedule is created through the existing create path, `POST /v1/cron`: the BFF has Control
++//! sign the create decision over the exact template, so the template cannot be built here after
++//! the decision exists. A template that names a `goal_id` is a goal-bound create and passes this
++//! admission before it is forwarded: the switch, a zero-retention or waived token (refused: the
++//! scheduled lane denies ZDR, DEC-32), the judge (a goal nobody judges would only run until a cap,
++//! so it is refused), and the template's shape (purpose `goal`, at most [`MAX_RUNS`] runs, at most
++//! one fire per [`MIN_INTERVAL_MINUTES`] minutes, a read-only contract, the default scheduled
++//! workflow only). Session-core binds the schedule to the goal only when the Control-verified
++//! creator owns the goal, active, on a personal thread (migration 0094), so ownership and Space
++//! are decided there, not from anything a client sends.
++//!
++//! The switch is `MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED`, default off. Off, a template naming a
++//! goal is refused, because session-core would bind it; every other create is untouched.
++
++use axum::{http::StatusCode, Json};
++use serde_json::{json, Value};
++
++use crate::auth::Claims;
++use crate::http_routes::HttpJsonError;
++
++/// The switch. Opt-in: only the literal `true` enables it.
++pub const ENABLED_ENV: &str = "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED";
++
++/// The most runs one goal-bound schedule may make (EP-7 S6). Session-core holds the same bound.
++pub const MAX_RUNS: u64 = 20;
++
++/// The shortest time between two fires of a goal-bound schedule.
++pub const MIN_INTERVAL_MINUTES: u32 = 30;
++
++/// The template purpose that marks a goal-bound schedule, so the Automations hub can label it.
++pub const PURPOSE: &str = "goal";
++
++/// The only contract class an unattended goal may hold.
++const READ_CLASS: &str = "read";
++
++/// The longest goal id the template may name (`goal_` and a ulid, with room to spare).
++const MAX_GOAL_ID_LEN: usize = 64;
++
++/// Whether the switch is on in this process. Read at each call, as the other goal switches are.
++#[must_use]
++pub fn enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// Whether a goal can be set to keep working while away on this deployment: this switch, the
++/// thread goals switch and the judge's switch are all on.
++#[must_use]
++pub fn available() -> bool {
++    enabled() && crate::thread_goal_routes::enabled() && crate::goal_judge::goal_judge_enabled()
++}
++
++/// Whether a schedule create names a goal. Only such a create is admitted here; every other
++/// create is forwarded as it always was.
++#[must_use]
++pub fn names_goal(body: &Value) -> bool {
++    body.get("task_template")
++        .and_then(Value::as_object)
++        .is_some_and(|template| template.contains_key("goal_id"))
++}
++
++/// The switches the admission reads, passed in so the rules are testable without the environment.
++#[derive(Debug, Clone, Copy)]
++pub struct Switches {
++    pub unattended: bool,
++    pub thread_goals: bool,
++    pub judge: bool,
++}
++
++impl Switches {
++    fn from_env() -> Self {
++        Self {
++            unattended: enabled(),
++            thread_goals: crate::thread_goal_routes::enabled(),
++            judge: crate::goal_judge::goal_judge_enabled(),
++        }
++    }
++}
++
++/// A typed error body; `details` is always an object.
++fn typed(status: StatusCode, code: &str, message: &str, details: Value) -> HttpJsonError {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": details } })),
++    )
++}
++
++/// A template field that does not hold to the rules, named so the dialog can point at it.
++fn invalid(field: &str, message: &str) -> HttpJsonError {
++    typed(
++        StatusCode::UNPROCESSABLE_ENTITY,
++        "invalid_goal_schedule",
++        message,
++        json!({ "field": field }),
++    )
++}
++
++/// Admit a goal-bound schedule create, with the switches read from the environment.
++pub(crate) fn admit(claims: &Claims, body: &Value) -> Result<(), HttpJsonError> {
++    admit_with(claims, body, Switches::from_env())
++}
++
++/// [`admit`] over injected switches: the switches first (a deployment without the feature answers
++/// the same for every caller), then the token's retention, then the judge, then the template.
++pub(crate) fn admit_with(
++    claims: &Claims,
++    body: &Value,
++    switches: Switches,
++) -> Result<(), HttpJsonError> {
++    if !(switches.unattended && switches.thread_goals) {
++        return Err(typed(
++            StatusCode::NOT_FOUND,
++            "goal_unattended_disabled",
++            "keeping a goal working while away is not enabled on this deployment",
++            json!({}),
++        ));
++    }
++    // The scheduled lane keeps an answer and a transcript: never for a ZDR or waived token.
++    crate::http_routes::require_non_zdr_durable_mutation(claims)?;
++    check_admission(body, switches.judge)
++}
++
++/// The judge and template rules, apart from the token: the pure core of [`admit_with`].
++pub(crate) fn check_admission(body: &Value, judge: bool) -> Result<(), HttpJsonError> {
++    if !judge {
++        return Err(typed(
++            StatusCode::CONFLICT,
++            "goal_unattended_needs_judge",
++            "a goal keeps working while away only when its completion judge is on",
++            json!({}),
++        ));
++    }
++    let template = body
++        .get("task_template")
++        .and_then(Value::as_object)
++        .ok_or_else(|| invalid("task_template", "the schedule needs a task template"))?;
++    let goal_id = template
++        .get("goal_id")
++        .and_then(Value::as_str)
++        .unwrap_or_default();
++    if !valid_goal_id(goal_id) {
++        return Err(invalid("goal_id", "goal_id is not a goal id"));
++    }
++    if template.get("purpose").and_then(Value::as_str) != Some(PURPOSE) {
++        return Err(invalid("purpose", "a goal-bound schedule has purpose \"goal\""));
++    }
++    let max_runs = template.get("goal_max_runs").and_then(Value::as_u64);
++    if !max_runs.is_some_and(|runs| (1..=MAX_RUNS).contains(&runs)) {
++        return Err(invalid("goal_max_runs", "goal_max_runs must be from 1 to 20"));
++    }
++    // A goal runs on the default scheduled workflow only: its digest-bound goal text is the work.
++    if template.contains_key("workflow_type") || template.contains_key("workflow_input") {
++        return Err(invalid(
++            "workflow_type",
++            "a goal-bound schedule runs the default scheduled workflow",
++        ));
++    }
++    let expr = body
++        .get("schedule_expr")
++        .and_then(Value::as_str)
++        .unwrap_or_default();
++    if !fires_at_most_every_half_hour(expr) {
++        return Err(invalid(
++            "schedule_expr",
++            "a goal-bound schedule fires at most once every 30 minutes",
++        ));
++    }
++    let contract = template
++        .get("approval_contract")
++        .and_then(Value::as_str)
++        .ok_or_else(|| invalid("approval_contract", "a goal-bound schedule needs a contract"))?;
++    if !contract_is_read_only(contract) {
++        return Err(invalid(
++            "approval_contract",
++            "a goal-bound schedule approves read-only tools only",
++        ));
++    }
++    Ok(())
++}
++
++/// `goal_` followed by id characters, bounded.
++fn valid_goal_id(id: &str) -> bool {
++    id.len() <= MAX_GOAL_ID_LEN
++        && id.strip_prefix("goal_").is_some_and(|rest| {
++            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
++        })
++}
++
++/// Whether a five-field cron expression fires at most once every [`MIN_INTERVAL_MINUTES`]. Only
++/// the minute field decides it, read conservatively: one fixed minute (at most hourly), `*/30`,
++/// or two fixed minutes exactly 30 apart. Anything else, including a valid expression that fires
++/// less often in a form this does not read, is refused; the dialog never sends one.
++fn fires_at_most_every_half_hour(expr: &str) -> bool {
++    let fields: Vec<&str> = expr.split_whitespace().collect();
++    let [minute, _, _, _, _] = fields.as_slice() else {
++        return false;
++    };
++    let fixed = |value: &str| {
++        !value.is_empty()
++            && value.chars().all(|c| c.is_ascii_digit())
++            && value.parse::<u32>().is_ok_and(|minute| minute < 60)
++    };
++    if fixed(minute) || *minute == "*/30" {
++        return true;
++    }
++    match minute.split_once(',') {
++        Some((first, second)) if fixed(first) && fixed(second) => {
++            let minute = |value: &str| value.parse::<u32>().unwrap_or_default();
++            minute(first).abs_diff(minute(second)) == MIN_INTERVAL_MINUTES
++        }
++        _ => false,
++    }
++}
++
++/// Whether a stored-consent contract (its JSON text, as the template stores it) approves at least
++/// one tool and only tools of the read class. Capability-core checks the tools against the
++/// registry at create; this holds the class ceiling of an unattended goal.
++fn contract_is_read_only(text: &str) -> bool {
++    let Ok(contract) = serde_json::from_str::<Value>(text) else {
++        return false;
++    };
++    let Some(tools) = contract.get("tools").and_then(Value::as_array) else {
++        return false;
++    };
++    !tools.is_empty()
++        && tools
++            .iter()
++            .all(|tool| tool.get("class").and_then(Value::as_str) == Some(READ_CLASS))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn contract(classes: &[&str]) -> String {
++        let tools: Vec<Value> = classes
++            .iter()
++            .map(|class| json!({ "tool": "web_search", "capability": "cap.web", "class": class }))
++            .collect();
++        json!({ "v": 1, "tools": tools, "expires_at": "2026-12-01T00:00:00Z" }).to_string()
++    }
++
++    fn body() -> Value {
++        json!({
++            "name": "Keep working: release notes",
++            "schedule_expr": "0 * * * *",
++            "task_template": {
++                "kind": "cron",
++                "title": "Keep working: release notes",
++                "description": "collect the release notes",
++                "purpose": "goal",
++                "goal_id": "goal_01JABCDEF",
++                "goal_max_runs": 3,
++                "approval_contract": contract(&["read"]),
++            },
++        })
++    }
++
++    fn code(error: &HttpJsonError) -> String {
++        error.1 .0["error"]["code"].as_str().unwrap_or_default().to_owned()
++    }
++
++    fn field(error: &HttpJsonError) -> String {
++        error.1 .0["error"]["details"]["field"]
++            .as_str()
++            .unwrap_or_default()
++            .to_owned()
++    }
++
++    #[test]
++    fn unattended_names_goal_only_for_a_template_with_goal_id() {
++        assert!(names_goal(&body()));
++        assert!(!names_goal(&json!({ "task_template": { "kind": "cron" } })));
++        assert!(!names_goal(&json!({ "name": "no template" })));
++    }
++
++    #[test]
++    fn unattended_switch_reads_literal_true_only() {
++        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes")] {
++            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
++        }
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++    }
++
++    #[test]
++    fn unattended_refuses_without_judge() {
++        let error = check_admission(&body(), false).unwrap_err();
++        assert_eq!(error.0, StatusCode::CONFLICT);
++        assert_eq!(code(&error), "goal_unattended_needs_judge");
++        assert!(error.1 .0["error"]["details"].is_object());
++        assert!(check_admission(&body(), true).is_ok());
++    }
++
++    #[test]
++    fn unattended_contract_read_class_only() {
++        let mut write = body();
++        write["task_template"]["approval_contract"] = json!(contract(&["read", "write"]));
++        assert_eq!(field(&check_admission(&write, true).unwrap_err()), "approval_contract");
++
++        let mut empty = body();
++        empty["task_template"]["approval_contract"] = json!(contract(&[]));
++        assert_eq!(field(&check_admission(&empty, true).unwrap_err()), "approval_contract");
++
++        let mut missing = body();
++        missing["task_template"]
++            .as_object_mut()
++            .unwrap()
++            .remove("approval_contract");
++        assert_eq!(field(&check_admission(&missing, true).unwrap_err()), "approval_contract");
++
++        let mut not_text = body();
++        not_text["task_template"]["approval_contract"] = json!({ "tools": [] });
++        assert_eq!(field(&check_admission(&not_text, true).unwrap_err()), "approval_contract");
++    }
++
++    /// The body with one edit is refused on `expected`.
++    fn refused(edit: impl Fn(&mut Value), expected: &str) {
++        let mut candidate = body();
++        edit(&mut candidate);
++        let error = check_admission(&candidate, true).unwrap_err();
++        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
++        assert_eq!(code(&error), "invalid_goal_schedule");
++        assert_eq!(field(&error), expected);
++    }
++
++    #[test]
++    fn unattended_template_limits_hold() {
++        refused(|b| b["task_template"]["goal_max_runs"] = json!(21), "goal_max_runs");
++        refused(|b| b["task_template"]["goal_max_runs"] = json!(0), "goal_max_runs");
++        refused(|b| b["task_template"]["goal_max_runs"] = json!("3"), "goal_max_runs");
++        refused(|b| b["task_template"]["purpose"] = json!("report"), "purpose");
++        refused(|b| b["task_template"]["goal_id"] = json!("thread-1"), "goal_id");
++        refused(|b| b["task_template"]["goal_id"] = json!(7), "goal_id");
++        refused(
++            |b| b["task_template"]["workflow_type"] = json!("DeepTaskWorkflow"),
++            "workflow_type",
++        );
++        refused(|b| b["schedule_expr"] = json!("*/5 * * * *"), "schedule_expr");
++        refused(|b| b["schedule_expr"] = json!("* * * * *"), "schedule_expr");
++        refused(|b| b["schedule_expr"] = json!("*/45 * * * *"), "schedule_expr");
++        refused(|b| b["schedule_expr"] = json!("0,15 * * * *"), "schedule_expr");
++        refused(|b| b["schedule_expr"] = json!("0 *"), "schedule_expr");
++    }
++
++    #[test]
++    fn unattended_interval_accepts_half_hourly_and_slower() {
++        for expr in [
++            "0 * * * *",
++            "*/30 * * * *",
++            "15,45 * * * *",
++            "0 */4 * * *",
++            "30 9 * * 1-5",
++        ] {
++            assert!(fires_at_most_every_half_hour(expr), "{expr}");
++        }
++        assert_eq!(MIN_INTERVAL_MINUTES, 30);
++        assert_eq!(MAX_RUNS, 20);
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index f0d849b57..85cf2fa28 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -7994,6 +7994,11 @@ async fn create_cron_proxy(
+     bearer: VerifiedCapabilityBearer,
+     Json(mut b): Json<Value>,
+ ) -> Result<Json<Value>, HttpJsonError> {
++    // A template naming a thread goal is a goal-bound schedule (EP-7 S6): admitted first, since
++    // session-core binds it to the goal at insert.
++    if crate::goal_unattended::names_goal(&b) {
++        crate::goal_unattended::admit(&c, &b)?;
++    }
+     b["org_id"] = json!(c.org_id);
+     proxy_to_capability_core(&s, &c, &bearer, "cron", "POST", Some(&b)).await
+ }
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0094_cron_schedule_goal_link.sql b/apps/Model Plane/rust/services/session-core/migrations/0094_cron_schedule_goal_link.sql
+new file mode 100644
+index 000000000..828d19c7d
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0094_cron_schedule_goal_link.sql	
+@@ -0,0 +1,140 @@
++-- 0094: goal-bound schedules (Wave 3 EP-7 S6; number assigned by integration round B).
++--
++-- "Keep working while I'm away" turns a thread goal into a WS20 schedule: each fire is an ordinary
++-- scheduled run under a read-only stored-consent contract, in the service-owned scheduled thread,
++-- with a fresh Control fire decision (owner decisions D6 (b) and D9, taken by their
++-- recommendation). Nothing here runs in the user's identity. This migration links the schedule to
++-- its goal, marks the goal turns those fires spend, and keeps the two in step:
++--
++-- * `cron_schedules.goal_id` is bound at insert from the template's `goal_id`, and only when the
++--   goal is open-and-active, in the schedule's org, owned by the schedule's Control-verified
++--   creator, on a personal (non-Space) thread that holds no waived run. A template that names a
++--   goal it may not bind is refused, so a schedule never runs a goal's text unbound. The template
++--   is digest-bound by Control, so the link can never be re-pointed afterwards (the guard below).
++-- * A goal that leaves `active` (paused, met, blocked, a cap, cleared) pauses its schedules in the
++--   same transaction (`goal_paused_reason`), whichever code path moved it. A paused goal-bound
++--   schedule is re-enabled only while its goal is active again, and never after it ran the runs
++--   its template allows (`goal_runs_reached`, written by session-core with the scheduled result).
++-- * A goal that is deleted (its thread or its org erased) sets the link NULL (ON DELETE SET NULL)
++--   and disables the schedule, so it never outlives its goal as an ordinary schedule.
++-- * `thread_goal_turns.unattended` / `scheduled_thread_id` mark the turns a fire spent; the row is
++--   written with the scheduled result (session-core `RecordScheduledRunResult`).
++--
++-- Zero Data Retention: no content. Ids, a closed reason token and a flag. The scheduled lane
++-- refuses ZDR and waived runs (`DeniesZDR`, DEC-32), and a goal never exists on such a thread
++-- (0091). Erasure: the link and the turns go with their goal; the schedule goes with its org.
++--
++-- Additive only: two nullable columns on cron_schedules (no default, no rewrite), two columns with
++-- constant defaults on thread_goal_turns (metadata-only), one partial index on a column that is
++-- NULL on every existing row, and three triggers that act only on goal-bound rows.
++
++ALTER TABLE cron_schedules
++    ADD COLUMN IF NOT EXISTS goal_id TEXT NULL REFERENCES thread_goals(id) ON DELETE SET NULL;
++-- Why a goal-bound schedule was paused by its goal: a closed token, NULL while it runs.
++ALTER TABLE cron_schedules
++    ADD COLUMN IF NOT EXISTS goal_paused_reason TEXT NULL
++        CHECK (goal_paused_reason IS NULL OR goal_paused_reason ~ '^[a-z0-9_]{1,64}$');
++
++-- One driver per goal: at most one live schedule is bound to a goal.
++CREATE UNIQUE INDEX IF NOT EXISTS cron_schedules_goal_idx
++    ON cron_schedules (goal_id)
++    WHERE goal_id IS NOT NULL AND deleted_at IS NULL;
++
++ALTER TABLE thread_goal_turns
++    ADD COLUMN IF NOT EXISTS unattended BOOLEAN NOT NULL DEFAULT false;
++-- The service-owned thread an unattended turn's answer went to (D9); NULL for an attended turn.
++ALTER TABLE thread_goal_turns
++    ADD COLUMN IF NOT EXISTS scheduled_thread_id TEXT NULL;
++
++-- Bind a new schedule to the goal its template names, or refuse it.
++CREATE OR REPLACE FUNCTION cron_schedules_bind_goal() RETURNS trigger AS $$
++DECLARE
++    named TEXT;
++BEGIN
++    IF NEW.task_template IS NULL OR NOT (NEW.task_template ? 'goal_id') THEN
++        NEW.goal_id := NULL;
++        RETURN NEW;
++    END IF;
++    IF jsonb_typeof(NEW.task_template -> 'goal_id') <> 'string' THEN
++        RAISE EXCEPTION 'thread_goal_schedule_binding_refused' USING ERRCODE = '23514';
++    END IF;
++    named := NEW.task_template ->> 'goal_id';
++    SELECT g.id INTO NEW.goal_id
++    FROM thread_goals g
++    JOIN threads t ON t.id = g.thread_id
++    WHERE g.id = named
++      AND g.status = 'active'
++      AND g.org_id = NEW.org_id
++      AND g.user_id = NEW.creator_subject_id
++      AND t.org_id = NEW.org_id
++      AND t.user_id = NEW.creator_subject_id
++      AND COALESCE(btrim(t.space_id), '') = ''
++      AND NOT EXISTS (
++          SELECT 1 FROM runs r WHERE r.thread_id = t.id AND r.retention_class = 'zdr_waived'
++      );
++    IF NEW.goal_id IS NULL THEN
++        RAISE EXCEPTION 'thread_goal_schedule_binding_refused' USING ERRCODE = '23514';
++    END IF;
++    RETURN NEW;
++END;
++$$ LANGUAGE plpgsql;
++
++DROP TRIGGER IF EXISTS cron_schedules_bind_goal ON cron_schedules;
++CREATE TRIGGER cron_schedules_bind_goal
++    BEFORE INSERT ON cron_schedules
++    FOR EACH ROW EXECUTE FUNCTION cron_schedules_bind_goal();
++
++-- Keep the link fixed, disable a schedule whose goal is gone, and re-enable only for an active goal.
++-- A schedule that ran its runs, or whose goal is gone, stays off: the person sets a new one.
++CREATE OR REPLACE FUNCTION cron_schedules_guard_goal() RETURNS trigger AS $$
++BEGIN
++    IF NEW.goal_id IS DISTINCT FROM OLD.goal_id THEN
++        IF NEW.goal_id IS NOT NULL THEN
++            RAISE EXCEPTION 'thread_goal_schedule_binding_refused' USING ERRCODE = '23514';
++        END IF;
++        -- The goal was deleted (ON DELETE SET NULL): the schedule stops with it.
++        NEW.enabled := false;
++        NEW.goal_paused_reason := 'goal_deleted';
++        RETURN NEW;
++    END IF;
++    IF NEW.enabled AND NOT OLD.enabled THEN
++        IF OLD.goal_paused_reason IN ('goal_deleted', 'goal_runs_reached') THEN
++            RAISE EXCEPTION 'thread_goal_schedule_finished' USING ERRCODE = '23514';
++        END IF;
++        IF NEW.goal_id IS NOT NULL AND NOT EXISTS (
++            SELECT 1 FROM thread_goals WHERE id = NEW.goal_id AND status = 'active'
++        ) THEN
++            RAISE EXCEPTION 'thread_goal_not_active' USING ERRCODE = '23514';
++        END IF;
++        NEW.goal_paused_reason := NULL;
++    END IF;
++    RETURN NEW;
++END;
++$$ LANGUAGE plpgsql;
++
++DROP TRIGGER IF EXISTS cron_schedules_guard_goal ON cron_schedules;
++CREATE TRIGGER cron_schedules_guard_goal
++    BEFORE UPDATE ON cron_schedules
++    FOR EACH ROW
++    WHEN (OLD.goal_id IS NOT NULL OR NEW.goal_id IS NOT NULL
++          OR OLD.goal_paused_reason IS NOT NULL)
++    EXECUTE FUNCTION cron_schedules_guard_goal();
++
++-- A goal that leaves `active` pauses its schedules in the transaction that moved it.
++CREATE OR REPLACE FUNCTION thread_goals_pause_schedules() RETURNS trigger AS $$
++BEGIN
++    UPDATE cron_schedules
++    SET enabled = false,
++        goal_paused_reason = CASE WHEN NEW.status = 'paused' THEN 'goal_paused' ELSE 'goal_closed' END,
++        updated_at = now()
++    WHERE goal_id = NEW.id AND enabled AND deleted_at IS NULL;
++    RETURN NULL;
++END;
++$$ LANGUAGE plpgsql;
++
++DROP TRIGGER IF EXISTS thread_goals_pause_schedules ON thread_goals;
++CREATE TRIGGER thread_goals_pause_schedules
++    AFTER UPDATE OF status ON thread_goals
++    FOR EACH ROW
++    WHEN (OLD.status = 'active' AND NEW.status <> 'active')
++    EXECUTE FUNCTION thread_goals_pause_schedules();
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0094_cron_schedule_goal_link.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0094_cron_schedule_goal_link.down.sql
+new file mode 100644
+index 000000000..83f054833
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0094_cron_schedule_goal_link.down.sql	
+@@ -0,0 +1,48 @@
++-- Reverses 0094_cron_schedule_goal_link.sql: drops the goal link of schedules, its triggers and
++-- the unattended marks of goal turns.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate! reads only the top
++-- level of migrations/. Run it by hand, against the database only, inside one transaction.
++--
++-- A goal-bound schedule keeps its template (which still names the goal) but loses the link, so
++-- its fires stop being ledgered on the goal and a goal close no longer pauses it. Step 2 below
++-- disables every such schedule first, so none runs on as an ordinary schedule. The unattended
++-- turns stay in the ledger as ordinary settled turns (their counts are kept).
++--
++-- ORDER, all four steps:
++--   1. set MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED and ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED unset
++--      (or not `true`), and recreate model-gateway and orchestrator-core;
++--   2. roll session-core back to a build without the unattended goal turn (its scheduled result
++--      write names the new columns);
++--   3. run this file;
++--   4. check that no schedule whose template names a `goal_id` is enabled.
++--
++-- Safe to run twice (every DROP is IF EXISTS; the UPDATE runs only while the column exists).
++
++BEGIN;
++
++DO $$
++BEGIN
++    IF EXISTS (
++        SELECT 1 FROM information_schema.columns
++        WHERE table_name = 'cron_schedules' AND column_name = 'goal_id'
++    ) THEN
++        UPDATE cron_schedules SET enabled = false, updated_at = now()
++        WHERE goal_id IS NOT NULL AND enabled;
++    END IF;
++END;
++$$;
++
++DROP TRIGGER IF EXISTS thread_goals_pause_schedules ON thread_goals;
++DROP TRIGGER IF EXISTS cron_schedules_guard_goal ON cron_schedules;
++DROP TRIGGER IF EXISTS cron_schedules_bind_goal ON cron_schedules;
++DROP FUNCTION IF EXISTS thread_goals_pause_schedules();
++DROP FUNCTION IF EXISTS cron_schedules_guard_goal();
++DROP FUNCTION IF EXISTS cron_schedules_bind_goal();
++DROP INDEX IF EXISTS cron_schedules_goal_idx;
++ALTER TABLE thread_goal_turns DROP COLUMN IF EXISTS scheduled_thread_id;
++ALTER TABLE thread_goal_turns DROP COLUMN IF EXISTS unattended;
++ALTER TABLE cron_schedules DROP COLUMN IF EXISTS goal_paused_reason;
++ALTER TABLE cron_schedules DROP COLUMN IF EXISTS goal_id;
++
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 0f6ebeb94..6013a2ab3 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -2102,10 +2102,22 @@ fn validate_scheduled_run_result_request(
+ /// row learns its outcome, in one transaction. Locks run and thread, then the
+ /// receipt, the order the other run writes use. A replay of the same terminal
+ /// outcome returns the message the first call appended.
+-#[allow(clippy::result_large_err, clippy::too_many_lines)]
++#[allow(clippy::result_large_err)]
+ async fn record_scheduled_run_result_inner(
+     pool: &PgPool,
+     req: pb::RecordScheduledRunResultRequest,
++) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
++    record_scheduled_run_result_with(pool, req, crate::thread_goals::thread_goals_enabled()).await
++}
++
++/// [`record_scheduled_run_result_inner`] with the goal ledger switch passed in. With `goal_ledger`
++/// (`SESSION_CORE_THREAD_GOALS_ENABLED`) a fire of a goal-bound schedule also writes its
++/// unattended goal turn in the same transaction (EP-7 S6); off, nothing here reads a goal.
++#[allow(clippy::result_large_err, clippy::too_many_lines)]
++async fn record_scheduled_run_result_with(
++    pool: &PgPool,
++    req: pb::RecordScheduledRunResultRequest,
++    goal_ledger: bool,
+ ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
+     let withheld_effects = validate_scheduled_run_result_request(&req)?;
+ 
+@@ -2255,6 +2267,21 @@ async fn record_scheduled_run_result_inner(
+     .execute(&mut *tx)
+     .await
+     .map_err(|error| Status::internal(error.to_string()))?;
++    if goal_ledger {
++        record_unattended_goal_turn(
++            &mut tx,
++            &UnattendedFire {
++                schedule_id: &schedule_id,
++                org_id: &req.org_id,
++                run_id: &req.run_id,
++                scheduled_thread_id: &thread_id,
++                outcome: unattended_turn_outcome(&req.status),
++                input_tokens: i64::from(req.input_tokens),
++                output_tokens: i64::from(req.output_tokens),
++            },
++        )
++        .await?;
++    }
+     tx.commit()
+         .await
+         .map_err(|error| Status::internal(error.to_string()))?;
+@@ -2265,6 +2292,600 @@ async fn record_scheduled_run_result_inner(
+     }))
+ }
+ 
++/// The most unattended runs one goal-bound schedule may make (EP-7 S6), and what a template that
++/// names none gets. The gateway refuses a larger cap at create; this bound holds whatever reached
++/// the table.
++const MAX_UNATTENDED_GOAL_RUNS: i32 = 20;
++
++/// One finished fire of a goal-bound schedule, as its goal turn records it: ids, a closed outcome
++/// and counts, never the answer.
++struct UnattendedFire<'a> {
++    schedule_id: &'a str,
++    org_id: &'a str,
++    run_id: &'a str,
++    scheduled_thread_id: &'a str,
++    outcome: &'static str,
++    input_tokens: i64,
++    output_tokens: i64,
++}
++
++/// The goal-turn outcome of a scheduled step status (the `thread_goal_turns` CHECK).
++fn unattended_turn_outcome(step_status: &str) -> &'static str {
++    match step_status {
++        "completed" => "completed",
++        "failed" => "failed",
++        _ => "unknown",
++    }
++}
++
++/// The counters of a goal an unattended turn was added to.
++#[derive(sqlx::FromRow)]
++struct UnattendedGoalCounters {
++    status: String,
++    token_budget: Option<i64>,
++    tokens_used: i64,
++    cost_budget_usd_micros: Option<i64>,
++    cost_used_usd_micros: i64,
++    max_turns: i32,
++    turns_used: i32,
++}
++
++/// The stop state of a goal after an unattended turn: the rule of `thread_goals::stop_state`
++/// (a spent budget is named before the turn cap; a cap not set never stops the goal), so an
++/// unattended fire closes a goal exactly as an attended settle does.
++fn unattended_stop_state(goal: &UnattendedGoalCounters) -> Option<(&'static str, &'static str)> {
++    if goal
++        .token_budget
++        .is_some_and(|budget| goal.tokens_used >= budget)
++    {
++        return Some(("budget_reached", "token_budget"));
++    }
++    if goal
++        .cost_budget_usd_micros
++        .is_some_and(|budget| goal.cost_used_usd_micros >= budget)
++    {
++        return Some(("budget_reached", "cost_budget"));
++    }
++    if goal.turns_used >= goal.max_turns {
++        return Some(("turns_reached", "max_turns"));
++    }
++    None
++}
++
++/// Ledger one fire of a goal-bound schedule on its goal (EP-7 S6), inside the scheduled result's
++/// transaction. The turn is written settled and counted, with the step's tokens as metered usage
++/// and the scheduled thread its answer went to (D9). A cap the turn reaches closes the goal, and
++/// the 0094 trigger pauses the schedule with it in this transaction; a schedule that made the runs
++/// its template allows is paused here (`goal_runs_reached`). A schedule without a goal, or whose
++/// goal is gone, writes nothing. A fire that lands after its goal closed is still ledgered: what a
++/// run spent is spent.
++#[allow(clippy::result_large_err)]
++async fn record_unattended_goal_turn(
++    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
++    fire: &UnattendedFire<'_>,
++) -> Result<(), Status> {
++    let internal = |error: sqlx::Error| Status::internal(error.to_string());
++    // Read without a row lock: the link and the digest-bound template never change (0094 guard),
++    // and locking the schedule before the goal would invert the goal-then-schedule order a goal
++    // close takes through the pause trigger.
++    let link: Option<(String, Option<i64>)> = sqlx::query_as(
++        "SELECT goal_id,
++                CASE WHEN jsonb_typeof(task_template -> 'goal_max_runs') = 'number'
++                     THEN LEAST((task_template ->> 'goal_max_runs')::numeric, 1000)::bigint END
++         FROM cron_schedules
++         WHERE id = $1 AND org_id = $2 AND goal_id IS NOT NULL",
++    )
++    .bind(fire.schedule_id)
++    .bind(fire.org_id)
++    .fetch_optional(&mut **tx)
++    .await
++    .map_err(internal)?;
++    let Some((goal_id, max_runs)) = link else {
++        return Ok(());
++    };
++    // The goal's row lock orders this write with an attended claim or settle of the same goal.
++    let locked: Option<(String,)> =
++        sqlx::query_as("SELECT id FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE")
++            .bind(&goal_id)
++            .bind(fire.org_id)
++            .fetch_optional(&mut **tx)
++            .await
++            .map_err(internal)?;
++    if locked.is_none() {
++        return Ok(());
++    }
++    let inserted = sqlx::query(
++        "INSERT INTO thread_goal_turns
++             (goal_id, turn_no, run_id, org_id, claim_expires_at, settled_at, outcome,
++              metered_input_tokens, metered_output_tokens, usage_source, counted,
++              unattended, scheduled_thread_id)
++         SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, $3, now(), now(), $4, $5, $6,
++                'run_response', true, true, $7
++         FROM thread_goal_turns WHERE goal_id = $1
++         ON CONFLICT (goal_id, run_id) WHERE run_id IS NOT NULL DO NOTHING",
++    )
++    .bind(&goal_id)
++    .bind(fire.run_id)
++    .bind(fire.org_id)
++    .bind(fire.outcome)
++    .bind(fire.input_tokens)
++    .bind(fire.output_tokens)
++    .bind(fire.scheduled_thread_id)
++    .execute(&mut **tx)
++    .await
++    .map_err(internal)?
++    .rows_affected();
++    if inserted == 0 {
++        // This run's turn is ledgered already.
++        return Ok(());
++    }
++    let goal: UnattendedGoalCounters = sqlx::query_as(
++        "UPDATE thread_goals
++         SET tokens_used = tokens_used + $2, turns_used = turns_used + 1, updated_at = now()
++         WHERE id = $1
++         RETURNING status, token_budget, tokens_used, cost_budget_usd_micros,
++                   cost_used_usd_micros, max_turns, turns_used",
++    )
++    .bind(&goal_id)
++    .bind(fire.input_tokens.saturating_add(fire.output_tokens))
++    .fetch_one(&mut **tx)
++    .await
++    .map_err(internal)?;
++    if matches!(goal.status.as_str(), "active" | "paused") {
++        if let Some((stop, reason)) = unattended_stop_state(&goal) {
++            sqlx::query(
++                "UPDATE thread_goals
++                 SET status = $2, status_reason = $3, revision = revision + 1,
++                     updated_at = now(), closed_at = now()
++                 WHERE id = $1 AND status IN ('active', 'paused')",
++            )
++            .bind(&goal_id)
++            .bind(stop)
++            .bind(reason)
++            .execute(&mut **tx)
++            .await
++            .map_err(internal)?;
++        }
++    }
++    let cap = max_runs
++        .and_then(|runs| i32::try_from(runs).ok())
++        .filter(|runs| (1..=MAX_UNATTENDED_GOAL_RUNS).contains(runs))
++        .unwrap_or(MAX_UNATTENDED_GOAL_RUNS);
++    let runs: i64 = sqlx::query_scalar(
++        "SELECT COUNT(*) FROM thread_goal_turns
++         WHERE goal_id = $1 AND unattended
++           AND run_id IN (SELECT run_id FROM cron_fires
++                          WHERE schedule_id = $2 AND run_id IS NOT NULL)",
++    )
++    .bind(&goal_id)
++    .bind(fire.schedule_id)
++    .fetch_one(&mut **tx)
++    .await
++    .map_err(internal)?;
++    if runs >= i64::from(cap) {
++        sqlx::query(
++            "UPDATE cron_schedules
++             SET enabled = false, goal_paused_reason = 'goal_runs_reached', updated_at = now()
++             WHERE id = $1 AND enabled",
++        )
++        .bind(fire.schedule_id)
++        .execute(&mut **tx)
++        .await
++        .map_err(internal)?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod unattended_goal_tests {
++    use super::{
++        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, unattended_stop_state,
++        unattended_turn_outcome, UnattendedGoalCounters,
++    };
++
++    fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
++        UnattendedGoalCounters {
++            status: "active".to_owned(),
++            token_budget: tokens.0,
++            tokens_used: tokens.1,
++            cost_budget_usd_micros: None,
++            cost_used_usd_micros: 0,
++            max_turns: turns.0,
++            turns_used: turns.1,
++        }
++    }
++
++    #[test]
++    fn unattended_turn_outcome_is_a_closed_token() {
++        assert_eq!(unattended_turn_outcome("completed"), "completed");
++        assert_eq!(unattended_turn_outcome("failed"), "failed");
++        assert_eq!(unattended_turn_outcome("unknown_outcome"), "unknown");
++        assert_eq!(unattended_turn_outcome("anything else"), "unknown");
++    }
++
++    #[test]
++    fn unattended_stop_names_budget_before_turns() {
++        assert_eq!(unattended_stop_state(&counters((None, 9_000), (10, 3))), None);
++        assert_eq!(
++            unattended_stop_state(&counters((Some(1_000), 1_000), (10, 10))),
++            Some(("budget_reached", "token_budget"))
++        );
++        assert_eq!(
++            unattended_stop_state(&counters((Some(1_000), 10), (3, 3))),
++            Some(("turns_reached", "max_turns"))
++        );
++    }
++
++    // The database tests below run with `--ignored` against a disposable Postgres, as the other
++    // session-core database tests do. They pass the goal ledger switch in, so no env is needed.
++
++    const OWNER: &str = "user-unattended-owner";
++
++    struct Seeded {
++        org_id: String,
++        goal_id: String,
++        schedule_id: String,
++    }
++
++    async fn connect() -> Option<sqlx::PgPool> {
++        let Ok(url) = std::env::var("DATABASE_URL") else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return None;
++        };
++        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
++        sqlx::migrate!("./migrations")
++            .run(&pool)
++            .await
++            .expect("migrate");
++        Some(pool)
++    }
++
++    /// A personal thread with an active goal, and a schedule bound to it through the 0094 trigger.
++    async fn seed_goal_schedule(pool: &sqlx::PgPool, suffix: &str, max_runs: i64) -> Seeded {
++        let org_id = format!("unattended-org-{suffix}");
++        let thread_id = format!("unattended-thread-{suffix}");
++        let goal_id = format!("goal_{suffix}");
++        let schedule_id = format!("unattended-schedule-{suffix}");
++        sqlx::query(
++            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
++        )
++        .bind(&thread_id)
++        .bind(&org_id)
++        .bind(OWNER)
++        .execute(pool)
++        .await
++        .expect("seed thread");
++        sqlx::query(
++            "INSERT INTO thread_goals (id, thread_id, org_id, user_id, objective, max_turns, status)
++             VALUES ($1, $2, $3, $4, 'collect the release notes', 10, 'active')",
++        )
++        .bind(&goal_id)
++        .bind(&thread_id)
++        .bind(&org_id)
++        .bind(OWNER)
++        .execute(pool)
++        .await
++        .expect("seed goal");
++        sqlx::query(
++            "INSERT INTO cron_schedules
++                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
++             VALUES ($1, $2, $1, '0 * * * *', $3, $3, $4)",
++        )
++        .bind(&schedule_id)
++        .bind(&org_id)
++        .bind(OWNER)
++        .bind(serde_json::json!({
++            "kind": "cron",
++            "title": "collect the release notes",
++            "purpose": "goal",
++            "goal_id": goal_id,
++            "goal_max_runs": max_runs,
++        }))
++        .execute(pool)
++        .await
++        .expect("seed goal-bound schedule");
++        Seeded {
++            org_id,
++            goal_id,
++            schedule_id,
++        }
++    }
++
++    /// One claimed scheduled step of `seeded`'s schedule, with its fire, ready for a result.
++    async fn claimed_fire(
++        pool: &sqlx::PgPool,
++        seeded: &Seeded,
++        fire: &str,
++    ) -> pb::RecordScheduledRunResultRequest {
++        let run_id = format!("unattended-run-{fire}");
++        let thread_id = format!("unattended-scheduled-thread-{fire}");
++        let space_id = format!("unattended-space-{fire}");
++        let fire_key = format!("fire-{fire}");
++        let step_id = format!("{run_id}:step:0");
++        let idempotency_key = format!("{fire_key}:step:0");
++        let template_digest = format!("sha256:{}", "a".repeat(64));
++        let audience_hash = format!("sha256:{}", "c".repeat(64));
++        sqlx::query(
++            "INSERT INTO threads
++             (id, session_key, org_id, user_id, space_id, space_decision_ref,
++              recipient_audience_ref, recipient_audience_revision,
++              recipient_audience_hash, privacy_policy_ref,
++              resource_authorization_ref, authority_revision, origin)
++             VALUES ($1,$1,$2,'service:orchestrator-core',$3,$4,$5,1,$6,$7,$8,1,'space')",
++        )
++        .bind(&thread_id)
++        .bind(&seeded.org_id)
++        .bind(&space_id)
++        .bind(format!("decision-{fire}"))
++        .bind(format!("audience-{fire}"))
++        .bind(&audience_hash)
++        .bind(format!("privacy-{fire}"))
++        .bind(format!("resource-{fire}"))
++        .execute(pool)
++        .await
++        .expect("seed scheduled thread");
++        sqlx::query(
++            "INSERT INTO runs
++             (id, thread_id, goal, org_id, user_id, status, metadata,
++              space_id, space_decision_ref, recipient_audience_ref,
++              recipient_audience_revision, recipient_audience_hash,
++              privacy_policy_ref, resource_authorization_ref, authority_revision,
++              retention_class)
++             VALUES ($1,$2,'collect the release notes',$3,'service:orchestrator-core',
++                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1,'persistent')",
++        )
++        .bind(&run_id)
++        .bind(&thread_id)
++        .bind(&seeded.org_id)
++        .bind(serde_json::json!({
++            "source": "scheduled_run",
++            "schedule_id": seeded.schedule_id,
++            "fire_key": fire_key,
++            "template_digest": template_digest,
++            "space_id": space_id,
++        }))
++        .bind(&space_id)
++        .bind(format!("decision-{fire}"))
++        .bind(format!("audience-{fire}"))
++        .bind(&audience_hash)
++        .bind(format!("privacy-{fire}"))
++        .bind(format!("resource-{fire}"))
++        .execute(pool)
++        .await
++        .expect("seed scheduled run");
++        sqlx::query(
++            "INSERT INTO cron_fires (id, schedule_id, status, fire_key)
++             VALUES ($1, $2, 'pending', $3)",
++        )
++        .bind(format!("fire-row-{fire}"))
++        .bind(&seeded.schedule_id)
++        .bind(&fire_key)
++        .execute(pool)
++        .await
++        .expect("seed fire");
++        let claimed = claim_scheduled_step_inner(
++            pool,
++            pb::ClaimScheduledStepRequest {
++                run_id: run_id.clone(),
++                thread_id,
++                org_id: seeded.org_id.clone(),
++                space_id,
++                schedule_id: seeded.schedule_id.clone(),
++                fire_key,
++                template_digest,
++                step_id: step_id.clone(),
++                step_index: 0,
++                policy_digest: format!("sha256:{}", "b".repeat(64)),
++                idempotency_key: idempotency_key.clone(),
++            },
++        )
++        .await
++        .expect("claim scheduled step")
++        .into_inner();
++        pb::RecordScheduledRunResultRequest {
++            run_id,
++            step_id,
++            org_id: seeded.org_id.clone(),
++            idempotency_key,
++            receipt_id: claimed.receipt_id,
++            status: "completed".to_owned(),
++            output: "the release notes so far".to_owned(),
++            input_tokens: 1_200,
++            output_tokens: 300,
++            ..Default::default()
++        }
++    }
++
++    async fn schedule_state(pool: &sqlx::PgPool, schedule_id: &str) -> (bool, Option<String>) {
++        sqlx::query_as("SELECT enabled, goal_paused_reason FROM cron_schedules WHERE id = $1")
++            .bind(schedule_id)
++            .fetch_one(pool)
++            .await
++            .expect("read schedule")
++    }
++
++    /// EP-7 S6: a fire of a goal-bound schedule writes one settled, counted, unattended turn with
++    /// the step's tokens and the scheduled thread, once; a replay adds nothing, and the switch off
++    /// writes nothing.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn scheduled_result_with_goal_writes_unattended_turn() {
++        let Some(pool) = connect().await else {
++            return;
++        };
++        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
++        let bound: Option<String> =
++            sqlx::query_scalar("SELECT goal_id FROM cron_schedules WHERE id = $1")
++                .bind(&seeded.schedule_id)
++                .fetch_one(&pool)
++                .await
++                .expect("read link");
++        assert_eq!(bound.as_deref(), Some(seeded.goal_id.as_str()));
++
++        let off = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
++        record_scheduled_run_result_with(&pool, off, false)
++            .await
++            .expect("result with the switch off");
++        let turns: i64 =
++            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turns WHERE goal_id = $1")
++                .bind(&seeded.goal_id)
++                .fetch_one(&pool)
++                .await
++                .expect("count turns");
++        assert_eq!(turns, 0, "the switch off writes no goal turn");
++
++        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
++        record_scheduled_run_result_with(&pool, request.clone(), true)
++            .await
++            .expect("first result");
++        record_scheduled_run_result_with(&pool, request.clone(), true)
++            .await
++            .expect("replayed result");
++        let (outcome, unattended, counted, input, output, scheduled_thread): (
++            String,
++            bool,
++            bool,
++            i64,
++            i64,
++            Option<String>,
++        ) = sqlx::query_as(
++            "SELECT outcome, unattended, counted, metered_input_tokens, metered_output_tokens,
++                    scheduled_thread_id
++             FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2",
++        )
++        .bind(&seeded.goal_id)
++        .bind(&request.run_id)
++        .fetch_one(&pool)
++        .await
++        .expect("one unattended turn");
++        assert_eq!(outcome, "completed");
++        assert!(unattended && counted);
++        assert_eq!((input, output), (1_200, 300));
++        let scheduled_thread = scheduled_thread.unwrap_or_default();
++        assert!(scheduled_thread.starts_with("unattended-scheduled-thread-"));
++        let (tokens, turns): (i64, i32) =
++            sqlx::query_as("SELECT tokens_used, turns_used FROM thread_goals WHERE id = $1")
++                .bind(&seeded.goal_id)
++                .fetch_one(&pool)
++                .await
++                .expect("read counters");
++        assert_eq!((tokens, turns), (1_500, 1), "a replay adds nothing");
++        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
++    }
++
++    /// EP-7 S6: a goal that leaves `active` pauses its schedule in the same transaction, and the
++    /// schedule is re-enabled only while the goal is active; a schedule that ran its runs stays off.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn goal_close_pauses_schedule() {
++        let Some(pool) = connect().await else {
++            return;
++        };
++        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 1).await;
++
++        sqlx::query("UPDATE thread_goals SET status = 'paused' WHERE id = $1")
++            .bind(&seeded.goal_id)
++            .execute(&pool)
++            .await
++            .expect("pause goal");
++        assert_eq!(
++            schedule_state(&pool, &seeded.schedule_id).await,
++            (false, Some("goal_paused".to_owned()))
++        );
++        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
++            .bind(&seeded.schedule_id)
++            .execute(&pool)
++            .await
++            .expect_err("a paused goal's schedule stays off");
++        sqlx::query("UPDATE thread_goals SET status = 'active' WHERE id = $1")
++            .bind(&seeded.goal_id)
++            .execute(&pool)
++            .await
++            .expect("resume goal");
++        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
++            .bind(&seeded.schedule_id)
++            .execute(&pool)
++            .await
++            .expect("re-enable under an active goal");
++        assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
++
++        // goal_max_runs = 1: the first fire pauses the schedule for good.
++        let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
++        record_scheduled_run_result_with(&pool, request, true)
++            .await
++            .expect("result");
++        assert_eq!(
++            schedule_state(&pool, &seeded.schedule_id).await,
++            (false, Some("goal_runs_reached".to_owned()))
++        );
++        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
++            .bind(&seeded.schedule_id)
++            .execute(&pool)
++            .await
++            .expect_err("a schedule that ran its runs stays off");
++
++        // A goal closed on a cap is a close: a second schedule's goal shows it.
++        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
++        sqlx::query(
++            "UPDATE thread_goals SET status = 'met', status_reason = '', closed_at = now()
++             WHERE id = $1",
++        )
++        .bind(&other.goal_id)
++        .execute(&pool)
++        .await
++        .expect("close goal");
++        assert_eq!(
++            schedule_state(&pool, &other.schedule_id).await,
++            (false, Some("goal_closed".to_owned()))
++        );
++    }
++
++    /// EP-7 S6: deleting a goal unbinds and disables its schedule, which never runs on as an
++    /// ordinary schedule; a template naming a goal the creator does not own is refused.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn goal_link_set_null_on_goal_delete() {
++        let Some(pool) = connect().await else {
++            return;
++        };
++        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
++        sqlx::query("DELETE FROM thread_goals WHERE id = $1")
++            .bind(&seeded.goal_id)
++            .execute(&pool)
++            .await
++            .expect("delete goal");
++        let (goal_id, enabled, reason): (Option<String>, bool, Option<String>) = sqlx::query_as(
++            "SELECT goal_id, enabled, goal_paused_reason FROM cron_schedules WHERE id = $1",
++        )
++        .bind(&seeded.schedule_id)
++        .fetch_one(&pool)
++        .await
++        .expect("read schedule");
++        assert_eq!(goal_id, None);
++        assert!(!enabled);
++        assert_eq!(reason.as_deref(), Some("goal_deleted"));
++        sqlx::query("UPDATE cron_schedules SET enabled = true WHERE id = $1")
++            .bind(&seeded.schedule_id)
++            .execute(&pool)
++            .await
++            .expect_err("a schedule whose goal is gone stays off");
++
++        let other = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 3).await;
++        let refused = sqlx::query(
++            "INSERT INTO cron_schedules
++                 (id, org_id, name, schedule_expr, created_by, creator_subject_id, task_template)
++             VALUES ($1, $2, $1, '0 * * * *', 'someone-else', 'someone-else', $3)",
++        )
++        .bind(format!("foreign-{}", other.schedule_id))
++        .bind(&other.org_id)
++        .bind(serde_json::json!({ "goal_id": other.goal_id }))
++        .execute(&pool)
++        .await
++        .expect_err("a goal another person owns is never bound");
++        assert!(refused.to_string().contains("thread_goal_schedule_binding_refused"));
++    }
++}
++
+ /// Append a scheduled run's answer to its thread inside the caller's transaction
+ /// (build plan WS20 S1). Unlike a chat append it runs no memory extraction: the
+ /// answer came from an unattended run and the thread is not a conversation. It

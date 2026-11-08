@@ -1,0 +1,2040 @@
+diff --git a/apps/Model Plane/proto/model_plane/v1/execution.proto b/apps/Model Plane/proto/model_plane/v1/execution.proto
+index 7fbb860b9..a84f60556 100644
+--- a/apps/Model Plane/proto/model_plane/v1/execution.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/execution.proto	
+@@ -322,6 +322,9 @@ message WebPolicyContext {
+   // The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
+   // switches apply (an enforced org the gateway could not read takes "off").
+   int64 revision = 3;
++  // The org browser-site policy revision the run was admitted under (Wave 3 EP-9 W3; additive). Carried for attribution
++  // only: zero when no revision was read for the run (WEB_DOMAIN_POLICY_MODE off), and execution-core never gates on it.
++  int64 site_policy_revision = 4;
+ }
+ 
+ // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 8cf7606e2..a34859e77 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -34,6 +34,7 @@ pub mod run_timing;
+ pub mod sandbox_report;
+ pub mod scheduled_contract;
+ pub mod shell_rule;
++pub mod site_policy;
+ pub mod skill_bundle;
+ pub mod skill_recovery;
+ pub mod space_attention;
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/site_policy.rs b/apps/Model Plane/rust/crates/mp-contracts/src/site_policy.rs
+new file mode 100644
+index 000000000..0c35f8ffc
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/site_policy.rs	
+@@ -0,0 +1,334 @@
++//! The org's domain rules as the Model Plane's web tools read them (Wave 3 EP-9 W3).
++//!
++//! org-core holds an organisation's domain rules (DEC-19, `browsersites`) and answers, per host, what the rules
++//! allow, through `GET /internal/orgs/:orgId/browser-sites/resolve`. This module is the pure half both loops
++//! share: the host canonicaliser that `browser-domain-canonical.json` pins, the reader that takes a URL to its
++//! host, the rule that turns an answer into allow or refuse, and the switch that says how far the rules bind.
++//! Each service keeps its own resolve client and cache (`site_policy_client.rs`), so the two loops stay separate
++//! and share only what is decided here.
++//!
++//! Nothing here reads a clock, a socket or the environment. The only thing that leaves the Model Plane toward
++//! org-core is a canonical host: no URL path, no query and no content.
++
++use serde::Deserialize;
++
++/// The environment switch of the org's domain rules (EP-9 W3). Each service reads its own copy once.
++pub const WEB_DOMAIN_POLICY_MODE_ENV: &str = "WEB_DOMAIN_POLICY_MODE";
++
++/// The most hosts one resolve call names. org-core refuses a longer list (`MaxResolveHosts`), so a client batches
++/// to this size.
++pub const MAX_RESOLVE_HOSTS: usize = 32;
++
++/// How far the org's domain rules bind (`WEB_DOMAIN_POLICY_MODE`). Unset, empty and `off` read nothing and change
++/// nothing. `shadow` reads and logs what the rules would refuse and refuses nothing. Any other value enforces,
++/// because an authority switch treats an unknown value as enforce (K3-26).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum WebDomainPolicyMode {
++    /// Nothing is read and nothing changes.
++    Off,
++    /// The rules are read and what they would refuse is logged; nothing is refused.
++    Shadow,
++    /// The rules bind, and a host whose answer cannot be read is refused.
++    Enforce,
++}
++
++impl WebDomainPolicyMode {
++    /// Parses the switch as the environment holds it.
++    #[must_use]
++    pub fn from_env_value(value: Option<&str>) -> Self {
++        match value.map(str::trim) {
++            None | Some("" | "off") => Self::Off,
++            Some("shadow") => Self::Shadow,
++            Some(_) => Self::Enforce,
++        }
++    }
++}
++
++/// The canonical form of one host, as `browser-domain-canonical.json` pins it: surrounding whitespace is trimmed,
++/// letters are folded to lower case, and then only ASCII letters, digits and hyphens may appear, in dot-separated
++/// labels. A host needs at least one dot, no label may be empty or start or end with a hyphen, a label may be at
++/// most 63 octets and the host at most 253. A trailing dot is refused, so `example.com.` has no canonical form.
++/// IP literals are refused, and so is a host whose last label is all digits: no top-level domain is numeric, and
++/// that also refuses the shorthand IPv4 forms such as `127.1`.
++#[must_use]
++pub fn canonical_host(raw: &str) -> Option<String> {
++    let host = raw.trim().to_lowercase();
++    if host.is_empty() || host.len() > 253 {
++        return None;
++    }
++    if !host
++        .bytes()
++        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.')
++    {
++        return None;
++    }
++    if !host.contains('.') {
++        return None;
++    }
++    let mut last_label = "";
++    for label in host.split('.') {
++        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
++            return None;
++        }
++        last_label = label;
++    }
++    if last_label.bytes().all(|byte| byte.is_ascii_digit()) {
++        return None;
++    }
++    Some(host)
++}
++
++/// The canonical host a URL names, read the way a fetch reads it: an absolute `http` or `https` URL whose authority
++/// is a plain hostname with an optional port of digits. Userinfo, a bracketed or percent-encoded host, whitespace,
++/// control characters or a backslash anywhere in the URL, another scheme and a missing scheme all have no host
++/// here. The caller refuses a URL with no host under enforcement, because the rules cannot be applied to it.
++#[must_use]
++pub fn host_of_url(url: &str) -> Option<String> {
++    let url = url.trim();
++    if url
++        .bytes()
++        .any(|byte| byte.is_ascii_control() || byte == b' ' || byte == b'\\')
++    {
++        return None;
++    }
++    let rest = after_web_scheme(url)?;
++    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
++    if authority.contains('@') {
++        return None;
++    }
++    let host = match authority.split_once(':') {
++        Some((host, port)) => {
++            if !port.bytes().all(|byte| byte.is_ascii_digit()) {
++                return None;
++            }
++            host
++        }
++        None => authority,
++    };
++    canonical_host(host)
++}
++
++/// The text after an `https://` or `http://` scheme, matched without regard to case.
++fn after_web_scheme(url: &str) -> Option<&str> {
++    ["https://", "http://"].into_iter().find_map(|scheme| {
++        let head = url.get(..scheme.len())?;
++        head.eq_ignore_ascii_case(scheme)
++            .then(|| &url[scheme.len()..])
++    })
++}
++
++/// Whether an organisation id can name a resolve path: 1 to 128 letters, digits, hyphens or underscores. An id that
++/// cannot is never sent to org-core, and its hosts are refused.
++#[must_use]
++pub fn routable_org_id(org_id: &str) -> bool {
++    !org_id.is_empty()
++        && org_id.len() <= 128
++        && org_id
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
++}
++
++/// Whether a resolved effective answer lets a fetch through. A fetch is a read and this policy adds no prompt, so
++/// `ask`, `read` and `act` allow it. `deny` refuses, and so does any answer this build does not know.
++#[must_use]
++pub fn fetch_allowed(effective: &str) -> bool {
++    matches!(effective, "ask" | "read" | "act")
++}
++
++/// One host's answer in org-core's resolve response (`browsersites.Decision`). The cap and source fields are not
++/// read here: a fetch needs only whether the answer lets it through.
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
++pub struct SiteDecision {
++    /// The canonical host the answer is for.
++    pub host: String,
++    /// `deny`, `ask`, `read` or `act`.
++    pub effective: String,
++}
++
++/// org-core's answer to one resolve call: one decision per host asked, at one policy revision.
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
++pub struct SiteResolution {
++    /// The organisation the answer is for. Empty is tolerated; a different organisation is a defect and is refused
++    /// by the client.
++    #[serde(default)]
++    pub organization_id: String,
++    /// The policy revision the answer was read at.
++    pub revision: i64,
++    /// The answers, one per host asked.
++    pub decisions: Vec<SiteDecision>,
++}
++
++/// What one host's answer means to a fetch: whether the rules let it through, and the revision it was read at.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct HostVerdict {
++    /// Whether the fetch may proceed.
++    pub allowed: bool,
++    /// The policy revision the answer was read at.
++    pub revision: i64,
++}
++
++/// The verdict for `host` from one resolution. A resolution that answers for no such host refuses it, so an answer
++/// that is partial can only narrow what may be fetched.
++#[must_use]
++pub fn verdict_for(host: &str, resolution: &SiteResolution) -> HostVerdict {
++    let allowed = resolution
++        .decisions
++        .iter()
++        .find(|decision| decision.host == host)
++        .is_some_and(|decision| fetch_allowed(&decision.effective));
++    HostVerdict {
++        allowed,
++        revision: resolution.revision,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The golden the browser broker's normaliser is pinned to. Both loops canonicalise a host by its rules.
++    const GOLDEN: &str = include_str!("../../../../api/contracts/browser-domain-canonical.json");
++
++    fn strings(value: &serde_json::Value) -> Vec<&str> {
++        value
++            .as_array()
++            .into_iter()
++            .flatten()
++            .filter_map(serde_json::Value::as_str)
++            .collect()
++    }
++
++    #[test]
++    fn canonical_host_follows_the_golden_vectors() {
++        let golden: serde_json::Value = serde_json::from_str(GOLDEN).expect("the golden parses");
++        let vectors = golden["vectors"].as_array().expect("the golden has vectors");
++        for vector in vectors {
++            let id = vector["id"].as_str().unwrap_or_default();
++            let inputs = strings(&vector["input"]);
++            if vector["expect"].as_str() == Some("accept") {
++                let mut canonical: Vec<String> = inputs
++                    .iter()
++                    .filter_map(|raw| canonical_host(raw))
++                    .collect();
++                assert_eq!(canonical.len(), inputs.len(), "{id}: every entry canonicalises");
++                canonical.sort();
++                canonical.dedup();
++                let mut expected: Vec<&str> = strings(&vector["output"]);
++                expected.sort_unstable();
++                expected.dedup();
++                assert_eq!(canonical, expected, "{id}");
++            } else if inputs.len() == 1 {
++                assert_eq!(canonical_host(inputs[0]), None, "{id}: a bad entry has no canonical host");
++            } else if id == "one_bad_entry_rejects_the_whole_list" {
++                assert!(
++                    inputs.iter().any(|raw| canonical_host(raw).is_none()),
++                    "{id}: one entry without a canonical host"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn canonical_host_refuses_a_numeric_top_level_label_and_the_empty_forms() {
++        for raw in ["127.1", "example.123", "example.com.", "", "   "] {
++            assert_eq!(canonical_host(raw), None, "{raw:?}");
++        }
++        assert_eq!(canonical_host("  Shop.Example.NO ").as_deref(), Some("shop.example.no"));
++    }
++
++    #[test]
++    fn host_of_url_reads_an_absolute_web_url_as_a_fetch_reads_it() {
++        assert_eq!(
++            host_of_url("https://Example.com/path?q=1#frag").as_deref(),
++            Some("example.com")
++        );
++        assert_eq!(host_of_url("HTTP://example.com:8080/a").as_deref(), Some("example.com"));
++        assert_eq!(host_of_url("  https://example.com  ").as_deref(), Some("example.com"));
++        assert_eq!(host_of_url("https://example.com:/").as_deref(), Some("example.com"));
++        assert_eq!(host_of_url("https://example.com?x=1").as_deref(), Some("example.com"));
++    }
++
++    #[test]
++    fn host_of_url_refuses_every_shape_it_cannot_read_with_certainty() {
++        for url in [
++            "example.com/path",
++            "ftp://example.com/file",
++            "https://user@example.com/",
++            "https://evil.com\\@example.com/",
++            "https://example.com\t.evil.com/",
++            "https://exa%6Dple.com/",
++            "https://[2001:db8::1]/",
++            "https://192.168.0.1/",
++            "https://example.com:port/",
++            "https:///path",
++            "https://example.com./",
++            "https://localhost/",
++            "https://bücher.example/",
++        ] {
++            assert_eq!(host_of_url(url), None, "{url}");
++        }
++    }
++
++    #[test]
++    fn fetch_is_allowed_for_ask_read_and_act_only() {
++        for effective in ["ask", "read", "act"] {
++            assert!(fetch_allowed(effective), "{effective}");
++        }
++        for effective in ["deny", "", "ASK", "none", "allow"] {
++            assert!(!fetch_allowed(effective), "{effective:?}");
++        }
++    }
++
++    #[test]
++    fn the_switch_reads_off_shadow_and_enforce_and_an_unknown_value_enforces() {
++        assert_eq!(WebDomainPolicyMode::from_env_value(None), WebDomainPolicyMode::Off);
++        assert_eq!(WebDomainPolicyMode::from_env_value(Some("")), WebDomainPolicyMode::Off);
++        assert_eq!(WebDomainPolicyMode::from_env_value(Some(" off ")), WebDomainPolicyMode::Off);
++        assert_eq!(
++            WebDomainPolicyMode::from_env_value(Some("shadow")),
++            WebDomainPolicyMode::Shadow
++        );
++        assert_eq!(
++            WebDomainPolicyMode::from_env_value(Some("enforce")),
++            WebDomainPolicyMode::Enforce
++        );
++        assert_eq!(WebDomainPolicyMode::from_env_value(Some("on")), WebDomainPolicyMode::Enforce);
++    }
++
++    #[test]
++    fn a_host_the_resolution_does_not_answer_for_is_refused() {
++        let resolution: SiteResolution = serde_json::from_str(
++            r#"{"organization_id":"org-a","revision":7,"decisions":[
++                {"host":"example.com","effective":"ask","cap":"act","source":"default"},
++                {"host":"blocked.example.com","effective":"deny","cap":"none","source":"org_block"},
++                {"host":"odd.example.com","effective":"maybe","cap":"act","source":"default"}]}"#,
++        )
++        .expect("the answer parses");
++        assert_eq!(
++            verdict_for("example.com", &resolution),
++            HostVerdict { allowed: true, revision: 7 }
++        );
++        assert_eq!(
++            verdict_for("blocked.example.com", &resolution),
++            HostVerdict { allowed: false, revision: 7 }
++        );
++        assert_eq!(
++            verdict_for("odd.example.com", &resolution),
++            HostVerdict { allowed: false, revision: 7 },
++            "an answer this build does not know is refused"
++        );
++        assert_eq!(
++            verdict_for("silent.example.com", &resolution),
++            HostVerdict { allowed: false, revision: 7 },
++            "a host the answer does not name is refused"
++        );
++    }
++
++    #[test]
++    fn an_organisation_id_must_be_a_plain_path_segment() {
++        assert!(routable_org_id("org-a_1"));
++        for org in ["", "org/a", "org a", "org%2Fa", "org.a"] {
++            assert!(!routable_org_id(org), "{org:?}");
++        }
++    }
++}
+diff --git a/apps/Model Plane/rust/services/execution-core/src/site_policy_client.rs b/apps/Model Plane/rust/services/execution-core/src/site_policy_client.rs
+new file mode 100644
+index 000000000..37d285e1a
+--- /dev/null
++++ b/apps/Model Plane/rust/services/execution-core/src/site_policy_client.rs	
+@@ -0,0 +1,670 @@
++//! The org's domain rules as the execution core's web tools enforce them (Wave 3 EP-9 W3).
++//!
++//! org-core owns the rules (DEC-19). Before `web_fetch`, `web_search` or one of the page-acquisition tools (`knowledge.map`,
++//! `knowledge.crawl_site`, `knowledge.batch`) reaches a host, this module asks org-core whether the rules allow it, and
++//! keeps each answer for [`POLICY_TTL`]. The pure rules (the canonical host, the reader of a URL, the verdict from an
++//! answer, the switch) live in `mp_contracts::site_policy`. This crate keeps its own resolve client, because the two
++//! loops stay separate; it reads its owner from this service's environment: `ORG_CORE_URL`, `EXECUTION_CORE_SERVICE_ID`
++//! and `EXECUTION_ORG_CORE_SERVICE_TOKEN`.
++//!
++//! `WEB_DOMAIN_POLICY_MODE` decides how far this binds. Under `off` nothing is read and the request is exactly what it was.
++//! Under `shadow` the same refusals are logged and nothing is refused. Under `enforce` a host whose answer cannot be read is
++//! refused, and so is a URL with no host the rules can name. A check sends org-core canonical hosts only.
++
++use std::collections::{BTreeSet, HashMap};
++use std::sync::{Arc, OnceLock};
++use std::time::{Duration, Instant};
++
++use dashmap::DashMap;
++use mp_contracts::site_policy::{
++    host_of_url, routable_org_id, verdict_for, HostVerdict, SiteResolution, WebDomainPolicyMode,
++    MAX_RESOLVE_HOSTS, WEB_DOMAIN_POLICY_MODE_ENV,
++};
++use serde_json::Value;
++
++const DEFAULT_ORG_CORE_URL: &str = "http://org-core:8080";
++const DEFAULT_SERVICE_ID: &str = "execution-core";
++
++/// How long one host's answer is served before org-core is asked again.
++pub const POLICY_TTL: Duration = Duration::from_secs(30);
++
++/// The longest a resolve call may take. An answer that comes later is an unreadable one.
++const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
++
++/// The code of a web call the org's domain rules stop. It is a typed tool error: the model reads the code and the host, and
++/// the words after it are copy.
++pub const SITE_BLOCKED_CODE: &str = "org_site_blocked";
++
++/// The process's switch, read once so it cannot change under a request.
++#[must_use]
++pub fn policy_mode() -> WebDomainPolicyMode {
++    static MODE: OnceLock<WebDomainPolicyMode> = OnceLock::new();
++    *MODE.get_or_init(|| {
++        WebDomainPolicyMode::from_env_value(std::env::var(WEB_DOMAIN_POLICY_MODE_ENV).ok().as_deref())
++    })
++}
++
++/// The process's checker, so every run shares one cache.
++fn shared_checker() -> Arc<SiteChecker> {
++    static CHECKER: OnceLock<Arc<SiteChecker>> = OnceLock::new();
++    Arc::clone(CHECKER.get_or_init(|| Arc::new(SiteChecker::default())))
++}
++
++/// Where org-core is, and the service identity this service presents to it.
++#[derive(Debug, Clone)]
++pub struct SiteOwner {
++    base_url: String,
++    service_id: String,
++    service_token: String,
++}
++
++impl SiteOwner {
++    /// The owner this service's environment names. An unset token is kept as empty, which leaves every host unreadable.
++    #[must_use]
++    pub fn from_env() -> Self {
++        let base_url = std::env::var("ORG_CORE_URL")
++            .ok()
++            .filter(|value| !value.trim().is_empty())
++            .unwrap_or_else(|| DEFAULT_ORG_CORE_URL.to_owned());
++        let service_id = std::env::var("EXECUTION_CORE_SERVICE_ID")
++            .ok()
++            .filter(|value| !value.trim().is_empty())
++            .unwrap_or_else(|| DEFAULT_SERVICE_ID.to_owned());
++        let service_token = std::env::var("EXECUTION_ORG_CORE_SERVICE_TOKEN").unwrap_or_default();
++        Self {
++            base_url,
++            service_id,
++            service_token,
++        }
++    }
++
++    /// An owner with the given address and identity.
++    #[cfg(test)]
++    #[must_use]
++    pub fn new(base_url: &str, service_id: &str, service_token: &str) -> Self {
++        Self {
++            base_url: base_url.to_owned(),
++            service_id: service_id.to_owned(),
++            service_token: service_token.to_owned(),
++        }
++    }
++}
++
++/// One host's answer and when org-core gave it.
++#[derive(Debug, Clone, Copy)]
++struct Entry {
++    verdict: HostVerdict,
++    fetched: Instant,
++}
++
++/// The verdicts one call read. A host with no verdict is one org-core could not answer for, and it is refused.
++#[derive(Debug, Default)]
++pub struct SiteVerdicts {
++    by_host: HashMap<String, HostVerdict>,
++}
++
++impl SiteVerdicts {
++    /// The verdict org-core gave a canonical host, or `None` when it gave none.
++    #[must_use]
++    pub fn verdict(&self, host: &str) -> Option<HostVerdict> {
++        self.by_host.get(host).copied()
++    }
++
++    /// Whether the rules let a fetch of this canonical host through.
++    #[must_use]
++    pub fn allows_host(&self, host: &str) -> bool {
++        self.verdict(host).is_some_and(|verdict| verdict.allowed)
++    }
++
++    /// Whether the rules let a fetch of, or a hit on, this URL through. A URL with no host the rules can name is refused.
++    #[must_use]
++    pub fn allows_url(&self, url: &str) -> bool {
++        host_of_url(url).is_some_and(|host| self.allows_host(&host))
++    }
++}
++
++/// The resolve client: one HTTP client and the answers this process holds, keyed by organisation and canonical host. A
++/// refresh replaces an entry whole. The revision rides on each verdict rather than in the key, because a revision is known
++/// only from an answer, so it cannot be part of the key that finds one.
++#[derive(Debug)]
++pub struct SiteChecker {
++    http: reqwest::Client,
++    entries: DashMap<(String, String), Entry>,
++}
++
++impl Default for SiteChecker {
++    fn default() -> Self {
++        Self {
++            http: reqwest::Client::builder()
++                .timeout(RESOLVE_TIMEOUT)
++                .build()
++                .unwrap_or_else(|_| reqwest::Client::new()),
++            entries: DashMap::new(),
++        }
++    }
++}
++
++impl SiteChecker {
++    /// The verdicts for `hosts` as of now.
++    pub async fn verdicts(&self, owner: &SiteOwner, org_id: &str, hosts: &[String]) -> SiteVerdicts {
++        self.verdicts_at(owner, org_id, hosts, Instant::now()).await
++    }
++
++    /// The verdicts for `hosts` as of `now`: each host from the cache while its answer is fresh, and the rest asked of org-core
++    /// in batches of [`MAX_RESOLVE_HOSTS`]. A host org-core cannot answer for has no verdict. An unreadable answer is not
++    /// cached, so the next call asks again.
++    pub async fn verdicts_at(
++        &self,
++        owner: &SiteOwner,
++        org_id: &str,
++        hosts: &[String],
++        now: Instant,
++    ) -> SiteVerdicts {
++        let distinct: BTreeSet<&str> = hosts.iter().map(String::as_str).collect();
++        let mut by_host = HashMap::new();
++        let mut missing: Vec<&str> = Vec::new();
++        for host in distinct {
++            match self.fresh(org_id, host, now) {
++                Some(verdict) => {
++                    by_host.insert(host.to_owned(), verdict);
++                }
++                None => missing.push(host),
++            }
++        }
++        for batch in missing.chunks(MAX_RESOLVE_HOSTS) {
++            let batch: Vec<String> = batch.iter().map(|host| (*host).to_owned()).collect();
++            match self.resolve(owner, org_id, &batch).await {
++                Ok(resolution) => {
++                    for host in batch {
++                        let verdict = verdict_for(&host, &resolution);
++                        self.entries.insert(
++                            (org_id.to_owned(), host.clone()),
++                            Entry {
++                                verdict,
++                                fetched: now,
++                            },
++                        );
++                        by_host.insert(host, verdict);
++                    }
++                }
++                Err(error) => {
++                    tracing::warn!(%org_id, hosts = batch.len(), %error, "org web domain policy cannot be read");
++                }
++            }
++        }
++        SiteVerdicts { by_host }
++    }
++
++    /// The held verdict for a host while its answer is within [`POLICY_TTL`].
++    fn fresh(&self, org_id: &str, host: &str, now: Instant) -> Option<HostVerdict> {
++        let entry = self.entries.get(&(org_id.to_owned(), host.to_owned()))?;
++        (now.saturating_duration_since(entry.fetched) <= POLICY_TTL).then_some(entry.verdict)
++    }
++
++    /// One resolve call for at most [`MAX_RESOLVE_HOSTS`] canonical hosts. Any failure is an error, and the caller treats
++    /// every host it named as unreadable.
++    async fn resolve(
++        &self,
++        owner: &SiteOwner,
++        org_id: &str,
++        hosts: &[String],
++    ) -> Result<SiteResolution, String> {
++        if !routable_org_id(org_id) {
++            return Err("the organisation id does not name a resolve path".to_owned());
++        }
++        let base = owner.base_url.trim().trim_end_matches('/');
++        if base.is_empty() || owner.service_token.trim().is_empty() {
++            return Err("org-core is not configured for this service".to_owned());
++        }
++        let query: Vec<(&str, &str)> = hosts.iter().map(|host| ("host", host.as_str())).collect();
++        let response = self
++            .http
++            .get(format!("{base}/internal/orgs/{org_id}/browser-sites/resolve"))
++            .query(&query)
++            .header("x-service-id", owner.service_id.as_str())
++            .header("x-service-token", owner.service_token.as_str())
++            .send()
++            .await
++            .map_err(|error| format!("org-core resolve request failed: {error}"))?;
++        let status = response.status();
++        if !status.is_success() {
++            return Err(format!("org-core resolve returned HTTP {status}"));
++        }
++        let resolution: SiteResolution = response
++            .json()
++            .await
++            .map_err(|error| format!("org-core resolve answer is unreadable: {error}"))?;
++        // org-core scopes the read by the caller's organisation, so an answer for another one is a defect: refuse it rather than
++        // hold one organisation's rules under another's id.
++        if !resolution.organization_id.is_empty() && resolution.organization_id != org_id {
++            return Err(format!(
++                "org-core answered for organisation '{}', not '{org_id}'",
++                resolution.organization_id
++            ));
++        }
++        Ok(resolution)
++    }
++}
++
++/// Why one URL is refused.
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum SiteRefusal {
++    /// The URL names no host the rules can read, so they cannot be applied to it.
++    NoHost,
++    /// org-core's answer for the host could not be read.
++    Unreadable(String),
++    /// The org's rules do not allow the host.
++    Blocked(String),
++}
++
++impl SiteRefusal {
++    fn reason(&self) -> &'static str {
++        match self {
++            Self::NoHost => "no_host",
++            Self::Unreadable(_) => "unreadable",
++            Self::Blocked(_) => "blocked",
++        }
++    }
++
++    fn host(&self) -> Option<&str> {
++        match self {
++            Self::NoHost => None,
++            Self::Unreadable(host) | Self::Blocked(host) => Some(host.as_str()),
++        }
++    }
++
++    fn message(&self, tool: &str) -> String {
++        match self {
++            Self::NoHost => format!(
++                "{}: '{tool}' cannot be checked against the organisation's site policy, so it is not run",
++                SITE_BLOCKED_CODE
++            ),
++            Self::Unreadable(host) => format!(
++                "{}: the organisation's site policy for '{host}' cannot be read right now, so '{tool}' is not run",
++                SITE_BLOCKED_CODE
++            ),
++            Self::Blocked(host) => format!(
++                "{}: the organisation does not allow web access to '{host}', so '{tool}' is not run",
++                SITE_BLOCKED_CODE
++            ),
++        }
++    }
++}
++
++/// The first refusal the rules give one URL, or `None` when they let it through.
++fn refusal_for(url: &str, verdicts: &SiteVerdicts) -> Option<SiteRefusal> {
++    let Some(host) = host_of_url(url) else {
++        return Some(SiteRefusal::NoHost);
++    };
++    match verdicts.verdict(&host) {
++        Some(verdict) if verdict.allowed => None,
++        Some(_) => Some(SiteRefusal::Blocked(host)),
++        None => Some(SiteRefusal::Unreadable(host)),
++    }
++}
++
++/// The refusal a web call meets under the switch, when one of its URLs is one the org's rules stop. `None` means the call may
++/// proceed. Under `off` nothing is read. Under `shadow` the refusal is logged and `None` is returned. Under `enforce` the
++/// refusal's typed message is returned for the model.
++pub async fn fetch_refusal(
++    mode: WebDomainPolicyMode,
++    checker: &SiteChecker,
++    owner: &SiteOwner,
++    org_id: &str,
++    urls: &[&str],
++    tool: &str,
++) -> Option<String> {
++    if mode == WebDomainPolicyMode::Off {
++        return None;
++    }
++    let hosts: Vec<String> = urls.iter().filter_map(|url| host_of_url(url)).collect();
++    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
++    let refusal = urls.iter().find_map(|url| refusal_for(url, &verdicts))?;
++    tracing::info!(
++        %org_id,
++        %tool,
++        reason = refusal.reason(),
++        host = refusal.host().unwrap_or(""),
++        enforced = mode == WebDomainPolicyMode::Enforce,
++        "org web domain policy refused a web call"
++    );
++    match mode {
++        WebDomainPolicyMode::Enforce => Some(refusal.message(tool)),
++        WebDomainPolicyMode::Off | WebDomainPolicyMode::Shadow => None,
++    }
++}
++
++fn hit_url(hit: &Value) -> Option<&str> {
++    hit.get("url").and_then(Value::as_str)
++}
++
++/// Drops from a search's result list every hit on a host the org's rules do not allow, and returns how many it dropped. Under
++/// `shadow` it counts them and drops none. Under `off` nothing is read. A hit with no host the rules can name counts as refused.
++pub async fn drop_denied_results(
++    mode: WebDomainPolicyMode,
++    checker: &SiteChecker,
++    owner: &SiteOwner,
++    org_id: &str,
++    results: &mut Vec<Value>,
++) -> usize {
++    if mode == WebDomainPolicyMode::Off {
++        return 0;
++    }
++    let hosts: Vec<String> = results
++        .iter()
++        .filter_map(hit_url)
++        .filter_map(host_of_url)
++        .collect();
++    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
++    let allowed = |hit: &Value| hit_url(hit).is_some_and(|url| verdicts.allows_url(url));
++    let enforced = mode == WebDomainPolicyMode::Enforce;
++    let refused = results.iter().filter(|hit| !allowed(*hit)).count();
++    if enforced {
++        results.retain(|hit| allowed(hit));
++    }
++    if refused > 0 {
++        tracing::info!(
++            %org_id,
++            refused,
++            enforced,
++            "org web domain policy: search hits on hosts the organisation does not allow"
++        );
++    }
++    refused
++}
++
++/// What one web call checks against the org's rules: the switch, the owner and the shared checker. Production builds it from
++/// the environment; a test builds one with the switch and owner it needs.
++#[derive(Clone)]
++pub struct SitePolicy {
++    mode: WebDomainPolicyMode,
++    owner: SiteOwner,
++    checker: Arc<SiteChecker>,
++}
++
++impl SitePolicy {
++    /// The policy this process applies, with the owner read from its environment now.
++    #[must_use]
++    pub fn from_env() -> Self {
++        Self {
++            mode: policy_mode(),
++            owner: SiteOwner::from_env(),
++            checker: shared_checker(),
++        }
++    }
++
++    /// A policy that checks nothing: the switch is off, so nothing is read and nothing changes.
++    #[cfg(test)]
++    #[must_use]
++    pub fn disabled() -> Self {
++        Self {
++            mode: WebDomainPolicyMode::Off,
++            owner: SiteOwner::new("", "", ""),
++            checker: shared_checker(),
++        }
++    }
++
++    /// A policy with the given switch, owner and checker.
++    #[cfg(test)]
++    #[must_use]
++    pub fn new(mode: WebDomainPolicyMode, owner: SiteOwner, checker: Arc<SiteChecker>) -> Self {
++        Self {
++            mode,
++            owner,
++            checker,
++        }
++    }
++
++    /// The refusal a web call over these URLs meets under the switch, or `None` when it may proceed.
++    pub async fn fetch_refusal(&self, org_id: &str, urls: &[&str], tool: &str) -> Option<String> {
++        fetch_refusal(self.mode, &self.checker, &self.owner, org_id, urls, tool).await
++    }
++
++    /// Drops the search hits on refused hosts under the switch, and returns how many were refused.
++    pub async fn drop_denied_results(&self, org_id: &str, results: &mut Vec<Value>) -> usize {
++        drop_denied_results(self.mode, &self.checker, &self.owner, org_id, results).await
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    const ORG: &str = "org-a";
++    const RESOLVE_PATH: &str = "/internal/orgs/org-a/browser-sites/resolve";
++
++    fn owner(base: &str) -> SiteOwner {
++        SiteOwner::new(base, "execution-core", "test-token")
++    }
++
++    async fn answer(server: &MockServer, status: u16, body: Value) {
++        Mock::given(method("GET"))
++            .and(path(RESOLVE_PATH))
++            .and(header("x-service-id", "execution-core"))
++            .and(header("x-service-token", "test-token"))
++            .respond_with(ResponseTemplate::new(status).set_body_json(body))
++            .mount(server)
++            .await;
++    }
++
++    async fn requests(server: &MockServer) -> usize {
++        server.received_requests().await.unwrap_or_default().len()
++    }
++
++    #[tokio::test]
++    async fn off_reads_nothing_and_refuses_nothing() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let policy = SitePolicy::new(
++            WebDomainPolicyMode::Off,
++            owner(&base),
++            Arc::new(SiteChecker::default()),
++        );
++        assert_eq!(
++            policy
++                .fetch_refusal(ORG, &["https://example.org/a"], "web_fetch")
++                .await,
++            None
++        );
++        assert_eq!(requests(&server).await, 0, "off makes no call to org-core");
++    }
++
++    #[tokio::test]
++    async fn enforce_refuses_a_blocked_host_by_name_and_lets_an_allowed_host_through() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 4, "decisions": [
++                {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
++                {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let policy = SitePolicy::new(
++            WebDomainPolicyMode::Enforce,
++            owner(&base),
++            Arc::new(SiteChecker::default()),
++        );
++        let refusal = policy
++            .fetch_refusal(ORG, &["https://example.org/page"], "web_fetch")
++            .await
++            .expect("a blocked host is refused");
++        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
++        assert!(refusal.contains("'example.org'"), "{refusal}");
++        assert!(refusal.contains("'web_fetch'"), "{refusal}");
++        assert_eq!(
++            policy
++                .fetch_refusal(ORG, &["https://example.com/"], "web_fetch")
++                .await,
++            None
++        );
++    }
++
++    #[tokio::test]
++    async fn enforce_refuses_a_host_org_core_cannot_answer_for_and_shadow_only_logs_it() {
++        let server = MockServer::start().await;
++        answer(&server, 503, json!({"error": "down"})).await;
++        let base = server.uri();
++        let checker = Arc::new(SiteChecker::default());
++        let enforce = SitePolicy::new(WebDomainPolicyMode::Enforce, owner(&base), Arc::clone(&checker));
++        let refusal = enforce
++            .fetch_refusal(ORG, &["https://example.org/"], "web_fetch")
++            .await
++            .expect("an unreadable host is refused");
++        assert!(refusal.contains("cannot be read"), "{refusal}");
++        let shadow = SitePolicy::new(WebDomainPolicyMode::Shadow, owner(&base), checker);
++        assert_eq!(
++            shadow
++                .fetch_refusal(ORG, &["https://example.org/"], "web_fetch")
++                .await,
++            None,
++            "shadow refuses nothing"
++        );
++    }
++
++    #[tokio::test]
++    async fn a_url_with_no_host_is_refused_under_enforce_without_a_request() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let policy = SitePolicy::new(
++            WebDomainPolicyMode::Enforce,
++            owner(&base),
++            Arc::new(SiteChecker::default()),
++        );
++        let refusal = policy
++            .fetch_refusal(ORG, &["https://user@example.org/"], "web_fetch")
++            .await;
++        assert!(refusal.is_some_and(|message| message.contains("cannot be checked")));
++        assert_eq!(requests(&server).await, 0);
++    }
++
++    #[tokio::test]
++    async fn an_unset_token_leaves_every_host_unreadable_under_enforce() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let policy = SitePolicy::new(
++            WebDomainPolicyMode::Enforce,
++            SiteOwner::new(&base, "execution-core", ""),
++            Arc::new(SiteChecker::default()),
++        );
++        let refusal = policy
++            .fetch_refusal(ORG, &["https://example.org/"], "web_fetch")
++            .await;
++        assert!(refusal.is_some_and(|message| message.contains("cannot be read")));
++        assert_eq!(requests(&server).await, 0, "no token, no call");
++    }
++
++    #[tokio::test]
++    async fn an_answer_is_served_from_the_cache_for_thirty_seconds() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 2, "decisions": [
++                {"host": "example.org", "effective": "ask", "cap": "act", "source": "default"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let checker = SiteChecker::default();
++        let hosts = vec!["example.org".to_owned()];
++        let t0 = Instant::now();
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0)
++            .await
++            .allows_host("example.org"));
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0 + Duration::from_secs(29))
++            .await
++            .allows_host("example.org"));
++        assert_eq!(requests(&server).await, 1, "the second read is served from the cache");
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0 + Duration::from_secs(31))
++            .await
++            .allows_host("example.org"));
++        assert_eq!(requests(&server).await, 2, "a stale answer is asked again");
++    }
++
++    #[tokio::test]
++    async fn resolve_names_at_most_thirty_two_hosts_per_call() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"organization_id": ORG, "revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let hosts: Vec<String> = (0..33).map(|n| format!("site{n:02}.example.com")).collect();
++        SiteChecker::default()
++            .verdicts_at(&owner(&base), ORG, &hosts, Instant::now())
++            .await;
++        let received = server.received_requests().await.unwrap_or_default();
++        assert_eq!(received.len(), 2, "33 hosts take two calls");
++        let named_in_first = received[0]
++            .url
++            .query_pairs()
++            .filter(|(key, _)| *key == "host")
++            .count();
++        assert_eq!(named_in_first, MAX_RESOLVE_HOSTS);
++    }
++
++    #[tokio::test]
++    async fn search_results_on_refused_hosts_are_dropped_under_enforce_only() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 5, "decisions": [
++                {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
++                {"host": "example.com", "effective": "read", "cap": "read", "source": "org_cap"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let results = || {
++            vec![
++                json!({"url": "https://example.org/a", "title": "A"}),
++                json!({"url": "https://example.com/b", "title": "B"}),
++                json!({"url": "ftp://example.com/c", "title": "C"}),
++            ]
++        };
++        let checker = Arc::new(SiteChecker::default());
++
++        let shadow = SitePolicy::new(WebDomainPolicyMode::Shadow, owner(&base), Arc::clone(&checker));
++        let mut kept = results();
++        assert_eq!(shadow.drop_denied_results(ORG, &mut kept).await, 2);
++        assert_eq!(kept.len(), 3, "shadow drops nothing");
++
++        let enforce = SitePolicy::new(WebDomainPolicyMode::Enforce, owner(&base), checker);
++        let mut enforced = results();
++        assert_eq!(enforce.drop_denied_results(ORG, &mut enforced).await, 2);
++        let urls: Vec<&str> = enforced.iter().filter_map(hit_url).collect();
++        assert_eq!(urls, ["https://example.com/b"], "only the allowed host's hit remains");
++    }
++
++    #[tokio::test]
++    async fn off_drops_no_result_and_reads_nothing() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let policy = SitePolicy::new(
++            WebDomainPolicyMode::Off,
++            owner(&base),
++            Arc::new(SiteChecker::default()),
++        );
++        let mut results = vec![json!({"url": "https://example.org/a", "title": "A"})];
++        assert_eq!(policy.drop_denied_results(ORG, &mut results).await, 0);
++        assert_eq!(results.len(), 1);
++        assert_eq!(requests(&server).await, 0);
++    }
++
++    #[test]
++    fn the_switch_off_policy_checks_nothing() {
++        let policy = SitePolicy::disabled();
++        assert_eq!(policy.mode, WebDomainPolicyMode::Off);
++    }
++}
+diff --git a/apps/Model Plane/rust/services/execution-core/src/web_tools.rs b/apps/Model Plane/rust/services/execution-core/src/web_tools.rs
+index 31486a16f..f9c2314b6 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/web_tools.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/web_tools.rs	
+@@ -27,6 +27,7 @@ use serde_json::{json, Value};
+ use mp_contracts::model_plane::v1 as pb;
+ 
+ use crate::quarry_auth::TokenSource;
++use crate::site_policy_client::SitePolicy;
+ 
+ const MAX_SEARCH_RESULTS: usize = 8;
+ // Second-stage snippet cap. The SERP providers already hand back ~150-char
+@@ -47,6 +48,8 @@ pub const READ_PAGE_TOOL: &str = "read_page";
+ pub const FIND_IN_PAGE_TOOL: &str = "find_in_page";
+ const SEARCH_SCOPES: &[&str] = &["search:read"];
+ const EXTRACT_SCOPES: &[&str] = &["extract:read"];
++/// The tool name a page fetch is refused under: the org's domain rules name it in the refusal (EP-9 W3).
++const WEB_FETCH_TOOL: &str = "web_fetch";
+ /// E3.7.10: the scopes of Quarry's site map and its durable crawl/batch jobs. The
+ /// service principal's grant of these is a Control Plane registry row (MP-ASKS).
+ const MAP_SCOPES: &[&str] = &["map:read"];
+@@ -61,6 +64,8 @@ pub struct WebToolsClient {
+     base_url: String,
+     auth: TokenSource,
+     http: reqwest::Client,
++    /// The org's domain rules, checked before a host is reached (EP-9 W3). Off reads nothing and changes nothing.
++    site: SitePolicy,
+ }
+ 
+ impl WebToolsClient {
+@@ -85,6 +90,7 @@ impl WebToolsClient {
+             base_url: base_url.trim_end_matches('/').to_owned(),
+             auth,
+             http,
++            site: SitePolicy::from_env(),
+         }))
+     }
+ 
+@@ -150,16 +156,22 @@ impl WebToolsClient {
+         // so this IS the edge's contract. The `data: {...}` envelope some
+         // callers expect is added by the BFF in front of the chat path, not by
+         // the edge — do not "harmonise" this reader toward `data.results`.
+-        let results = value
++        let mut results = value
+             .get("results")
+             .and_then(Value::as_array)
+             .cloned()
+             .unwrap_or_default();
++        // The org's domain rules drop a hit on a host the org does not allow, before any hit is shown (EP-9 W3).
++        self.site.drop_denied_results(org_id, &mut results).await;
+         Ok(format_search_results(query, &value, &results))
+     }
+ 
+     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
+     pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
++        // The org's domain rules come before the call: a host the org does not allow is refused by name, and nothing is read.
++        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], WEB_FETCH_TOOL).await {
++            return Err(refusal);
++        }
+         let body = extract_body(url, zdr);
+         let value = self
+             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
+@@ -180,6 +192,9 @@ impl WebToolsClient {
+         include_subdomains: bool,
+         org_id: &str,
+     ) -> Result<String, String> {
++        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], MAP_TOOL).await {
++            return Err(refusal);
++        }
+         let body = map_body(url, search, limit, include_subdomains);
+         let value = self.post("/v1/map", &body, org_id, MAP_SCOPES).await?;
+         Ok(format_map_result(url, &value))
+@@ -195,6 +210,9 @@ impl WebToolsClient {
+         ingest: bool,
+         org_id: &str,
+     ) -> Result<String, String> {
++        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_SITE_TOOL).await {
++            return Err(refusal);
++        }
+         let body = crawl_body(url, max_pages, max_depth, ingest);
+         let value = self.post("/v1/crawl", &body, org_id, CRAWL_SCOPES).await?;
+         Ok(format_handoff("crawl", &value))
+@@ -207,6 +225,10 @@ impl WebToolsClient {
+         ingest: bool,
+         org_id: &str,
+     ) -> Result<String, String> {
++        let every_url: Vec<&str> = urls.iter().map(String::as_str).collect();
++        if let Some(refusal) = self.site.fetch_refusal(org_id, &every_url, BATCH_TOOL).await {
++            return Err(refusal);
++        }
+         let body = batch_body(urls, ingest);
+         let value = self.post("/v1/batch", &body, org_id, CRAWL_SCOPES).await?;
+         Ok(format_handoff("batch", &value))
+@@ -292,6 +314,7 @@ impl WebToolsClient {
+                 .timeout(Duration::from_secs(5))
+                 .build()
+                 .expect("test HTTP client"),
++            site: SitePolicy::disabled(),
+         }
+     }
+ }
+@@ -1215,3 +1238,141 @@ mod reader_tests {
+         assert_eq!(whole.chars().count(), MAX_FETCH_CHARS + 10);
+     }
+ }
++
++// ---- EP-9 W3: the org's domain rules before a web call (see `site_policy_client`) ---------------------------
++
++#[cfg(test)]
++mod site_policy_tests {
++    use std::sync::Arc;
++
++    use mp_contracts::site_policy::WebDomainPolicyMode;
++    use serde_json::{json, Value};
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    use super::tests::{mint_mock, minted, quarry_client};
++    use crate::site_policy_client::{SiteChecker, SiteOwner, SitePolicy};
++
++    const ORG: &str = "org-a";
++
++    /// org-core's resolve route for `ORG`, answering with `decisions`.
++    async fn org_core(decisions: Value) -> MockServer {
++        let org = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path("/internal/orgs/org-a/browser-sites/resolve"))
++            .and(header("x-service-id", "execution-core"))
++            .and(header("x-service-token", "org-core-test-token"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "organization_id": ORG,
++                "revision": 3,
++                "decisions": decisions,
++            })))
++            .mount(&org)
++            .await;
++        org
++    }
++
++    /// The policy in enforcement against `org`, with a fresh cache.
++    fn enforcing(org: &MockServer) -> SitePolicy {
++        SitePolicy::new(
++            WebDomainPolicyMode::Enforce,
++            SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
++            Arc::new(SiteChecker::default()),
++        )
++    }
++
++    fn blocked_and_open() -> Value {
++        json!([
++            {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
++            {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
++        ])
++    }
++
++    #[tokio::test]
++    async fn a_fetch_of_a_blocked_host_is_refused_before_quarry_is_called() {
++        let org = org_core(blocked_and_open()).await;
++        let edge = MockServer::start().await;
++        // The extract route must never be reached: the refusal comes before any call to the edge.
++        Mock::given(method("POST"))
++            .and(path("/v1/extract"))
++            .respond_with(ResponseTemplate::new(200))
++            .expect(0)
++            .mount(&edge)
++            .await;
++        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
++        client.site = enforcing(&org);
++
++        let refusal = client
++            .fetch("https://example.org/page", ORG, false)
++            .await
++            .expect_err("a blocked host is refused");
++        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
++        assert!(refusal.contains("'example.org'"), "{refusal}");
++        assert!(refusal.contains("'web_fetch'"), "{refusal}");
++    }
++
++    #[tokio::test]
++    async fn a_search_shows_no_hit_on_a_host_the_org_does_not_allow() {
++        let org = org_core(blocked_and_open()).await;
++        let edge = MockServer::start().await;
++        Mock::given(method("POST"))
++            .and(path("/v1/search"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "query": "norge",
++                "provider": "brave",
++                "results": [
++                    {"url": "https://example.org/a", "title": "Blocked hit", "snippet": "s", "rank": 1},
++                    {"url": "https://example.com/b", "title": "Open hit", "snippet": "t", "rank": 2}
++                ],
++                "count": 2
++            })))
++            .mount(&edge)
++            .await;
++        let auth = MockServer::start().await;
++        mint_mock(ORG, "search:read", minted("search-token"))
++            .mount(&auth)
++            .await;
++        let mut client = quarry_client(&edge.uri(), &auth.uri());
++        client.site = enforcing(&org);
++
++        let shown = client
++            .search("norge", 5, ORG, false)
++            .await
++            .expect("the search answers");
++        assert!(shown.contains("https://example.com/b"), "{shown}");
++        assert!(!shown.contains("example.org"), "{shown}");
++    }
++
++    #[tokio::test]
++    async fn a_map_or_a_crawl_of_a_blocked_start_host_is_refused_before_quarry_is_called() {
++        let org = org_core(blocked_and_open()).await;
++        let edge = MockServer::start().await;
++        for route in ["/v1/map", "/v1/crawl", "/v1/batch"] {
++            Mock::given(method("POST"))
++                .and(path(route))
++                .respond_with(ResponseTemplate::new(200))
++                .expect(0)
++                .mount(&edge)
++                .await;
++        }
++        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
++        client.site = enforcing(&org);
++
++        assert!(client
++            .map_site("https://example.org/", None, 10, false, ORG)
++            .await
++            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
++        assert!(client
++            .start_crawl("https://example.org/", 10, None, false, ORG)
++            .await
++            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
++        assert!(client
++            .start_batch(
++                &["https://example.com/a".to_owned(), "https://example.org/b".to_owned()],
++                false,
++                ORG,
++            )
++            .await
++            .is_err_and(|refusal| refusal.contains("'example.org'")));
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/site_policy_client.rs b/apps/Model Plane/rust/services/model-gateway/src/site_policy_client.rs
+new file mode 100644
+index 000000000..663d21a41
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/site_policy_client.rs	
+@@ -0,0 +1,684 @@
++//! The org's domain rules as the gateway's web tools enforce them (Wave 3 EP-9 W3).
++//!
++//! org-core owns the rules (DEC-19). Before a web tool reaches a host, this module asks org-core whether the rules
++//! allow that host, and keeps each answer for [`POLICY_TTL`], so a turn that reads one site several times asks once.
++//! The pure rules (the canonical host, the reader of a URL, the verdict from an answer, the switch) live in
++//! `mp_contracts::site_policy`. This file holds the HTTP call, the cache and the two entry points the tool loop uses:
++//! a fetch and a search.
++//!
++//! `WEB_DOMAIN_POLICY_MODE` decides how far this binds. Under `off` nothing is read and the request is exactly what it
++//! was. Under `shadow` the same refusals are logged and nothing is refused. Under `enforce` a host whose answer cannot
++//! be read is refused, and so is a URL with no host the rules can name, so an outage of org-core narrows the web tools
++//! and never widens them. A check sends org-core canonical hosts only: no path, no query and no content.
++
++use std::collections::{BTreeSet, HashMap};
++use std::sync::OnceLock;
++use std::time::{Duration, Instant};
++
++use dashmap::DashMap;
++use mp_contracts::site_policy::{
++    host_of_url, routable_org_id, verdict_for, HostVerdict, SiteResolution, WebDomainPolicyMode,
++    MAX_RESOLVE_HOSTS, WEB_DOMAIN_POLICY_MODE_ENV,
++};
++
++use crate::quarry::SearchReply;
++use crate::state::AppState;
++
++/// How long one host's answer is served before org-core is asked again.
++pub const POLICY_TTL: Duration = Duration::from_secs(30);
++
++/// The longest a resolve call may take. An answer that comes later is an unreadable one.
++const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
++
++/// The code of a web call the org's domain rules stop. It is a typed tool error: the model reads the code and the
++/// host, and the words after it are copy.
++pub const SITE_BLOCKED_CODE: &str = "org_site_blocked";
++
++/// The process's switch, read once so it cannot change under a request.
++#[must_use]
++pub fn policy_mode() -> WebDomainPolicyMode {
++    static MODE: OnceLock<WebDomainPolicyMode> = OnceLock::new();
++    *MODE.get_or_init(|| {
++        WebDomainPolicyMode::from_env_value(std::env::var(WEB_DOMAIN_POLICY_MODE_ENV).ok().as_deref())
++    })
++}
++
++/// The process's checker, so every turn shares one cache.
++#[must_use]
++pub fn shared_checker() -> &'static SiteChecker {
++    static CHECKER: OnceLock<SiteChecker> = OnceLock::new();
++    CHECKER.get_or_init(SiteChecker::default)
++}
++
++/// Where org-core is, and the service identity the gateway presents to it (`x-service-id`, `x-service-token`).
++#[derive(Debug, Clone, Copy)]
++pub struct SiteOwner<'a> {
++    /// org-core's base address.
++    pub base_url: &'a str,
++    /// The gateway's service identity in org-core.
++    pub service_id: &'a str,
++    /// The matching secret. Empty means org-core is not configured, so every host is unreadable.
++    pub service_token: &'a str,
++}
++
++impl<'a> SiteOwner<'a> {
++    /// The owner the gateway's own configuration names.
++    #[must_use]
++    pub fn of(state: &'a AppState) -> Self {
++        Self {
++            base_url: &state.org_core_base_url,
++            service_id: &state.org_core_service_id,
++            service_token: &state.org_core_service_token,
++        }
++    }
++}
++
++/// One host's answer and when org-core gave it.
++#[derive(Debug, Clone, Copy)]
++struct Entry {
++    verdict: HostVerdict,
++    fetched: Instant,
++}
++
++/// The verdicts one call read. A host with no verdict is one org-core could not answer for, and it is refused.
++#[derive(Debug, Default)]
++pub struct SiteVerdicts {
++    by_host: HashMap<String, HostVerdict>,
++}
++
++impl SiteVerdicts {
++    /// The verdict org-core gave a canonical host, or `None` when it gave none.
++    #[must_use]
++    pub fn verdict(&self, host: &str) -> Option<HostVerdict> {
++        self.by_host.get(host).copied()
++    }
++
++    /// Whether the rules let a fetch of this canonical host through.
++    #[must_use]
++    pub fn allows_host(&self, host: &str) -> bool {
++        self.verdict(host).is_some_and(|verdict| verdict.allowed)
++    }
++
++    /// Whether the rules let a fetch of, or a hit on, this URL through. A URL with no host the rules can name is refused.
++    #[must_use]
++    pub fn allows_url(&self, url: &str) -> bool {
++        host_of_url(url).is_some_and(|host| self.allows_host(&host))
++    }
++}
++
++/// The resolve client: one HTTP client and the answers this process holds, keyed by organisation and canonical host.
++/// A refresh replaces an entry whole. The revision rides on each verdict rather than in the key, because a revision
++/// is known only from an answer, so it cannot be part of the key that finds one.
++#[derive(Debug)]
++pub struct SiteChecker {
++    http: reqwest::Client,
++    entries: DashMap<(String, String), Entry>,
++}
++
++impl Default for SiteChecker {
++    fn default() -> Self {
++        Self {
++            http: reqwest::Client::builder()
++                .timeout(RESOLVE_TIMEOUT)
++                .build()
++                .unwrap_or_else(|_| reqwest::Client::new()),
++            entries: DashMap::new(),
++        }
++    }
++}
++
++impl SiteChecker {
++    /// The verdicts for `hosts` as of now.
++    pub async fn verdicts(&self, owner: &SiteOwner<'_>, org_id: &str, hosts: &[String]) -> SiteVerdicts {
++        self.verdicts_at(owner, org_id, hosts, Instant::now()).await
++    }
++
++    /// The verdicts for `hosts` as of `now`: each host from the cache while its answer is fresh, and the rest asked of
++    /// org-core in batches of [`MAX_RESOLVE_HOSTS`]. A host org-core cannot answer for has no verdict. An unreadable
++    /// answer is not cached, so the next call asks again.
++    pub async fn verdicts_at(
++        &self,
++        owner: &SiteOwner<'_>,
++        org_id: &str,
++        hosts: &[String],
++        now: Instant,
++    ) -> SiteVerdicts {
++        let distinct: BTreeSet<&str> = hosts.iter().map(String::as_str).collect();
++        let mut by_host = HashMap::new();
++        let mut missing: Vec<&str> = Vec::new();
++        for host in distinct {
++            match self.fresh(org_id, host, now) {
++                Some(verdict) => {
++                    by_host.insert(host.to_owned(), verdict);
++                }
++                None => missing.push(host),
++            }
++        }
++        for batch in missing.chunks(MAX_RESOLVE_HOSTS) {
++            let batch: Vec<String> = batch.iter().map(|host| (*host).to_owned()).collect();
++            match self.resolve(owner, org_id, &batch).await {
++                Ok(resolution) => {
++                    for host in batch {
++                        let verdict = verdict_for(&host, &resolution);
++                        self.entries.insert(
++                            (org_id.to_owned(), host.clone()),
++                            Entry {
++                                verdict,
++                                fetched: now,
++                            },
++                        );
++                        by_host.insert(host, verdict);
++                    }
++                }
++                Err(error) => {
++                    tracing::warn!(%org_id, hosts = batch.len(), %error, "org web domain policy cannot be read");
++                }
++            }
++        }
++        SiteVerdicts { by_host }
++    }
++
++    /// The held verdict for a host while its answer is within [`POLICY_TTL`].
++    fn fresh(&self, org_id: &str, host: &str, now: Instant) -> Option<HostVerdict> {
++        let entry = self.entries.get(&(org_id.to_owned(), host.to_owned()))?;
++        (now.saturating_duration_since(entry.fetched) <= POLICY_TTL).then_some(entry.verdict)
++    }
++
++    /// One resolve call for at most [`MAX_RESOLVE_HOSTS`] canonical hosts. Any failure is an error, and the caller
++    /// treats every host it named as unreadable.
++    async fn resolve(
++        &self,
++        owner: &SiteOwner<'_>,
++        org_id: &str,
++        hosts: &[String],
++    ) -> Result<SiteResolution, String> {
++        if !routable_org_id(org_id) {
++            return Err("the organisation id does not name a resolve path".to_owned());
++        }
++        let base = owner.base_url.trim().trim_end_matches('/');
++        if base.is_empty() || owner.service_token.trim().is_empty() {
++            return Err("org-core is not configured for this service".to_owned());
++        }
++        let query: Vec<(&str, &str)> = hosts.iter().map(|host| ("host", host.as_str())).collect();
++        let response = self
++            .http
++            .get(format!("{base}/internal/orgs/{org_id}/browser-sites/resolve"))
++            .query(&query)
++            .header("x-service-id", owner.service_id)
++            .header("x-service-token", owner.service_token)
++            .send()
++            .await
++            .map_err(|error| format!("org-core resolve request failed: {error}"))?;
++        let status = response.status();
++        if !status.is_success() {
++            return Err(format!("org-core resolve returned HTTP {status}"));
++        }
++        let resolution: SiteResolution = response
++            .json()
++            .await
++            .map_err(|error| format!("org-core resolve answer is unreadable: {error}"))?;
++        // org-core scopes the read by the caller's organisation, so an answer for another one is a defect: refuse it
++        // rather than hold one organisation's rules under another's id.
++        if !resolution.organization_id.is_empty() && resolution.organization_id != org_id {
++            return Err(format!(
++                "org-core answered for organisation '{}', not '{org_id}'",
++                resolution.organization_id
++            ));
++        }
++        Ok(resolution)
++    }
++}
++
++/// Why one URL is refused.
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum SiteRefusal {
++    /// The URL names no host the rules can read, so they cannot be applied to it.
++    NoHost,
++    /// org-core's answer for the host could not be read.
++    Unreadable(String),
++    /// The org's rules do not allow the host.
++    Blocked(String),
++}
++
++impl SiteRefusal {
++    fn reason(&self) -> &'static str {
++        match self {
++            Self::NoHost => "no_host",
++            Self::Unreadable(_) => "unreadable",
++            Self::Blocked(_) => "blocked",
++        }
++    }
++
++    fn host(&self) -> Option<&str> {
++        match self {
++            Self::NoHost => None,
++            Self::Unreadable(host) | Self::Blocked(host) => Some(host.as_str()),
++        }
++    }
++
++    fn message(&self, tool: &str) -> String {
++        match self {
++            Self::NoHost => format!(
++                "{}: '{tool}' cannot be checked against the organisation's site policy, so it is not run",
++                SITE_BLOCKED_CODE
++            ),
++            Self::Unreadable(host) => format!(
++                "{}: the organisation's site policy for '{host}' cannot be read right now, so '{tool}' is not run",
++                SITE_BLOCKED_CODE
++            ),
++            Self::Blocked(host) => format!(
++                "{}: the organisation does not allow web access to '{host}', so '{tool}' is not run",
++                SITE_BLOCKED_CODE
++            ),
++        }
++    }
++}
++
++/// The first refusal the rules give one URL, or `None` when they let it through.
++fn refusal_for(url: &str, verdicts: &SiteVerdicts) -> Option<SiteRefusal> {
++    let Some(host) = host_of_url(url) else {
++        return Some(SiteRefusal::NoHost);
++    };
++    match verdicts.verdict(&host) {
++        Some(verdict) if verdict.allowed => None,
++        Some(_) => Some(SiteRefusal::Blocked(host)),
++        None => Some(SiteRefusal::Unreadable(host)),
++    }
++}
++
++/// The refusal a web call meets under the switch, when one of its URLs is one the org's rules stop. `None` means the
++/// call may proceed. Under `off` nothing is read. Under `shadow` the refusal is logged and `None` is returned. Under
++/// `enforce` the refusal's typed message is returned for the model.
++pub async fn fetch_refusal(
++    mode: WebDomainPolicyMode,
++    checker: &SiteChecker,
++    owner: &SiteOwner<'_>,
++    org_id: &str,
++    urls: &[&str],
++    tool: &str,
++) -> Option<String> {
++    if mode == WebDomainPolicyMode::Off {
++        return None;
++    }
++    let hosts: Vec<String> = urls.iter().filter_map(|url| host_of_url(url)).collect();
++    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
++    let refusal = urls.iter().find_map(|url| refusal_for(url, &verdicts))?;
++    tracing::info!(
++        %org_id,
++        %tool,
++        reason = refusal.reason(),
++        host = refusal.host().unwrap_or(""),
++        enforced = mode == WebDomainPolicyMode::Enforce,
++        "org web domain policy refused a web call"
++    );
++    match mode {
++        WebDomainPolicyMode::Enforce => Some(refusal.message(tool)),
++        WebDomainPolicyMode::Off | WebDomainPolicyMode::Shadow => None,
++    }
++}
++
++/// Drops from the search replies every hit on a host the org's rules do not allow, and returns how many it dropped.
++/// Under `shadow` it counts them and drops none. Under `off` nothing is read. A hit with no host the rules can name
++/// counts as refused, so an unreadable hit does not reach the model under enforcement.
++pub async fn drop_denied_replies(
++    mode: WebDomainPolicyMode,
++    checker: &SiteChecker,
++    owner: &SiteOwner<'_>,
++    org_id: &str,
++    replies: &mut [SearchReply],
++) -> usize {
++    if mode == WebDomainPolicyMode::Off {
++        return 0;
++    }
++    let hosts: Vec<String> = replies
++        .iter()
++        .flat_map(|reply| reply.results.iter())
++        .filter_map(|hit| host_of_url(&hit.url))
++        .collect();
++    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
++    let enforced = mode == WebDomainPolicyMode::Enforce;
++    let mut refused = 0;
++    for reply in replies.iter_mut() {
++        if enforced {
++            let before = reply.results.len();
++            reply.results.retain(|hit| verdicts.allows_url(&hit.url));
++            refused += before - reply.results.len();
++        } else {
++            refused += reply
++                .results
++                .iter()
++                .filter(|hit| !verdicts.allows_url(&hit.url))
++                .count();
++        }
++    }
++    if refused > 0 {
++        tracing::info!(
++            %org_id,
++            refused,
++            enforced,
++            "org web domain policy: search hits on hosts the organisation does not allow"
++        );
++    }
++    refused
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::quarry::SearchResult;
++    use serde_json::json;
++    use wiremock::matchers::{header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    const ORG: &str = "org-a";
++    const RESOLVE_PATH: &str = "/internal/orgs/org-a/browser-sites/resolve";
++
++    fn owner(base: &str) -> SiteOwner<'_> {
++        SiteOwner {
++            base_url: base,
++            service_id: "model-gateway",
++            service_token: "test-token",
++        }
++    }
++
++    async fn answer(server: &MockServer, status: u16, body: serde_json::Value) {
++        Mock::given(method("GET"))
++            .and(path(RESOLVE_PATH))
++            .and(header("x-service-id", "model-gateway"))
++            .and(header("x-service-token", "test-token"))
++            .respond_with(ResponseTemplate::new(status).set_body_json(body))
++            .mount(server)
++            .await;
++    }
++
++    async fn requests(server: &MockServer) -> usize {
++        server.received_requests().await.unwrap_or_default().len()
++    }
++
++    /// A search hit on `url`, for the filter tests.
++    fn hit(url: &str) -> SearchResult {
++        SearchResult {
++            url: url.to_owned(),
++            title: String::new(),
++            snippet: String::new(),
++            source: "brave".to_owned(),
++            score: 0.5,
++            relevance: None,
++            rank: 1,
++            highlights: Vec::new(),
++            engines: Vec::new(),
++            score_kind: None,
++            raw: serde_json::Value::Null,
++        }
++    }
++
++    #[tokio::test]
++    async fn off_reads_nothing_and_refuses_nothing() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Off,
++            &SiteChecker::default(),
++            &owner(&base),
++            ORG,
++            &["https://example.org/a"],
++            "fetch_url",
++        )
++        .await;
++        assert_eq!(refusal, None);
++        assert_eq!(requests(&server).await, 0, "off makes no call to org-core");
++    }
++
++    #[tokio::test]
++    async fn enforce_refuses_a_blocked_host_by_name_and_lets_an_allowed_host_through() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 4, "decisions": [
++                {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
++                {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let checker = SiteChecker::default();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Enforce,
++            &checker,
++            &owner(&base),
++            ORG,
++            &["https://example.org/page"],
++            "fetch_url",
++        )
++        .await
++        .expect("a blocked host is refused");
++        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
++        assert!(refusal.contains("'example.org'"), "{refusal}");
++        assert!(refusal.contains("'fetch_url'"), "{refusal}");
++        let allowed = fetch_refusal(
++            WebDomainPolicyMode::Enforce,
++            &checker,
++            &owner(&base),
++            ORG,
++            &["https://example.com/"],
++            "fetch_url",
++        )
++        .await;
++        assert_eq!(allowed, None);
++    }
++
++    #[tokio::test]
++    async fn enforce_refuses_a_host_org_core_cannot_answer_for_and_shadow_only_logs_it() {
++        let server = MockServer::start().await;
++        answer(&server, 503, json!({"error": "down"})).await;
++        let base = server.uri();
++        let checker = SiteChecker::default();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Enforce,
++            &checker,
++            &owner(&base),
++            ORG,
++            &["https://example.org/"],
++            "fetch_url",
++        )
++        .await
++        .expect("an unreadable host is refused");
++        assert!(refusal.contains("cannot be read"), "{refusal}");
++        let shadow = fetch_refusal(
++            WebDomainPolicyMode::Shadow,
++            &checker,
++            &owner(&base),
++            ORG,
++            &["https://example.org/"],
++            "fetch_url",
++        )
++        .await;
++        assert_eq!(shadow, None, "shadow refuses nothing");
++    }
++
++    #[tokio::test]
++    async fn shadow_lets_a_blocked_host_through_and_still_reads_the_rules() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 9, "decisions": [
++                {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Shadow,
++            &SiteChecker::default(),
++            &owner(&base),
++            ORG,
++            &["https://example.org/"],
++            "fetch_url",
++        )
++        .await;
++        assert_eq!(refusal, None);
++        assert_eq!(requests(&server).await, 1, "shadow reads the rules to log them");
++    }
++
++    #[tokio::test]
++    async fn a_url_with_no_host_is_refused_under_enforce_without_a_request() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Enforce,
++            &SiteChecker::default(),
++            &owner(&base),
++            ORG,
++            &["ftp://example.org/file"],
++            "fetch_url",
++        )
++        .await;
++        assert!(
++            refusal.is_some_and(|message| message.contains("cannot be checked")),
++            "a URL with no host the rules can name is refused"
++        );
++        assert_eq!(requests(&server).await, 0);
++    }
++
++    #[tokio::test]
++    async fn a_blank_organisation_is_refused_under_enforce_without_a_request() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let refusal = fetch_refusal(
++            WebDomainPolicyMode::Enforce,
++            &SiteChecker::default(),
++            &owner(&base),
++            "",
++            &["https://example.org/"],
++            "fetch_url",
++        )
++        .await;
++        assert!(refusal.is_some_and(|message| message.contains("cannot be read")));
++        assert_eq!(requests(&server).await, 0, "an id that names no path is never sent");
++    }
++
++    #[tokio::test]
++    async fn an_answer_is_served_from_the_cache_for_thirty_seconds() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 2, "decisions": [
++                {"host": "example.org", "effective": "ask", "cap": "act", "source": "default"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let checker = SiteChecker::default();
++        let hosts = vec!["example.org".to_owned()];
++        let t0 = Instant::now();
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0)
++            .await
++            .allows_host("example.org"));
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0 + Duration::from_secs(29))
++            .await
++            .allows_host("example.org"));
++        assert_eq!(requests(&server).await, 1, "the second read is served from the cache");
++        assert!(checker
++            .verdicts_at(&owner(&base), ORG, &hosts, t0 + Duration::from_secs(31))
++            .await
++            .allows_host("example.org"));
++        assert_eq!(requests(&server).await, 2, "a stale answer is asked again");
++    }
++
++    #[tokio::test]
++    async fn resolve_names_at_most_thirty_two_hosts_per_call() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"organization_id": ORG, "revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let hosts: Vec<String> = (0..33).map(|n| format!("site{n:02}.example.com")).collect();
++        SiteChecker::default()
++            .verdicts_at(&owner(&base), ORG, &hosts, Instant::now())
++            .await;
++        let received = server.received_requests().await.unwrap_or_default();
++        assert_eq!(received.len(), 2, "33 hosts take two calls");
++        let named_in_first = received[0]
++            .url
++            .query_pairs()
++            .filter(|(key, _)| *key == "host")
++            .count();
++        assert_eq!(named_in_first, MAX_RESOLVE_HOSTS);
++    }
++
++    #[tokio::test]
++    async fn an_answer_for_another_organisation_is_unreadable() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": "org-b", "revision": 1, "decisions": [
++                {"host": "example.org", "effective": "ask", "cap": "act", "source": "default"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let verdicts = SiteChecker::default()
++            .verdicts(&owner(&base), ORG, &["example.org".to_owned()])
++            .await;
++        assert_eq!(verdicts.verdict("example.org"), None);
++    }
++
++    #[tokio::test]
++    async fn search_hits_on_refused_hosts_are_dropped_under_enforce_only() {
++        let server = MockServer::start().await;
++        answer(
++            &server,
++            200,
++            json!({"organization_id": ORG, "revision": 5, "decisions": [
++                {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
++                {"host": "example.com", "effective": "read", "cap": "read", "source": "org_cap"}
++            ]}),
++        )
++        .await;
++        let base = server.uri();
++        let reply = || SearchReply {
++            results: vec![
++                hit("https://example.org/a"),
++                hit("https://example.com/b"),
++                hit("ftp://example.com/c"),
++            ],
++            rerank: None,
++            provider: "brave".to_owned(),
++        };
++        let checker = SiteChecker::default();
++
++        let mut shadow = [reply()];
++        let counted = drop_denied_replies(WebDomainPolicyMode::Shadow, &checker, &owner(&base), ORG, &mut shadow).await;
++        assert_eq!(counted, 2, "shadow counts the blocked host and the host-less hit");
++        assert_eq!(shadow[0].results.len(), 3, "shadow drops nothing");
++
++        let mut enforced = [reply()];
++        let dropped = drop_denied_replies(WebDomainPolicyMode::Enforce, &checker, &owner(&base), ORG, &mut enforced).await;
++        assert_eq!(dropped, 2);
++        let urls: Vec<&str> = enforced[0].results.iter().map(|hit| hit.url.as_str()).collect();
++        assert_eq!(urls, ["https://example.com/b"], "only the allowed host's hit remains");
++    }
++
++    #[tokio::test]
++    async fn off_drops_no_hit_and_reads_nothing() {
++        let server = MockServer::start().await;
++        answer(&server, 200, json!({"revision": 1, "decisions": []})).await;
++        let base = server.uri();
++        let mut replies = [SearchReply {
++            results: vec![hit("https://example.org/a")],
++            rerank: None,
++            provider: "brave".to_owned(),
++        }];
++        let dropped = drop_denied_replies(WebDomainPolicyMode::Off, &SiteChecker::default(), &owner(&base), ORG, &mut replies).await;
++        assert_eq!(dropped, 0);
++        assert_eq!(replies[0].results.len(), 1);
++        assert_eq!(requests(&server).await, 0);
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 853db18d1..38acf1ddb 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -3977,6 +3977,16 @@ async fn dispatch_tool_with_cost(
+                     Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
+                 }
+             }
++            // The org's domain rules drop a hit on a host the org does not allow, before any hit is recorded or shown (EP-9
++            // W3). Under `off` nothing is read and nothing is dropped.
++            crate::site_policy_client::drop_denied_replies(
++                crate::site_policy_client::policy_mode(),
++                crate::site_policy_client::shared_checker(),
++                &crate::site_policy_client::SiteOwner::of(state),
++                org_id,
++                &mut replies,
++            )
++            .await;
+             // The line names every search the turn answered, so it is recorded only once the whole call has
+             // answered: a failed batch returned above, and its hits never reached the model.
+             if let Some(provenance) = search_provenance {
+@@ -4126,6 +4136,20 @@ async fn dispatch_tool_with_cost(
+                 Ok(url) => url,
+                 Err(message) => return err_outcome(call, message),
+             };
++            // The org's domain rules come before the fetch: a host the org does not allow is refused by name, and no page
++            // is read (EP-9 W3). Under `off` nothing is read.
++            if let Some(refusal) = crate::site_policy_client::fetch_refusal(
++                crate::site_policy_client::policy_mode(),
++                crate::site_policy_client::shared_checker(),
++                &crate::site_policy_client::SiteOwner::of(state),
++                org_id,
++                &[url.as_str()],
++                &call.name,
++            )
++            .await
++            {
++                return err_outcome(call, refusal);
++            }
+             // `scrape_readable`, not `scrape`: it resolves Quarry's
+             // artifact-referenced page text and escalates once to the
+             // browser driver when a plain fetch yields nothing. Deep
+@@ -4235,6 +4259,22 @@ async fn dispatch_tool_with_cost(
+                 Ok(args) => args,
+                 Err(message) => return err_outcome(call, format!("extract_structured: {message}")),
+             };
++            // The org's domain rules come before any page is read, for every URL the call names (EP-9 W3).
++            let refusal = {
++                let urls: Vec<&str> = args.urls.iter().map(String::as_str).collect();
++                crate::site_policy_client::fetch_refusal(
++                    crate::site_policy_client::policy_mode(),
++                    crate::site_policy_client::shared_checker(),
++                    &crate::site_policy_client::SiteOwner::of(state),
++                    org_id,
++                    &urls,
++                    &call.name,
++                )
++                .await
++            };
++            if let Some(refusal) = refusal {
++                return err_outcome(call, refusal);
++            }
+             if !state.quarry.available() {
+                 return err_outcome(call, "extract_structured: the page reader is not configured");
+             }

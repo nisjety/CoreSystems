@@ -1,0 +1,161 @@
+{
+ "slice": "WS03 S4 leftovers: RunDetail resumable/park_reason read path, and fold purge on every run-end path (session-core, design only)",
+ "summary": "Tags 17 and 18 are free in RunDetail (it has fields 1-16 and no reserved ranges) and are already reserved for WS03 in build plan section 4.3 (plan line 1883). Every production writer of runs.status to completed, failed or cancelled already deletes the fold in the same transaction: transition_managed_run_terminal (RecordTerminalOutcome, CompleteDirectRunWithMessage, the recovery worker), record_run_terminal (legacy unmanaged CompleteStep) and RunService.CancelRun. Thread delete, org erasure and any runs DELETE also remove folds (explicit delete or FK cascade). The real gaps are narrower: save() and claim() never check run status, so after a purge a writer whose first save is seq 0 recreates a fold on an ended run; park_reason is not validated on write; a test-only raw cancel (grpc.rs 13402-13405) skips the purge; and no CI job runs the existing loop_checkpoint DB tests (the only ignored-test job filters on zdr_receipt). No migration is needed. No production client calls the loop checkpoint RPCs yet (only test mocks), so the guards are latent but cheap to land now. Nothing was built, edited or run: no cargo, buf or DB; no files were written. Line numbers are at HEAD b8792341 on branch model-plane.",
+ "approach": "A. Terminal-path enumeration (every runs.status writer in session-core src, found by multiline grep for UPDATE runs and SET status, plus every DELETE FROM runs). 1) ManagedRunLifecycle.RecordTerminalOutcome: grpc.rs 6520 -> terminalization.rs record_terminal_outcome_inner 1240 -> apply_managed_terminal_outcome 1111 -> transition_managed_run_terminal 1066 (UPDATE 1072-1081, purge_run 1089, same transaction). PURGED. 2) ManagedRunLifecycle.CompleteDirectRunWithMessage: grpc.rs 6630 -> complete_direct_run_with_message_inner 1484 (apply at 1626) -> same transition. PURGED. 3) Recovery worker: run_recovery_worker 1859 -> recover_due_terminalizations 1841 -> recover_claimed_terminalization 1782 (apply at 1818) -> same transition. PURGED; supersede_terminalized_obligations 1684 writes the outbox only. 4) SessionCore.CompleteStep with terminal=true on an unmanaged run: grpc.rs 4880 -> complete_step_inner 3530 (record_run_terminal call at 3586; managed runs refused at 3554-3560) -> record_run_terminal 3426 (UPDATE 3468-3471, purge_run 3485, same transaction). PURGED. 5) RunService.CancelRun: run_service_grpc.rs cancel_run 758; UPDATE ... RETURNING 813-822; purge_run 848-850 in the same transaction as the RUN_CANCELLED event; commit 881. PURGED. Early return for already-terminal runs (774-802) needs no purge. 6) Test-only: grpc.rs 13399-13409 (a_cancel_that_commits_first_leaves_no_answer_on_the_run) runs its own UPDATE runs SET status = cancelled with no purge. NOT PURGED, but test code only. 7) DeleteThread, DeleteThreads and DeleteSpaceThreads all go through delete_thread_rows (grpc.rs 365): explicit DELETE FROM run_loop_checkpoints at 490, before DELETE FROM runs at 493. COVERED (explicit, not purge_run). 8) GDPR org erasure: gdpr.rs purge_organization_data 226 (explicit DELETE at 236, before runs at 370), also reached from gdpr_nats.rs 156. COVERED. 9) Any DELETE FROM runs: run_loop_checkpoints.run_id REFERENCES runs(id) ON DELETE CASCADE (migration 0047 line 14). COVERED by cascade. Not terminal and out of scope: run creation (grpc.rs 3118, terminalization.rs 561), set_run_mode (grpc.rs 5362), record_run_context (5422), record_run_output (6595, final_output only), and reads (tool_ledger.rs 45-56, approval_delivery.rs). B. Read path, run_service_grpc.rs. RUN_SELECT (358-381) is shared by GetRun (473), ListSystemRuns (636) and ListRuns (712). ListRuns' Space branch appends JOIN threads right after the FROM, which stays valid after a LEFT JOIN. Change the FROM to: FROM runs r LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id. Add projected columns r.retention_class, lc.state AS fold_state, (lc.claim_expires_at < now()) AS fold_claim_expired, lc.park_reason AS fold_park_reason. Never select ciphertext, fold_digest, authority_digest or claim_token_hash. RunRow (173-189) gains retention_class: String, fold_state: Option String, fold_claim_expired: Option bool, fold_park_reason: Option String. Use Option for the LEFT JOIN columns so sqlx does not decode NULL into bool. row_to_detail(row, store_enabled) (384) computes claimable = store_enabled && retention_class == persistent && !ended(status) && fold_is_claimable(fold_state, fold_claim_expired); resumable = claimable; park_reason = fold_park_reason only when claimable and fold_state == parked, else empty. fold_is_claimable mirrors the claim gate of loop_checkpoint::claim (state paused or parked, or resuming with a lapsed lease) and deliberately ignores pause_ref and the stale-active branch. Compute store_enabled = loop_checkpoint::enabled() once per request. Call sites: 481 becomes row_to_detail(row, store_enabled); 661 and 748 currently pass .map(row_to_detail) and must become .map(|row| row_to_detail(row, store_enabled)). Capture status before moving fields in the struct literal. C. Write-side guard, loop_checkpoint.rs. run_owner_tx (82-98) also selects status in its existing SELECT FOR UPDATE on runs. That row lock already serialises against every terminal UPDATE, and the order (runs row, then fold row) matches the purge order. save() (after the retention check at 191, before the seq check at 199-209) and claim() (after 288, before the UPDATE at 290) refuse ended runs with Status::failed_precondition(loop_checkpoint_run_ended). close() stays tolerant. save() for kind park validates park_reason by parsing it as mp_contracts::loop_fold::ParkReason (serde snake_case); unknown text is invalid_argument. The purge code is unchanged. D. Tests and CI: move scratch_pool, seed_run and fold_for out of tests::db into a new #[cfg(test)] pub(crate) mod test_support in loop_checkpoint.rs, and add seed_fold, fold_rows and fold_state there. Give every new DB test the prefix loop_checkpoint_ so one cargo filter (loop_checkpoint) covers all of them. Extend the session-core-receipts job in .github/workflows/model-plane-rust-ci.yml (lines 120-170): it currently runs only the zdr_receipt filter with a count of at least 8. Add a loop_checkpoint invocation with --ignored and --test-threads=1, and its own count check.",
+ "interfaces": "PROTO (apps/Model Plane/proto/model_plane/v1/runs.proto, message RunDetail). After the line google.protobuf.Struct metadata = 16; add two fields, each with a leading // comment (buf COMMENT_FIELD needs one, and the baseline has no entries for these names). Field 17: bool resumable. Comment: True when a continuation can claim this run's durable loop fold now (loop paused for an approval or parked, fold store on, run persistent and not ended). A flag only; the fold never appears on this message. Owner: WS03 durable loop. Field 18: string park_reason. Comment: Why the run is parked; set only while resumable and parked; one closed token, credential_window, provider_exhausted, upstream_unavailable, crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason). Owner: WS03 durable loop. No reserved ranges are added. RUST (session-core, all pub(crate) or private): run_service_grpc.rs fn fold_is_claimable(state: Option<&str>, claim_expired: bool) -> bool; fn row_to_detail(row: RunRow, store_enabled: bool) -> pb::RunDetail. loop_checkpoint.rs struct RunOwner { org_id: String, user_id: String, status: String }; async fn run_owner_tx(tx, run_id) -> Result<RunOwner, Status>; fn ended(status: &str) -> bool, true for completed, failed or cancelled; refusal Status::failed_precondition(loop_checkpoint_run_ended). #[cfg(test)] pub(crate) mod test_support with scratch_pool() (asserts the database name contains test), seed_run(pool, retention) -> (run_id, org, user), seed_fold(pool, run_id, kind, pause_ref, park_reason, park_until) -> Result<i64, Status>, fold_rows(pool, run_id) -> i64, fold_state(pool, run_id) -> Option String. Unchanged: loop_checkpoint::enabled(), save, claim, close, purge_run. Go: go/gen/model_plane/v1/runs.pb.go RunDetail gains Resumable bool and ParkReason string (regenerated, see steps).",
+ "file_changes": [
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/runs.proto",
+   "change": "Add RunDetail field 17 bool resumable and field 18 string park_reason after metadata = 16, each with a leading comment that names the owner (WS03) and, for park_reason, the closed token set. Nothing else in this file changes."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/runs.pb.go",
+   "change": "Regenerate with buf generate --template buf.gen.go-only.yaml run from apps/Model Plane/proto (see steps). Expect only the RunDetail struct, its getters and the raw descriptor bytes to change. runs_grpc.pb.go should be unchanged because no RPC changes."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+   "change": "RUN_SELECT (358-381): LEFT JOIN run_loop_checkpoints lc and project retention_class, fold_state, fold_claim_expired, fold_park_reason. RunRow (173-189): four new fields. row_to_detail (384-415): takes store_enabled and sets resumable and park_reason per the predicate in approach B. Call sites 481, 661, 748 updated; store_enabled computed once per request. Test literals at 1171 and 1201 get the new fields; existing row_to_detail tests pass store_enabled explicitly (true or false) so they never read the environment. Add non-DB tests and loop_checkpoint_get_run_* DB tests (see tests)."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+   "change": "run_owner_tx (82-98) returns RunOwner including status. save() refuses ended runs (after 191, before 199) and validates park_reason for kind park (171-186). claim() refuses ended runs after 288. close() unchanged. purge_run (386-395) unchanged. Move scratch_pool, seed_run and fold_for from tests::db into a new #[cfg(test)] pub(crate) mod test_support. Add the DB tests and the source-scan test listed under tests, and the non-DB park_reason test."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+   "change": "No production change: record_run_terminal already purges at 3485. Replace the raw UPDATE at 13402-13405 (test a_cancel_that_commits_first_leaves_no_answer_on_the_run) with a call that goes through production cancel (the existing cancel() helper at 13226) while keeping the lock-holding shape, or add the purge there, so no test path writes a terminal status without the purge. Add loop_checkpoint_direct_completion_removes_the_fold in direct_completion_db_tests (helpers managed_run 13066, completion 13132, complete 13177), loop_checkpoint_legacy_terminal_step_removes_the_fold next to the test at 11603, and loop_checkpoint_thread_delete_removes_the_fold calling delete_thread_rows (365). Do not reformat the line let _ = delete_thread_rows(&mut tx, thread_id).await?; because memory_erasure.rs line 321 source-scans for it."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+   "change": "No production change. Its RecordTerminalOutcome and recovery paths are tested from loop_checkpoint's db module through the pub(crate) functions record_terminal_outcome_inner, start_managed_run_inner and recover_due_terminalizations."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+   "change": "No change. Keep the single explicit DELETE FROM run_loop_checkpoints at 236 before the runs delete at 370. Do not add another occurrence of that string above it, because the order test around 683 uses source.find on the first match."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/model-plane-rust-ci.yml",
+   "change": "In job session-core-receipts (lines 120-170), keep the zdr_receipt step and add a loop_checkpoint step: cargo test -p session-core --bin session-core loop_checkpoint -- --ignored --test-threads=1, with a count check so an empty filter fails the job. DATABASE_URL already points at session_core_test and REQUIRE_CONTRACT is already 1."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md",
+   "change": "Append one dated entry (append-only; the 2026-10-16 durable-loop entry at lines 25-56 is still proposed): purge on every run-end path, ended-run refusal on save and claim, closed park_reason set, and the resumable definition. Record that the read side of WS03 S8's reserved tags 17 and 18 landed in S4."
+  }
+ ],
+ "invariants": [
+  "A runs.status write to completed, failed or cancelled never commits without deleting that run's fold row in the same transaction. The purge runs only after rows_affected of the status flip is checked (three production sites: terminalization.rs 1072-1089, grpc.rs 3468-3485, run_service_grpc.rs 813-848).",
+  "After an ended run commits, save() and claim() refuse that run and the table gains no row. Lock order is runs row first, then run_loop_checkpoints row, in save, claim, close and purge.",
+  "resumable is true only when the store switch is on, the run is persistent and not ended, and the fold is paused, parked, or resuming with a lapsed lease. It is false for every zdr and zdr_waived run.",
+  "park_reason is non-empty only when resumable and state is parked, and it is always one of the five ParkReason tokens because save() validates it.",
+  "The read path never selects ciphertext, fold_digest, authority_digest or claim_token_hash, and never logs fold content.",
+  "The proto change is additive: field 17 bool and field 18 string, no renumbering, comments present. buf breaking against the unchanged baseline.binpb passes. The lint ratchet reports no new findings.",
+  "No migration and no revert file: the 0047 primary key and FK cascade are enough.",
+  "No production client calls SaveLoopCheckpoint, ClaimLoopCheckpoint or CloseLoopCheckpoint yet. The only callers are test mocks (execution-core runtime_loop/agent.rs 6387-6405, model-gateway src/grpc.rs 3598-3624), so the guards are latent today."
+ ],
+ "open_questions": [
+  "Visibility: the recommendation is that resumable and park_reason follow the same read authorisation as status. Should park_reason be blanked for Space peers in the ListRuns Space branch (it reveals a delegated credential window), and for ListSystemRuns? Owner-only is not viable as written because model-gateway calls GetRun as a service caller to route continuation (WS03 S7).",
+  "Should resumable also require that the pause's approval is already decided? Recommended no: keep it fold-state only and let the continue route check approval state. WS15 must not show Continue for a pending approval.",
+  "claim() ignores park_until and treats any active row older than 900 s as claimable without checking pause_ref. S8 must decide whether a parked row is claimable before park_until, and whether recovery parks a stale active row before resumable can be trusted.",
+  "Should park_until be exposed as RunDetail field 19? Not requested here; the run_parked SSE frame already carries resets_at.",
+  "Lock-order inversion: erasure and thread delete delete loop_checkpoints rows before runs rows (gdpr.rs 236 then 370; grpc.rs 490 then 493). A concurrent save for the same run can deadlock, and Postgres aborts one side. Fix in this slice by locking runs first, or as a follow-up?",
+  "Defence-in-depth sweep that deletes folds of ended runs: optional, since all three purges are atomic and no production writer exists yet. Include it or not?"
+ ],
+ "risks": [
+  "The write guard changes the FoldWriter contract (WS03 S6): a save that returns loop_checkpoint_run_ended must end the loop's writes, not retry. Record this in the S6 slice.",
+  "The LEFT JOIN changes RUN_SELECT, which three read paths share. The ListRuns Space branch appends JOIN threads after it; keep that order valid. Run the existing DB test a_scheduled_run_is_not_listed_org_wide_and_its_thread_is_not_org_readable with a database.",
+  "Environment races: unit tests must pass store_enabled rather than read SESSION_CORE_LOOP_CHECKPOINT_ENABLED. loop_checkpoint's the_store_is_off_unless_the_switch_is_true mutates the variable, so any DB test that sets it must run with --test-threads=1, which the CI step does.",
+  "The source-scan guard is text-based (whitespace-normalised substring counts). It is a tripwire, not a proof, and unusual SQL formatting could evade it. Test-only writers count, so the expected counts are 3 and 3 only after grpc.rs 13402 is fixed.",
+  "Generated Go: remote plugin versions may drift and churn the header or raw descriptor. Current headers are protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2. If a version changes, pin it in the template rather than accept the churn. Do not run the full buf.gen.yaml, which also rewrites apps/Model Plane/python/mp-events-py/src/mp_events/_gen and apps/Frontend Plane/verevon/src/lib/model-plane/gen.",
+  "The SPA does not see the new fields until a mapping change. C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/runs-client.ts maps RunDetail explicitly (type 12-25, mapping 88-96). Out of scope for S4.",
+  "Lint: runs.proto already has 47 baseline findings. The two new fields must carry comments, or the ratchet reports two new keys and CI fails. Do not run --update on the baseline.",
+  "Unverified in this design pass: buf's out-path resolution for the go-only template when run from apps/Model Plane/proto; remote plugin availability (BSR network access); that the managed outbox row defaults to state open after start (the insert omits state, and only the heartbeat sets it); and that a recovery test's due obligation is not claimed by another test in a shared database (run with --test-threads=1). Nothing was executed.",
+  "Plan section 4.3 (plan line 1883) names WS03 S8 as the owner of 17 and 18. The read side lands in S4, which is still WS03, but record it in the ledger entry so the integrator sees it at merge time. Numbers are frozen by the integrator when the PR enters its train."
+ ],
+ "steps": [
+  "1. Edit runs.proto: add RunDetail field 17 (bool resumable) and field 18 (string park_reason) after metadata = 16, each with a leading comment (see interfaces). No other edits.",
+  "2. From apps/Model Plane/proto on a host with buf and BSR access (not Docker; buf is not installed on the Windows dev host per proto/README.md), run buf generate --template buf.gen.go-only.yaml. Check that git diff touches only apps/Model Plane/go/gen/model_plane/v1/runs.pb.go, with the header versions unchanged.",
+  "3. cargo build -p mp-contracts from apps/Model Plane/rust (build.rs compiles runs.proto at build time; no checked-in Rust generation exists).",
+  "4. loop_checkpoint.rs: run_owner_tx returns RunOwner with status; add ended(); refuse ended runs in save() and claim() with loop_checkpoint_run_ended; validate park_reason for kind park against ParkReason; keep close() tolerant; add test_support by moving scratch_pool, seed_run and fold_for out of tests::db. Add the non-DB park_reason test.",
+  "5. run_service_grpc.rs: extend RunRow, RUN_SELECT (LEFT JOIN and four columns), fold_is_claimable, row_to_detail(row, store_enabled), the three call sites, and the two test literals. Add the non-DB table test, the fold_is_claimable test and the RUN_SELECT content guard. Run cargo test -p session-core --bins run_service_grpc.",
+  "6. grpc.rs: replace the raw cancel UPDATE at 13402-13405 with the production cancel helper while keeping the lock-holding shape. Add the three DB tests (direct completion, legacy terminal step, thread delete).",
+  "7. loop_checkpoint.rs DB tests: cancel, RecordTerminalOutcome (ExecutionAgent, COMPLETED), recovery, org erasure, late-writer save refusal (expected_seq 0 and 1), claim refusal on a stale active row. Add the source-scan guard. Run cargo test -p session-core --bins loop_checkpoint.",
+  "8. run_service_grpc.rs DB tests: GetRun reports resumable and park_reason for paused, parked and live-resuming runs, and a zdr run is never resumable even when a row is inserted directly.",
+  "9. Update the CI job as described in file_changes (session-core-receipts, add the loop_checkpoint step with a count check).",
+  "10. Run the DB tests against a disposable database whose name contains test; run the buf lint ratchet and buf breaking on a buf host or in CI; append the ledger entry. Then re-check the three purge sites and the save and claim refusals still hold."
+ ],
+ "tests": [
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_cancel_run_removes_the_fold (DB)",
+   "proves": "RunService.CancelRun (path 5) returns cancelled=true and the run's run_loop_checkpoints row count is 0 afterwards, with the purge in the cancel transaction."
+  },
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_recorded_terminal_outcome_removes_the_fold (DB)",
+   "proves": "terminalization::record_terminal_outcome_inner with ExecutionAgent source and COMPLETED outcome on a managed run (path 1) sets the run completed and deletes the fold row."
+  },
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_recovery_terminalization_removes_the_fold (DB)",
+   "proves": "After start_managed_run_inner and a save, UPDATE managed_run_terminalization_outbox SET deadline_at and next_attempt_at to the past, then recover_due_terminalizations returns 1, the run is failed, and the fold row is gone (path 3). Assert the outbox state is open first."
+  },
+  {
+   "name": "grpc::direct_completion_db_tests::loop_checkpoint_direct_completion_removes_the_fold (DB)",
+   "proves": "complete_direct_run_with_message on a persistent GatewayDirect run (path 2) completes the run and deletes the fold row."
+  },
+  {
+   "name": "grpc::tests::loop_checkpoint_legacy_terminal_step_removes_the_fold (DB)",
+   "proves": "An unmanaged run with a fold, completed via complete_step_inner with terminal=true (path 4), ends completed and loses its fold row. Model the setup on legacy_terminal_step_cannot_settle_a_managed_run_in_postgres at 11603."
+  },
+  {
+   "name": "grpc::tests::loop_checkpoint_thread_delete_removes_the_fold (DB)",
+   "proves": "delete_thread_rows on a thread whose run has a fold (path 7) leaves no run_loop_checkpoints row for that run after commit."
+  },
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_org_erasure_removes_the_fold (DB)",
+   "proves": "gdpr::purge_organization_data for an org with a folded run (path 8) removes the fold and the run. The org id is unique per test."
+  },
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_save_for_an_ended_run_is_refused_and_writes_nothing (DB, fails until the guard lands)",
+   "proves": "After any path-1 to path-5 terminal commit, save with expected_seq 0 and with expected_seq 1 both return failed_precondition loop_checkpoint_run_ended, and the table gains no row. Today expected_seq 0 recreates a fold because save() never checks run status."
+  },
+  {
+   "name": "loop_checkpoint::tests::db::loop_checkpoint_claim_on_an_ended_run_is_refused (DB, fails until the guard lands)",
+   "proves": "A stale active row inserted directly for a cancelled run (simulating a pre-guard row) is not claimable, and the row is unchanged. Today the stale-active branch of claim has no run-status check."
+  },
+  {
+   "name": "run_service_grpc::tests::loop_checkpoint_get_run_reports_a_parked_fold_as_resumable_with_its_reason (DB)",
+   "proves": "GetRun on a parked run with the switch on returns resumable true and park_reason equal to the stored closed token. On a paused run it returns resumable true and empty park_reason. On a resuming run with a live lease it returns resumable false. Run with --test-threads=1 because it sets the switch."
+  },
+  {
+   "name": "run_service_grpc::tests::loop_checkpoint_get_run_never_reports_a_zdr_run_as_resumable (DB)",
+   "proves": "A zdr or zdr_waived run with a fold row inserted directly (bypassing save) reports resumable false and empty park_reason: defence in depth at the read side."
+  },
+  {
+   "name": "run_service_grpc::tests::loop_checkpoint_resumable_is_true_only_for_a_claimable_persistent_unended_fold_while_the_switch_is_on (non-DB table test)",
+   "proves": "row_to_detail(row, store_enabled) over the product of store_enabled, retention_class, status (active, completed) and fold_state (none, active, paused, parked, resuming live and lapsed, closed) yields the expected resumable and park_reason. Covers the switch-off case and the ZDR and terminal cases without reading the environment."
+  },
+  {
+   "name": "run_service_grpc::tests::loop_checkpoint_fold_is_claimable_matches_the_claim_gate (non-DB)",
+   "proves": "fold_is_claimable agrees with the claim gate in loop_checkpoint::claim for paused, parked, resuming with a lapsed lease, resuming live, active, closed and none. It differs only in ignoring pause_ref and the stale-active branch."
+  },
+  {
+   "name": "run_service_grpc::tests::loop_checkpoint_run_select_projects_no_fold_content (non-DB)",
+   "proves": "RUN_SELECT contains none of ciphertext, fold_digest, authority_digest or claim_token_hash, so the read path cannot return fold content."
+  },
+  {
+   "name": "loop_checkpoint::tests::park_reason_accepts_only_the_closed_tokens (non-DB)",
+   "proves": "ParkReason parses credential_window, provider_exhausted, upstream_unavailable, crash_interrupted and reauth_required, and rejects empty and free text. The save() validation depends on it."
+  },
+  {
+   "name": "loop_checkpoint::tests::every_run_status_write_outside_the_fold_module_is_paired_with_a_purge (non-DB source scan)",
+   "proves": "Reads every src/*.rs except loop_checkpoint.rs, collapses whitespace, and asserts count('UPDATE runs SET status') equals count('purge_run('). Expected 3 and 3 after grpc.rs 13402 is fixed. Catches a new terminal writer that forgets the purge."
+  }
+ ],
+ "verification_commands": [
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust\" && cargo build -p mp-contracts",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust\" && cargo test -p session-core --bins loop_checkpoint",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust\" && cargo test -p session-core --bins run_service_grpc",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust\" && DATABASE_URL=postgres://session_core:session_core@localhost:5432/session_core_test cargo test -p session-core --bin session-core loop_checkpoint -- --ignored --test-threads=1 (requires a disposable Postgres whose name contains test; NOT run in this design pass)",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto\" && buf generate --template buf.gen.go-only.yaml (requires buf and BSR; not run here; no Docker)",
+  "git -C \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b\" diff --stat -- \"apps/Model Plane/go/gen\" (expect runs.pb.go only)",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b\" && buf lint \"apps/Model Plane/proto\" --error-format=json > <scratchpad>/buf-lint.json; python3 scripts/gates/buf-lint-ratchet.py --baseline \"apps/Model Plane/proto/buf-lint-baseline.json\" <scratchpad>/buf-lint.json (expect no new findings; never --update)",
+  "cd \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b\" && buf breaking \"apps/Model Plane/proto\" --against \"apps/Model Plane/proto/baseline.binpb\" (expect pass; do not regenerate baseline.binpb)"
+ ]
+}

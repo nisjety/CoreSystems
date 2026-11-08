@@ -1,0 +1,724 @@
+{
+ "batchId": "W2-28",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS27-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\run_ceiling.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse_events.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib run_ceiling budget org_quota (the batch's form, CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "Does not run: cargo 1.97 rejects a second TESTNAME (error: unexpected argument 'budget'). Use the libtest form below."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib -- run_ceiling budget org_quota",
+     "outcome": "95 passed, 0 failed, 2424 filtered out. Includes all 10 run_ceiling-path tests: 8 in sse_events::run_ceiling::tests (request_cap_wins_and_org_fills_unset, warning_fires_once_at_80_and_once_at_100, subscription_is_exempt, enforcement_ends_tool_phase_and_still_answers, plus share, for_turn, switch and each-warning-once tests), sse_events::tests::run_ceiling_stops_the_tool_phase_once_a_recorded_call_reaches_the_cap, and org_quota::tests::both_run_ceilings_are_read_from_the_payload."
+    },
+    {
+     "command": "cargo test -p model-gateway --lib -- run_ceiling (verbose)",
+     "outcome": "10 passed, 0 failed."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full lib suite)",
+     "outcome": "2514 passed, 1 failed, 4 ignored. The one failure is sse_events::payload_contract::sse_event_payload_golden, expected: the committed golden lacks four new optional usage_progress keys. Diff of committed vs generated is exactly ceiling_tokens (integer), ceiling_usd (number), fraction (number), warning (string), all optional. Needs the lead's regeneration (see lead_todo)."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test usage_meter_contract --test zdr_feature_table --test zdr_posture_matrix",
+     "outcome": "5 passed, 11 passed, 7 passed (all green)."
+    },
+    {
+     "command": "standalone: rustc --edition 2021 --test run_ceiling.rs (before wiring into the crate)",
+     "outcome": "8 passed, 0 failed."
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib (pedantic workspace lints), filtered to git-diff changed lines and run_ceiling.rs",
+     "outcome": "No warnings on new or changed lines. Test modules are not covered by --lib."
+    },
+    {
+     "command": "pnpm vitest run src/features/chat/components/RunCostMeter.test.tsx",
+     "outcome": "7 passed, 0 failed (run before and after the design-token style change)."
+    },
+    {
+     "command": "pnpm exec eslint src/features/chat/components/RunCostMeter.tsx src/features/chat/components/RunCostMeter.test.tsx",
+     "outcome": "Clean after switching the colours to design tokens (the first run flagged three raw hex colours)."
+    },
+    {
+     "command": "pnpm typecheck (tsc -b)",
+     "outcome": "Exit 1 with 22 errors, all pre-existing in src/shared/api/quarry-client.ts (unresolved @quarry/client) and src/shared/api/schedule-contract.test.ts. None in RunCostMeter.tsx or its test."
+    },
+    {
+     "command": "rustfmt --check on the edited files (parse only; diffs limited to my lines, which were brought into rustfmt layout)",
+     "outcome": "No parse errors in sse.rs, sse_events.rs, tool_loop.rs or run_ceiling.rs."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: insert after line 374 (the MODEL_GATEWAY_USAGE_PROGRESS line, inside service model-gateway), with the same 6-space indent: `      MODEL_GATEWAY_RUN_CEILING_WARN: ${MODEL_GATEWAY_RUN_CEILING_WARN:-false}` and `      MODEL_GATEWAY_RUN_CEILING_ENFORCE: ${MODEL_GATEWAY_RUN_CEILING_ENFORCE:-false}`.",
+    "NO lib.rs edit is needed. Do not add `pub mod run_ceiling;` to lib.rs, because the module is already declared in sse_events.rs and the second declaration would duplicate it.",
+    "needs_other_files shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (without it the bar never receives the ceiling): (a) in type ChatUsageProgressEvent, after `  unpricedCalls?: number` add `  /** The metered spend cap, when the turn has one (WS27-S6). */` / `  ceilingUsd?: number` / `  /** The metered token cap, when the turn has one (WS27-S6). */` / `  ceilingTokens?: number` / `  /** The share of the ceiling used, when a capped figure is known. Above 1 once the cap is passed. */` / `  fraction?: number` / `  /** The ceiling warning this frame is the first to carry. */` / `  warning?: 'run_ceiling_80' | 'run_ceiling_reached'`. (b) before the usageProgressFrame doc comment add `function runCeilingWarningValue(value: unknown): 'run_ceiling_80' | 'run_ceiling_reached' | undefined {` / `  return value === 'run_ceiling_80' || value === 'run_ceiling_reached' ? value : undefined` / `}`. (c) in usageProgressFrame's returned object, after `    unpricedCalls: num(payload.unpriced_calls),` add `    ceilingUsd: num(payload.ceiling_usd),` / `    ceilingTokens: num(payload.ceiling_tokens),` / `    fraction: num(payload.fraction),` / `    warning: runCeilingWarningValue(payload.warning),`. Add a case to chat-client.test.ts `usage_progress (WS27 S3)`.",
+    "Golden regeneration after the chat-client edit (the golden is red by design now). From apps/Model Plane/rust run `MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib -- sse_event_payload_golden` (writes apps/Model Plane/api/contracts/sse-event-payloads.json). The diff against the committed file is only the four optional usage_progress keys. Then refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256, copy the golden and its .sha256 to apps/Frontend Plane/verevonv3/src/shared/api/contracts/, regenerate apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts, and update the pinned digest in scripts/tests/zdr-contract-sync.test.sh. Follow the WS27-S3 steps (D2-664).",
+    "Regenerate the event taxonomy doc: `python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\"`, then `--check`.",
+    "Fix the plan row and batch test command: `cargo test -q -p model-gateway --lib run_ceiling budget org_quota` is rejected by cargo 1.97. Use `cargo test -q -p model-gateway --lib -- run_ceiling budget org_quota` (95 passed).",
+    "Live proof, lead only, with docker: rebuild model-gateway via the compose.sh recipe. In a test org set the run cost ceiling to $0.05 (max_cost_per_run_usd_micros = 50000) through the existing org-core PUT. With MODEL_GATEWAY_USAGE_PROGRESS=true and MODEL_GATEWAY_RUN_CEILING_WARN=true, a multi-round tool turn must carry one run_ceiling_80 and one run_ceiling_reached across its usage_progress frames, with ceiling_usd and fraction on each frame. With MODEL_GATEWAY_RUN_CEILING_ENFORCE=true too, the tool phase must end at the cap and the answer must still stream. With every switch unset the frames must match the pre-slice frames (no ceiling keys). Capture the SSE transcript and a screenshot once the meter is mounted by S4. Do NOT enable WARN or ENFORCE until the budget.rs precedence decision in depth_findings is made.",
+    "Append the depth_findings below to docs/plans/model-plane-depth-register.md, and add the decision-ledger entry and the status update for the 'Run-cost meter and ceiling warnings' row in apps/Model Plane/docs/capability-ownership-matrix.md (S6 code built, dark) and apps/Model Plane/docs/decisions/ledger.md (WS27-S6)."
+   ],
+   "deviations": [
+    "Module path is crate::sse_events::run_ceiling, declared in sse_events.rs with #[path = \"run_ceiling.rs\"], not crate::run_ceiling, because lib.rs is outside this slice's ownership. sse.rs uses the same pattern for cache_telemetry and lifecycle_events.",
+    "RunCeiling::resolve takes primitive caps (request usd, request tokens u32, org usd, org tokens i64) instead of OrgQuotaLimits, so run_ceiling.rs has no crate imports and compiled standalone before wiring. The precedence is the same as budget.rs.",
+    "The plan's warning_state(prev, now) is implemented as warning_due(share, sent) plus CeilingTracker::record and progress.",
+    "stream_call_usage now gates on RichEventSink::records_calls() (progress stream or tracked ceiling) rather than on streams_usage_progress(), because enforcement must count calls even when no frame streams them.",
+    "run_infer_fallback takes the sink as a new parameter so the fallback answer frame carries the ceiling. The plan row does not name this path.",
+    "RunCostMeter.tsx is created in this slice (the file did not exist) as a ceiling bar plus warning only. S4 must extend it rather than replace it.",
+    "Warnings ride only usage_progress frames, so MODEL_GATEWAY_RUN_CEILING_WARN has no effect unless MODEL_GATEWAY_USAGE_PROGRESS is on."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Regenerate the SSE payload golden. sse_events::payload_contract::sse_event_payload_golden is red because the slice added a usage_progress sample that carries the ceiling. This is the only failure in the full lib suite (2514 passed, 1 failed). Run MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib -- sse_event_payload_golden, then refresh api/contracts/sse-event-payloads.json.sha256, the SPA's vendored copy, chat-event-payloads.generated.ts and the pinned digest in scripts/tests/zdr-contract-sync.test.sh. After that, run the gen-sse-event-taxonomy.py --check. The plan puts this in the same PR, and every file involved is outside the slice's ownership.",
+     "Shared edit to chat-client.ts (ChatUsageProgressEvent keys plus the usageProgressFrame parse) and a chat-client.test.ts case. Without it the SPA drops ceiling_usd, ceiling_tokens, fraction and warning.",
+     "Shared edit to deploy/docker-compose.yml: add MODEL_GATEWAY_RUN_CEILING_WARN and MODEL_GATEWAY_RUN_CEILING_ENFORCE, both with default false.",
+     "Live proof with docker. Rebuild model-gateway, then set a $0.05 org ceiling through the org-core PUT in a test org. With progress and warn on, run_ceiling_80 and run_ceiling_reached must each appear once across the frames. With enforce on, the tool phase must end at the cap with the notice and the answer must still stream. With switches off, the frames must be unchanged. Take a screenshot once S4 mounts RunCostMeter.",
+     "Fix the plan row and batch test command. cargo 1.97 rejects `cargo test -q -p model-gateway --lib run_ceiling budget org_quota`. The working form is `-- run_ceiling budget org_quota`.",
+     "Record in the depth register, the decision ledger and the capability-matrix status row (S6 built, dark). Owner decision on whether budget.rs lets a request cap loosen the org ceiling, needed before WARN or ENFORCE is switched on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P0",
+     "text": "budget.rs:66 and budget.rs:73 let a request's own cap replace a larger org ceiling (normalized.max_cost_usd.or(org) and normalized.max_tokens.or(org_tokens)), and normalize.rs:513-514 takes those caps from the client body, so a caller can loosen the org per-run ceiling in both the 402 gate and this slice's ceiling; budget.rs's own doc says callers may only tighten. Owner decision and a min() fix in budget.rs (not owned here) are needed before MODEL_GATEWAY_RUN_CEILING_WARN or _ENFORCE is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An unpriced metered call leaves the USD share unknown (RunCeiling::share returns None), so a USD-only run ceiling cannot warn or stop a run on a model missing from the catalogue; only a token cap bounds that run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "judge_sources and resample_answer use record_overhead, not record_call, so their provider calls never enter the tally: they neither stream nor advance the mid-run ceiling, and reach only the closing answer frame."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Enforcement is checked at the round boundary, so the call in flight and the closing answer can carry a run past its cap; the cap is soft by one provider call, which the ledger entry should state."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives the enforcement break or the closing-frame ceiling through invoke_stream_sse or the tool loop with the switches on; coverage is the pure tracker tests, one sink test and the source-order guard. A mocked-provider e2e (tests/e2e_invoke_chain_test.rs pattern) should assert the tool phase stops at the cap and the answer still streams."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The run_infer_fallback change (sink parameter, ceiling on the fallback answer frame) has no test."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "chat-client.ts drops ceiling_usd, ceiling_tokens, fraction and warning, and RunCostMeter is mounted nowhere because S4 is not built, so the bar stays invisible until the shared edit lands and S4 mounts the meter fed from onUsageProgress."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Confirm whether a request may ever loosen the org ceiling (see the P0 item). This slice keeps budget.rs's precedence so the warnings and the 402 gate agree, as the plan requires."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run ceiling is per turn (per request): Do runs and multi-turn threads are not covered, and until MODEL_GATEWAY_BUDGET_WINDOW is on the 402 gate counts lifetime spend, so a warning can disagree with the gate, as the plan's risk row says."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "ZDR turns return before the tool loop and the budget gate (sse.rs ZDR branch), so no run ceiling covers ZDR spend; ZDR.md must say so alongside DEF-Z-06b."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Lead live proof with docker, as in the lead_todo item: rebuilt model-gateway, a $0.05 org ceiling in a test org, warn frames once each, enforcement ending the tool phase while the answer streams, and switches-off frames unchanged."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "sse_event_payload_golden is red until the lead regenerates the golden (four optional usage_progress keys); the taxonomy doc and the SPA pins follow from the same regeneration."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The batch and plan test command `cargo test -q -p model-gateway --lib run_ceiling budget org_quota` is invalid for cargo 1.97; the working form is `cargo test -q -p model-gateway --lib -- run_ceiling budget org_quota`."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Warnings ride only usage_progress frames, so with MODEL_GATEWAY_USAGE_PROGRESS off the WARN switch does nothing; that is by design, but the flag help should say so."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With MODEL_GATEWAY_RUN_CEILING_ENFORCE on and MODEL_GATEWAY_USAGE_PROGRESS off, every provider call of a capped turn is priced (state.pricing.priced runs ensure_fresh per call; see D2-659), which adds catalogue reads to the hot path."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Confirm the resume path (invoke_resume_sse) does not re-run tool rounds under a fresh sink, which would reset the warning state and could resend run_ceiling_80 (WS03 territory)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RunCostMeter.tsx was created here as a ceiling-only component because S4 is unbuilt. S4 must extend it rather than recreate it, and it should move its inline token styles into the chat stylesheet."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "clippy on the lib target shows no warnings on new or changed lines, but test modules were not linted (cargo clippy --lib does not cover them)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P0",
+     "text": "RunCeiling::resolve copies budget.rs's precedence, so a request-body max_cost_usd or max_tokens above the org's per-run ceiling replaces it (the test even asserts Some(50.0) over an org $5.0). A caller can therefore loosen the org cap in both the 402 gate and this ceiling. A min() fix in budget.rs and run_ceiling.rs needs an owner decision before WARN or ENFORCE is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A USD-only ceiling never warns or stops once any metered call is unpriced. The snapshot's cost_usd is then None, so share() returns None and stops_tool_phase stays false, and only a token cap bounds that run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Overhead calls recorded through record_overhead (judge_sources, resample_answer) never enter the sink's tally. They do not advance the mid-run ceiling or enforcement, and only the closing answer frame counts them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives the enforcement break in run_tool_rounds_for_model_with_attachments, or the closing-frame ceiling in invoke_stream_sse and run_infer_fallback, with the switches on. A mocked-provider e2e (e2e_invoke_chain_test.rs pattern) should assert that the tool phase stops at the cap, that RUN_CEILING_NOTICE is appended, and that the answer streams."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Enforcement is checked only at the round boundary, so the call in flight and the answer can carry a run past its cap. The ledger entry should state that the cap is soft by about one provider call."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With ENFORCE on and USAGE_PROGRESS off, stream_call_usage now prices every tool-phase call (records_calls), which adds catalogue reads to the hot path of a capped turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The WARN switch is effective only together with MODEL_GATEWAY_USAGE_PROGRESS (warn && usage_progress in sse.rs). That is by design, but the flag documentation must say so."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RunCostMeter.tsx puts a bare English 'tokens' into capLabel without i18n.tr, which the plan's 'i18n keys only' and the spa-ui-gates bare-copy rule disallow. It also uses inline styles that S4 should move to the chat stylesheet."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "RunCostMeter is mounted nowhere until S4. S4 must extend this component, fed from onUsageProgress, rather than recreate it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Confirm that the resume path (invoke_resume_sse) does not rebuild the sink, and with it the CeilingTracker, mid-turn. A rebuilt tracker would resend run_ceiling_80."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib -- run_ceiling budget org_quota (plan form 'run_ceiling budget org_quota' rejected by cargo; libtest form used)",
+      "outcome": "95 passed, 0 failed, 2424 filtered out",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (compile check + full lib suite)",
+      "outcome": "Compiles. 2514 passed, 1 failed, 4 ignored. Failure: sse_events::payload_contract::sse_event_payload_golden (sse_events.rs:3490) - committed SSE payload golden differs from ChatEvent::payload output (new optional usage_progress keys). Needs MP_UPDATE_GOLDEN=1 regeneration, .sha256 refresh, SPA vendored copy refresh, and update of pinned digest in scripts/tests/zdr-contract-sync.test.sh.",
+      "passed": false
+     },
+     {
+      "command": "pnpm vitest run --pool=threads src/features/chat/components/RunCostMeter.test.tsx",
+      "outcome": "1 file, 7 tests passed. Default pool timed out (worker timeout, environmental), --pool=threads worked.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money",
+    "policy"
+   ],
+   "notes": "Built the per-run ceiling behind two switches, both default off and read with the strict literal \"true\" parser. RunCeiling::resolve applies budget.rs precedence (a request cap is used where set, the org's ceiling fills unset, non-positive caps are no cap). Token caps count input plus output of metered calls only, so subscription calls add no spend and no tokens. CeilingTracker keeps the metered tokens and the sent warning, and emits run_ceiling_80 and run_ceiling_reached once each, on the usage_progress frame that first crosses. The RichEventSink holds one lock over the meter and the tracker. The closing answer frame is read from the turn's total, so the answer's own cost can trigger a warning. Under MODEL_GATEWAY_RUN_CEILING_ENFORCE the tool loop breaks at the round boundary once a cap is reached, after queued input is delivered, appends a notice, and the answer still streams. The fallback answer frame also carries the ceiling. With every switch off the code path is unchanged: no tracker, no pricing, no extra keys. Wiring: lib.rs is not owned, so the module is declared inside the owned sse_events.rs with #[path], the same way sse.rs declares cache_telemetry. Its path is crate::sse_events::run_ceiling, and lib.rs needs no edit. Frontend: RunCostMeter.tsx is a ceiling-only component, because S4 is not built. It is not mounted, and the chat-client parse of the new keys is in a shared file. Nothing committed or pushed. The worktree also holds uncommitted edits from WS24-S9 and WS23-S8.code, which I did not touch."
+  },
+  {
+   "id": "WS24-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\tests\\workspace-tools-proof.sh (new, executable)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\tests\\agent-action-admission-proof.sh (new, executable)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\model-plane-rust-ci.yml (two steps added, +20 lines)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\fixtures\\zdr-posture-matrix.json.sha256 (pin bytes made identical to the canonical pin; git blob unchanged)"
+   ],
+   "tests_run": [
+    {
+     "command": "bash -n on workspace-tools-proof.sh and agent-action-admission-proof.sh",
+     "outcome": "syntax ok, re-checked after the last edits"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "exit 1: 88 passed, 21 failed (before the pin fix: 87 passed, 22 failed). Of the 21: 17 goldens or copies are not tracked at HEAD (rerank-v1 x3 goldens, Quarry dp-contracts x12 copies, usage-ledger-v2 x2 copies, live-only baseline) and cross-plane-token-requests.json digest drifted (18 real gaps with it); 3 are CRLF differences of this Windows worktree (usage-envelopes pin, model-gateway quarry-token-claims pin, mp-contracts zdr pin)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh --self-test",
+     "outcome": "exit 1 before any scenario runs: cp cannot stat the rerank-v1 golden (absent at this HEAD; pre-existing)"
+    },
+    {
+     "command": "cargo test -p execution-core --test agent_action_admission_contract --test workspace_edit_contract --no-fail-fast (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "6 passed and 6 passed (this is the command the new CI step runs)"
+    },
+    {
+     "command": "cargo test -p execution-core --lib workspace | owner_ | only_the_server_resolved_view_may_offer_ticket_create | every_offered_tool",
+     "outcome": "98, 31, 1 and 3 passed"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib every_ask_read",
+     "outcome": "NOT RUN: the lib test target does not compile in this worktree (15 errors: crate::run_ceiling is not declared in lib.rs, while run_ceiling.rs is untracked). That is concurrent WS27-S6 work in this worktree, not S9 files"
+    },
+    {
+     "command": "go test -count=1 -v -run Workspace ./internal/registry/ (capability-core, default tags)",
+     "outcome": "2 passed"
+    },
+    {
+     "command": "go test -count=1 -v -run 'ModelActionView|AgentActionAdmission' ./internal/api/ (capability-core)",
+     "outcome": "8 passed"
+    },
+    {
+     "command": "go test -count=1 -v -run 'RunActionTarget|IssueModelActionView|RunActionDecision' ./internal/spaces/ and ./internal/http/ (user-core)",
+     "outcome": "11 and 1 passed"
+    },
+    {
+     "command": "pnpm vitest run src/shared/actions/admission-contract.test.ts src/shared/actions/model-eligibility.test.ts (apps/Frontend Plane/verevonv3)",
+     "outcome": "2 files, 8 tests passed"
+    },
+    {
+     "command": "PromoteWorkspace guard body (the CI step and the proof's promote_boundary), run from apps/Model Plane/rust",
+     "outcome": "no caller outside sandbox_manager_client.rs"
+    },
+    {
+     "command": "NOT RUN: both proof scripts end to end; the Docker steps (workspace migration tests with CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL, the admission integration test through testcontainers)",
+     "outcome": "needs Docker; left to the lead"
+    },
+    {
+     "command": "CI YAML parse",
+     "outcome": "not parsed (no YAML parser available here); indentation checked by reading the edited regions"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: after the 'Per-tool side-effect class and approval floor' row (about line 62) add two rows. Row 1: 'Agent action admission (which actions a run may see, access, closed reason, side-effect class, authority)' | **capability-core** (agent_action_admissions and the signed model action view); the Frontend model-access.ts side map only classifies | Postgres agent_action_admissions; the vendored contract api/contracts/agent-action-admission.json | execution-core pins owner actions (owner_actions.rs) and reads the view; model-gateway checks Ask reads against the golden | — | ✅ one admission owner (DEC-25). Row 2: 'Do-mode workspace tools (workspace_glob, workspace_grep, workspace_list, workspace_read, workspace_edit, workspace_put)' | **execution-core** (workspace_tools.rs, workspace_edit.rs; the run's overlay) | run-keyed overlay rows in **sandbox-manager** workspace_files (no matrix row kind yet) | cap.workspace.read and cap.workspace.write gates in capability-core; the Space changes only by diff-and-upload, no PromoteWorkspace caller (DEC-24 D1) | — | ✅ owner; overlay durability is an owner decision.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: append a W2-28 section. WS24-S9: the two proof scripts and the two CI steps; the three ZDR items are goldens, not matrix rows (README MCP precedent; the matrix, its digests and copies unchanged); the workspace_tools refusal key is pending; the DEC-24 D1 guard holds until the owner decides.",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: after the mcp_execution Feature entry (about lines 292-295) insert Feature { key: \"workspace_tools\", label: \"workspace files\" } in the same layout. Then regenerate: cd 'apps/Model Plane/rust' && MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p mp-contracts zdr_refusal (writes apps/Model Plane/api/contracts/zdr-refusals.json).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: add `  | 'workspace_tools'` after line 48 (`  | 'mcp_execution'`), and `  workspace_tools: { no: 'arbeidsfiler', en: 'workspace files' },` after line 174. The Norwegian wording is a proposal for the owner to confirm.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs, the workspace gate (about lines 774-786): return mp_contracts::zdr_refusal::Refusal::feature_not_supported(\"workspace_tools\").message() for the zdr or waived case, as the connector_read branch (about lines 755-759) does; the switch-off message stays plain text. Split the condition, so the two cases do not share one message.",
+    "After the three shared edits above: write the new pin as '<sha256>  zdr-refusals.json' with CRLF, matching the existing pin; copy the regenerated JSON and its pin to apps/Frontend Plane/verevonv3/src/shared/api/contracts/; set the digest for apps/Model Plane/api/contracts/zdr-refusals.json at line 109 of scripts/tests/zdr-contract-sync.test.sh (S9 owns that file, so the lead applies it); then run bash scripts/tests/zdr-contract-sync.test.sh and the mp-contracts zdr_refusal test.",
+    "Goldens (recommended; needs one new test file, which is not in new_files): apps/Model Plane/rust/services/execution-core/tests/zdr_feature_goldens.rs, modelled on zdr_mcp_golden.rs and reading tests/fixtures/zdr-posture-matrix.json with no matrix change. (a) workspace_tools_under_zdr_not_offered_not_executed: every zdr and waived row, execute_step with workspace_read is refused before the policy is asked; plus a source check that the offer passes req.zdr || waived into workspace_tools::offered. (b) owner_reads_under_zdr_not_offered: every zdr and waived row, knowledge_list_documents is refused before the policy is asked; owner_reads::permitted(true, true) is false. (c) owner_actions_under_zdr_not_offered: write it after the execute-level refusal in depth item 3. Pin the row counts in this file as zdr_mcp_golden.rs does.",
+    "Pin copy (not owned): cp the canonical pin apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256 over apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json.sha256. CI, on an LF checkout, does not see this difference; it only makes the local byte check green.",
+    "Commit: git add --chmod=+x for the two new scripts (they are 100755 here; .gitattributes already forces LF). The model-gateway pin appears modified only through CRLF in this worktree; check that the staged blob is unchanged before committing it.",
+    "Live proof (lead, rebuilt images, Docker, flags on the proof stack only, never the product route): run bash 'apps/Model Plane/scripts/tests/workspace-tools-proof.sh' and bash 'apps/Model Plane/scripts/tests/agent-action-admission-proof.sh' on a machine with Docker and the Frontend dependencies installed (pnpm install), then the live steps listed in their closing lines. The Docker-dependent steps were not run here.",
+    "CI at this HEAD: the rust job's sync step fails for reasons outside S9. The 17 untracked goldens and copies are the live-only baseline (WS01-S0), and cross-plane-token-requests.json needs its pin reconciled. Land WS01-S0 before expecting the job green. The PromoteWorkspace guard runs before this step, so it still runs.",
+    "Re-run cargo test -p model-gateway --lib every_ask_read (CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0) once WS27-S6's lib.rs declaration of run_ceiling lands. The test name exists at tool_loop.rs (about line 10541) and is what the admission proof filters on."
+   ],
+   "deviations": [
+    "The three named items, workspace_tools_under_zdr_not_offered_not_executed, owner_actions_under_zdr_not_offered and owner_reads_under_zdr_not_offered, are not added as rows of zdr-posture-matrix.json. The matrix loaders accept only the org, decision and enforcement row shapes (zdr-contract-schema.mjs exactKeys and TABLE_PREFIX; mp-contracts zdr_retention_matrix.rs load_enforcement rejects unknown top-level keys), and enforcement row counts are pinned in zdr_mcp_golden.rs (27), loop_fold_zdr_matrix.rs and model-gateway zdr_posture_matrix.rs. The api/contracts README's MCP paragraph says the same kind of rule is a golden in the owning plane that neither edits the matrix nor its pins. The matrix, its digests and every copy are unchanged. The three names fit that golden pattern.",
+    "The workspace_tools refusal key is not added to zdr-refusals.json. The catalogue is generated by mp-contracts zdr_refusal.rs, the SPA labels live in zdr-refusals.ts, and the typed gate is in runtime_loop/mod.rs. All three are outside this slice's ownership (needs_other_files), so the generated JSON, its pins and the sync digest at line 109 are left for the lead.",
+    "The CI change adds two steps: the PromoteWorkspace guard runs before the goldens step, so it runs even when the goldens step fails; the two contract targets are named before the full workspace run, which already covers them, so a renamed or deleted target fails the job.",
+    "The model-gateway posture pin copy is rewritten to the canonical bytes (CRLF in this worktree). Its git blob (LF) is unchanged, so the commit should not change; git status may still list it until it is re-indexed."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs (add the workspace_tools Feature entry after mcp_execution; regenerate the catalogue)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (typed workspace_tools refusal under zdr or waived; the execute-level refusal for tickets.create under zdr or waived)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts (FeatureKey union after line 48; label after line 174)",
+    "apps/Model Plane/docs/decisions/ledger.md (shared: W2-28 section)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md (shared: two ownership rows)",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json.sha256 (pin copy, LF in this worktree; copy the canonical pin)",
+    "apps/Model Plane/rust/services/execution-core/tests/zdr_feature_goldens.rs (NEW test file for the three goldens; not in new_files)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: rebuild the images, run both proof scripts with Docker (the workspace migrations on the disposable Postgres; the admission integration test through testcontainers), then the live captures listed in the closing lines of each script. Flags go on only on the proof stack.",
+     "Apply the shared edits from the implementer's lead_todo to two files: the ledger.md W2-28 section and the two rows in capability-ownership-matrix.md.",
+     "Decide how the three ZDR items are delivered, and build them. They are not matrix rows today and no golden exists for them yet.",
+     "CI rust job: the zdr-contract-sync step stays red until WS01-S0 (the live-only baseline) lands and the cross-plane-token-requests pin is reconciled."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The three named items cannot be matrix rows under the current matrix design (strict loaders, pinned enforcement counts in four test files). Build them as goldens in execution-core per the README MCP precedent (lead_todo 7), or the owner decides on a new row kind via a cross-plane schema change. Close register item D2-683 with this decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The workspace_tools refusal key is not in the catalogue. Its chain (mp-contracts generator, SPA label and union, typed gate, regenerated catalogue and pin, sync digest at line 109) spans files outside this slice (lead_todo 3-6)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "tickets.create (ticket_tools) has no zdr or waiver refusal in execute_step_inner: the branch near runtime_loop/mod.rs line 1131 takes no retention input, while the MCP, connector, workspace and owner-read gates all sit at about lines 746-791. Under zdr the offer is kept out because the view is refused (user-core TestIssueModelActionViewRefusesZDR, capability-core TestModelActionViewStillRefusesZeroDataRetention), but a call naming it reaches the capability policy. Add a typed refusal before the policy, as the owner-read gate does, then write owner_actions_under_zdr_not_offered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Waived Do turns are unverified. zdr_feature_table.rs pins the agentic refusals for ZDR tokens only, so whether a waived run reaches execute_step's owner paths is not established. The workspace and owner-read gates do cover waived routes; the owner-action path does not."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The S9 live proof is not done: rebuilt images, both proof scripts with Docker, and the captures listed in their closing lines (lead)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "model-gateway --lib every_ask_read was not run: the lib test target does not compile in this worktree (crate::run_ceiling is not declared in lib.rs while run_ceiling.rs is untracked), from concurrent WS27-S6 work."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Neither proof script was run end to end. The Docker steps (workspace migrations with CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL, the admission integration test through testcontainers) are unverified; the Cargo, Go and Vitest filters were verified (see tests_run)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "CI at this HEAD: the rust job's sync step fails before the S9 contract step because of the live-only baseline (17 untracked goldens and copies) and a cross-plane-token-requests.json digest drift. Land WS01-S0 first; the PromoteWorkspace guard still runs before it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Three sync failures are CRLF differences of this Windows worktree (core.autocrlf=true; blobs are LF). They vanish on an LF checkout, as in CI."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The two new .sh files need mode 100755 in the index (git add --chmod=+x); .gitattributes already forces LF for *.sh."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The admission proof's frontend step needs the Frontend dependencies installed. pnpm vitest run passed here (8 tests), but node_modules has no .bin/vitest."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "DEC-24 D1 (overlay-only durability) remains the owner's decision (register D2-613). The PromoteWorkspace guard in CI and in the proof holds the line until it is taken."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The plan row asks for three posture-matrix rows: workspace_tools_under_zdr_not_offered_not_executed, owner_actions_under_zdr_not_offered and owner_reads_under_zdr_not_offered. None was added, as a row or as a golden. The matrix loaders accept only o_/d_/e_ rows with fixed keys (zdr-contract-schema.mjs TABLE_PREFIX and exactKeys), and the api/contracts README's MCP precedent puts this kind of rule in a golden in the owning plane. The fitting home is a new execution-core test, tests/zdr_feature_goldens.rs, which is outside S9's file set, so the lead must assign it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The tickets.create dispatch in runtime_loop/mod.rs (the ticket_tools::TOOL_NAME branch, about line 1139) has no zdr/waived refusal before the capability policy. The MCP, connector, workspace and owner-read gates at about lines 746-791 all have one. Exposure is limited because RunAgent and view issuance already refuse ZDR, but a waived run calling it by name is not guarded, so owner_actions_under_zdr_not_offered cannot yet be written as a meaningful golden."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The workspace_tools refusal key is not in zdr-refusals.json. The workspace gate in mod.rs (about line 777) returns plain text rather than Refusal::feature_not_supported(\"workspace_tools\"). The fix chain runs through zdr_refusal.rs, zdr-refusals.ts and mod.rs, all outside S9's ownership. The plan marks the key [live-only]."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Neither proof script was run end to end, because both need Docker. The admission proof also depends on model-gateway --lib every_ask_read and on the Frontend node_modules being installed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The PromoteWorkspace grep guard, in CI and in the proof, has gaps. It scans only *.rs under the Model Plane rust tree. It misses a call written with whitespace before the parenthesis, or one passed as a path without a call (for example SandboxManagerClient::promote_workspace). Go callers outside sandbox-manager are not covered at all."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Two commit-time chores. The two new proof scripts need mode 100755 staged (git add --chmod=+x). The model-gateway posture pin shows as modified only because of CRLF, so check that its staged blob is unchanged."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The CI YAML edit was checked by reading it, not by a parser (no YAML module here). The two new steps sit at the same indentation as their neighbours, and the guard step correctly inherits working-directory apps/Model Plane/rust."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+      "outcome": "exit 1: 88 passed, 21 failed. Failures: 3 rerank-v1 goldens missing, 12 Quarry dp-contracts/web-rerank vendored copies missing, 2 usage-ledger-v2 copies missing, cross-plane-token-requests.json digest drift, and 3 CRLF-only mismatches (usage-envelopes pin, model-gateway quarry-token-claims pin, mp-contracts zdr-posture-matrix pin). None are caused by files S9 owns, except mp-contracts zdr pin which is a CRLF copy mismatch.",
+      "passed": false
+     },
+     {
+      "command": "bash -n workspace-tools-proof.sh and agent-action-admission-proof.sh",
+      "outcome": "syntax ok for both",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test agent_action_admission_contract --test workspace_edit_contract --no-fail-fast (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "6 passed, 0 failed; 6 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib (same env)",
+      "outcome": "Finished with no errors; mp-contracts and model-gateway compile (run_ceiling error reported by the implementer no longer reproduces)",
+      "passed": true
+     },
+     {
+      "command": "Proof scripts end to end and Docker steps",
+      "outcome": "not run: need Docker, which this tester may not run",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "WS24-S9 is partial. Built: two proof scripts modelled on tickets-create-proof.sh (disposable Postgres bound to loopback with trust auth, no password or service credential, the switch never set by the script; each step refuses to pass when it runs nothing); two named CI steps (a PromoteWorkspace caller guard placed before the goldens step, and the two contract targets named before the full run); and the model-gateway posture pin copy made byte-identical to the canonical pin, which clears one of the sync failures. Not built, for reasons in deviations: the three named ZDR posture-matrix rows, the workspace_tools refusal key, and the ledger and ownership rows (shared files). The matrix, its digests and all copies are unchanged. The three owned-scope claims verified: no PromoteWorkspace caller exists outside the sandbox-manager client, every row of agent-action-admission.json carries zdr_allowed false, and the admission and workspace contract targets pass."
+  },
+  {
+   "id": "WS23-S8.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Control Plane\\config\\plane-service-principals.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Control Plane\\auth-core\\src\\auth\\plane-service-principals-policy.contract.spec.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\integration_tools.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\provider_write_contract.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/auth-core\" && pnpm exec jest plane-service-principal plane-token-exchange plane-token.controller --ci",
+     "outcome": "Test Suites: 1 failed, 5 passed, 6 total. Tests: 1 failed, 1 skipped, 189 passed, 191 total. The failure is the policy spec test 'accepts the policy shape once the launcher adds credentials, and authorizes the exchange' at line 115 (integration:write must be refused on exchange). It stays red until the shared guard lands. The skip is the posix-only it.skip at plane-service-principal.spec.ts:749 on win32."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test provider_write_contract",
+     "outcome": "running 10 tests; test result: ok. 10 passed; 0 failed."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- provider_effect_summary a_mail_send a_recipient_string a_summary_says only_a_mail_send a_write_outside a_write_is_outside a_provider_write_with_no_acting_user an_ask_posture_mail_send",
+     "outcome": "test result: ok. 9 passed; 0 failed; 1510 filtered out."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/auth-core/src/auth/plane-service-principal.ts: in authorizePlaneServiceTokenExchange (lines 555-601), insert one line after line 585 `    requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||` and before line 586 `    reason.length < 3 ||`: `    requestedScopes.some((scope) => scope.endsWith(':write')) ||`. Optional why-comment above it: `    // An exchange never mints a write; writes mint on the attested internal-token path.` The file is LF-only (0 CRLF). Do not add it to authorizePlaneServicePrincipal (the mint function, refusal condition at lines ~481-497): the attested write path mints there.",
+    "Land that edit in the same commit as the registry row (apps/Control Plane/config/plane-service-principals.json, model-execution integration:write). Do not run the Control registry deploy (scripts/run-control-plane.sh) before it lands.",
+    "After it lands, run cd \"apps/Control Plane/auth-core\" && pnpm exec jest plane-service-principal plane-token-exchange plane-token.controller --ci. Expect the policy spec at 55/55 and no new failure. The slice's own pattern plane-service-principals does not match plane-service-principal.spec.ts, so use the singular pattern too.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the K1-11 ADR (Model's write_attestor is the durable contract; Ingestion accepts it; execution-core is the signer, so the approval gate sits there). No writes are switched on before it is accepted.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add a provider-write authority row (model-execution holds integration:write on ingestion only; each write is attested and approval-gated).",
+    "Live proof per the row, not run (no docker in this batch): rebuild execution-core; set the attestation keys on the proof stack only; use dedicated accounts (DEC-27); run a draft-email, approve, read-back, then a deny run; record the approval row, the integration-corev2 receipt and the audit rows.",
+    "Rotate the key named EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY in apps/Model Plane/deploy/.env. Its value was printed into a session transcript earlier. Name only; no value is repeated here."
+   ],
+   "deviations": [
+    "No owned-file edits this round. The only required fix (the exchange guard) is in plane-service-principal.ts, which the task names as a shared file the lead applies, so I did not edit it.",
+    "Turn-scope binding for writes applies only when the turn selected at least one connection. An empty selection keeps today's write behaviour (left as a decision).",
+    "The approval reason includes the first 120 characters of the plain-text body, as the row and K3-16 say. The lead's summary says recipient and subject only (decision).",
+    "provider_effect_summary takes the execute_provider_action input JSON (tool_input) rather than (operation, params, body).",
+    "Acting-user refusal is added in execute_provider_action and in execute_action, before any network call.",
+    "approval_reason_erased_with_run is not written: its erasure half needs session-core, which is not owned. The execution-core tests cover the reason half.",
+    "The forged and replayed contract test uses a Rust replica of the verifier and receipt matching, with ephemeral Ed25519 keys. The Go suites are the authority."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Control Plane\\auth-core\\src\\auth\\plane-service-principal.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\capability-ownership-matrix.md"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Control Plane/auth-core/src/auth/plane-service-principal.ts (shared file, the lead applies it): in authorizePlaneServiceTokenExchange, add the refusal `requestedScopes.some((scope) => scope.endsWith(':write')) ||` beside the existing `requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||` line. Reason: the slice's registry row (plane-service-principals.json, model-execution ingestion `integration:write`) widens the RFC 8693 exchange, so a session-core subject token can now mint integration:write for model-execution. The test the row says to keep ('The exchange never mints a write credential, whatever the registry says' in plane-service-principals-policy.contract.spec.ts, 'accepts the policy shape once the launcher adds credentials, and authorizes the exchange') was green at HEAD and is red now. I re-ran it: 1 failed, 206 passed, 1 skipped. Land the guard in the same commit as the registry row, and do not deploy the registry row (scripts/run-control-plane.sh) before it."
+    ],
+    "dod_gaps": [
+     "K1-11 ADR in apps/Model Plane/docs/decisions/ledger.md: Model's write_attestor is the durable contract, Ingestion accepts it, and execution-core is the signer, so the human-approval gate sits there. It is a shared doc, the plan says no write ships before it, and it is not written.",
+     "The named test approval_reason_erased_with_run (K3-16) does not exist. Its erasure half needs session-core, which this slice does not own.",
+     "Live proof not run (no docker): rebuilt execution-core, attestation keys on the proof stack only, dedicated DEC-27 accounts, then draft, pause card, approve, send, read-back, and a deny run, with the approval row, the integration-corev2 receipt and the audit rows recorded.",
+     "Rotate the key named EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY in apps/Model Plane/deploy/.env. The implementer reports its value was printed into an earlier transcript.",
+     "Add the provider-write authority row to apps/Model Plane/docs/capability-ownership-matrix.md (shared doc)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "The registry row widens the token exchange: authorizePlaneServiceTokenExchange (plane-service-principal.ts:555-601) would mint integration:write for model-execution from a session-core subject token. Closed only when the lead's shared guard lands. Do not deploy the registry row before it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The integration-corev2 write gate is an allowlist. writeAction comes from actionRequiresApproval (internal/api/server.go:3621-3689), which returns false for any operation it does not name. docs/actions-surface-operations.md section 6.1 says an unmapped operation silently skips both gates. The first 60 approval-no rows I grepped are all GET reads, but I did not check every write row against the switch. A contract test in integration-corev2 that fails on a write row with no approval entry would close this (follow-up, not in this slice's files)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "execution-core is the attestation signer (server.go:3104-3107 names its write-attestation signer). Ingestion checks the signature, binding and single-use receipt in verifyWriteAttestation. I did not read the verifier's approval handling. So the human approval is enforced by execution-core before it signs, and K1-11 must say so."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The exchange guard keys on the ':write' suffix. A write-capable scope named without that suffix would pass it if a tokenExchange row ever named it. Owner call: validate tokenExchange scopes at load time, or keep an explicit exchange allowlist."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "An empty turn selection leaves writes unbound (the K3-15 analogue for reads). Owner decides whether personal-connection writes need an explicit selection, as reads do."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The direct ExecuteStep RPC path (no connector_scope) bypasses the turn-scope binding for writes, as before. Decide whether connector writes are refused when no scope is passed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The approval reason carries 120 characters of the plain-text body (row and K3-16). The lead's summary says the approval shows recipient and subject only. Confirm the card copy and whether the excerpt stays in approvals.reason."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The erasure half of approval_reason_erased_with_run is untested. Thread deletion (session-core grpc.rs ~722-770) and org GDPR erasure (gdpr.rs:285) delete approvals rows, but nothing proves approvals.reason is cleared on a run-only erasure. Needs an ignored session-core DB test; session-core is not owned here."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof not run (no docker in this batch). It needs a rebuilt execution-core, the attestation keys on the proof stack only, dedicated accounts under DEC-27, and a draft, approve, send, read-back and deny run, with the audit rows checked."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The write-attestation private key was printed into a session transcript in the earlier round (name EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY in apps/Model Plane/deploy/.env). Rotate it before any shared deployment. No value is repeated here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The continuation descriptor (agent.rs, pre-existing) stores the full tool input, including the whole mail body, not only the 120-character excerpt. Erasure must cover descriptors as well as the reason."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "A mail with HTML only (no bodyText) gets no opening in the approval summary, so the approval shows recipient and subject only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "list_provider_actions still lists every connection of the org inside a turn that has a selection. Discovery is not bound to the turn scope (pre-existing)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Control config README has no model-execution row. A capability-ownership-matrix row for provider-write authority is needed (shared doc)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Until the shared exchange guard lands, authorizePlaneServiceTokenExchange mints integration:write for model-execution from a session-core subject token, because the registry row now lists integration:write in scopesByAudience.ingestion and the exchange only checks membership."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "approval_reason_erased_with_run (K3-16) is absent. Nothing proves approvals.reason, which now carries recipients, subject and 120 body characters, is erased on run or thread erasure."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "write_outside_turn_scope returns false when connector_scope is empty, so a turn with no selection (and the direct ExecuteStep path) can still write to any org connection. Only the approval gate stands in the way, and the owner has not decided this."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The approval reason includes a 120-character body excerpt (per the row and K3-16), but the slice summary says recipient and subject only. The owner should confirm the card copy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The integration-corev2 actionRequiresApproval switch is an allowlist: an unmapped write operation skips both gates, and no contract test pins every write row to an approval entry."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The exchange guard keys on the ':write' suffix. A write-capable scope named without it would pass if a tokenExchange principal were ever granted one, so validate exchange scopes at load time."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The pre-existing continuation descriptor in agent.rs stores the full tool input, mail body included, so erasure must cover descriptors as well as approvals.reason."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "provider_write_contract.rs tests a Rust replica of the Go verifier with ephemeral keys, so drift from internal/attestation would not be caught here. A shared golden vector would close that."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "An HTML-only mail (no bodyText) gets no opening in provider_effect_summary. This is untested against what integration-corev2 actually sends."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "list_provider_actions still lists every org connection inside a turn that has a selection (pre-existing)."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd 'apps/Control Plane/auth-core' && pnpm exec jest plane-service-principals plane-service-principal plane-token --ci",
+      "outcome": "8 suites: 7 passed, 1 failed. Tests: 206 passed, 1 skipped, 1 failed (208). Failure: plane-service-principals-policy.contract.spec.ts 'accepts the policy shape once the launcher adds credentials, and authorizes the exchange' at line 115: expected the exchange to refuse integration:write with /not authorized/i but the function did not throw. This is the shared guard the lead has not landed in plane-service-principal.ts (the implementer predicted exactly this).",
+      "passed": false
+     },
+     {
+      "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --tests --no-fail-fast (includes the crate compile check)",
+      "outcome": "Compiles (only pre-existing dead-code warnings). lib: 1519 passed, 0 failed. provider_write_contract: all pass (10 tests, in the earlier run too). All other integration targets pass except 2 failing targets. (1) org_policy_characterisation: the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context panics at tests/org_policy_characterisation.rs:101 (found 0 dispatches, expected 1); HEAD agent.rs also has 0 matches of 'runtime_loop::execute_step_with_subagent(' line header, so it fails at HEAD too and is not from this slice. (2) zdr_refusal_inventory: every_zdr_refusal_in_execution_core_carries_a_catalogue_kind fails on untyped refusal at skill_mounts.rs:637; skill_mounts.rs is not modified in git status, so it is pre-existing and not from this slice.",
+      "passed": false
+     },
+     {
+      "command": "cd 'apps/Ingestion Plane/integration-corev2' && GOWORK=off go test ./internal/api/...",
+      "outcome": "ok github.com/triodelab/integration-corev2/internal/api (cached). Passed.",
+      "passed": true
+     },
+     {
+      "command": "named: approval_reason_erased_with_run (K3-16)",
+      "outcome": "Not present anywhere in the Rust tree; the implementer deliberately did not write it (erasure half needs session-core, not owned). Cannot run.",
+      "passed": false
+     },
+     {
+      "command": "named: forged and replayed attestation refusal contract test (K1-11)",
+      "outcome": "Covered by tests/provider_write_contract.rs, 10 passed. Note it uses a Rust replica of the verifier with ephemeral Ed25519 keys; the Go suites are the authority.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "audit",
+    "policy"
+   ],
+   "notes": "Round 2, fix 1 only. No file was edited this round. Fix 1 is the shared-file guard the lead applies; the exact insertion is in lead_todo. Checked before recommending it: requestedScopes is string[] (normalizedUnique, line 563), and the insertion lands in authorizePlaneServiceTokenExchange (lines 555-601), not in the mint function. Blast radius is small: model-execution is the only principal with tokenExchange (pinned by the policy spec). No production path requests a write scope through the exchange. The only integration:write request is integration_tools.rs:439, which mints through mint_ingestion_token at line 448 (the internal-token path). Reads use the exchange only with integration:read. The exchange tests in plane-service-principal.spec.ts, plane-token.controller.spec.ts and plane-token-exchange.composition.spec.ts request integration:read or expect refusal, so they should stay green. Status stays partial until the lead lands the guard. The 55/55 result for the policy spec is expected from reading the code; it was not run with the guard applied. Not re-run this round: Go (integration-corev2, untouched), the full execution-core --lib run (1519 tests, last run before the formatting-only edits; no Rust source changed this round), and prettier (spec unchanged). The dead-code warnings in the execution-core build (execute_step_with_subagent at runtime_loop/mod.rs:557 and decision_closer at resume.rs:581) exist at HEAD too and are not from this slice. Line endings measured: plane-service-principal.ts, the policy spec, plane-service-principal.spec.ts and the registry JSON are LF-only (0 CRLF). The new test file provider_write_contract.rs is new in this slice."
+  }
+ ]
+}

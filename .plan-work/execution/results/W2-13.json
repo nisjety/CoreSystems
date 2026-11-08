@@ -1,0 +1,224 @@
+{
+ "batchId": "W2-13",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS20-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.test.tsx",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/ScheduledRunsPanel.test.tsx src/shared/api/cron-client.test.ts",
+     "outcome": "pass: 2 files, 12 tests (final run after the last edit)"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm typecheck",
+     "outcome": "34 TS errors, all in files I did not touch (pre-existing); none in ScheduledRunsPanel.tsx or cron-client.ts"
+    },
+    {
+     "command": "pnpm exec eslint on ScheduledRunsPanel.tsx, ScheduledRunsPanel.test.tsx, cron-client.ts, cron-client.test.ts",
+     "outcome": "pass, exit 0 (whole-project pnpm lint not run)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets",
+     "outcome": "pass: 721+7+3+1 tests, 0 failed; includes list_cron_fires_forwards_org_scope and list_cron_fires_refuses_a_member_who_did_not_create_the_schedule (both new)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib cron_fires_path",
+     "outcome": "NOT RUN: model-gateway lib does not compile in this worktree, error E0063 missing field image_parts at services/model-gateway/src/tool_loop.rs:7038 (non-test code, file not touched by this slice). The new unit test cron_fires_path_tests::fires_path_forwards_only_a_numeric_limit is written but unexecuted. Typeck of the rest of the crate reported only this one error, which is some evidence http_routes.rs type-checks."
+    },
+    {
+     "command": "rustfmt --check on agent_actions.rs and http_routes.rs",
+     "outcome": "no diffs in the new code; remaining diff hunks are pre-existing code (http_routes.rs is not fmt-clean at HEAD)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: at line ~7038 the InferRequest literal lacks the field `image_parts` (E0063, pre-existing, present in the HEAD copy of this file and not from this slice). Add the field with the value the proto contract expects, so `cargo test -q -p model-gateway --lib cron_fires_path` can build and run. Not determined by me.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts (optional, to satisfy the CLAUDE.md action-contract rule): add near the schedule-related inputs `const scheduleFiresListInput = z.object({ scheduleId: z.string().trim().min(1).max(200), limit: z.number().int().min(1).max(100).optional() })`, and inside actionRegistry before `] as const satisfies readonly ActionDescriptor[]`: `{ id: 'schedule.fires.list', label: 'List schedule fires', description: 'List the most recent fires of one of your schedules, with their status, outcome and the thread that holds the answer. Schedule creator or org admin only.', ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true, inputSchema: scheduleFiresListInput, outputSchema: envelopeStatusOutput }`. Check action-registry.test.ts and the catalog-manifest/model-eligibility tests afterwards; outputSchema is a status shape, so pick a list output if the lead prefers.",
+    "Rebuild the gateway image (the gateway change is in agent_actions.rs), rebuild model-gateway (`bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway`) once tool_loop.rs compiles, and restart the verevonv3 frontend container (Vite bind mount; cache-bust global.css). Set VITE_SCHEDULE_RESULTS=true only after S1 is live (lead decision), so the button opens the list.",
+    "Live proof (not run here): with a real fire from S1, confirm the owner can open the scheduled thread through the BFF transcript route (plan D12, step 0). Without that, the 'Open transcript' link returns a 403. Screenshot the expander with a real fire."
+   ],
+   "deviations": [
+    "The row says VITE_SCHEDULE_RESULTS is 'default on once S1 is on'. I kept the code default OFF (strict === 'true' read at render), per the every-switch-defaults-off rule; enabling is an env setting the lead flips after S1 is live.",
+    "The Playwright spec tests/e2e/scheduled-results.spec.ts that the row names is not written (e2e, depth work in wave mode). Not in new_files either.",
+    "The action contract schedule.fires.list is not registered: action-registry.ts is not in my owned files, so the entry is handed to the lead as a shared-edit. listCronSchedules and the other cron calls also bypass the registry today.",
+    "The fires route is creator-scoped through the existing authorize_own_schedule gate, as the row asks. Admins see any schedule's fires.",
+    "The status and outcome labels are a closed token table with a raw-token fallback, since the exact outcome vocabulary is not pinned by a golden yet."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts (schedule.fires.list contract entry; see lead_todo)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (line ~7038 missing image_parts; pre-existing compile break that blocks the model-gateway lib tests)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the lead_todo shared-edit to apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts to register schedule.fires.list (contract text in the implementer's lead_todo); outside the ownership set, so only the lead can close it.",
+     "Live proof: rebuild the gateway image (agent_actions.rs), rebuild model-gateway via compose.sh, restart the verevonv3 frontend (Vite bind mount, cache-bust global.css), and with a real S1 fire confirm the owner's Open transcript link opens and screenshot the expander. Docker and live steps are lead-only.",
+     "Complete the model-gateway unit test run (cargo test -p model-gateway --lib cron_fires_path); it did not finish during this verification.",
+     "Whole-project pnpm lint was not run by this verifier; only eslint on the four owned files was run (exit 0).",
+     "Before enabling VITE_SCHEDULE_RESULTS, confirm S1 (session-core persistence and capability-core fires listing) is live in the target environment, since this slice depends on cron_fires rows carrying run_id and thread_id.",
+     "Scope check: the git status of the shared worktree lists many other modified files (sidebar-navigation.ts, DashboardComposer.tsx, chat-client.ts, Model Plane proto and session-core files, and others). They belong to other batches (W1-11, W1-17, W2-05 and similar), not to this slice's six files; the owned-file diffs contain only S3 changes."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The transcript link depends on the owner being able to read a service:orchestrator-core-owned scheduled thread through the BFF transcript route (plan D12); this has not been checked live, and the flag must not be flipped until it has."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Playwright spec tests/e2e/scheduled-results.spec.ts named by the row is not written."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The model-gateway unit test fires_path_forwards_only_a_numeric_limit has never run because the lib does not compile (tool_loop.rs:7038, E0063 missing image_parts), which is pre-existing and outside this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The 'Se resultater' button sets aria-controls to an element id that exists only while the row is expanded, so the reference dangles when collapsed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The 'Plan' origin chip is static and does not read runs.metadata.origin, because the fires endpoint does not carry origin; acceptable for S3 but S2's stamp is not surfaced here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The status and outcome tokens are a hand-kept switch; pin the closed vocabulary against the S1/S7 token sets with a golden test when that vocabulary is frozen."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The Open transcript link opens a thread owned by service:orchestrator-core (plan D12); the owner's read through the BFF transcript route is unverified, so VITE_SCHEDULE_RESULTS must stay off until a real fire's thread opens for its owner."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Playwright spec tests/e2e/scheduled-results.spec.ts named by the row is not written; the vitest coverage is component-level only."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The batch flag note says default on once S1 is on, but the implementer kept the code default off (strict === 'true' read at render), which follows the every-switch-defaults-off rule; the lead decides when to set the env var after S1 is live."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The See results button sets aria-controls to scheduled-fires-<id>, which exists only while the row is expanded, so the reference dangles when collapsed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The origin chip is a static Schedule label because the fires JSON carries no origin, so the S2 origin stamp on runs.metadata is not surfaced in this panel."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The action contract schedule.fires.list is not registered (action-registry.ts is outside the ownership set); the lead should apply the lead_todo shared-edit so the CLAUDE.md action-contract rule is met for this operation, although existing cron calls also bypass the registry today."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The lead_todo tool_loop.rs E0063 shared-edit should not be applied: cargo check of model-gateway lib and tests now passes, and the field the implementer named is a WS08 proto change that the model-gateway code does not reference."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A percent-encoded ? in cron_id survives the gateway and model-gateway path decoding and reaches the capability-core URL unescaped. Both the creator gate and the forwarded request resolve the same schedule id, so no bypass was found, but the gateway should validate cron_id as a plain token (existing cron routes share the pattern)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs is LF in this autocrlf checkout while most model-gateway sources are CRLF; git diff is clean (47 insertions), so this is cosmetic, but the lead should confirm the S3 edit did not change its line endings."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Implemented the S3 \"See results\" slice in wave mode. Backend: model-gateway GET /v1/cron/:id/fires (typed numeric limit, forwards only `cron/{id}/fires?limit=N` to capability-core, whose listFires already exists from S1); gateway GET /api/v1/cron/{cron_id}/fires gated by the existing authorize_own_schedule (org admin/owner or the schedule's creator), then proxied with build_query. Frontend: listScheduleFires(orgId, cronId, limit=5) in cron-client.ts returning the {data} array; ScheduledRunsPanel replaces the disabled button with an expander when VITE_SCHEDULE_RESULTS === 'true' (read at render, default off, so rollback keeps the disabled button); each open row shows a ScheduleFires list with time, status token, outcome token, static \"Schedule\" origin chip, withheld count, and an \"Open transcript\" link (chatThreadHref + selectChatThread, modifier-click falls through to the browser). Honest loading, empty and error states. Nothing is live: no image rebuilt, no frontend container restarted, no fire seen end to end."
+  },
+  {
+   "id": "WS24-S0",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/tool_catalogue_characterisation.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "FAIL, unchanged blocker: E0063 missing field image_parts in InferRequest at src/runtime_loop/agent.rs:2720. agent.rs is not modified in this worktree; the image_parts = 20 proto change (apps/Model Plane/proto/model_plane/v1/inference.proto, uncommitted, another batch's WS08 work) has no matching Rust field set. Not my file, not edited."
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/actions/model-eligibility.test.ts --pool=forks",
+     "outcome": "PASS: 3 of 3 tests. (The default pool timed out once with a vitest worker timeout; the forks pool passed.)"
+    },
+    {
+     "command": "python3 -I parser check of offered tool names in src/runtime_loop/agent.rs (offered_tool_defs, browser_tool_defs, process_tool_defs)",
+     "outcome": "33 names, 33 unique: 31 string literals plus crate::subagent::research_fan_out::RESEARCH_TOOL_NAME and crate::plan::PROPOSE_TOOL. Parser check only, not a cargo run."
+    },
+    {
+     "command": "grep check of the test file's imports in execution-core and mp-contracts",
+     "outcome": "trusted_capability_id, rung_required_for, is_risky_tool, PROPOSE_TOOL, RESEARCH_TOOL_NAME (pub const in subagent/research_fan_out.rs), mp_contracts::autonomy::label are all public; mp-contracts and serde_json are regular dependencies. Compile not verified."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Unblock execution-core lib: the other batch's uncommitted proto change adds InferRequest.image_parts (tag 20) in apps/Model Plane/proto/model_plane/v1/inference.proto, but apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2720 constructs pb::InferRequest without it. That batch must set image_parts (or the proto change must be held back) before any execution-core cargo build succeeds.",
+    "Once the lib compiles: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 DO_TOOL_CATALOGUE_UPDATE=1 cargo test -q -p execution-core --test tool_catalogue_characterisation . Review apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json: expect 33 tools, matching the parser check above.",
+    "Then run the same command without DO_TOOL_CATALOGUE_UPDATE and expect it green. Then cargo test -q -p execution-core --lib, which should be unaffected apart from the workspace_hydrate.rs doc header.",
+    "Commit the fixture together with tests/tool_catalogue_characterisation.rs (new, untracked) and the Frontend model-eligibility.test.ts.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert the two entries from the previous report directly above the line '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)'. Their headings are '## 2026-10-24 - Do tool catalogue and the eight model-eligible ids are characterised before admission changes (WS24-S0)' and '## 2026-10-24 - Workspace edits are a per-run overlay, and workspace tools never call PromoteWorkspace (WS24-S0, DEC-24)'. Bodies as given in the earlier report."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Add the golden fixture apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json, which is absent from the worktree. A clean HEAD copy with this slice's two Rust files overlaid generated it with DO_TOOL_CATALOGUE_UPDATE=1: 204 lines, 33 unique tools, and the run without the env var passes. The generated file is at C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws24/apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json. Copy it as is, because the test normalises CRLF on read; regenerate it if fix 2 changes the tool list. The three source files it depends on (agent.rs, permission/mod.rs, capability_policy.rs) are unmodified in the worktree, so the golden matches the worktree once the lib compiles.",
+     "Correct the scope claim in apps/Model Plane/rust/services/execution-core/tests/tool_catalogue_characterisation.rs. The header says the golden covers 'every tool a Do run can be offered', but it reads only the three literal offer lists (33 names). tickets.create is offered through the server-resolved path (runtime_loop/agent.rs:1243 append_server_resolved_tool_defs; constant ticket_tools::TOOL_NAME, module pub at lib.rs:50) and is absent from the golden, and MCP and client tools are dynamic and also absent. Either pin crate::ticket_tools::TOOL_NAME as an extra name via resolve_constant and regenerate the fixture (34 entries), or narrow the header to name the three lists and the excluded server-resolved, MCP and client tools.",
+     "Fix the sentence in apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs header (lines 6-13) that says 'The first Space-scoped code_interpreter or process_* call of a run reaches hydrate'. Only process_start reaches ensure_hydrated_workspace (runtime_loop/mod.rs, the branch `if tool_name == crate::process_tools::PROCESS_START`); the other process tools reuse an existing lease. Change 'process_*' to 'process_start'. Keep the CRLF line endings."
+    ],
+    "dod_gaps": [
+     "Worktree execution-core lib does not compile: E0063 for missing image_parts in InferRequest at runtime_loop/agent.rs:2720, caused by another batch's uncommitted proto change at apps/Model Plane/proto/model_plane/v1/inference.proto:241. Only the lead can resolve this, and it must be done before the fixture is committed in this worktree.",
+     "Ledger entries are not in apps/Model Plane/docs/decisions/ledger.md. They are a shared-edit the lead applies. The lead_todo refers to 'bodies as given in the earlier report', which this verifier did not receive, so the lead must supply the two entry bodies (WS24-S0 DEC-24 never-promote and DEC-25 tool naming, classification and rung entries) before the DoD 'ledger merged' can be met.",
+     "Docs and test slice with no runtime change: switch defaults, ZDR, proto tags, migration numbers and live proofs do not apply and were not exercised; no docker was run."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The golden's parser reads only `name: ` literal lines inside the three offer functions, so a tool added through a helper or a non-literal expression not in resolve_constant escapes detection, although the header says a new offered tool fails the test; add a runtime count check against the assembled offer lists or document the gap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The golden pins answers that WS24-S3/S4 are meant to change (process_stdin and code_interpreter as read_only, plan.propose mapped to cap.memory.index, save_memory as workspace_write); the header should say these are characterised current answers, not reviewed correct ones, so later regeneration is a deliberate diff."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The worktree's execution-core lib does not compile (E0063 at runtime_loop/agent.rs:2720), so the plan's `cargo test -q -p execution-core --lib` cannot pass in this worktree until the other batch's proto change (InferRequest.image_parts = 20) is matched in agent.rs or held back."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Required fix 1 is NOT delivered. The fixture apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json does not exist, because the execution-core lib does not compile in this worktree. I could not run DO_TOOL_CATALOGUE_UPDATE=1, so I did not review a generated golden and did not confirm the test passes without the env var. The characterisation test will keep failing (read_text panics on the missing fixture) until the fixture is generated. I did not edit agent.rs, since it is not owned by this slice and is another batch's file. I did not commit, stage, or run docker or live proofs. The Frontend test was re-run and passes. A monitor (task bbi1z8vvw) is armed on agent.rs for an image_parts reference, with a 30-minute window. If the lib is fixed, the fixture can be generated at once."
+  }
+ ]
+}

@@ -1,0 +1,157 @@
+{
+  "schema": "quarry-pii-golden/1",
+  "note": "Authored golden for quarry-transform pii.rs (E3.6-1). Every number is a published example or was computed with the check it tests; none is a real person's identifier. Findings are listed in text order: kind label and the exact matched text.",
+  "validators": [
+    { "kind": "email", "input": "kari.nordmann@example.no", "valid": true, "note": "plain Norwegian style address" },
+    { "kind": "email", "input": "postmottak@kommune.no", "valid": true, "note": "public-sector mailbox" },
+    { "kind": "email", "input": "first.last+tag@sub.example.co.uk", "valid": true, "note": "plus tag, three-label domain" },
+    { "kind": "email", "input": "kari..nordmann@example.no", "valid": false, "note": "doubled dot in local part" },
+    { "kind": "email", "input": ".kari@example.no", "valid": false, "note": "leading dot" },
+    { "kind": "email", "input": "kari@localhost", "valid": false, "note": "no dot, no top-level domain" },
+    { "kind": "email", "input": "kari@example.n", "valid": false, "note": "top-level domain of one letter" },
+    { "kind": "email", "input": "kari@-example.no", "valid": false, "note": "hyphen at the start of a label" },
+
+    { "kind": "phone", "input": "+47 22 33 44 55", "valid": true, "note": "Norwegian international form" },
+    { "kind": "phone", "input": "+1 415 555 0132", "valid": true, "note": "North American international form, 11 digits" },
+    { "kind": "phone", "input": "22 33 44 55", "valid": true, "note": "Norwegian national, 2-2-2-2" },
+    { "kind": "phone", "input": "98 76 54 32", "valid": true, "note": "Norwegian national, mobile range" },
+    { "kind": "phone", "input": "12 34 56 78", "valid": false, "note": "national number starting with 1" },
+    { "kind": "phone", "input": "+0 22 33 44 55", "valid": false, "note": "international form with a leading zero" },
+    { "kind": "phone", "input": "+47 22 33", "valid": false, "note": "international form too short" },
+    { "kind": "phone", "input": "974 760 673", "valid": false, "note": "Norwegian organisation number (3-3-3), not a phone" },
+
+    { "kind": "iban", "input": "NO9386011117947", "valid": true, "note": "published Norwegian example" },
+    { "kind": "iban", "input": "NO93 8601 1117 947", "valid": true, "note": "same, printed in groups" },
+    { "kind": "iban", "input": "GB82 WEST 1234 5698 7654 32", "valid": true, "note": "published UK example" },
+    { "kind": "iban", "input": "DE89 3704 0044 0532 0130 00", "valid": true, "note": "published German example" },
+    { "kind": "iban", "input": "SE4550000000058398257466", "valid": true, "note": "published Swedish example, 24 characters" },
+    { "kind": "iban", "input": "NO9386011117948", "valid": false, "note": "check digits do not match (mod-97 fails)" },
+    { "kind": "iban", "input": "NO938601111794", "valid": false, "note": "Norwegian length is 15, this is 14" },
+
+    { "kind": "card", "input": "4111 1111 1111 1111", "valid": true, "note": "published Visa test number" },
+    { "kind": "card", "input": "4111-1111-1111-1111", "valid": true, "note": "dashes between groups" },
+    { "kind": "card", "input": "378282246310005", "valid": true, "note": "published Amex test number, 15 digits" },
+    { "kind": "card", "input": "4111 1111 1111 1112", "valid": false, "note": "Luhn check fails" },
+    { "kind": "card", "input": "1234 5678 9012 3456", "valid": false, "note": "Luhn-shaped but no issuer prefix" },
+
+    { "kind": "fodselsnummer", "input": "12058512336", "valid": true, "note": "12 May 1985, both control digits valid" },
+    { "kind": "fodselsnummer", "input": "120585 12336", "valid": true, "note": "same, with the optional space after the date" },
+    { "kind": "fodselsnummer", "input": "13058512375", "valid": true, "note": "13 May 1985" },
+    { "kind": "fodselsnummer", "input": "12458512319", "valid": true, "note": "H-number: month 05 plus 40" },
+    { "kind": "fodselsnummer", "input": "52058512400", "valid": true, "note": "D-number: day 12 plus 40" },
+    { "kind": "fodselsnummer", "input": "01010078950", "valid": true, "note": "1 January 2000 range, valid checksums" },
+    { "kind": "fodselsnummer", "input": "12058512337", "valid": false, "note": "second control digit wrong" },
+    { "kind": "fodselsnummer", "input": "13138512336", "valid": false, "note": "month 13" },
+    { "kind": "fodselsnummer", "input": "120585123", "valid": false, "note": "nine digits" }
+  ],
+  "cases": [
+    {
+      "id": "no-public-sector-application",
+      "group": "norwegian",
+      "text": "Søknad fra Kari Nordmann, fødselsnummer 12058512336, sendes til postmottak@kommune.no innen 1. juni.",
+      "expect": [
+        { "kind": "fodselsnummer", "text": "12058512336" },
+        { "kind": "email", "text": "postmottak@kommune.no" }
+      ]
+    },
+    {
+      "id": "no-contact-block",
+      "group": "norwegian",
+      "text": "Kontakt: Ola Hansen, tlf. 98 76 54 32, e-post ola.hansen@eksempel.no, konto NO9386011117947.",
+      "expect": [
+        { "kind": "phone", "text": "98 76 54 32" },
+        { "kind": "email", "text": "ola.hansen@eksempel.no" },
+        { "kind": "iban", "text": "NO9386011117947" }
+      ]
+    },
+    {
+      "id": "no-phone-two-forms",
+      "group": "norwegian",
+      "text": "Ring 22 33 44 55 eller +47 22 33 44 55 før fristen.",
+      "expect": [
+        { "kind": "phone", "text": "22 33 44 55" },
+        { "kind": "phone", "text": "+47 22 33 44 55" }
+      ]
+    },
+    {
+      "id": "no-fnr-with-space",
+      "group": "norwegian",
+      "text": "Fødselsnr: 120585 12336 (registrert 2026).",
+      "expect": [
+        { "kind": "fodselsnummer", "text": "120585 12336" }
+      ]
+    },
+    {
+      "id": "no-d-and-h-numbers",
+      "group": "norwegian",
+      "text": "D-nummer 52058512400 og H-nummer 12458512319 er begge gyldige.",
+      "expect": [
+        { "kind": "fodselsnummer", "text": "52058512400" },
+        { "kind": "fodselsnummer", "text": "12458512319" }
+      ]
+    },
+    {
+      "id": "en-card-and-near-miss",
+      "group": "english",
+      "text": "Card 4111 1111 1111 1111 exp 12/28, order 4111 1111 1111 1112.",
+      "expect": [
+        { "kind": "card", "text": "4111 1111 1111 1111" }
+      ]
+    },
+    {
+      "id": "en-contact-with-phone",
+      "group": "english",
+      "text": "Contact jane.doe@example.org or call +1 415 555 0132 after 5pm.",
+      "expect": [
+        { "kind": "email", "text": "jane.doe@example.org" },
+        { "kind": "phone", "text": "+1 415 555 0132" }
+      ]
+    },
+    {
+      "id": "en-iban-followed-by-capitalised-word",
+      "group": "english",
+      "text": "Pay to NO93 8601 1117 947 AND quote invoice 88.",
+      "expect": [
+        { "kind": "iban", "text": "NO93 8601 1117 947" }
+      ]
+    },
+    {
+      "id": "en-invalid-card-then-valid-card",
+      "group": "english",
+      "text": "Refs 1234 5678 9012 3456 and 4111 1111 1111 1111.",
+      "expect": [
+        { "kind": "card", "text": "4111 1111 1111 1111" }
+      ]
+    },
+    {
+      "id": "near-miss-organisation-and-dates",
+      "group": "near_miss",
+      "text": "Org.nr 974 760 673, saksnr 2026/1234, dato 23.10.2026, versjon 2.4.1.",
+      "expect": []
+    },
+    {
+      "id": "near-miss-iban-checksum",
+      "group": "near_miss",
+      "text": "Reference NO9386011117948 is wrong.",
+      "expect": []
+    },
+    {
+      "id": "near-miss-fnr-checksum-and-month",
+      "group": "near_miss",
+      "text": "Faktura 12058512337 og 13138512336 mottatt.",
+      "expect": []
+    },
+    {
+      "id": "near-miss-sixteen-digit-order-number",
+      "group": "near_miss",
+      "text": "Sum 1 234 567 kr, ref 1234567890123456 ignored.",
+      "expect": []
+    },
+    {
+      "id": "near-miss-email-shapes",
+      "group": "near_miss",
+      "text": "Send to kari@@example.no or @example.no or name@localhost.",
+      "expect": []
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+scripts/tests/browser-grant-contract.test.mjs
+scripts/tests/model-trace-nats-smoke.sh
+scripts/tests/run-trace-soak.sh
+scripts/tests/zdr-contract-sync.test.sh

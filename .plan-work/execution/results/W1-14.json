@@ -1,0 +1,338 @@
+{
+ "batchId": "W1-14",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS10-S3",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/inference_grpc.pb.go",
+    "apps/Model Plane/api/contracts/infer-statuses.json",
+    "apps/Model Plane/rust/crates/mp-contracts/src/model_entitlement.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/model_entitlement_matrix.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/model-entitlement-matrix.json",
+    "apps/Model Plane/rust/services/inference-core/src/entitlement.rs",
+    "apps/Model Plane/rust/services/inference-core/src/lib.rs",
+    "apps/Model Plane/rust/services/inference-core/src/config.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/metered.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/rust/services/inference-core/tests/model_entitlement_chain_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/scripts/release-artifact.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-contracts",
+     "outcome": "pass: lib 201 (incl. new Mode test), model_entitlement_matrix 14, catalogue and the other suites green"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib",
+     "outcome": "503 passed (7 new grpc tests: catalogue filter, GetModelAccess verdict/draft/catalogue/refusals, wire statuses, tier join; status golden regenerated and passing)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --tests (all integration targets)",
+     "outcome": "pass; model_entitlement_chain_test 20 passed (wiremock org-core, real gate and real FallbackChain)"
+    },
+    {
+     "command": "cargo check -q -p model-gateway --lib --tests and -p execution-core --lib --tests",
+     "outcome": "compile clean; all InferenceCore mocks carry get_model_access and ListModelsResponse.access"
+    },
+    {
+     "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p inference-core --lib status_contract",
+     "outcome": "pass; golden diff is 21 added lines: kinds model_entitlement_unavailable and model_not_entitled, two cases"
+    },
+    {
+     "command": "buf lint + ratchet; buf breaking against baseline.binpb",
+     "outcome": "no lint finding names any new inference.proto symbol (ratchet reports only sessions.proto findings from other sessions' uncommitted work); breaking is vacuous (0-byte baseline)"
+    },
+    {
+     "command": "diff HEAD inference.proto vs working copy, CRLF stripped",
+     "outcome": "0 removed lines: additive only (new rpc, 6 messages, ListModelsResponse.access = 2); no InferRequest tag used"
+    },
+    {
+     "command": "go test ./... in go/gen; go vet in orchestrator-core and capability-core",
+     "outcome": "pass"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (inference-core environment block): ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}  (use the org-core address the model-gateway block already uses for ORG_CORE_URL), INFERENCE_ORG_CORE_SERVICE_TOKEN: ${INFERENCE_ORG_CORE_SERVICE_TOKEN:-}, MODEL_ENTITLEMENT_MODE: ${MODEL_ENTITLEMENT_MODE:-off}",
+    "shared-edit apps/Model Plane/deploy/.env.example: MODEL_ENTITLEMENT_MODE=off (comment: off|shadow|enforce, unknown value means enforce) and INFERENCE_ORG_CORE_SERVICE_TOKEN= (empty; minted by apps/Control Plane/scripts/run-control-plane.sh for the org-core principal inference-core, scope org:model-entitlement:read:any); never write the value into a file",
+    "Update the infer-statuses.json digest pin in scripts/tests/zdr-contract-sync.test.sh line ~53 and re-vendor the byte copies at apps/Data Plane v2/services/inference-client-rs/tests/fixtures/inference-core/infer-statuses.json and apps/Data Plane v2/services/embedding-engine-rs/tests/fixtures/contracts/infer-statuses.json; run those two Data Plane crates' status_contract tests (they decode the kinds and may enumerate them)",
+    "Regenerate Go callers if any Go service embeds the unimplemented InferenceCore server (none found: orchestrator-core and capability-core vet clean)",
+    "Rebuild inference-core with the new env and the model-gateway/execution-core images (mock-only changes, no behaviour change) when a live proof is scheduled; live proof recipe: MODEL_ENTITLEMENT_MODE=shadow, org policy denying model B, member sends B, expect success plus model_entitlement_total{decision=\"would_refuse\"} and a log line naming org, revision, reason; then enforce and capture grpcurl trailers (x-mp-provider-error, x-mp-entitlement-reason)",
+    "bash scripts/tests/zdr-contract-sync.test.sh and python3 scripts/gates/buf-lint-ratchet.py in CI context: the ratchet currently reports sessions.proto findings that belong to other sessions' uncommitted work, none from inference.proto",
+    "Commit the regenerated go/gen files together with the proto in one commit"
+   ],
+   "deviations": [
+    "Entitlement settings live in a new config::EntitlementConfig (from_env), not as fields on InferenceConfig: InferenceConfig is built by exhaustive struct literals in 5 non-owned test files (real_rules_tests.rs, zdr_waiver_route_tests.rs, tests/fallback_test.rs x3) that new fields would have broken. FallbackChain::from_config reads EntitlementConfig::from_env() and holds the gate (chain.entitlement()); new_with_providers is off; with_entitlement is the test builder.",
+    "Edited inference-core/src/lib.rs (one line, pub mod entitlement;): not in the owned list but the new entitlement.rs cannot compile without it.",
+    "Regenerated and copied go/gen/model_plane/v1/inference_grpc.pb.go as well as inference.pb.go (the added rpc changes the stub; the file was not in the owned list). Generated with native buf 1.72 + protoc-gen-go/-grpc into a scratch dir; the header versions and all untouched content are byte-identical.",
+    "Edited model-gateway/tests/usage_meter_contract.rs (a fifth InferenceCore mock the plan's list omitted); the plan's mock list is otherwise covered. Mocks for the Ok case return an unrestricted GetModelAccessResponse, Down mocks return unavailable.",
+    "Plan puts a fixture only at tests/fixtures; the canonical authored file already exists at api/contracts (S2), so the fixture is a byte copy with an equality test, like zdr-posture-matrix.",
+    "Unknown or unreadable policy tier label reads as Sovereign (fail closed), and a body org-core returns that the matcher cannot read (unknown state, state with no policy, malformed policy) is unavailable, never unrestricted.",
+    "MODEL_ENTITLEMENT_MODE parsing follows the plan (unset/empty = off, unknown = enforce), which deliberately differs from the repository's only-literal-true pattern because this switch guards access; documented in Mode::parse.",
+    "No deploy/.env.example or docker-compose.yml edits (shared files, see lead_todo)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/deploy/.env.example",
+    "scripts/tests/zdr-contract-sync.test.sh",
+    "apps/Data Plane v2/services/inference-client-rs/tests/fixtures/inference-core/infer-statuses.json",
+    "apps/Data Plane v2/services/embedding-engine-rs/tests/fixtures/contracts/infer-statuses.json"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edits for the lead: deploy/docker-compose.yml (inference-core env: ORG_CORE_URL, INFERENCE_ORG_CORE_SERVICE_TOKEN, MODEL_ENTITLEMENT_MODE:-off) and deploy/.env.example (MODEL_ENTITLEMENT_MODE=off, INFERENCE_ORG_CORE_SERVICE_TOKEN= empty).",
+     "infer-statuses.json changed: update the digest pin in scripts/tests/zdr-contract-sync.test.sh, re-vendor the two Data Plane copies (inference-client-rs and embedding-engine-rs fixtures) and run their status_contract tests. Until then that sync script is expected to fail.",
+     "Live proof (docker): shadow soak, org-core token and URL reachability from the inference-core container, stop-org-core stale-then-503 run, and enforce trailers captured with grpcurl.",
+     "Commit the regenerated go/gen files together with the proto in one commit; the working tree also holds other sessions' uncommitted changes (browser.proto, sse.rs, idempotency_registry.rs, scheduled_step_decision.rs), so stage by hunk."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under MODEL_ENTITLEMENT_MODE=off GetModelAccess answers 'not enforced' and refuses draft/include_catalogue as model_entitlement_unavailable (nothing is resolved with the switch off), so the WS10-S5 ZDR write guard cannot evaluate a draft until inference-core runs shadow or enforce; S5 must treat that as its documented 503 fail-closed or the lead must decide that admin draft checks may resolve while off."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needed before the switch can go on: shadow soak with would_refuse and service_exempt read, proof that the org-core service token and ORG_CORE_URL reach org-core from the inference-core container, a stop-org-core run showing stale service within 900/120 s then 503 model_entitlement_unavailable, and enforce trailers via grpcurl."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The infer-statuses.json golden changed (two kinds, a PERMISSION_DENIED code, trailer x-mp-entitlement-reason on the model_not_entitled case); the sha pin and the two Data Plane vendored copies must be updated and their status decoders checked for unknown kinds, and trailer_keys in the golden does not yet list x-mp-entitlement-reason."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Prompt-cache hits are rechecked against model_used/provider_used, but a provider that is unspecified-default per candidate is judged on the effective model after request_for; a policy that names a Verevon intent id in allow/deny is never matched against it (intent ids pass as unspecified), so org-core validation should reject or ignore verevon-* entries."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Entitlement is not applied to inference-core's non-chat RPCs or to CreateEmbedding (chat only per D5); revisit if the policy should cover vision/image models used for chat-like analysis."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "LRU eviction at 10 000 entries (evict_least_recently_used) has no test; it needs a cheap way to fill 10 000 slots without 10 000 HTTP fetches (e.g. a test-only source) or a configurable cap."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end gRPC test drives a real InferenceService through authorize + gate + chain for infer/infer_stream/list_models under wiremock org-core (handlers are covered by unit tests of the pieces and the chain by the integration test); add one beside real_rules_tests."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test that a ZDR token's pinned-but-permitted unattested model still gets the ZDR refusal rather than model_not_entitled, and no streaming-path test of the cache-independent shadow count; the matrix z_ rows are covered only at the pure matcher level."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "clippy pedantic suggests Duration::from_mins and sort_unstable_by_key in entitlement.rs/model_entitlement.rs; left as written to match the surrounding files (same pre-existing warnings)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An unreadable answer under shadow resolves to Unreadable and is counted as would_unavailable; the owner may prefer shadow to refuse nothing but also log per call, and whether model_not_entitled should be retryable=false with the 'choose another model' action for the no_entitled_route reason is the S1 catalogue's existing choice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under MODEL_ENTITLEMENT_MODE=off, GetModelAccess refuses draft and include_catalogue as model_entitlement_unavailable, so the WS10-S5 ZDR write guard cannot evaluate a draft until inference-core runs shadow or enforce; S5 must treat that as its fail-closed 503, or the lead must decide that admin draft checks may resolve while off."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before the switch goes on: a shadow soak reading would_refuse and service_exempt, a stop-org-core run showing stale service for up to 900 s (restrictive answer) or 120 s (unrestricted) then 503 model_entitlement_unavailable, and enforce trailers (x-mp-provider-error, x-mp-entitlement-reason) captured live."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The infer-statuses.json golden's trailer_keys object does not list x-mp-entitlement-reason although the model_not_entitled case emits it; add it when the Data Plane vendored copies are re-vendored and check that their decoders accept the two new kinds."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A policy entry naming a verevon-* intent id is never matched, because intent ids pass as unspecified; an Auto request is judged only on the concrete model the intent layer resolves, and resolve_intent does not exclude denied models, so Auto can end in no_entitled_route even when an allowed model exists. This is acceptable for the plan row but needs an explicit live-proof case for flow (d), and org-core should reject verevon-* entries."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Mode::parse treats an unknown value as enforce, as the plan row says, which departs from the repository's only-literal-true switch pattern; with enforce and no usable ORG_CORE_URL or token, every user chat call and ListModels refuses. The warn log at boot is the only signal, so the deploy must set both values before enforce."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "LRU eviction at 10 000 entries (evict_least_recently_used) has no test; it needs a configurable cap or a test-only source to fill the slots without 10 000 HTTP fetches."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end gRPC test drives a real InferenceService through authorize, gate and chain for infer, infer_stream and list_models under a wiremock org-core; only the pieces and the chain integration are covered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows that a ZDR token pinned to a permitted but unattested model still gets the ZDR refusal rather than model_not_entitled, and no streaming-path test covers the once-per-call shadow count; the z_ matrix rows are checked at the pure matcher level only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Entitlement covers chat only: CreateEmbedding and inference-core's non-chat RPCs are unfiltered (decision D5); revisit if vision or image models serve chat-like analysis."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Out-of-list edits are minimal and justified: inference-core/src/lib.rs (pub mod entitlement), go/gen inference_grpc.pb.go (the new RPC changes the stub) and model-gateway/tests/usage_meter_contract.rs (a mock that needed the new method). Add them to the slice's file list in the ledger."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "auth",
+    "zdr"
+   ],
+   "notes": "Built to the plan row with MODEL_ENTITLEMENT_MODE default off (unset or empty = off, no resolve, no HTTP, no metric; byte-identical). Matcher in mp-contracts/model_entitlement.rs: Mode, Policy::permits/restricts/clamp_effort, ResolvedAccess::{from_body,permits,deny_reason,clamp_effort,route,restricted}, after_failed_refresh with 30 s TTL, 900 s restrictive and 120 s unrestricted bounds. Every matrix row naming mp-contracts runs against it; the fixture is a byte copy of api/contracts/model-entitlement-matrix.json (S2's file), checked equal by a test. inference-core entitlement.rs: org-core client (1 s total timeout, x-service-id/x-service-token), single flight per (org,user) via per-entry async lock, LRU cap 10 000, 1 s failure backoff, injectable clock, RequestAccess carried on provider::InferRequest.access, metric model_entitlement_total{decision,mode} with no org/user label. Chain: pinned pre-check before intent and cache (checked per provider so provider: selectors work), cache hit rechecked against model_used/provider_used, tool ladder prunes denied rungs before the 4-step bound, per-candidate permit after request_for, exhaustion = model_not_entitled (no_entitled_route for automatic) named before tier/ZDR/residency refusals. Wire: PERMISSION_DENIED/UNAVAILABLE with x-mp-provider-error and x-mp-entitlement-reason trailers, never FAILED_PRECONDITION; inference_requests_total{outcome=model_not_entitled} comes for free from the kind trailer. Policy min_privacy_tier joins the request tier as the max under enforce only. Shadow counts would_refuse once per call and never refuses or filters. Service principals (user_id None) exempt with decision=service_exempt. ListModels filters chat models only (other modalities pass) and fills access meta (absent when off/exempt/unreadable)."
+  },
+  {
+   "id": "WS04-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib -- idempotency shared_idempotency_tests resume_of (CARGO_INCREMENTAL=0)",
+     "outcome": "30 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (CARGO_INCREMENTAL=0)",
+     "outcome": "2231 passed, 0 failed, 4 ignored"
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib",
+     "outcome": "no new warnings in the new code; the warnings seen in idempotency_registry.rs are pre-existing constants and struct fields"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Add MODEL_GATEWAY_SHARED_IDEMPOTENCY (default off, stays off in S9) to the compose env only if the owner wants it exposed; nothing reads it unless set.",
+    "Own live proof before any flip: two-replica stack (MODEL_PLANE_REPLICAS=1 overlay), switch on for both replicas, POST the same idempotency_key to both /v1/invoke/stream endpoints, then check one runs row and the same frames on both streams."
+   ],
+   "deviations": [
+    "The plan says to reuse the stream buffer's Redis breaker, but stream_buffer.rs is not owned by this slice and has no SET NX helper. The Redis claim store therefore opens its own ConnectionManager from REDIS_URL, lazily and only with the switch on, with a cooldown breaker of its own. No state.rs change was needed.",
+    "The error for an evicted original reuses the existing code duplicate_in_flight with a distinct message, so no BFF or SPA error vocabulary changes."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live two-replica proof with MODEL_GATEWAY_SHARED_IDEMPOTENCY on and REDIS_URL set (needs docker; one runs row, same frames on both streams)",
+     "Live Redis (Dragonfly) test of RedisClaimStore SET NX PX and settle",
+     "The switch is not in the compose env; the lead adds it only if the owner wants it exposed (stays off in S9)"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs its own live proof before the switch is flipped: duplicate POST with one key to two replicas yields one run in session-core runs and two clients seeing the same frames, with MODEL_GATEWAY_SHARED_IDEMPOTENCY on in the two-replica overlay and REDIS_URL set; also run an ignored live Redis test of RedisClaimStore (SET NX PX, settle) against Dragonfly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The Pending claim lasts 120 s with no heartbeat, as the local registry's PENDING_TTL does. A stream running longer than 120 s lets a duplicate start a second run on another replica; renew the claim on a timer in the owner before the flip."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A duplicate arriving before the original has buffered a frame, with the run-control bus off, gets the error that names the original instead of attaching, because resume_stream_for finds no buffer and no live producer. Decide whether to buffer `connected` before the claim returns or to require the bus for the switch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RedisClaimStore::settle does a GET then SET/DEL, not an atomic compare-and-set. A claim that expired inside the 250 ms window could be overwritten; a Lua compare-and-set would close it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RedisClaimStore duplicates the stream buffer's Breaker and connection config. If stream_buffer.rs later exposes a pub(crate) breaker plus a kv_set_nx helper, the claim store can reuse them."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CommitGuard drop reads the whole buffered stream with replay_after(None) to learn whether `done` landed, which is a full LRANGE per stream end with the switch on; a done-key-only probe in stream_buffer.rs would be cheaper."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Add a two-AppState test over one hub once WS04-S1 test scaffolding exists, covering the full invoke_sse path (real claim, attach, one run), since the unit tests cover the registry and attach_to_original separately."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ZDR: a test pinning that the shared claim is never reached for ZDR or waived turns (the early return in invoke_sse before the claim) was not added."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The stream path never commits to the local registry, so today a completed key is free again; with the switch on, the shared claim stays Done for 600 s and a later same-key send (a regenerate that reuses the key) attaches to the old answer instead of running, so confirm the SPA never reuses a key for regenerate or edited resubmit before the flip."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The Pending claim lasts 120 s with no renewal, so a stream running longer lets a duplicate on another replica start a second run; add a heartbeat renewal in the owner before flipping."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A duplicate that arrives before the original has buffered any frame, with the run-control bus off, finds no buffer and no live producer and so gets the duplicate_in_flight error naming the original instead of attaching; buffer `connected` before the claim returns or require the bus for the switch."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs a two-replica live proof (same key to :8080 and :8081 gives one runs row and identical frames) and an ignored live test of RedisClaimStore (SET NX PX, settle) against Dragonfly; the Redis implementation itself has no test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that a ZDR or waived turn never reaches the shared claim; the code is correct (zdr_direct_stream returns before the claim in invoke_stream_sse) but unguarded, and no two-AppState test covers the full invoke_sse claim, attach, one-run path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RedisClaimStore::settle is a GET then SET/DEL, not an atomic compare-and-set, so a claim that expired inside the 250 ms window could be overwritten; a Lua compare-and-set closes it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The claim store duplicates the stream buffer's breaker and connection setup (plan said reuse), and CommitGuard drop reads the whole buffered stream with replay_after(None) just to learn whether done landed, which is a full range read per stream end with the switch on."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "Built with MODEL_GATEWAY_SHARED_IDEMPOTENCY off by default (strict \"true\" parser via mp_contracts::loop_fold::switch_from). With the switch off, shared_store() returns None before any connect or read, so the send path is unchanged.\n\nidempotency_registry.rs (CRLF kept): a SharedClaimStore trait seam (claim / get / settle), a Redis implementation of it, and CommitGuard::claim_shared / record_run. Redis does SET NX PX on mp:gw:idem:{org}\\x1f{user}\\x1f{key} with Pending 120 s and Done 600 s. The value holds only request_id, run_id, thread_id and state, never answer text. The key is built from the same identity-scoped key as the local map, so another tenant derives a different key.\n\nWhen the guard drops, the shared claim becomes Done only if the stream buffered its `done` frame; any other end deletes it, so a failed turn can be retried with the same key. The Redis store has its own 250 ms op timeout and 5 s cooldown breaker, so an outage degrades to local behaviour.\n\nsse.rs (LF kept): invoke_resume_sse is split into a thin handler plus resume_stream_for(state, org, user, request_id, after_seq). In invoke_sse, a local InFlight claim looks up the shared record, and a local Proceed then takes the shared claim; if another request holds it, the duplicate calls attach_to_original (resume_stream_for from frame 0) and the local claim is released. If the original is no longer resumable it answers `duplicate_in_flight` with the original request_id. ZDR returns before the claim, so a ZDR turn never claims. The unary /v1/invoke path is untouched.\n\nTests (13 new): switch parser, key scoping, ids-only value, two replicas attach, foreign org does not attach, outage falls back to local, Done claim names the run, abandoned stream removes its claim, settle never touches another request's claim, attach replays the original's frames, evicted original gives an error naming it, a foreign identity cannot attach, resume of an unknown stream is still a 404.\n\nThe first test build failed on test mocks in grpc.rs and http_routes.rs that a concurrent inference-core entitlement slice had broken (GetModelAccess). I did not touch them; they were fixed by that slice and the tests above then ran."
+  }
+ ]
+}

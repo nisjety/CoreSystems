@@ -1,0 +1,2583 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs
+index c3dc3f29b..a7da07302 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs	
+@@ -1,3 +1,4 @@
++mod artifacts;
+ pub(crate) mod documents;
+ pub(crate) mod history;
+ pub(crate) mod json_handlers;
+@@ -55,6 +56,19 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/chat/threads/{thread_id}/rewind",
+             post(json_handlers::rewind_thread),
+         )
++        // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
++        .route(
++            "/api/v1/chat/threads/{thread_id}/artifacts",
++            get(artifacts::list_artifact_heads),
++        )
++        .route(
++            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions",
++            get(artifacts::list_artifact_revisions),
++        )
++        .route(
++            "/api/v1/chat/composer-capabilities",
++            get(artifacts::get_composer_capabilities),
++        )
+         // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+         .route(
+             "/api/v1/chat/threads/{thread_id}/fork",
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/artifacts.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/artifacts.rs
+new file mode 100644
+index 000000000..31b354bcb
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/artifacts.rs	
+@@ -0,0 +1,201 @@
++//! Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
++//!
++//! Three read-only pass-throughs to Model Gateway:
++//! - `GET /api/v1/chat/threads/{thread_id}/artifacts`: the head of each artifact, no text.
++//! - `GET /api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions`: one artifact's
++//!   revisions newest first, paged with `before_version` and `limit`.
++//! - `GET /api/v1/chat/composer-capabilities`: which composer and panel features the gateway
++//!   serves, from its own switches, so the SPA needs no build-time flag.
++//!
++//! The gateway and Session Core decide who may read a thread: the BFF forwards the user's minted
++//! model and session tokens only, never an owner, org or Space header of its own, and relays the
++//! gateway's typed envelope and status unchanged (404 `artifact_history_unavailable` while the
++//! history switch is not `on`). Revision text is the user's content, so no answer is cached.
++
++use axum::{
++    extract::{Extension, Path, Query, State},
++    http::{header, HeaderMap, HeaderValue, StatusCode},
++    response::{IntoResponse, Response},
++    Json,
++};
++use reqwest::Method;
++use serde::Deserialize;
++use serde_json::Value;
++
++use crate::{
++    config::AppState, envelope::error, middleware::AuthenticatedUser, upstream::authorized_org_id,
++};
++
++use super::shared;
++
++/// The gateway's page cap; a larger ask is clamped there too.
++const MAX_REVISION_PAGE: u32 = 20;
++
++#[derive(Debug, Default, Deserialize)]
++pub(crate) struct RevisionPageQuery {
++    #[serde(alias = "beforeVersion")]
++    before_version: Option<u32>,
++    limit: Option<u32>,
++}
++
++pub(super) async fn list_artifact_heads(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(thread_id): Path<String>,
++) -> Response {
++    let url = heads_url(&state.model_gateway_url, &thread_id);
++    relay(&state, &user, &headers, &url).await
++}
++
++pub(super) async fn list_artifact_revisions(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path((thread_id, artifact_id)): Path<(String, String)>,
++    Query(query): Query<RevisionPageQuery>,
++) -> Response {
++    let url = revisions_url(&state.model_gateway_url, &thread_id, &artifact_id, &query);
++    relay(&state, &user, &headers, &url).await
++}
++
++pub(super) async fn get_composer_capabilities(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++) -> Response {
++    let url = format!("{}/v1/chat/composer-capabilities", state.model_gateway_url);
++    relay(&state, &user, &headers, &url).await
++}
++
++/// One GET to Model Gateway under the user's own tokens, relayed with `no-store`.
++async fn relay(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    headers: &HeaderMap,
++    url: &str,
++) -> Response {
++    if authorized_org_id(state, user).await.trim().is_empty() {
++        return no_store(
++            (
++                StatusCode::FORBIDDEN,
++                Json(error(
++                    "org_scope_required",
++                    "An authorized organization scope is required.",
++                )),
++            )
++                .into_response(),
++        );
++    }
++    let token = shared::model_token(state, user, headers).await;
++    let session_token = match shared::required_session_token(state, user, headers).await {
++        Ok(token) => token,
++        Err(error) => return no_store(shared::delegated_auth_unavailable(error).into_response()),
++    };
++    let (status, Json(payload)): (StatusCode, Json<Value>) =
++        shared::proxy_model_json_with_session(
++            state,
++            Method::GET,
++            url,
++            None,
++            token.as_deref(),
++            Some(&session_token),
++            user,
++        )
++        .await;
++    no_store((status, Json(payload)).into_response())
++}
++
++fn no_store(mut response: Response) -> Response {
++    response
++        .headers_mut()
++        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
++    response
++}
++
++fn heads_url(base: &str, thread_id: &str) -> String {
++    format!("{base}/v1/threads/{}/artifacts", urlencoding::encode(thread_id))
++}
++
++/// Only the two paging numbers are relayed; anything else in the browser's query is dropped.
++fn revisions_url(base: &str, thread_id: &str, artifact_id: &str, query: &RevisionPageQuery) -> String {
++    let mut params = Vec::new();
++    if let Some(before) = query.before_version.filter(|version| *version > 0) {
++        params.push(format!("before_version={before}"));
++    }
++    if let Some(limit) = query.limit.filter(|limit| *limit > 0) {
++        params.push(format!("limit={}", limit.min(MAX_REVISION_PAGE)));
++    }
++    let mut url = format!(
++        "{base}/v1/threads/{}/artifacts/{}/revisions",
++        urlencoding::encode(thread_id),
++        urlencoding::encode(artifact_id),
++    );
++    if !params.is_empty() {
++        url.push('?');
++        url.push_str(&params.join("&"));
++    }
++    url
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn path_segments_are_encoded_so_an_id_cannot_reach_another_route() {
++        assert_eq!(
++            heads_url("http://mg", "t/../runs"),
++            "http://mg/v1/threads/t%2F..%2Fruns/artifacts"
++        );
++        let url = revisions_url("http://mg", "t1", "a b/c", &RevisionPageQuery::default());
++        assert_eq!(url, "http://mg/v1/threads/t1/artifacts/a%20b%2Fc/revisions");
++    }
++
++    #[test]
++    fn only_positive_paging_numbers_are_relayed_and_the_page_is_capped() {
++        let url = revisions_url(
++            "http://mg",
++            "t1",
++            "a1",
++            &RevisionPageQuery {
++                before_version: Some(5),
++                limit: Some(500),
++            },
++        );
++        assert_eq!(
++            url,
++            "http://mg/v1/threads/t1/artifacts/a1/revisions?before_version=5&limit=20"
++        );
++        let url = revisions_url(
++            "http://mg",
++            "t1",
++            "a1",
++            &RevisionPageQuery {
++                before_version: Some(0),
++                limit: Some(0),
++            },
++        );
++        assert!(!url.contains('?'));
++    }
++
++    #[test]
++    fn the_paging_query_accepts_the_spa_spelling() {
++        let query: RevisionPageQuery =
++            serde_json::from_value(serde_json::json!({ "beforeVersion": 3, "limit": 2 })).unwrap();
++        assert_eq!(query.before_version, Some(3));
++        assert_eq!(query.limit, Some(2));
++    }
++
++    #[test]
++    fn every_answer_is_marked_no_store() {
++        let response = no_store(
++            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": {} }))).into_response(),
++        );
++        assert_eq!(response.status(), StatusCode::NOT_FOUND);
++        assert_eq!(
++            response.headers().get(header::CACHE_CONTROL).unwrap(),
++            "no-store"
++        );
++    }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx
+new file mode 100644
+index 000000000..b24f09643
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx	
+@@ -0,0 +1,175 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { ArtifactRevision, ArtifactRevisionPage, ComposerCapabilities } from '@/shared/api/chat-client'
++
++// EP-3 S3: the panel reads the server's revision history for a chat thread when the gateway says it is on.
++
++const capabilitiesMock = vi.hoisted(() => vi.fn<() => Promise<ComposerCapabilities>>())
++const revisionsMock = vi.hoisted(() =>
++  vi.fn<(threadId: string, artifactId: string, options?: { beforeVersion?: number }) => Promise<ArtifactRevisionPage>>(),
++)
++vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/api/chat-client')>()),
++  getComposerCapabilities: () => capabilitiesMock(),
++  listArtifactRevisions: (threadId: string, artifactId: string, options?: { beforeVersion?: number }) =>
++    revisionsMock(threadId, artifactId, options),
++}))
++
++import { ArtifactsPanel } from './ChatArtifactPanel'
++import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
++
++function turn(artifact: ChatArtifact): ChatTurn {
++  return {
++    attachments: [],
++    artifacts: [artifact],
++    content: 'Lag et dokument',
++    createdAt: '2026-11-04T10:00:00.000Z',
++    id: 'turn-3',
++    role: 'assistant',
++    streaming: false,
++    tools: [],
++  }
++}
++
++const streamed: ChatArtifact = { id: 'report', kind: 'document', title: 'Rapport', content: 'tredje', version: 3 }
++
++function item(artifact: ChatArtifact = streamed): ArtifactPanelItem {
++  return { artifact, turn: turn(artifact) }
++}
++
++function revision(version: number, editorKind: ArtifactRevision['editorKind'], extra: Partial<ArtifactRevision> = {}): ArtifactRevision {
++  return {
++    id: `rev-${version}`,
++    artifactId: 'report',
++    version,
++    kind: 'document',
++    title: 'Rapport',
++    content: `tekst ${version}`,
++    editorKind,
++    createdAt: '2026-11-04T10:00:00Z',
++    ...extra,
++  }
++}
++
++const ON: ComposerCapabilities = {
++  artifactHistory: true,
++  artifactEditing: false,
++  contextRefs: false,
++  threadReferences: false,
++  selectionEdit: false,
++}
++
++beforeEach(() => {
++  capabilitiesMock.mockResolvedValue(ON)
++  revisionsMock.mockResolvedValue({
++    revisions: [revision(3, 'model'), revision(2, 'user'), revision(1, 'model')],
++    hasMore: false,
++  })
++})
++
++afterEach(() => {
++  cleanup()
++  capabilitiesMock.mockReset()
++  revisionsMock.mockReset()
++})
++
++/** Let the capability read and the revisions read resolve, then run Solid's queued updates. */
++async function settle() {
++  for (let index = 0; index < 5; index += 1) {
++    await Promise.resolve()
++    flush()
++  }
++}
++
++describe('ArtifactsPanel server history', () => {
++  it('stepper_labels_editor', async () => {
++    const { container } = render(() => (
++      <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await vi.waitFor(() => {
++      flush()
++      expect(container.textContent).toContain('v3 · Verevon')
++    })
++    expect(revisionsMock).toHaveBeenCalledWith('thread-1', 'report', {})
++
++    fireEvent.click(screen.getByRole('button', { name: 'Forrige versjon' }))
++    flush()
++    expect(container.textContent).toContain('v2 · deg')
++    expect(container.textContent).toContain('tekst 2')
++  })
++
++  it('names a restore with the version it brought back', async () => {
++    revisionsMock.mockResolvedValue({
++      revisions: [revision(4, 'restore', { restoredFromVersion: 2 }), revision(3, 'model')],
++      hasMore: false,
++    })
++    const { container } = render(() => (
++      <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await vi.waitFor(() => {
++      flush()
++      expect(container.textContent).toContain('v4 · gjenopprettet fra v2')
++    })
++  })
++
++  it('loads earlier versions below the oldest one shown', async () => {
++    revisionsMock.mockResolvedValueOnce({ revisions: [revision(3, 'model'), revision(2, 'user')], hasMore: true })
++    revisionsMock.mockResolvedValueOnce({ revisions: [revision(1, 'model')], hasMore: false })
++    render(() => <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />)
++    const earlier = await vi.waitFor(() => {
++      flush()
++      return screen.getByRole('button', { name: 'Tidligere versjoner' })
++    })
++    fireEvent.click(earlier)
++    await settle()
++    expect(revisionsMock).toHaveBeenLastCalledWith('thread-1', 'report', { beforeVersion: 2 })
++    expect(screen.queryByRole('button', { name: 'Tidligere versjoner' })).toBeNull()
++  })
++
++  it('room_surface_never_fetches', async () => {
++    render(() => (
++      <ArtifactsPanel items={[item()]} surface="room" history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await settle()
++    expect(capabilitiesMock).not.toHaveBeenCalled()
++    expect(revisionsMock).not.toHaveBeenCalled()
++  })
++
++  it('temporary_thread_never_fetches', async () => {
++    render(() => <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: true }} />)
++    await settle()
++    expect(capabilitiesMock).not.toHaveBeenCalled()
++    expect(revisionsMock).not.toHaveBeenCalled()
++  })
++
++  it('reads nothing while the gateway says history is off, and keeps the old label', async () => {
++    capabilitiesMock.mockResolvedValue({ ...ON, artifactHistory: false })
++    const two = { ...streamed, version: 2, history: [{ content: 'en', title: 'Rapport', version: 1 }] }
++    const { container } = render(() => (
++      <ArtifactsPanel items={[item(two)]} history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await settle()
++    expect(capabilitiesMock).toHaveBeenCalledTimes(1)
++    expect(revisionsMock).not.toHaveBeenCalled()
++    expect(container.textContent).toContain('v2 · 2/2')
++  })
++
++  it('never fetches without a thread, as every existing mount is', async () => {
++    render(() => <ArtifactsPanel items={[item()]} />)
++    await settle()
++    expect(capabilitiesMock).not.toHaveBeenCalled()
++  })
++
++  it('a failed history read keeps the streamed revision on screen', async () => {
++    revisionsMock.mockRejectedValue(new Error('artifact_history_unavailable'))
++    const { container } = render(() => (
++      <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await settle()
++    expect(revisionsMock).toHaveBeenCalled()
++    expect(container.textContent).toContain('tredje')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx
+index 5120bde13..f72463694 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
+@@ -7,6 +7,12 @@
+  * renderer, untrusted HTML in a sandboxed iframe, images, and generated binaries
+  * as a download card. A `‹ v2/3 ›` stepper walks the revision history of a
+  * repeatedly re-emitted artifact and always opens on the newest revision.
++ *
++ * With the server's revision history on (EP-3 S3, `artifact_history` in the
++ * gateway's composer capabilities), a chat thread's panel also reads every
++ * stored revision (action `chat.list_artifact_revisions`), so the stepper
++ * survives a reload and another device and names who made each revision. A
++ * room and a temporary thread never ask.
+  */
+ import {
+   AlertCircle,
+@@ -61,6 +67,7 @@ import {
+   artifactVersions,
+   imageArtifactSrc,
+   isCopyableRenderKind,
++  mergeServerRevisions,
+ } from './chat-artifacts'
+ import {
+   highlightCode,
+@@ -73,8 +80,14 @@ import {
+ } from './chat-media-markdown'
+ import {
+   type ArtifactPanelItem,
++  type ChatArtifactVersion,
+   type IconComponent,
+ } from './chat-types'
++import {
++  type ArtifactRevision,
++  getComposerCapabilities,
++  listArtifactRevisions,
++} from '@/shared/api/chat-client'
+ import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
+ import { useI18n } from '@/shared/i18n'
+ import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/artifacts/viewer-registry'
+@@ -99,9 +112,42 @@ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
+   text: FileCode2,
+ }
+ 
+-export function ArtifactsPanel(props: { items: ArtifactPanelItem[]; surface?: ViewerSurface }) {
++/** The thread whose stored history the panel may read; only a chat thread passes one. */
++export type ArtifactHistorySource = {
++  threadId: string
++  /** A temporary (zero-retention) thread keeps no history, so the panel never asks for it. */
++  temporary: boolean
++}
++
++/** Kinds the server stores revisions of; every other kind keeps its streamed history only. */
++const STORED_REVISION_KINDS = new Set(['document', 'code', 'html'])
++
++export function ArtifactsPanel(props: {
++  items: ArtifactPanelItem[]
++  surface?: ViewerSurface
++  history?: ArtifactHistorySource
++}) {
+   const i18n = useI18n()
+   const [requestedId, setRequestedId] = createSignal<string | null>(null)
++  /** The thread to read stored history for, once the gateway says its history is on. */
++  const [historyThreadId, setHistoryThreadId] = createSignal<string | null>(null)
++
++  createEffect(
++    () => {
++      const history = props.history
++      const eligible = (props.surface ?? 'chat') === 'chat' && history != null && !history.temporary
++      return eligible ? history.threadId.trim() : ''
++    },
++    (threadId) => {
++      setHistoryThreadId(null)
++      if (!threadId) return
++      let cancelled = false
++      void getComposerCapabilities().then((capabilities) => {
++        if (!cancelled && capabilities.artifactHistory) setHistoryThreadId(threadId)
++      })
++      return () => { cancelled = true }
++    },
++  )
+ 
+   // The selection follows the newest artifact until the user picks one, and
+   // falls back to the newest again if the picked artifact leaves the list
+@@ -137,7 +183,7 @@ export function ArtifactsPanel(props: { items: ArtifactPanelItem[]; surface?: Vi
+           </For>
+         </div>
+         <Show when={selected()}>
+-          {(item) => <ArtifactViewer item={item()} surface={props.surface} />}
++          {(item) => <ArtifactViewer item={item()} surface={props.surface} historyThreadId={historyThreadId()} />}
+         </Show>
+       </div>
+     </Show>
+@@ -175,10 +221,29 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean;
+   )
+ }
+ 
+-export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: ViewerSurface }) {
++function revisionVersion(revision: ArtifactRevision): ChatArtifactVersion {
++  return {
++    content: revision.content,
++    title: revision.title,
++    version: revision.version,
++    editorKind: revision.editorKind,
++    ...(revision.restoredFromVersion ? { restoredFromVersion: revision.restoredFromVersion } : {}),
++  }
++}
++
++export function ArtifactViewer(props: {
++  item: ArtifactPanelItem
++  surface?: ViewerSurface
++  /** Set only when the server's history is on for a chat thread that is not temporary. */
++  historyThreadId?: string | null
++}) {
+   const i18n = useI18n()
+   const surface = (): ViewerSurface => props.surface ?? 'chat'
+   const [versionCursor, setVersionCursor] = createSignal<number | null>(null)
++  /** Revisions read from the server's history, every page loaded so far. */
++  const [serverRevisions, setServerRevisions] = createSignal<ChatArtifactVersion[]>([])
++  const [olderRevisionsExist, setOlderRevisionsExist] = createSignal(false)
++  const [loadingOlder, setLoadingOlder] = createSignal(false)
+   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
+   const [showSource, setShowSource] = createSignal(false)
+   /**
+@@ -190,7 +255,11 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: Viewe
+   const [imageFailed, setImageFailed] = createSignal(false)
+   const [exportFailed, setExportFailed] = createSignal(false)
+ 
+-  const artifact = () => props.item.artifact
++  const artifact = createMemo(() => (
++    serverRevisions().length > 0
++      ? mergeServerRevisions(props.item.artifact, serverRevisions())
++      : props.item.artifact
++  ))
+   const versions = createMemo(() => artifactVersions(artifact()))
+   const revision = createMemo(() => artifactVersionAt(artifact(), versionCursor()))
+   const revisionIndex = createMemo(() => {
+@@ -248,6 +317,70 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: Viewe
+     },
+   )
+ 
++  // The stored history of this artifact, first page on open. Keyed on the
++  // thread and the artifact, so a revision streaming in does not refetch; a
++  // failed read leaves the streamed history as it was.
++  let historyGeneration = 0
++  const loadRevisions = (threadId: string, artifactId: string, beforeVersion?: number) => {
++    const generation = historyGeneration
++    setLoadingOlder(beforeVersion != null)
++    return listArtifactRevisions(threadId, artifactId, beforeVersion != null ? { beforeVersion } : {})
++      .then((page) => {
++        if (generation !== historyGeneration) return
++        setServerRevisions((current) => [...current, ...page.revisions.map(revisionVersion)])
++        setOlderRevisionsExist(page.hasMore)
++      })
++      .catch(() => {
++        // The history is a richer view of what streamed, never a precondition for reading it.
++      })
++      .finally(() => {
++        if (generation === historyGeneration) setLoadingOlder(false)
++      })
++  }
++  createEffect(
++    () => {
++      const threadId = props.historyThreadId ?? ''
++      const item = props.item.artifact
++      return threadId && STORED_REVISION_KINDS.has(item.kind) ? `${threadId}\n${item.id}` : ''
++    },
++    (key) => {
++      historyGeneration += 1
++      setServerRevisions([])
++      setOlderRevisionsExist(false)
++      if (!key) return
++      const [threadId = '', artifactId = ''] = key.split('\n')
++      void loadRevisions(threadId, artifactId)
++    },
++  )
++  const loadOlderRevisions = () => {
++    const threadId = props.historyThreadId
++    const oldest = serverRevisions().reduce<number | null>(
++      (lowest, entry) => (lowest == null || entry.version < lowest ? entry.version : lowest),
++      null,
++    )
++    if (!threadId || oldest == null || loadingOlder()) return
++    void loadRevisions(threadId, props.item.artifact.id, oldest)
++  }
++  /** `v3 · you`, `v4 · Verevon`, `v5 · restored from v2`; the plain position when no editor is known. */
++  const revisionLabel = createMemo(() => {
++    const current = revision()
++    switch (current.editorKind) {
++      case 'model':
++        return `v${current.version} · Verevon`
++      case 'user':
++        return i18n.tr(`v${current.version} · deg`, `v${current.version} · you`)
++      case 'restore':
++        return current.restoredFromVersion
++          ? i18n.tr(
++            `v${current.version} · gjenopprettet fra v${current.restoredFromVersion}`,
++            `v${current.version} · restored from v${current.restoredFromVersion}`,
++          )
++          : i18n.tr(`v${current.version} · gjenopprettet`, `v${current.version} · restored`)
++      default:
++        return `v${current.version} · ${revisionIndex() + 1}/${versions().length}`
++    }
++  })
++
+   // Word/Excel/PowerPoint/PDF for a document artifact, built in the browser
+   // from the revision on screen (lib/chat-export). The same four choices an
+   // answer offers, and the ones that matter more here: in Verevon the draft
+@@ -339,7 +472,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: Viewe
+               >
+                 <ChevronLeft size={14} />
+               </button>
+-              <span>v{revision().version} · {revisionIndex() + 1}/{versions().length}</span>
++              <span>{revisionLabel()}</span>
+               <button
+                 type="button"
+                 aria-label={i18n.tr('Neste versjon', 'Next version')}
+@@ -350,6 +483,16 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: Viewe
+               </button>
+             </div>
+           </Show>
++          <Show when={olderRevisionsExist()}>
++            <button
++              type="button"
++              class="verevon-chat-artifact-action"
++              disabled={loadingOlder()}
++              onClick={() => loadOlderRevisions()}
++            >
++              {i18n.tr('Tidligere versjoner', 'Earlier versions')}
++            </button>
++          </Show>
+           {/* The value the accessor receives must be the diff itself, so the
+               `missing` guard is a ternary rather than an && (which narrows to `true`). */}
+           <Show when={missing() ? null : revisionDiff()}>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.server-revisions.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.server-revisions.test.ts
+new file mode 100644
+index 000000000..cfaefc8b6
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.server-revisions.test.ts	
+@@ -0,0 +1,71 @@
++import { describe, expect, it } from 'vitest'
++import { artifactVersionAt, artifactVersions, mergeArtifactVersion, mergeServerRevisions } from './chat-artifacts'
++import type { ChatArtifact, ChatArtifactVersion } from './chat-types'
++
++// EP-3 S3: revisions read from the server's history fold into the streamed history.
++
++function streamed(version: number, content: string): ChatArtifact {
++  return { id: 'report', kind: 'document', title: 'Rapport', content, version }
++}
++
++function server(version: number, content: string, extra: Partial<ChatArtifactVersion> = {}): ChatArtifactVersion {
++  return { content, title: 'Rapport', version, editorKind: 'model', ...extra }
++}
++
++describe('mergeServerRevisions', () => {
++  it('server_revisions_fill_history', () => {
++    // After a reload only the newest turn's revision streamed back.
++    const artifact = streamed(3, 'tredje')
++    const merged = mergeServerRevisions(artifact, [
++      server(3, 'tredje'),
++      server(2, 'andre', { editorKind: 'user' }),
++      server(1, 'første'),
++    ])
++    expect(artifactVersions(merged).map((entry) => entry.version)).toEqual([1, 2, 3])
++    expect(artifactVersionAt(merged, 2)).toMatchObject({ content: 'andre', editorKind: 'user' })
++    expect(merged.version).toBe(3)
++    expect(merged.content).toBe('tredje')
++  })
++
++  it('equal_version_prefers_server', () => {
++    const artifact = mergeArtifactVersion(streamed(1, 'utkast'), streamed(2, 'strømmet tekst'))
++    const merged = mergeServerRevisions(artifact, [server(2, 'lagret tekst')])
++    const second = artifactVersionAt(merged, 2)
++    expect(second.content).toBe('lagret tekst')
++    expect(second.editorKind).toBe('model')
++    // The streamed-only revision the server has not paged in yet is kept.
++    expect(artifactVersionAt(merged, 1).content).toBe('utkast')
++  })
++
++  it('a newer server head becomes what the panel shows', () => {
++    // Another device revised the document after this tab streamed version 2.
++    const merged = mergeServerRevisions(streamed(2, 'gammel'), [
++      server(4, 'gjenopprettet', { editorKind: 'restore', restoredFromVersion: 1 }),
++    ])
++    expect(merged.version).toBe(4)
++    expect(merged.content).toBe('gjenopprettet')
++    expect(merged.editor).toBe('restore')
++    expect(artifactVersionAt(merged, 4).restoredFromVersion).toBe(1)
++  })
++
++  it('keeps the server attribution when the newest streamed frame named none', () => {
++    const merged = mergeServerRevisions(streamed(2, 'tekst'), [server(2, 'tekst', { editorKind: 'user' })])
++    // Folding the same streamed frame again must not erase who made the revision.
++    const again = mergeArtifactVersion(merged, streamed(2, 'tekst'))
++    expect(artifactVersionAt(again, 2).editorKind).toBe('user')
++  })
++
++  it('ignores a malformed server entry', () => {
++    const merged = mergeServerRevisions(streamed(1, 'en'), [
++      { title: 'Rapport', version: 2 } as unknown as ChatArtifactVersion,
++    ])
++    expect(artifactVersions(merged).map((entry) => entry.version)).toEqual([1])
++  })
++
++  it('an empty page changes nothing a reader sees', () => {
++    const artifact = mergeArtifactVersion(streamed(1, 'en'), streamed(2, 'to'))
++    const merged = mergeServerRevisions(artifact, [])
++    expect(artifactVersions(merged)).toEqual(artifactVersions(artifact))
++    expect(merged.editor).toBeUndefined()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts
+index aacbfa523..01f1b13ab 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts	
+@@ -8,7 +8,7 @@
+  * without pulling in the renderer.
+  *
+  * The backend contract this implements (model-gateway SSE):
+- *   artifact: { id, kind, title, content, version }
++ *   artifact: { id, kind, title, content, version, editor? }
+  * where `kind` is free-form and `content` is either source text, Markdown, a
+  * complete HTML document, or a `data:` URI (base64) for generated binaries.
+  * The same `id` re-emitted with a higher `version` is an UPDATE of the same
+@@ -448,7 +448,12 @@ export function artifactFileMeta(
+ // ── Version history ──────────────────────────────────────────────────────────
+ 
+ function versionOf(artifact: ChatArtifact): ChatArtifactVersion {
+-  return { content: artifact.content, title: artifact.title, version: artifact.version }
++  return {
++    content: artifact.content,
++    title: artifact.title,
++    version: artifact.version,
++    ...(artifact.editor ? { editorKind: artifact.editor } : {}),
++  }
+ }
+ 
+ export function isChatArtifactVersion(value: unknown): value is ChatArtifactVersion {
+@@ -469,7 +474,9 @@ export function isChatArtifactVersion(value: unknown): value is ChatArtifactVers
+ export function artifactVersions(artifact: ChatArtifact): ChatArtifactVersion[] {
+   const byVersion = new Map((artifact.history ?? []).filter(isChatArtifactVersion)
+     .map((entry) => [entry.version, entry]))
+-  byVersion.set(artifact.version, versionOf(artifact))
++  // The current fields win on text; an attribution the history already holds
++  // for that version (from the server) is kept when the frame named none.
++  byVersion.set(artifact.version, { ...byVersion.get(artifact.version), ...versionOf(artifact) })
+   return [...byVersion.values()].sort((left, right) => left.version - right.version)
+ }
+ 
+@@ -521,6 +528,32 @@ export function mergeArtifactVersion(existing: ChatArtifact | undefined, incomin
+   }
+ }
+ 
++/**
++ * Folds revisions read from the server's history (EP-3 S3) into an artifact's
++ * `history`. The server is the durable record, so on an equal version its
++ * revision replaces the streamed one (it carries the editor). An older page
++ * only adds entries; the top-level fields still mirror the newest revision,
++ * and a server head newer than anything streamed (another device's turn)
++ * becomes what the panel shows.
++ */
++export function mergeServerRevisions(artifact: ChatArtifact, revisions: ChatArtifactVersion[]): ChatArtifact {
++  const byVersion = new Map(artifactVersions(artifact).map((entry) => [entry.version, entry]))
++  for (const entry of revisions.filter(isChatArtifactVersion)) byVersion.set(entry.version, entry)
++  const history = [...byVersion.values()].sort((left, right) => left.version - right.version)
++  const newest = history[history.length - 1] ?? versionOf(artifact)
++  const merged: ChatArtifact = {
++    ...artifact,
++    content: newest.content,
++    history,
++    title: newest.title,
++    version: newest.version,
++  }
++  // The top-level editor names the newest revision, which may now be another one.
++  if (newest.editorKind) merged.editor = newest.editorKind
++  else delete merged.editor
++  return merged
++}
++
+ /** Finds the artifact with this id anywhere in a set of per-turn artifact lists. */
+ export function findArtifactById(lists: Array<ChatArtifact[] | undefined>, id: string): ChatArtifact | undefined {
+   let found: ChatArtifact | undefined
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts
+index 67fcb9aae..41febd7fe 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
+@@ -3,6 +3,7 @@ import {
+ } from '@/features/dashboard/home/DashboardComposer'
+ import {
+   type AgentModeId,
++  type ArtifactEditorKind,
+   type AutonomyRung,
+   type ChatAction,
+   type ChatCostBasis,
+@@ -59,11 +60,15 @@ export type ChatCancelFailure = {
+ }
+ export type IconComponent = (props: LucideProps) => JSX.Element
+ 
+-/** One revision of an artifact, as emitted by a single `artifact` SSE event. */
++/** One revision of an artifact, as emitted by a single `artifact` SSE event or read from the server's history. */
+ export type ChatArtifactVersion = {
+   content: string
+   title: string
+   version: number
++  /** Absent for a revision the server has not attributed (history off, or an older frame). */
++  editorKind?: ArtifactEditorKind
++  /** For a restore, the version whose text it brought back. */
++  restoredFromVersion?: number
+ }
+ 
+ export type ChatArtifact = {
+@@ -86,6 +91,8 @@ export type ChatArtifact = {
+   history?: ChatArtifactVersion[]
+   /** A research report's provenance stamp (EP-2-S4), in the wire shape. */
+   provenance?: ResearchProvenance
++  /** Who made the newest revision, when the frame named it (EP-3 S3). */
++  editor?: ArtifactEditorKind
+ }
+ 
+ export type ChatToolCall = {
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 982a037ce..b5ef2eba6 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -747,6 +747,29 @@ describe('action registry', () => {
+     expect(schema?.safeParse({ citationId: 'doc-1', orgId: 'org_x' }).success).toBe(false)
+   })
+ 
++  it('registers the artifact revision history as a low-risk read the model cannot execute (EP-3-S3)', () => {
++    const history = getActionDescriptor('chat.list_artifact_revisions')
++
++    expect(history).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.list_artifact_revisions')).toBe(false)
++    expect(MODEL_ACCESS['chat.list_artifact_revisions']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
++
++    const schema = history?.inputSchema
++    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report' }).success).toBe(true)
++    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', beforeVersion: 3, limit: 20 }).success).toBe(true)
++    for (const input of [
++      { threadId: '', artifactId: 'report' },
++      { threadId: 'thread-1', artifactId: '' },
++      { threadId: 'thread-1', artifactId: 'report', beforeVersion: 0 },
++      { threadId: 'thread-1', artifactId: 'report', limit: 21 },
++      { threadId: 'thread-1', artifactId: 'report', limit: 1.5 },
++    ]) {
++      expect(schema?.safeParse(input).success).toBe(false)
++    }
++    // The owner is read from the session, never named by a client.
++    expect(schema?.safeParse({ threadId: 'thread-1', artifactId: 'report', userId: 'user_x' }).success).toBe(false)
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1160,7 +1183,8 @@ describe('action registry', () => {
+     // 275 after EP-2-S4 registered chat.open_cited_passage, the cited-passage viewer read.
+     // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.
+     // +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.
+-    expect(ids).toHaveLength(277)
++    // +1 after EP-3-S3 registered chat.list_artifact_revisions, the Output panel's stored history read.
++    expect(ids).toHaveLength(278)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 6a99b4a43..bc8a101c9 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1124,6 +1124,17 @@ const chatOpenCitedPassageInput = z
+   })
+   .strict()
+ 
++// One page of an artifact's stored revisions (EP-3 S3): the thread and artifact it belongs to and an
++// optional page position. No user or org field: Session Core reads the owner from the session.
++const chatListArtifactRevisionsInput = z
++  .object({
++    threadId: z.string().min(1).max(128),
++    artifactId: z.string().min(1).max(128),
++    beforeVersion: z.number().int().min(1).optional(),
++    limit: z.number().int().min(1).max(20).optional(),
++  })
++  .strict()
++
+ // A wide-research start (EP-2 S8) names a count preset or the person's own items. The server clamps
+ // the count to the org's item cap, so nothing here can widen a run.
+ const chatWideResearchStartInput = z
+@@ -4099,6 +4110,17 @@ export const actionRegistry = [
+     inputSchema: chatOpenCitedPassageInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.list_artifact_revisions',
++    label: 'List an artifact's revisions',
++    description: 'Read the stored revisions of one artifact in the person's own chat thread, newest first, with who made each (the model, the person, or a restore) and when, so the Output panel's version stepper survives a reload and another device. Read only and owner only: another person's thread reads as not found, a zero-retention session is refused, and a temporary or Space room thread is never asked. Answers not found while the gateway's revision history is off. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatListArtifactRevisionsInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.wide_research_start',
+     label: 'Start wide research',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 4dfffda0f..0c18380d7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -537,6 +537,15 @@ export type ChatArtifactEvent = {
+   version?: number
+   /** What a research report was built from (EP-2-S4); only on a deep-research report, and only when the server sends it. */
+   provenance?: ResearchProvenance
++  /** Who made this revision (EP-3 S3); only while the server's revision history is on. */
++  editor?: ArtifactEditorKind
++}
++
++/** Who made a stored artifact revision (EP-3 S3): the model, the person, or a restore of an older one. */
++export type ArtifactEditorKind = 'model' | 'user' | 'restore'
++
++function isArtifactEditorKind(value: unknown): value is ArtifactEditorKind {
++  return value === 'model' || value === 'user' || value === 'restore'
+ }
+ 
+ /**
+@@ -1656,6 +1665,11 @@ function artifactProvenance(value: Record<string, unknown>): Pick<ChatArtifactEv
+   return provenance ? { provenance } : {}
+ }
+ 
++/** The frame's editor, when it names one of the three the server writes; anything else is dropped. */
++function artifactEditor(value: Record<string, unknown>): Pick<ChatArtifactEvent, 'editor'> {
++  return isArtifactEditorKind(value.editor) ? { editor: value.editor } : {}
++}
++
+ /**
+  * A knowledge citation's chunk, read again through the BFF's Data Plane chunk read (EP-2-S4). Data Plane resolves
+  * the viewer's own grants before it fetches any text, so a document this person may not read comes back empty and
+@@ -2154,6 +2168,7 @@ function dispatchAgUiEvent(
+             content: str(value.content),
+             version: num(value.version),
+             ...artifactProvenance(value),
++            ...artifactEditor(value),
+           })
+           break
+         case 'attachment':
+@@ -2392,6 +2407,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
+         content: str(payload.content),
+         version: num(payload.version),
+         ...artifactProvenance(payload),
++        ...artifactEditor(payload),
+       })
+       break
+     case 'attachment':
+@@ -3595,6 +3611,119 @@ function normalizeChatSearchHits(raw: unknown): ChatSearchHit[] {
+   })
+ }
+ 
++/** One stored revision of a thread artifact (EP-3 S3), newest first in a page. */
++export type ArtifactRevision = {
++  id: string
++  artifactId: string
++  version: number
++  kind: string
++  title: string
++  content: string
++  editorKind: ArtifactEditorKind
++  /** For a restore, the version whose text it brought back. */
++  restoredFromVersion?: number
++  createdAt: string
++}
++
++export type ArtifactRevisionPage = {
++  revisions: ArtifactRevision[]
++  /** Older revisions exist below the last one in this page. */
++  hasMore: boolean
++}
++
++/** What the composer and the Output panel may offer, from the gateway's own switches (EP-3). */
++export type ComposerCapabilities = {
++  artifactHistory: boolean
++  artifactEditing: boolean
++  contextRefs: boolean
++  threadReferences: boolean
++  selectionEdit: boolean
++}
++
++export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
++  artifactHistory: false,
++  artifactEditing: false,
++  contextRefs: false,
++  threadReferences: false,
++  selectionEdit: false,
++}
++
++/**
++ * The gateway's composer capabilities. Any failure (an older gateway has no
++ * such route) reads as nothing offered, so a feature never appears on a guess.
++ */
++export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
++  let raw: unknown
++  try {
++    raw = await requestJson<unknown>('/api/v1/chat/composer-capabilities')
++  } catch {
++    return NO_COMPOSER_CAPABILITIES
++  }
++  const record = objectValue(raw)
++  return {
++    artifactHistory: record?.artifact_history === true,
++    artifactEditing: record?.artifact_editing === true,
++    contextRefs: record?.context_refs === true,
++    threadReferences: record?.thread_references === true,
++    selectionEdit: record?.selection_edit === true,
++  }
++}
++
++/**
++ * One page of an artifact's stored revisions, newest first, text included.
++ * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`
++ * (404 `artifact_history_unavailable` while the server's history is off).
++ */
++export async function listArtifactRevisions(
++  threadId: string,
++  artifactId: string,
++  options: { beforeVersion?: number; limit?: number } = {},
++): Promise<ArtifactRevisionPage> {
++  const params = new URLSearchParams()
++  if (options.beforeVersion != null && Number.isInteger(options.beforeVersion) && options.beforeVersion > 0) {
++    params.set('before_version', String(options.beforeVersion))
++  }
++  if (options.limit != null && Number.isInteger(options.limit) && options.limit > 0) {
++    params.set('limit', String(options.limit))
++  }
++  const query = params.toString()
++  const raw = await requestJson<unknown>(
++    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/artifacts/${encodeURIComponent(artifactId)}/revisions${query ? `?${query}` : ''}`,
++  )
++  const record = objectValue(raw)
++  return {
++    revisions: normalizeArtifactRevisions(record?.revisions),
++    hasMore: record?.has_more === true,
++  }
++}
++
++function normalizeArtifactRevisions(source: unknown): ArtifactRevision[] {
++  if (!Array.isArray(source)) return []
++  return source.flatMap((item): ArtifactRevision[] => {
++    const record = objectValue(item)
++    const id = str(record?.id)
++    const artifactId = str(record?.artifact_id)
++    const version = num(record?.version)
++    const content = str(record?.content)
++    const editorKind = record?.editor_kind
++    // A revision without its text, its number or a known editor cannot stand in the stepper.
++    if (!id || !artifactId || version == null || version < 1 || content == null) return []
++    if (!isArtifactEditorKind(editorKind)) return []
++    const restored = num(record?.restored_from_version)
++    return [{
++      id,
++      artifactId,
++      version,
++      kind: str(record?.kind) ?? '',
++      title: str(record?.title) ?? '',
++      content,
++      editorKind,
++      ...(restored != null && restored > 0 ? { restoredFromVersion: restored } : {}),
++      createdAt: str(record?.created_at) ?? '',
++    }]
++  })
++}
++
+ export async function saveChatThreadSnapshot(
+   threadId: string,
+   snapshot: SaveChatThreadSnapshotRequest,
+diff --git a/apps/Model Plane/api/contracts/sse-event-payloads.json b/apps/Model Plane/api/contracts/sse-event-payloads.json
+index a18e82069..e1418fd8e 100644
+--- a/apps/Model Plane/api/contracts/sse-event-payloads.json	
++++ b/apps/Model Plane/api/contracts/sse-event-payloads.json	
+@@ -15,6 +15,12 @@
+           ],
+           "presence": "always"
+         },
++        "editor": {
++          "types": [
++            "string"
++          ],
++          "presence": "optional"
++        },
+         "id": {
+           "types": [
+             "string"
+diff --git a/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 b/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256
+index 640dc94f5..555ebcd4e 100644
+--- a/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256	
++++ b/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256	
+@@ -1 +1 @@
+-ab385cc9d0ab3385c59a1755ebe54920ece933e8ed55b7830674d07dfed3cb7f *sse-event-payloads.json
++6e74587f895f57fba91403b3d1b7f1bdb2fb252dccabe17a2fb36d55a6d26014 *sse-event-payloads.json
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/artifact_revision_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/artifact_revision_routes.rs
+new file mode 100644
+index 000000000..afacadd7d
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/artifact_revision_routes.rs	
+@@ -0,0 +1,627 @@
++//! Read routes over session-core's artifact revision store, and the composer's capability read
++//! (Wave 3 EP-3 S3).
++//!
++//! - `GET /v1/threads/:thread_id/artifacts`: the head of every artifact in the thread, no text.
++//! - `GET /v1/threads/:thread_id/artifacts/:artifact_id/revisions?before_version=&limit=`: one
++//!   artifact's revisions newest first, text included, at most [`MAX_PAGE`] per page.
++//! - `GET /v1/chat/composer-capabilities`: which composer and panel features this gateway serves,
++//!   from its own switches, so the SPA never reads a build-time flag for server behaviour.
++//!
++//! The history routes answer 404 `artifact_history_unavailable` unless
++//! `MODEL_GATEWAY_ARTIFACT_REVISIONS` is `on`: in `off` and `shadow` nothing the user sees changes.
++//! Session Core is the authority on who may read a thread; the gateway forwards the verified
++//! session bearer and the claims' org only, never an owner from the path or query. Another
++//! person's thread and a thread in another org both answer the same 404 as a missing one, so the
++//! route says nothing about which threads exist. A zero-retention credential is refused with the
++//! existing 412 before any call: a ZDR turn writes no revision, so there is nothing to read, and
++//! the refusal keeps that explicit. `has_more` rides inside `data` because the SPA's request
++//! helper unwraps `data` and drops `meta`.
++
++use axum::{
++    extract::{Path, Query, State},
++    http::StatusCode,
++    Extension, Json,
++};
++use mp_contracts::model_plane::v1::{ArtifactRevision, ListArtifactRevisionsRequest};
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++
++use crate::artifact_revisions::ArtifactRevisionsMode;
++use crate::auth::{Claims, VerifiedSessionBearer};
++use crate::http_routes::{
++    authenticated_session_request, require_non_zdr_durable_mutation, session_thread_error,
++    timestamp_to_rfc3339, HttpJsonError,
++};
++use crate::state::AppState;
++
++/// Revisions per page: each carries up to 200,000 characters of text.
++const MAX_PAGE: u32 = 20;
++
++/// Heads per thread read. Session Core reads more than 50 as 50.
++const MAX_HEADS: u32 = 50;
++
++/// What session-core answers while its own store switch is off.
++const STORE_DISABLED: &str = "artifact_revisions_disabled";
++
++/// The routes, merged at the end of the authed router.
++pub(crate) fn router() -> axum::Router<AppState> {
++    axum::Router::new()
++        .route(
++            "/v1/threads/:thread_id/artifacts",
++            axum::routing::get(list_artifact_heads),
++        )
++        .route(
++            "/v1/threads/:thread_id/artifacts/:artifact_id/revisions",
++            axum::routing::get(list_artifact_revisions),
++        )
++        .route(
++            "/v1/chat/composer-capabilities",
++            axum::routing::get(composer_capabilities),
++        )
++}
++
++#[derive(Debug, Default, Deserialize)]
++pub(crate) struct RevisionsQuery {
++    /// Only versions below this one; absent or 0 starts at the head.
++    before_version: Option<u32>,
++    /// At most [`MAX_PAGE`]; absent or 0 means a full page.
++    limit: Option<u32>,
++}
++
++/// One stored revision as the panel reads it. The editor's subject id is not sent: the owner is
++/// the only reader, and `editor_kind` is what the stepper labels.
++#[derive(Debug, Serialize, PartialEq, Eq)]
++pub(crate) struct RevisionJson {
++    id: String,
++    artifact_id: String,
++    version: u32,
++    kind: String,
++    title: String,
++    /// Absent on a heads read, which carries no text.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    content: Option<String>,
++    editor_kind: String,
++    #[serde(skip_serializing_if = "String::is_empty")]
++    run_id: String,
++    #[serde(skip_serializing_if = "String::is_empty")]
++    source_message_id: String,
++    /// For a restore, the version whose text was restored.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    restored_from_version: Option<u32>,
++    content_sha256: String,
++    created_at: String,
++}
++
++impl RevisionJson {
++    fn from_proto(revision: ArtifactRevision, with_content: bool) -> Self {
++        Self {
++            id: revision.id,
++            artifact_id: revision.artifact_id,
++            version: revision.version,
++            kind: revision.kind,
++            title: revision.title,
++            content: with_content.then_some(revision.content),
++            editor_kind: revision.editor_kind,
++            run_id: revision.run_id,
++            source_message_id: revision.source_message_id,
++            restored_from_version: (revision.restored_from_version > 0)
++                .then_some(revision.restored_from_version),
++            content_sha256: revision.content_sha256,
++            created_at: timestamp_to_rfc3339(revision.created_at),
++        }
++    }
++}
++
++/// The 404 every history route answers while the switch is not `on`, or while session-core's
++/// own store switch is off.
++fn history_unavailable() -> HttpJsonError {
++    (
++        StatusCode::NOT_FOUND,
++        Json(json!({
++            "error": {
++                "code": "artifact_history_unavailable",
++                "message": "artifact history is not enabled on this deployment",
++                "details": {},
++            }
++        })),
++    )
++}
++
++/// The gate in front of every history read: the switch first (a deployment without the feature
++/// answers the same for every caller), then the ZDR refusal.
++fn history_gate(state: &AppState, claims: &Claims) -> Result<(), HttpJsonError> {
++    if state.artifact_revisions_mode != ArtifactRevisionsMode::On {
++        return Err(history_unavailable());
++    }
++    require_non_zdr_durable_mutation(claims)
++}
++
++/// Session Core's refusals as the panel reads them. Not found and permission denied are one 404,
++/// so a thread someone else owns reads like one that does not exist.
++fn history_error(error: &tonic::Status) -> HttpJsonError {
++    match error.code() {
++        tonic::Code::Unavailable if error.message() == STORE_DISABLED => history_unavailable(),
++        tonic::Code::NotFound | tonic::Code::PermissionDenied => (
++            StatusCode::NOT_FOUND,
++            Json(json!({
++                "error": {
++                    "code": "thread_not_found",
++                    "message": "thread not found",
++                    "details": {},
++                }
++            })),
++        ),
++        _ => session_thread_error("session-core list_artifact_revisions failed", error),
++    }
++}
++
++/// A page size the store accepts: absent or 0 is a full page, anything past it is clamped.
++fn page_limit(raw: Option<u32>) -> u32 {
++    match raw {
++        None | Some(0) => MAX_PAGE,
++        Some(limit) => limit.min(MAX_PAGE),
++    }
++}
++
++async fn list(
++    state: &AppState,
++    bearer: &VerifiedSessionBearer,
++    request: ListArtifactRevisionsRequest,
++) -> Result<(Vec<ArtifactRevision>, bool), HttpJsonError> {
++    let response = state
++        .artifact_revision_client
++        .clone()
++        .list_artifact_revisions(authenticated_session_request(request, bearer)?)
++        .await
++        .map_err(|error| history_error(&error))?
++        .into_inner();
++    Ok((response.revisions, response.has_more))
++}
++
++pub(crate) async fn list_artifact_heads(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: VerifiedSessionBearer,
++    Path(thread_id): Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    history_gate(&state, &claims)?;
++    let (heads, has_more) = list(
++        &state,
++        &bearer,
++        ListArtifactRevisionsRequest {
++            org_id: claims.org_id.clone(),
++            thread_id,
++            artifact_id: String::new(),
++            include_content: false,
++            limit: MAX_HEADS,
++            before_version: 0,
++        },
++    )
++    .await?;
++    let artifacts: Vec<RevisionJson> = heads
++        .into_iter()
++        .map(|head| RevisionJson::from_proto(head, false))
++        .collect();
++    Ok(Json(json!({
++        "data": { "artifacts": artifacts, "has_more": has_more }
++    })))
++}
++
++pub(crate) async fn list_artifact_revisions(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: VerifiedSessionBearer,
++    Path((thread_id, artifact_id)): Path<(String, String)>,
++    Query(query): Query<RevisionsQuery>,
++) -> Result<Json<Value>, HttpJsonError> {
++    history_gate(&state, &claims)?;
++    let (revisions, has_more) = list(
++        &state,
++        &bearer,
++        ListArtifactRevisionsRequest {
++            org_id: claims.org_id.clone(),
++            thread_id,
++            artifact_id,
++            include_content: true,
++            limit: page_limit(query.limit),
++            before_version: query.before_version.unwrap_or(0),
++        },
++    )
++    .await?;
++    let revisions: Vec<RevisionJson> = revisions
++        .into_iter()
++        .map(|revision| RevisionJson::from_proto(revision, true))
++        .collect();
++    Ok(Json(json!({
++        "data": { "revisions": revisions, "has_more": has_more }
++    })))
++}
++
++/// What the composer and the Output panel may offer, from this gateway's own switches. Only
++/// `artifact_history` has a server half today; each later EP-3 slice wires its own field here.
++#[derive(Debug, Serialize, PartialEq, Eq)]
++pub(crate) struct ComposerCapabilities {
++    artifact_history: bool,
++    artifact_editing: bool,
++    context_refs: bool,
++    thread_references: bool,
++    selection_edit: bool,
++}
++
++fn capabilities_for(mode: ArtifactRevisionsMode, zdr: bool) -> ComposerCapabilities {
++    ComposerCapabilities {
++        // A ZDR caller would only be refused the read, so the panel is told not to ask.
++        artifact_history: mode == ArtifactRevisionsMode::On && !zdr,
++        artifact_editing: false,
++        context_refs: false,
++        thread_references: false,
++        selection_edit: false,
++    }
++}
++
++pub(crate) async fn composer_capabilities(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++) -> Json<Value> {
++    // A posture that cannot be decided reads as ZDR: a capability is never offered on a guess.
++    let zdr = crate::zdr_posture::zdr_or_refuse(
++        &claims,
++        &crate::zdr_posture::Route::plain(false),
++    )
++    .unwrap_or(true);
++    Json(json!({ "data": capabilities_for(state.artifact_revisions_mode, zdr) }))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use mp_contracts::model_plane::v1::{
++        artifact_revision_service_client::ArtifactRevisionServiceClient,
++        artifact_revision_service_server::{
++            ArtifactRevisionService, ArtifactRevisionServiceServer,
++        },
++        AppendArtifactRevisionRequest, AppendArtifactRevisionResponse, GetArtifactRevisionRequest,
++        GetArtifactRevisionResponse, ListArtifactRevisionsResponse,
++    };
++    use std::sync::{Arc, Mutex};
++
++    const OWNER: &str = "user-1";
++
++    /// A revision store double: answers the owner of `org-1` with three revisions of one
++    /// artifact, and anyone else the way session-core does (not found across orgs, permission
++    /// denied inside one). Keeps every list request it saw.
++    #[derive(Clone, Default)]
++    struct FakeStore {
++        seen: Arc<Mutex<Vec<ListArtifactRevisionsRequest>>>,
++        disabled: bool,
++    }
++
++    fn revision(version: u32) -> ArtifactRevision {
++        ArtifactRevision {
++            id: format!("rev-{version}"),
++            thread_id: "thread-1".to_owned(),
++            artifact_id: "report".to_owned(),
++            version,
++            kind: "document".to_owned(),
++            title: "Report".to_owned(),
++            content: format!("text {version}"),
++            editor_kind: if version == 2 { "user" } else { "model" }.to_owned(),
++            editor_subject_id: OWNER.to_owned(),
++            run_id: String::new(),
++            source_message_id: String::new(),
++            restored_from_version: 0,
++            content_sha256: "ab".to_owned(),
++            created_at: None,
++        }
++    }
++
++    #[tonic::async_trait]
++    impl ArtifactRevisionService for FakeStore {
++        async fn append_artifact_revision(
++            &self,
++            _request: tonic::Request<AppendArtifactRevisionRequest>,
++        ) -> Result<tonic::Response<AppendArtifactRevisionResponse>, tonic::Status> {
++            Err(tonic::Status::unimplemented("not used"))
++        }
++
++        async fn list_artifact_revisions(
++            &self,
++            request: tonic::Request<ListArtifactRevisionsRequest>,
++        ) -> Result<tonic::Response<ListArtifactRevisionsResponse>, tonic::Status> {
++            if self.disabled {
++                return Err(tonic::Status::unavailable(STORE_DISABLED));
++            }
++            let bearer = request
++                .metadata()
++                .get("authorization")
++                .and_then(|value| value.to_str().ok())
++                .unwrap_or_default()
++                .to_owned();
++            let request = request.into_inner();
++            self.seen.lock().unwrap().push(request.clone());
++            if request.org_id != "org-1" {
++                return Err(tonic::Status::not_found("thread not found"));
++            }
++            if bearer != format!("Bearer {OWNER}") {
++                return Err(tonic::Status::permission_denied("not the thread owner"));
++            }
++            let all: Vec<ArtifactRevision> = (1..=3)
++                .rev()
++                .map(revision)
++                .filter(|r| request.before_version == 0 || r.version < request.before_version)
++                .map(|mut r| {
++                    if !request.include_content {
++                        r.content.clear();
++                    }
++                    r
++                })
++                .collect();
++            let limit = request.limit as usize;
++            Ok(tonic::Response::new(ListArtifactRevisionsResponse {
++                has_more: all.len() > limit,
++                revisions: all.into_iter().take(limit).collect(),
++            }))
++        }
++
++        async fn get_artifact_revision(
++            &self,
++            _request: tonic::Request<GetArtifactRevisionRequest>,
++        ) -> Result<tonic::Response<GetArtifactRevisionResponse>, tonic::Status> {
++            Err(tonic::Status::unimplemented("not used"))
++        }
++    }
++
++    async fn state_with(fake: FakeStore, mode: ArtifactRevisionsMode) -> AppState {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        tokio::spawn(async move {
++            let _ = tonic::transport::Server::builder()
++                .add_service(ArtifactRevisionServiceServer::new(fake))
++                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
++                .await;
++        });
++        let mut state = AppState::new();
++        state.artifact_revision_client =
++            ArtifactRevisionServiceClient::connect(format!("http://{address}"))
++                .await
++                .unwrap();
++        state.artifact_revisions_mode = mode;
++        state
++    }
++
++    fn claims(org: &str, user: &str, zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": user,
++            "iss": "https://auth.test/model",
++            "aud": "model-gateway",
++            "exp": 4_102_444_800_i64,
++            "nbf": 1_700_000_000_i64,
++            "org_id": org,
++            "user_id": user,
++            "principal_type": "user",
++            "zdr": zdr,
++            "org_zdr": zdr,
++        }))
++        .expect("a minted token's payload is valid Claims")
++    }
++
++    async fn revisions_as(
++        state: &AppState,
++        org: &str,
++        user: &str,
++        query: RevisionsQuery,
++    ) -> Result<Json<Value>, HttpJsonError> {
++        list_artifact_revisions(
++            State(state.clone()),
++            Extension(claims(org, user, false)),
++            VerifiedSessionBearer::for_test(user),
++            Path(("thread-1".to_owned(), "report".to_owned())),
++            Query(query),
++        )
++        .await
++    }
++
++    fn error_code(error: &HttpJsonError) -> (StatusCode, String) {
++        (
++            error.0,
++            error.1 .0["error"]["code"]
++                .as_str()
++                .unwrap_or_default()
++                .to_owned(),
++        )
++    }
++
++    #[tokio::test]
++    async fn history_routes_404_unless_on() {
++        for mode in [ArtifactRevisionsMode::Off, ArtifactRevisionsMode::Shadow] {
++            let fake = FakeStore::default();
++            let state = state_with(fake.clone(), mode).await;
++            let error = revisions_as(&state, "org-1", OWNER, RevisionsQuery::default())
++                .await
++                .expect_err("history is off");
++            assert_eq!(
++                error_code(&error),
++                (StatusCode::NOT_FOUND, "artifact_history_unavailable".to_owned())
++            );
++            assert!(error.1 .0["error"]["details"].is_object());
++            let heads = list_artifact_heads(
++                State(state.clone()),
++                Extension(claims("org-1", OWNER, false)),
++                VerifiedSessionBearer::for_test(OWNER),
++                Path("thread-1".to_owned()),
++            )
++            .await
++            .expect_err("heads are off too");
++            assert_eq!(heads.0, StatusCode::NOT_FOUND);
++            assert!(fake.seen.lock().unwrap().is_empty(), "{mode:?} made no call");
++        }
++    }
++
++    #[tokio::test]
++    async fn a_disabled_store_reads_as_unavailable_history() {
++        let fake = FakeStore {
++            disabled: true,
++            ..FakeStore::default()
++        };
++        let state = state_with(fake, ArtifactRevisionsMode::On).await;
++        let error = revisions_as(&state, "org-1", OWNER, RevisionsQuery::default())
++            .await
++            .expect_err("store off");
++        assert_eq!(
++            error_code(&error),
++            (StatusCode::NOT_FOUND, "artifact_history_unavailable".to_owned())
++        );
++    }
++
++    #[tokio::test]
++    async fn history_is_owner_only() {
++        let fake = FakeStore::default();
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let other_user = revisions_as(&state, "org-1", "user-2", RevisionsQuery::default())
++            .await
++            .expect_err("another person in the org");
++        let other_org = revisions_as(&state, "org-2", "user-3", RevisionsQuery::default())
++            .await
++            .expect_err("another org");
++        assert_eq!(error_code(&other_user), error_code(&other_org));
++        assert_eq!(
++            error_code(&other_user),
++            (StatusCode::NOT_FOUND, "thread_not_found".to_owned())
++        );
++        // The org forwarded is the caller's own; nothing in the request names another.
++        let seen = fake.seen.lock().unwrap().clone();
++        assert_eq!(seen[0].org_id, "org-1");
++        assert_eq!(seen[1].org_id, "org-2");
++    }
++
++    #[tokio::test]
++    async fn history_refuses_a_zdr_credential_before_any_call() {
++        let fake = FakeStore::default();
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let error = list_artifact_revisions(
++            State(state),
++            Extension(claims("org-1", OWNER, true)),
++            VerifiedSessionBearer::for_test(OWNER),
++            Path(("thread-1".to_owned(), "report".to_owned())),
++            Query(RevisionsQuery::default()),
++        )
++        .await
++        .expect_err("zdr");
++        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
++        assert!(fake.seen.lock().unwrap().is_empty());
++    }
++
++    #[tokio::test]
++    async fn history_pages_by_before_version() {
++        let fake = FakeStore::default();
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let Json(first) = revisions_as(
++            &state,
++            "org-1",
++            OWNER,
++            RevisionsQuery {
++                before_version: None,
++                limit: Some(2),
++            },
++        )
++        .await
++        .expect("first page");
++        let versions: Vec<u64> = first["data"]["revisions"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .map(|r| r["version"].as_u64().unwrap())
++            .collect();
++        assert_eq!(versions, [3, 2]);
++        assert_eq!(first["data"]["has_more"], true);
++        assert_eq!(first["data"]["revisions"][1]["editor_kind"], "user");
++        assert_eq!(first["data"]["revisions"][0]["content"], "text 3");
++        assert!(first["data"]["revisions"][0].get("editor_subject_id").is_none());
++
++        let Json(second) = revisions_as(
++            &state,
++            "org-1",
++            OWNER,
++            RevisionsQuery {
++                before_version: Some(2),
++                limit: Some(500),
++            },
++        )
++        .await
++        .expect("second page");
++        assert_eq!(second["data"]["revisions"].as_array().unwrap().len(), 1);
++        assert_eq!(second["data"]["has_more"], false);
++        let seen = fake.seen.lock().unwrap().clone();
++        assert_eq!(seen[1].before_version, 2);
++        assert_eq!(seen[1].limit, MAX_PAGE, "a page past the cap is clamped");
++        assert!(seen.iter().all(|r| r.include_content));
++    }
++
++    #[tokio::test]
++    async fn heads_carry_no_text() {
++        let fake = FakeStore::default();
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let Json(heads) = list_artifact_heads(
++            State(state),
++            Extension(claims("org-1", OWNER, false)),
++            VerifiedSessionBearer::for_test(OWNER),
++            Path("thread-1".to_owned()),
++        )
++        .await
++        .expect("heads");
++        let first = &heads["data"]["artifacts"][0];
++        assert!(first.get("content").is_none());
++        assert_eq!(first["content_sha256"], "ab");
++        let seen = fake.seen.lock().unwrap().clone();
++        assert!(seen[0].artifact_id.is_empty());
++        assert!(!seen[0].include_content);
++        assert_eq!(seen[0].limit, MAX_HEADS);
++    }
++
++    #[test]
++    fn page_limit_defaults_and_clamps() {
++        assert_eq!(page_limit(None), MAX_PAGE);
++        assert_eq!(page_limit(Some(0)), MAX_PAGE);
++        assert_eq!(page_limit(Some(5)), 5);
++        assert_eq!(page_limit(Some(21)), MAX_PAGE);
++    }
++
++    #[test]
++    fn capabilities_reflect_switches() {
++        assert!(!capabilities_for(ArtifactRevisionsMode::Off, false).artifact_history);
++        assert!(!capabilities_for(ArtifactRevisionsMode::Shadow, false).artifact_history);
++        assert!(capabilities_for(ArtifactRevisionsMode::On, false).artifact_history);
++        assert!(!capabilities_for(ArtifactRevisionsMode::On, true).artifact_history);
++        let on = capabilities_for(ArtifactRevisionsMode::On, false);
++        assert!(!on.artifact_editing && !on.context_refs && !on.thread_references && !on.selection_edit);
++    }
++
++    #[tokio::test]
++    async fn the_capabilities_route_answers_every_key_in_the_envelope() {
++        let state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;
++        let Json(body) =
++            composer_capabilities(State(state), Extension(claims("org-1", OWNER, false))).await;
++        assert_eq!(
++            body,
++            json!({ "data": {
++                "artifact_history": true,
++                "artifact_editing": false,
++                "context_refs": false,
++                "thread_references": false,
++                "selection_edit": false,
++            }})
++        );
++    }
++
++    #[test]
++    fn a_restore_names_its_source_and_a_model_revision_does_not() {
++        let mut restored = revision(4);
++        restored.editor_kind = "restore".to_owned();
++        restored.restored_from_version = 2;
++        let json = serde_json::to_value(RevisionJson::from_proto(restored, true)).unwrap();
++        assert_eq!(json["restored_from_version"], 2);
++        let model = serde_json::to_value(RevisionJson::from_proto(revision(3), true)).unwrap();
++        assert!(model.get("restored_from_version").is_none());
++        assert!(model.get("run_id").is_none());
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs b/apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs
+index 837dc1fda..842cfa751 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs	
+@@ -18,9 +18,16 @@
+ //! Ask already persists. The write carries the user's session bearer, so session-core checks the
+ //! thread's owner and attributes the revision to the user's turn. Content is never logged.
+ //!
+-//! `on` is S3's third state (the read routes); for this writer it behaves as `shadow`.
++//! `on` is S3's third state. The read routes answer (`artifact_revision_routes`), a turn's start
++//! raises the process-local counters to the table's heads ([`seed_from_table_heads`]), and the
++//! append moves from after the save to the commit lock ([`commit_turn_revisions`]): the table's
++//! compare-and-set then decides a race between replicas, and a moved head ends the turn with the
++//! same `artifact_revision_conflict` a race inside one replica gets. Each published frame names
++//! its editor (`model`).
+ 
+-use mp_contracts::model_plane::v1::{AppendArtifactRevisionRequest, AppendOutcome};
++use mp_contracts::model_plane::v1::{
++    AppendArtifactRevisionRequest, AppendOutcome, ListArtifactRevisionsRequest,
++};
+ use sha2::{Digest as _, Sha256};
+ 
+ use crate::artifacts::ArtifactVersionStore;
+@@ -76,8 +83,29 @@ impl ArtifactRevisionsMode {
+     pub const fn writes(self) -> bool {
+         !matches!(self, Self::Off)
+     }
++
++    /// Whether the turn's revisions are written best effort after the assistant message is
++    /// durable (`shadow`). In `on` they are written earlier, under the commit lock.
++    #[must_use]
++    pub const fn writes_after_save(self) -> bool {
++        matches!(self, Self::Shadow)
++    }
++
++    /// Whether the table is the compare-and-set at the commit lock, the turn starts from its
++    /// heads and the published frames name their editor (`on`).
++    #[must_use]
++    pub const fn table_is_authority(self) -> bool {
++        matches!(self, Self::On)
++    }
+ }
+ 
++/// The editor every frame a model turn publishes names in `on` mode.
++pub const MODEL_EDITOR: &str = "model";
++
++/// Most heads one turn start reads. Session Core reads more than 50 as 50; a thread with more
++/// artifacts keeps the rest from its message metadata, as before.
++const MAX_SEEDED_HEADS: u32 = 50;
++
+ /// Whether a turn of this posture writes revisions: the mode writes, and the turn is neither
+ /// ZDR nor waived.
+ #[must_use]
+@@ -85,6 +113,21 @@ pub const fn permits(mode: ArtifactRevisionsMode, zdr: bool, waived: bool) -> bo
+     mode.writes() && !zdr && !waived
+ }
+ 
++/// The editor a published frame names: `model` in `on` for a turn whose revisions are stored,
++/// otherwise none, so the frame stays byte-identical to before.
++#[must_use]
++pub const fn frame_editor(
++    mode: ArtifactRevisionsMode,
++    zdr: bool,
++    waived: bool,
++) -> Option<&'static str> {
++    if mode.table_is_authority() && permits(mode, zdr, waived) {
++        Some(MODEL_EDITOR)
++    } else {
++        None
++    }
++}
++
+ /// One revision to append: what the turn published, and the head it moved from.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct PlannedRevision {
+@@ -142,7 +185,10 @@ pub fn record_turn_revisions(
+     zdr: bool,
+     waived: bool,
+ ) -> bool {
+-    if !permits(state.artifact_revisions_mode, zdr, waived) || artifacts.is_empty() {
++    if !state.artifact_revisions_mode.writes_after_save()
++        || !permits(state.artifact_revisions_mode, zdr, waived)
++        || artifacts.is_empty()
++    {
+         return false;
+     }
+     let planned = plan_turn_revisions(committed, &target.thread_id, artifacts);
+@@ -170,6 +216,116 @@ pub async fn write_turn(
+     bearer: &VerifiedSessionBearer,
+     target: &RevisionTarget,
+     planned: Vec<PlannedRevision>,
++) -> WriteTally {
++    write_planned(state, bearer, target, planned, false).await
++}
++
++/// The table refused a moved head under the commit lock: another replica (or another run this
++/// replica no longer knows of) published a revision of the same artifact first.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct RevisionConflict;
++
++/// `on` mode: append the turn's model revisions under the commit lock, before the assistant
++/// message is saved, so the table's compare-and-set decides between replicas. The caller ends
++/// the turn with `artifact_revision_conflict` on `Err`, as it does for a race inside one replica.
++/// Stops at the first conflict. Any other refusal is counted and the turn goes on: the message
++/// metadata stays the record the panel and the Space aggregate read, so a store outage must not
++/// fail a turn. Nothing is sent outside `on`, for a ZDR or waived turn, or without artifacts.
++///
++/// # Errors
++///
++/// [`RevisionConflict`] when session-core answers `revision_mismatch`.
++pub async fn commit_turn_revisions(
++    state: &AppState,
++    bearer: &VerifiedSessionBearer,
++    target: &RevisionTarget,
++    committed: &ArtifactVersionStore,
++    artifacts: &[RecordedArtifact],
++    zdr: bool,
++    waived: bool,
++) -> Result<(), RevisionConflict> {
++    if !state.artifact_revisions_mode.table_is_authority()
++        || !permits(state.artifact_revisions_mode, zdr, waived)
++        || artifacts.is_empty()
++    {
++        return Ok(());
++    }
++    let planned = plan_turn_revisions(committed, &target.thread_id, artifacts);
++    let tally = write_planned(state, bearer, target, planned, true).await;
++    if tally.conflict > 0 {
++        return Err(RevisionConflict);
++    }
++    Ok(())
++}
++
++/// `on` mode, at a turn's start: raise this replica's counters (and text) to the table's heads,
++/// so a revision another replica committed is the base this turn revises. Seeding never lowers
++/// a version, so the message metadata the turn also rehydrates from cannot undo it. Best effort:
++/// on any refusal the turn starts from the metadata alone, as before. Returns how many heads
++/// were seeded.
++pub async fn seed_from_table_heads(
++    state: &AppState,
++    bearer: &VerifiedSessionBearer,
++    org_id: &str,
++    thread_id: &str,
++    zdr: bool,
++    waived: bool,
++) -> usize {
++    if !state.artifact_revisions_mode.table_is_authority() || zdr || waived {
++        return 0;
++    }
++    let request = ListArtifactRevisionsRequest {
++        org_id: org_id.to_owned(),
++        thread_id: thread_id.to_owned(),
++        artifact_id: String::new(),
++        // The text is the base an update_artifact revises; a head without it would let the
++        // model rewrite an older copy under a newer number.
++        include_content: true,
++        limit: MAX_SEEDED_HEADS,
++        before_version: 0,
++    };
++    let Ok(request) = crate::http_routes::authenticated_session_request(request, bearer) else {
++        return 0;
++    };
++    let heads = match state
++        .artifact_revision_client
++        .clone()
++        .list_artifact_revisions(request)
++        .await
++    {
++        Ok(response) => response.into_inner().revisions,
++        Err(status) => {
++            tracing::debug!(code = ?status.code(), "artifact revision heads not read");
++            metrics::counter!("mp_gateway_artifact_revision_seed_total", "outcome" => "failed")
++                .increment(1);
++            return 0;
++        }
++    };
++    for head in &heads {
++        state.artifact_versions.seed_persisted(
++            thread_id,
++            &head.artifact_id,
++            &head.title,
++            &head.content,
++            head.version,
++        );
++        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&head.kind) {
++            state
++                .artifact_versions
++                .remember_kind(thread_id, &head.artifact_id, kind);
++        }
++    }
++    metrics::counter!("mp_gateway_artifact_revision_seed_total", "outcome" => "seeded")
++        .increment(1);
++    heads.len()
++}
++
++async fn write_planned(
++    state: &AppState,
++    bearer: &VerifiedSessionBearer,
++    target: &RevisionTarget,
++    planned: Vec<PlannedRevision>,
++    stop_on_conflict: bool,
+ ) -> WriteTally {
+     let mut tally = WriteTally::default();
+     for revision in planned {
+@@ -184,11 +340,12 @@ pub async fn write_turn(
+             }
+             Err(status) if is_conflict(&status) => {
+                 tally.conflict += 1;
+-                // Ids only: the shadow comparison is what this line is for.
++                // Ids only: the cross-replica comparison is what this line is for.
+                 tracing::info!(
+                     thread_id = %target.thread_id,
+                     run_id = %target.run_id,
+-                    "artifact revision shadow conflict"
++                    authoritative = stop_on_conflict,
++                    "artifact revision conflict"
+                 );
+                 "conflict"
+             }
+@@ -201,6 +358,9 @@ pub async fn write_turn(
+         };
+         metrics::counter!("mp_gateway_artifact_revision_writes_total", "outcome" => outcome)
+             .increment(1);
++        if stop_on_conflict && tally.conflict > 0 {
++            break;
++        }
+     }
+     tally
+ }
+@@ -266,19 +426,24 @@ mod tests {
+         artifact_revision_service_server::{
+             ArtifactRevisionService, ArtifactRevisionServiceServer,
+         },
+-        AppendArtifactRevisionResponse, GetArtifactRevisionRequest, GetArtifactRevisionResponse,
+-        ListArtifactRevisionsRequest, ListArtifactRevisionsResponse,
++        AppendArtifactRevisionResponse, ArtifactRevision, GetArtifactRevisionRequest,
++        GetArtifactRevisionResponse, ListArtifactRevisionsResponse,
+     };
+     use std::sync::atomic::{AtomicUsize, Ordering};
+     use std::sync::{Arc, Mutex};
+ 
+     /// A revision store double: counts appends, keeps the requests, and answers each with a
+-    /// conflict or an append.
++    /// conflict or an append. With `cas` it keeps one head per artifact and refuses a stale
++    /// expected version as session-core does; `heads` is what a heads listing returns.
+     #[derive(Clone, Default)]
+     struct FakeStore {
+         calls: Arc<AtomicUsize>,
+         requests: Arc<Mutex<Vec<AppendArtifactRevisionRequest>>>,
+         conflict: bool,
++        cas: bool,
++        table: Arc<Mutex<std::collections::HashMap<String, u32>>>,
++        heads: Vec<ArtifactRevision>,
++        lists: Arc<Mutex<Vec<ListArtifactRevisionsRequest>>>,
+     }
+ 
+     #[tonic::async_trait]
+@@ -288,10 +453,19 @@ mod tests {
+             request: tonic::Request<AppendArtifactRevisionRequest>,
+         ) -> Result<tonic::Response<AppendArtifactRevisionResponse>, tonic::Status> {
+             self.calls.fetch_add(1, Ordering::SeqCst);
+-            self.requests.lock().unwrap().push(request.into_inner());
++            let request = request.into_inner();
++            self.requests.lock().unwrap().push(request.clone());
+             if self.conflict {
+                 return Err(tonic::Status::aborted(REVISION_MISMATCH));
+             }
++            if self.cas {
++                let mut table = self.table.lock().unwrap();
++                let head = table.entry(request.artifact_id.clone()).or_insert(0);
++                if *head != request.expected_version {
++                    return Err(tonic::Status::aborted(REVISION_MISMATCH));
++                }
++                *head = request.version;
++            }
+             Ok(tonic::Response::new(AppendArtifactRevisionResponse {
+                 revision: None,
+                 outcome: AppendOutcome::Appended as i32,
+@@ -300,9 +474,13 @@ mod tests {
+ 
+         async fn list_artifact_revisions(
+             &self,
+-            _request: tonic::Request<ListArtifactRevisionsRequest>,
++            request: tonic::Request<ListArtifactRevisionsRequest>,
+         ) -> Result<tonic::Response<ListArtifactRevisionsResponse>, tonic::Status> {
+-            Err(tonic::Status::unimplemented("not used"))
++            self.lists.lock().unwrap().push(request.into_inner());
++            Ok(tonic::Response::new(ListArtifactRevisionsResponse {
++                revisions: self.heads.clone(),
++                has_more: false,
++            }))
+         }
+ 
+         async fn get_artifact_revision(
+@@ -615,4 +793,258 @@ mod tests {
+             "artifact_revision_limit"
+         )));
+     }
++
++    #[test]
++    fn only_a_stored_on_mode_frame_names_its_editor() {
++        assert_eq!(
++            frame_editor(ArtifactRevisionsMode::On, false, false),
++            Some("model")
++        );
++        assert_eq!(frame_editor(ArtifactRevisionsMode::Off, false, false), None);
++        assert_eq!(frame_editor(ArtifactRevisionsMode::Shadow, false, false), None);
++        assert_eq!(frame_editor(ArtifactRevisionsMode::On, true, false), None);
++        assert_eq!(frame_editor(ArtifactRevisionsMode::On, false, true), None);
++    }
++
++    #[test]
++    fn only_on_makes_the_table_the_authority() {
++        assert!(!ArtifactRevisionsMode::Off.table_is_authority());
++        assert!(!ArtifactRevisionsMode::Shadow.table_is_authority());
++        assert!(ArtifactRevisionsMode::On.table_is_authority());
++        assert!(ArtifactRevisionsMode::Shadow.writes_after_save());
++        assert!(!ArtifactRevisionsMode::On.writes_after_save());
++        assert!(!ArtifactRevisionsMode::Off.writes_after_save());
++    }
++
++    #[tokio::test]
++    async fn on_mode_writes_at_the_commit_lock_not_after_save() {
++        let fake = FakeStore::default();
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let committed = ArtifactVersionStore::new();
++        assert!(
++            !record_turn_revisions(
++                &state,
++                &bearer(),
++                target(),
++                &committed,
++                &[published("report", 1)],
++                false,
++                false,
++            ),
++            "the after-save write is shadow's"
++        );
++        settle().await;
++        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
++        assert_eq!(
++            commit_turn_revisions(
++                &state,
++                &bearer(),
++                &target(),
++                &committed,
++                &[published("report", 1)],
++                false,
++                false,
++            )
++            .await,
++            Ok(())
++        );
++        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
++    }
++
++    #[tokio::test]
++    async fn the_commit_append_is_off_outside_on_and_for_zdr_or_waived_turns() {
++        for (mode, zdr, waived) in [
++            (ArtifactRevisionsMode::Off, false, false),
++            (ArtifactRevisionsMode::Shadow, false, false),
++            (ArtifactRevisionsMode::On, true, false),
++            (ArtifactRevisionsMode::On, false, true),
++        ] {
++            let fake = FakeStore {
++                conflict: true,
++                ..FakeStore::default()
++            };
++            let state = state_with(fake.clone(), mode).await;
++            let outcome = commit_turn_revisions(
++                &state,
++                &bearer(),
++                &target(),
++                &ArtifactVersionStore::new(),
++                &[published("report", 1)],
++                zdr,
++                waived,
++            )
++            .await;
++            assert_eq!(outcome, Ok(()), "{mode:?} zdr={zdr} waived={waived}");
++            assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
++        }
++    }
++
++    #[tokio::test]
++    async fn cross_replica_conflict_is_artifact_revision_conflict() {
++        // One session-core, two gateway replicas: each has its own process-local store and
++        // commit lock, and both revise version 1 of the same report.
++        let fake = FakeStore {
++            cas: true,
++            ..FakeStore::default()
++        };
++        fake.table.lock().unwrap().insert("report".to_owned(), 1);
++        let replica_a = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let replica_b = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        for replica in [&replica_a, &replica_b] {
++            replica
++                .artifact_versions
++                .seed_persisted("thread-a", "report", "Report", "text 1", 1);
++        }
++        let first = commit_turn_revisions(
++            &replica_a,
++            &bearer(),
++            &target(),
++            &replica_a.artifact_versions,
++            &[published("report", 2)],
++            false,
++            false,
++        )
++        .await;
++        let second = commit_turn_revisions(
++            &replica_b,
++            &bearer(),
++            &target(),
++            &replica_b.artifact_versions,
++            &[published("report", 2)],
++            false,
++            false,
++        )
++        .await;
++        assert_eq!(first, Ok(()));
++        assert_eq!(
++            second,
++            Err(RevisionConflict),
++            "the second replica's turn ends as a revision conflict, not a lost write"
++        );
++        assert_eq!(fake.table.lock().unwrap()["report"], 2);
++    }
++
++    #[tokio::test]
++    async fn the_commit_stops_at_the_first_conflict() {
++        let fake = FakeStore {
++            conflict: true,
++            ..FakeStore::default()
++        };
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        let outcome = commit_turn_revisions(
++            &state,
++            &bearer(),
++            &target(),
++            &ArtifactVersionStore::new(),
++            &[published("report", 1), published("notes", 1)],
++            false,
++            false,
++        )
++        .await;
++        assert_eq!(outcome, Err(RevisionConflict));
++        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
++    }
++
++    #[tokio::test]
++    async fn an_unreachable_store_does_not_fail_the_commit() {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        drop(listener);
++        let mut state = AppState::new();
++        state.artifact_revision_client = ArtifactRevisionServiceClient::new(
++            tonic::transport::Endpoint::from_shared(format!("http://{address}"))
++                .unwrap()
++                .connect_lazy(),
++        );
++        state.artifact_revisions_mode = ArtifactRevisionsMode::On;
++        let outcome = commit_turn_revisions(
++            &state,
++            &bearer(),
++            &target(),
++            &ArtifactVersionStore::new(),
++            &[published("report", 1)],
++            false,
++            false,
++        )
++        .await;
++        assert_eq!(outcome, Ok(()));
++    }
++
++    fn head(id: &str, version: u32) -> ArtifactRevision {
++        ArtifactRevision {
++            artifact_id: id.to_owned(),
++            version,
++            kind: "document".to_owned(),
++            title: "Report".to_owned(),
++            content: format!("table text {version}"),
++            editor_kind: "model".to_owned(),
++            ..ArtifactRevision::default()
++        }
++    }
++
++    #[tokio::test]
++    async fn turn_start_seeds_from_table_heads() {
++        let fake = FakeStore {
++            heads: vec![head("report", 4)],
++            ..FakeStore::default()
++        };
++        let state = state_with(fake.clone(), ArtifactRevisionsMode::On).await;
++        // This replica last saw version 2 from the message metadata.
++        state
++            .artifact_versions
++            .seed_persisted("thread-a", "report", "Report", "metadata text 2", 2);
++        let seeded =
++            seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", false, false).await;
++        assert_eq!(seeded, 1);
++        assert_eq!(
++            state.artifact_versions.current_version("thread-a", "report"),
++            Some(4)
++        );
++        assert_eq!(
++            state
++                .artifact_versions
++                .content_of("thread-a", "report")
++                .as_deref(),
++            Some("table text 4"),
++            "the base the next update revises is the table's text"
++        );
++        // The metadata rehydration that follows cannot lower it.
++        state
++            .artifact_versions
++            .seed_persisted("thread-a", "report", "Report", "metadata text 2", 2);
++        assert_eq!(
++            state.artifact_versions.current_version("thread-a", "report"),
++            Some(4)
++        );
++        let lists = fake.lists.lock().unwrap().clone();
++        assert_eq!(lists.len(), 1);
++        assert!(lists[0].artifact_id.is_empty(), "one heads read");
++        assert!(lists[0].include_content);
++        assert_eq!(lists[0].org_id, "org-a");
++    }
++
++    #[tokio::test]
++    async fn seeding_reads_nothing_outside_on_or_for_zdr_or_waived_turns() {
++        for (mode, zdr, waived) in [
++            (ArtifactRevisionsMode::Off, false, false),
++            (ArtifactRevisionsMode::Shadow, false, false),
++            (ArtifactRevisionsMode::On, true, false),
++            (ArtifactRevisionsMode::On, false, true),
++        ] {
++            let fake = FakeStore {
++                heads: vec![head("report", 4)],
++                ..FakeStore::default()
++            };
++            let state = state_with(fake.clone(), mode).await;
++            assert_eq!(
++                seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", zdr, waived).await,
++                0
++            );
++            assert!(fake.lists.lock().unwrap().is_empty());
++            assert_eq!(
++                state.artifact_versions.current_version("thread-a", "report"),
++                None
++            );
++        }
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs b/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs
+index ffa0489ca..96604df5c 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/artifacts.rs	
+@@ -473,6 +473,8 @@ pub fn artifact_event(
+         content: content.to_owned(),
+         version,
+         provenance: None,
++        // A live frame is not yet a stored revision; the publish after the save names the editor.
++        editor: None,
+     }
+ }
+ 
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index cd449ad52..e0b559264 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -444,6 +444,8 @@ fn authed_routes() -> Router<AppState> {
+             "/v1/finetune/jobs/:job_id/deploy",
+             post(crate::finetune_routes::deploy_job),
+         )
++        // Wave 3 EP-3 S3: artifact revision history and the composer's capability read.
++        .merge(crate::artifact_revision_routes::router())
+ }
+ 
+ /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 601ab074d..fe6956cda 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -2,6 +2,7 @@
+ 
+ pub mod approvals;
+ pub mod attachment_policy;
++pub mod artifact_revision_routes;
+ pub mod artifact_revisions;
+ pub mod artifacts;
+ pub mod audit;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index 6705992ee..3a2a370a9 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -3225,6 +3225,18 @@ pub async fn invoke_stream_sse(
+         room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
+         participants: &wake.participants,
+     });
++    // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
++    // revision another replica committed is what this turn revises. Runs before the metadata
++    // rehydration below; seeding never lowers a version, so the order only saves a write.
++    crate::artifact_revisions::seed_from_table_heads(
++        &state,
++        &model_bearer,
++        &org_id,
++        &session_run.thread_id,
++        effective_zdr,
++        retention_class.is_some(),
++    )
++    .await;
+     let recent_thread = load_recent_thread_messages(
+         &state,
+         &org_id,
+@@ -5687,8 +5699,25 @@ pub async fn invoke_stream_sse(
+                     let lock_started = timing.now_ms();
+                     let _artifact_commit_guard = committed_artifacts.lock_commit(&session_thread_id).await;
+                     timing.close(crate::turn_timing::Phase::CommitLock, lock_started);
++                    // EP-3 S3: with the revision switch `on`, the table's compare-and-set
++                    // also decides, so a head another replica moved fails the same way.
+                     if sink.recorded_artifacts().iter().any(|artifact|
+-                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id)) {
++                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id))
++                        || crate::artifact_revisions::commit_turn_revisions(
++                            &session_state,
++                            &session_bearer,
++                            &crate::artifact_revisions::RevisionTarget {
++                                org_id: org_clone.clone(),
++                                thread_id: session_thread_id.clone(),
++                                run_id: session_run_for_terminal.run_id.clone(),
++                            },
++                            &committed_artifacts,
++                            &sink.recorded_artifacts(),
++                            effective_zdr,
++                            retention_class.is_some(),
++                        )
++                        .await
++                        .is_err() {
+                         failure_code = "artifact_revision_conflict";
+                         emit_turn_timing(
+                             &tx,
+@@ -6008,8 +6037,9 @@ pub async fn invoke_stream_sse(
+ 
+                     // EP-3 S2: with the revision switch on, the same revisions also go to
+                     // session-core's store, best effort on their own task. It reads the heads
+-                    // committed before this turn, so it runs before the seeding below.
+-                    if session_state.artifact_revisions_mode.writes() {
++                    // committed before this turn, so it runs before the seeding below. In `on`
++                    // the same revisions were appended at the commit lock instead (S3).
++                    if session_state.artifact_revisions_mode.writes_after_save() {
+                         crate::artifact_revisions::record_turn_revisions(
+                             &session_state,
+                             &session_bearer,
+@@ -6026,6 +6056,13 @@ pub async fn invoke_stream_sse(
+                         );
+                     }
+ 
++                    // EP-3 S3: in `on` a stored revision's frame names its editor; in every other
++                    // mode the frame carries no `editor` key, as before.
++                    let artifact_editor = crate::artifact_revisions::frame_editor(
++                        session_state.artifact_revisions_mode,
++                        effective_zdr,
++                        retention_class.is_some(),
++                    );
+                     // The exact text and its receipt are now in the durable
+                     // assistant message. Publish only the last selected version
+                     // of each artifact, through the normal resumable stream.
+@@ -6042,7 +6079,7 @@ pub async fn invoke_stream_sse(
+                         }
+                         // The live frame keeps a report's provenance stamp even when the turn may not store it.
+                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+-                            artifact.into_event()).await;
++                            artifact.into_event().with_editor(artifact_editor)).await;
+                     }
+                     if hold_artifact_answer {
+                         let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
+@@ -8293,6 +8330,7 @@ fn image_gen_stream(
+                     content: content.clone(),
+                     version: 1,
+                     provenance: None,
++                    editor: None,
+                 };
+                 if artifact.should_emit(&features) {
+                     let _ = tx.send(Ok(artifact.to_sse(&request_id))).await;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index d9d94fda4..123ea469d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -355,6 +355,10 @@ pub enum ChatEvent {
+         /// What a research report was built from (EP-2-S4), set only on a deep-research report
+         /// behind [`CITATION_PASSAGES_ENV`]. `None` writes no `provenance` key.
+         provenance: Option<Box<crate::deep_research::ResearchProvenance>>,
++        /// Who made this revision, `model`, `user` or `restore` (EP-3 S3). Set only on a stored
++        /// revision's frame while `MODEL_GATEWAY_ARTIFACT_REVISIONS` is `on`; `None` writes no
++        /// `editor` key, so older clients see the frame unchanged.
++        editor: Option<String>,
+     },
+     /// A generated file/image attachment.
+     Attachment {
+@@ -615,6 +619,18 @@ pub enum ChatEvent {
+ }
+ 
+ impl ChatEvent {
++    /// An `artifact` frame naming who made the revision (EP-3 S3); `None`, and every other
++    /// variant, is returned unchanged.
++    #[must_use]
++    pub fn with_editor(self, editor: Option<&str>) -> Self {
++        match (self, editor) {
++            (ChatEvent::Artifact { id, kind, title, content, version, provenance, .. }, Some(editor)) => {
++                ChatEvent::Artifact { id, kind, title, content, version, provenance, editor: Some(editor.to_owned()) }
++            }
++            (event, _) => event,
++        }
++    }
++
+     /// The `sandbox_state` frame for a workspace result a tool call produced (WS22-S6). Each token must be a
+     /// member of its closed list, so a result that carries free text or a path yields `None` rather than a
+     /// frame that could show it.
+@@ -831,11 +847,15 @@ impl ChatEvent {
+                 content,
+                 version,
+                 provenance,
++                editor,
+             } => {
+                 let mut payload = json!({ "id": id, "kind": kind, "title": title, "content": content, "version": version });
+                 if let Some(provenance) = provenance {
+                     payload["provenance"] = serde_json::to_value(provenance).unwrap_or_else(|_| json!({}));
+                 }
++                if let Some(editor) = editor {
++                    payload["editor"] = json!(editor);
++                }
+                 payload
+             }
+             ChatEvent::Attachment {
+@@ -1392,6 +1412,8 @@ impl RecordedArtifact {
+             content,
+             version,
+             provenance,
++            // The editor is a property of the stored revision, not of the message metadata.
++            editor: _,
+         } = event
+         else {
+             return None;
+@@ -1428,6 +1450,7 @@ impl RecordedArtifact {
+             content: self.content,
+             version: self.version,
+             provenance: self.provenance,
++            editor: None,
+         }
+     }
+ }
+@@ -1820,7 +1843,7 @@ mod tests {
+         let sink = RichEventSink::staging_artifacts(tx, families(&["artifacts", "steps"]), "r".into());
+         for version in [3, 4] {
+             sink.emit(ChatEvent::Artifact { id: "doc".into(), kind: "document".into(),
+-                title: "Draft".into(), content: format!("private {version}"), version, provenance: None }).await;
++                title: "Draft".into(), content: format!("private {version}"), version, provenance: None, editor: None }).await;
+         }
+         assert!(rx.try_recv().is_err());
+         assert_eq!(sink.recorded_artifacts()[0].version, 4);
+@@ -1958,6 +1981,7 @@ mod tests {
+             content: content.into(),
+             version: 1,
+             provenance: None,
++            editor: None,
+         };
+         sink.emit(artifact("doc", "document", "private draft"))
+             .await;
+@@ -2116,6 +2140,7 @@ mod tests {
+             content: content.into(),
+             version,
+             provenance: None,
++            editor: None,
+         };
+         sink.emit(artifact("rapport", "document", "v1 body", 1)).await;
+         sink.emit(artifact("notat", "document", "memo", 1)).await;
+@@ -3740,7 +3765,7 @@ mod payload_contract {
+             },
+             grounding(false),
+             grounding(true),
+-            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None },
++            ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None, editor: None },
+             ChatEvent::Artifact {
+                 id: s("a1"),
+                 kind: s("code"),
+@@ -3748,6 +3773,7 @@ mod payload_contract {
+                 content: s("body"),
+                 version: 2,
+                 provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
++                editor: Some(s("model")),
+             },
+             ChatEvent::Attachment {
+                 id: s("f1"),
+@@ -4270,6 +4296,7 @@ mod citation_passage_tests {
+             content: "# Rapport".to_owned(),
+             version: 1,
+             provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample())),
++            editor: None,
+         };
+         let payload = event.payload("r");
+         assert_eq!(payload["provenance"]["pipeline"], "deep_research_v1");
+@@ -4288,7 +4315,35 @@ mod citation_passage_tests {
+             content: "c".to_owned(),
+             version: 1,
+             provenance: None,
++            editor: None,
+         };
+         assert!(plain.payload("r").get("provenance").is_none());
+     }
++
++    #[test]
++    fn artifact_event_omits_editor_when_none() {
++        let plain = ChatEvent::Artifact {
++            id: "a".to_owned(),
++            kind: "document".to_owned(),
++            title: "T".to_owned(),
++            content: "c".to_owned(),
++            version: 3,
++            provenance: None,
++            editor: None,
++        };
++        assert!(plain.payload("r").get("editor").is_none(), "older clients see the frame unchanged");
++        assert_eq!(plain.clone().with_editor(None), plain);
++
++        let attributed = plain.clone().with_editor(Some("model"));
++        assert_eq!(attributed.payload("r")["editor"], "model");
++        assert_eq!(attributed.payload("r")["version"], 3);
++        let recorded = RecordedArtifact::from_event(&attributed).expect("a text artifact");
++        assert!(
++            serde_json::to_value(&recorded).expect("serializable").get("editor").is_none(),
++            "the message metadata never carries the editor"
++        );
++
++        let other = ChatEvent::Error { code: "x".into(), message: "y".into(), retryable: false };
++        assert!(other.clone().with_editor(Some("model")).payload("r").get("editor").is_none());
++    }
+ }

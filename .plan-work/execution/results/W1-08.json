@@ -1,0 +1,653 @@
+{
+ "batchId": "W1-08",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS06-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/audit-core/internal/verifier/verifier.go",
+    "apps/Control Plane/audit-core/internal/verifier/verifier_test.go",
+    "apps/Control Plane/audit-core/internal/store/verify.go",
+    "apps/Control Plane/audit-core/internal/store/verify_test.go",
+    "apps/Control Plane/audit-core/internal/store/migrations/009_audit_chain_verification_state.sql",
+    "apps/Control Plane/audit-core/internal/store/migrations/revert/009_audit_chain_verification_state.down.sql",
+    "apps/Control Plane/audit-core/cmd/audit-verify/main.go",
+    "apps/Control Plane/audit-core/cmd/audit-verify/main_test.go",
+    "apps/Control Plane/audit-core/Dockerfile",
+    "apps/Control Plane/observability/rules/audit-core.rules.yml",
+    "apps/Control Plane/observability/rules/audit-core.rules.test.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Control Plane/audit-core && go vet ./...",
+     "outcome": "clean"
+    },
+    {
+     "command": "cd apps/Control Plane/audit-core && go test ./... -count=1",
+     "outcome": "all packages ok (verifier, store, cmd/audit-verify, cmd/server included); DB-backed store tests skip because TEST_DATABASE_URL is unset"
+    }
+   ],
+   "db_tests_written": [
+    "TestVerifyOrgCleanChainIsVerified",
+    "TestVerifyOrgAttackTable",
+    "TestVerifyOrgPrunedChainStartsAtItsCheckpoint",
+    "TestVerifyOrgFullyPrunedChainIsVerifiedAtItsCheckpoint",
+    "TestVerifyOrgCheckpointAttacks",
+    "TestVerifyOrgReportsLegacyRowsAndNeverHidesThem",
+    "TestVerifyOrgWithoutAChainIsPartialNoChain",
+    "TestVerifyOrgRowLimitIsPartialAndTheCursorResumes",
+    "TestVerifierStateRoundTrips",
+    "TestVerifierPassRecordsStateAndCountsABrokenChain"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/audit-core/internal/store/migrate.go: after the 008 entry in the migrations slice add {version: \"009_audit_chain_verification_state\", name: \"audit chain verifier state\", sql: auditChainVerificationStateSQL}, (the embed var already exists in internal/store/verify.go; do not add a second //go:embed)",
+    "shared-edit apps/Control Plane/audit-core/cmd/server/main.go: import \"github.com/triodelab/controlplane/audit-core/internal/verifier\" and right after the `go runAttestor(...)` block add: if verifier.Enabled(os.Getenv(\"AUDIT_CHAIN_VERIFY_ENABLED\"), cfg.ChainEnabled) { go verifier.Run(ctx, st, verifier.Config{Interval: verifier.ParseInterval(os.Getenv(\"AUDIT_CHAIN_VERIFY_INTERVAL\"))}) }",
+    "shared-edit apps/Control Plane/docker-compose.yml (audit-core service env, next to AUDIT_CHAIN_ATTEST_INTERVAL): AUDIT_CHAIN_VERIFY_ENABLED: ${AUDIT_CHAIN_VERIFY_ENABLED:-} and AUDIT_CHAIN_VERIFY_INTERVAL: ${AUDIT_CHAIN_VERIFY_INTERVAL:-24h} (empty means follow the chain switch). Mirror both names, commented, in apps/Control Plane/audit-core/.env.example. Re-run cmd/server tests (compose-contract tests are text-sensitive).",
+    "DB harness (lead only): run the ignored Postgres tests TestVerifyOrg*, TestVerifierStateRoundTrips and TestVerifierPassRecordsStateAndCountsABrokenChain in apps/Control Plane/audit-core/internal/store with TEST_DATABASE_URL set (plan 6.4 recipe); re-run the S2/S3 store tests for regressions.",
+    "promtool (lead only): check rules on audit-core.rules.yml and test rules on audit-core.rules.test.yml; the six new unit tests have not been executed.",
+    "Image build and live proof (lead only, via scripts/run-control-plane.sh up -d --build audit-core): confirm /usr/local/bin/audit-verify is in the image; with the chain on, confirm the last-verify gauge appears only after the loop starts and is absent with AUDIT_CHAIN_ENABLED=0; mutate one row (audit.maintenance='on') and capture status broken with first_broken_seq, the failures counter increment and the firing alert; restore and clear that org's audit_chain_verifications row."
+   ],
+   "deviations": [
+    "AUDIT_CHAIN_VERIFY_ENABLED is not a strict literal-1 switch: on iff the chain is on and the value is not the literal 0 (the plan row says default 1 when the chain is on, and the row wins).",
+    "The pure verification rules live in internal/verifier (owned), not internal/chain (not owned); the CLI links internal/verifier.",
+    "The failures counter registers in internal/verifier via init and the last-verify gauge via Run, instead of internal/metrics/server.go (not owned); both appear on the default registry and /metrics.",
+    "Added migrations/revert/009_audit_chain_verification_state.down.sql, required by the migration rules.",
+    "Added rules unit tests to audit-core.rules.test.yml, the test file beside the rules file changed."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/audit-core/internal/store/migrate.go (register migration 009)",
+    "apps/Control Plane/audit-core/cmd/server/main.go (start the verifier loop)",
+    "apps/Control Plane/docker-compose.yml (AUDIT_CHAIN_VERIFY_ENABLED and AUDIT_CHAIN_VERIFY_INTERVAL env on audit-core)",
+    "apps/Control Plane/audit-core/.env.example (document the two env names)",
+    "apps/Control Plane/audit-core/cmd/server/main_test.go (compose-contract tests are text-sensitive)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edit apps/Control Plane/audit-core/internal/store/migrate.go: register migration 009_audit_chain_verification_state using the existing auditChainVerificationStateSQL embed in verify.go. Without it the audit_chain_verifications table never exists in a running service.",
+     "Lead shared-edit apps/Control Plane/audit-core/cmd/server/main.go: start verifier.Run when verifier.Enabled(os.Getenv(\"AUDIT_CHAIN_VERIFY_ENABLED\"), cfg.ChainEnabled) is true, with verifier.ParseInterval(os.Getenv(\"AUDIT_CHAIN_VERIFY_INTERVAL\")). Until then Enabled, ParseInterval and Run have no caller and the loop never runs.",
+     "Lead shared-edit apps/Control Plane/docker-compose.yml and apps/Control Plane/audit-core/.env.example: add AUDIT_CHAIN_VERIFY_ENABLED and AUDIT_CHAIN_VERIFY_INTERVAL, then re-run the cmd/server compose-contract tests.",
+     "DB harness (lead only): run the Postgres-backed tests TestVerifyOrg*, TestVerifierStateRoundTrips and TestVerifierPassRecordsStateAndCountsABrokenChain with TEST_DATABASE_URL set, and re-run the S2/S3 store tests. None of the new SQL has run against Postgres.",
+     "promtool (lead only): check rules and test rules on audit-core.rules.yml and audit-core.rules.test.yml. promtool is not installed here, so the six new rule unit tests were not executed.",
+     "Live proof (lead only): image build confirming /usr/local/bin/audit-verify is present, a one-row mutation showing status broken with first_broken_seq, the failures counter increment and the firing alert, then restore to verified, and audit-verify run on exported pages."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "None of the new SQL has run against Postgres: the repeatable-read snapshot, the LEFT JOIN of attestations onto rows, the state upsert and the SQL attack table."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "S5 must emit the export format audit-verify defines (field names in the cmd/audit-verify doc comment) and define a signed manifest payload; the CLI treats the manifest head as an unsigned claim."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "After a restore of audit tables from a copy, the saved verifier cursor can exceed the restored head and the next incremental pass reports a false head_behind_chain break. The runbook (S9) must say to delete the org's audit_chain_verifications row, or the loop should treat a cursor above the head as a reset."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A head marked state='broken' by the insert-time spot check is never reset by a clean verification, and Attest skips broken heads forever. No operator reset path exists yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The verify-failure alert uses increase over 1h and the loop runs daily, so a persistently broken chain alerts for about an hour per pass. A gauge of currently broken orgs would give a durable alert."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every replica runs the verifier loop with no advisory lock: duplicated read work and last-writer-wins state writes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A checkpoint or attestation under an unknown key id is key_unavailable, not broken, and raises no alert today; the owner should confirm that policy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Truncation plus deletion of the newer attestations yields partial/no_attestation, never verified; only an external witness closes it. Belongs in the S9 honest-limits section."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "audit-verify loads all exported pages into memory; a streaming merge would bound memory for very large exports."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Repeatable-read read-only snapshot, the LEFT JOIN of attestations onto rows, the state upsert and the SQL attack table are compile-checked only. They need the DB harness before the loop is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "After a restore of the audit tables from a copy, the saved verifier cursor can exceed the restored head and the next incremental pass raises a false head_behind_chain break. The S9 runbook must say to delete the org's audit_chain_verifications row, or the loop should reset a cursor above the head."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "S5 must emit the export format audit-verify defines (field names in the cmd/audit-verify doc comment) and a signed manifest payload. The CLI treats the manifest head as an unsigned claim, pinned only by the attestation signature."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "store.VerifyOrg has no SQL LIMIT. With MaxRows reached, pgx rows.Close still drains the rest of the result, so a capped pass on a huge chain pays the network cost of the whole remainder. Memory stays bounded; adding a LIMIT of MaxRows+1 would fix the cost."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A head marked state='broken' by the insert-time spot check is never reset by a clean verification, and Attest skips broken heads forever. No operator reset path exists yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ControlAuditChainVerifyFailed uses increase over 1h while the loop runs daily, so a persistently broken chain alerts for about an hour per pass. A gauge of currently broken orgs would give a durable alert."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every replica runs the verifier loop with no advisory lock. The read work is duplicated and the state row is last-writer-wins."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A checkpoint or attestation under an unknown key id is key_unavailable, not broken, and raises no alert. The owner should confirm that policy."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "verifier.Enabled treats any value other than the literal 0 as on when the chain is on, so 'false' or 'no' still enables it. The plan row says default 1 when the chain is on and the row wins, and verification is read-only. Confirm the owner does not want the strict parser applied to the explicit-off direction."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Truncation plus deletion of the newer attestations yields partial no_attestation, never verified. Only an external witness closes it, so it belongs in the S9 honest-limits section."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a saved cursor above the current head (post-restore), nor a state row left over after org chain reset."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "audit-verify loads every exported page into memory. A streaming merge would bound memory for very large exports."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "Review fix applied. The audit_core_chain_last_verify_timestamp_seconds gauge is no longer registered in init(). It is registered by registerLastVerify() (sync.Once around MustRegister), called at the top of verifier.Run. A binary that never starts the loop (chain off) therefore exports no such series, and ControlAuditChainVerifyStale cannot fire for it. The failures counter stays registered in init(). TestLoopErrorLeavesTheLastVerifyTimestampAlone now calls registerLastVerify() itself because it drives Pass directly. No promtool test change is needed. Everything else from the earlier report stands: the slice stays partial because migrate.go, cmd/server/main.go, docker-compose.yml and .env.example are outside my ownership, and the DB harness and promtool are lead-only. The shared-edit lines in the previous report's lead_todo are unchanged, and verifier.Run is still the entry point cmd/server/main.go should call."
+  },
+  {
+   "id": "WS02-S11",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo check -q -p model-gateway --lib (cwd apps/Model Plane/rust, CARGO_INCREMENTAL=0)",
+     "outcome": "passes with my edits"
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib",
+     "outcome": "no warnings in the new code (only existing warnings elsewhere)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib compaction",
+     "outcome": "NOT RUN: the lib test target does not compile because of two test literals in files I do not own (grpc.rs:3973 ListThreadsResponse lacks next_cursor; sse_events.rs:2478 ProviderSummary lacks failed_attempts_ms and retry_wait_ms). I waited about 40 minutes for the sibling slices to fix them; they did not."
+    },
+    {
+     "command": "cargo test -q -p execution-core --test compaction_parity_contract",
+     "outcome": "10 passed, 1 failed: both_loops_classify_through_one_trust_table_and_one_scanner (read_provider_action must be ConnectorContent). It fails in execution-core integration_tools.rs, a file another slice has modified; I did not touch it and my change does not reach execution-core. The compaction-specific parity tests pass."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Fix the two test literals that keep `cargo test -p model-gateway --lib` from compiling (they belong to other slices): grpc.rs:3973 ListThreadsResponse needs next_cursor, and sse_events.rs:2478 ProviderSummary needs failed_attempts_ms and retry_wait_ms.",
+    "Then run `cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib compaction`. Expect my 5 new tests plus the existing budget tests to pass; I have not seen them run.",
+    "Look at the compaction_parity_contract failure in execution-core (read_provider_action must be ConnectorContent). It comes from an integration_tools.rs change by another slice and is not caused by this slice.",
+    "Evidence for the slice DoD (needs a rebuilt model-gateway): force a summariser timeout and capture `mp_gateway_compaction_total{phase=\"abort\",outcome=\"timeout\"}` on /metrics, plus the dropped-history marker in the prompt."
+   ],
+   "deviations": [
+    "compaction_generation is added through NewHeadSummary and stamp_generation (inside the head_summary struct), not as a field of StoredHeadSummary. The slice row's owned files exclude session_flow.rs, which constructs StoredHeadSummary literals.",
+    "The unmatched-start guard is a CompactionLedger inside compaction.rs, swept on every begin and on demand through take_unmatched. It is not a separate background task.",
+    "The bracket is opened inside summarize_head, shared by both callers, not at each of the two call sites, and after the memory-directive read."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (test literal ListThreadsResponse lacks next_cursor; blocks lib test compile; owned by another slice)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (test literal ProviderSummary lacks failed_attempts_ms and retry_wait_ms; blocks lib test compile; owned by another slice)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "`cargo test -p model-gateway --lib` still does not compile in the worktree, for reasons outside this slice. The test literals at grpc.rs:3973 (ListThreadsResponse lacks next_cursor) and sse_events.rs:2478 (ProviderSummary lacks failed_attempts_ms and retry_wait_ms) belong to other slices. The lead must fix them, then re-run `cargo test -p model-gateway --lib compaction` in the worktree.",
+     "`cargo test -p execution-core --test compaction_parity_contract` has 1 failing test of 11: both_loops_classify_through_one_trust_table_and_one_scanner. It wants `read_provider_action` in the trust table as ConnectorContent, and the in-progress execution-core/src/integration_tools.rs from another slice does not have it. This slice touches neither file. It must be green before the batch closes.",
+     "Live evidence is not captured: `mp_gateway_compaction_total{phase,outcome}` on /metrics, and a forced summariser timeout showing `abort`/`timeout` plus the DROPPED_HISTORY_NOTICE marker. This needs a rebuilt model-gateway and docker, so only the lead can do it."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new tests cover the bracket, the ledger and the generation stamping only; there is no test that summarize_head emits abort or commit on a timeout or a provider error, because it needs a live AppState (source-read or mock-state test needed)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The ledger is per replica and keyed (thread, generation). Two concurrent turns on one thread share a generation (0 on the message-count path), so one begin can overwrite the other's entry. The unmatched report is advisory only (WS04 multi-replica)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The head_summary key literal is now duplicated in compaction.rs and session_flow.rs. Fold generation into StoredHeadSummary and with_head_summary when session_flow.rs is next open, and delete stamp_generation."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Durable commit and abort records, and a durable reader for the generation, are WS17. The compaction_generation written now is also not read by the non-budget message-count path."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The metric on /metrics and the abort outcome under a forced summariser timeout still need a rebuilt model-gateway and a live capture."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows that summarize_head commits on a usable answer, or aborts with timeout, provider_error or empty_summary. It needs a live AppState or a source-reading test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The unmatched sweep runs only inside CompactionTx::begin on that replica. With no further compaction after a dropped stream, a stale entry stays in the ledger and is never counted. It is also keyed (thread, generation), and the message-count path always uses generation 0, so two concurrent turns on one thread overwrite each other's entry. Both are advisory limits, deferred to WS04 and WS17."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The head_summary key literal and the record writing now sit in both compaction.rs (stamp_generation) and session_flow.rs. Fold compaction_generation into StoredHeadSummary and with_head_summary when session_flow.rs is next open, then delete stamp_generation."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "compaction_generation is written on every turn that persists a head_summary, but only the token-budget path reads it back. The message-count path persists nothing and passes 0. A durable commit/abort record and a durable generation reader are WS17."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The last hunk of the run_infer_fallback metadata block in sse.rs has a closing parenthesis indented off by one level, which rustfmt would change. `cargo fmt --check` already reports hundreds of unrelated diffs in sse.rs, so this adds noise only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "An empty summarizer answer aborts the bracket but still returns Some(\"\") to apply_head_summary, as before. The prompt falls back to the dropped-history notice the same way, and plan.record rejects empty summaries, so nothing is persisted. Behaviour is unchanged; the abort is metrics-only."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "mp_gateway_compaction_total on /metrics and the abort/timeout outcome under a forced summariser timeout still need a rebuilt model-gateway and a live capture."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "The code is built and compiles. The tests are written but have not been seen to pass, so the slice is partial.\n\nBuilt in compaction.rs (CRLF kept):\n- CompactionTx with begin, commit(summary_digest) and abort(CompactionAbort). The abort reasons are timeout, provider_error and empty_summary. A second close is refused (commit after abort gives AlreadyAborted; abort after commit gives AlreadyCommitted).\n- CompactionLedger, an in-process map keyed (thread, generation). take_unmatched removes and returns entries begun more than COMPACTION_SUMMARY_TIMEOUT ago that never closed. Every begin sweeps it, counts each stale entry as phase=begin, outcome=unmatched and logs a warning.\n- The counter mp_gateway_compaction_total{phase,outcome} is emitted through metrics::counter!. Outcomes are started, unmatched, ok, the abort reasons and refused.\n- COMPACTION_SUMMARY_TIMEOUT (6 s) moved here from sse.rs.\n- summary_digest: the first 32 hex characters of blake3 over the trimmed summary. No content is logged or put in a metric label.\n- NewHeadSummary { record: StoredHeadSummary, generation }, stamp_generation(metadata, new) and persisted_generation(metadata). The generation is written as compaction_generation inside the existing head_summary metadata struct. Records without one read as 0.\n- Tests added: a_begun_but_never_committed_compaction_is_reported_unmatched, commit_after_abort_is_refused, abort_after_commit_is_refused, a_summary_digest_names_the_text_without_carrying_it, the_generation_rides_inside_the_head_summary_record.\n\nChanged in sse.rs (LF kept):\n- summarize_head takes a generation. It begins the bracket right before the bounded direct_infer call, after the memory-directive read, so the bracket times exactly the 6 s call. A timeout, provider error or empty answer aborts; a usable answer commits. The returned Option<String> is the same as before, so the existing DROPPED_HISTORY_NOTICE fallback in apply_head_summary is unchanged and the prompt bytes are identical.\n- The message-count caller passes generation 0, because nothing is persisted on that path.\n- The token-budget caller passes persisted_generation + 1. The persisted generation is read from the newest assistant message that carries a head_summary record.\n- RecentThread.head_summary and the fallback function's parameter are now NewHeadSummary.\n- The two metadata-writing sites (the direct-answer path and the run_infer_fallback path) wrap with_head_summary in stamp_generation.\n\nThere is no new switch. Behaviour is unchanged apart from the new counter and the extra compaction_generation key inside head_summary metadata. The key is not written under ZDR, because with_head_summary already withholds the record.\n\nThe generation lives next to StoredHeadSummary (as NewHeadSummary) and not inside it. session_flow.rs, which I do not own, builds StoredHeadSummary with full literals, so adding a field there would not compile."
+  },
+  {
+   "id": "WS02-S8.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\python\\eval-lab-py\\src\\eval_lab\\stable_prefix_ab.py (new: plan, drive, capture, compare; CRLF)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\python\\eval-lab-py\\tests\\test_stable_prefix_ab.py (new: 33 offline tests; CRLF)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\runbooks\\stable-prefix-order-ab-evidence.md (new: evidence template and procedure; LF, matching runbooks)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/python/eval-lab-py && ./.venv/Scripts/python.exe -m pytest tests/test_stable_prefix_ab.py tests/test_runner.py -q -p no:cacheprovider",
+     "outcome": "52 passed in 0.67s (33 new in test_stable_prefix_ab.py, 19 existing selftests in test_runner.py). Run after the final edits."
+    },
+    {
+     "command": "PYTHONPATH=src ./.venv/Scripts/python.exe -m eval_lab.stable_prefix_ab plan --provider azure-openai --model verevon-balance",
+     "outcome": "exit 0; 26 requests, all pinned to azure-openai; both route paths (/v1/invoke/stream, /api/v1/cost/analytics) found in their registering source files; no network."
+    },
+    {
+     "command": "PYTHONPATH=src ./.venv/Scripts/python.exe -m eval_lab.stable_prefix_ab compare --evidence-root <missing folder>",
+     "outcome": "exit 2 with a one-line error (error path only)."
+    },
+    {
+     "command": "Scratch script in the session scratchpad (not in the repo): drive_arm with a fake sender, two arms with fixture analytics and three eval reports each, then compare_evidence",
+     "outcome": "Table, delta line, drive counts, miss reasons and parity lines rendered as designed."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/python/eval-lab-py/Makefile: in the selftest recipe (a tab, then $(VENVDIR)/bin/pytest tests/test_runner.py -q) make the line $(VENVDIR)/bin/pytest tests/test_runner.py tests/test_stable_prefix_ab.py -q. The file is CRLF in the worktree; keep it.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert above line 25 (the heading '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)'), after blank line 24, this block, then a line '---' and a blank line:\n\n## 2026-10-24 - Stable-prefix order is measured on staging before its switch is set (WS02-S8)\n\n**Status: proposed, not yet measured.** MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER stays off. It moves the per-turn blocks out of the cached prefix, and it reaches only turns pinned to an OpenAI-API chat-completions provider (CacheRoute::of_turn). The A/B pins provider to openai or azure-openai on every request and compares an arm with the switch off against one with it on: three threads of eight turns and two Do runs per arm, then three eval reruns per arm, read by python -m eval_lab.stable_prefix_ab compare. It reports hit rate, write share, the share of input the pin served, and eval pass rate with per-case parity. The procedure and the evidence layout are in apps/Model Plane/docs/runbooks/stable-prefix-order-ab-evidence.md. The table and the owner's decision go in that runbook; this entry moves to implemented or rejected once the numbers exist.",
+    "Commit (Conventional Commit; the lead's call), e.g. 'feat(model-plane): stable-prefix A/B driver, compare and evidence runbook (WS02-S8 code half)'. Stage the three new files, the Makefile and the ledger. Do not stage .venv (gitignored).",
+    "Live A/B, lead-run only, after the commit is deployed (model-gateway and cost-core built from a commit that has the WS02-S1 usage keys and WS02-S2 analytics). Owner chooses --provider (openai or azure-openai) and --model. Export INTERNAL_API_KEY and EVAL_COST_TOKEN in the shell only. Use absolute paths for the evidence root <repo>/docs/eval-reports/ws02-s8-stable-prefix.",
+    "Arm off: unset MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER; run bash 'apps/Model Plane/scripts/compose.sh' up -d --no-deps model-gateway; confirm the container value is empty. Then python -m eval_lab.stable_prefix_ab drive --arm off --provider P --model M --evidence-root ROOT; then capture --arm off --evidence-root ROOT --cost-core-url http://127.0.0.1:8089 (EVAL_COST_TOKEN set); then EVAL_REPORTS_DIR=ROOT/off/eval/rerun-N make eval for N = 1, 2, 3, from a POSIX shell (WSL or Git Bash) inside apps/Model Plane/python/eval-lab-py.",
+    "Arm on: set MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1; recreate model-gateway as above and confirm the value is 1. Repeat drive, capture and the three reruns with --arm on and ROOT/on.",
+    "Before accepting an arm: the drive line must show 0 failed and 0 off the pinned route, and the analytics request count must match the successful turns. Otherwise rerun under a new evidence root.",
+    "Compare: python -m eval_lab.stable_prefix_ab compare --evidence-root ROOT. Paste the output into the runbook's Result section without editing it. The owner decides; then update the ledger entry status."
+   ],
+   "deviations": [
+    "The slice listed no owned files and no new file paths. The code half's named deliverables (A/B script and evidence template) became three new files: the eval_lab module, its tests beside it, and the runbook under docs/runbooks.",
+    "drive sends provider through its own httpx POST (gateway_sender, reusing parse_sse_lines) instead of VerevonClient.invoke_stream, which has no provider argument; client.py is not owned, so it was not changed.",
+    "The count is named 'Do runs without error', not 'completed', because a Do run that pauses for approval still ends in done.",
+    "The dry run is the plan subcommand (no network). The staging A/B and any live proof are left to the lead.",
+    "The Makefile selftest line and the ledger entry were not edited (not owned); the exact lines are in lead_todo."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/python/eval-lab-py/Makefile (selftest recipe: add tests/test_stable_prefix_ab.py)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Staging A/B (drive, capture, three eval reruns per arm, compare) is live-only and unrun; the written A/B table and owner decision are still open.",
+     "Lead applies the shared edits: Makefile selftest line adding tests/test_stable_prefix_ab.py, and the ledger entry for WS02-S8.",
+     "make selftest and EVAL_LIVE=1 make eval need the POSIX .venv/bin layout and could not run on this Windows host; the same pytest command was run instead."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Run the staging A/B per the runbook; nothing live was run here, so hit rate, write share and eval pass rate are unmeasured."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Verify the cost token: cost-core accepts audiences cost-core and inference-core (COST_CORE_AUTH_AUDIENCE), so the model-gateway token that drive mints is probably refused by capture; a cost-core token with cost:org:read for the driver's organisation is needed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Write share will read 0.0% on OpenAI-API routes if the provider reports no cache-creation count, so it is not evidence of writes until a pinned route reports one."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The owner picks the staging provider (openai or azure-openai) and the model alias the pinned route serves before the run; drive records both in turns.json."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "drive closes the window 20 seconds after the last stream (--settle-seconds); if cost-core lags the usage envelope, capture under-counts, so compare the analytics request count with the successful turns before accepting an arm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An organisation mismatch between the driver (EVAL_ORG_A, default org_eval_a) and the cost token gives zero pinned requests in the table; check that count before reading any rate."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner confirms that the fixed traffic (one eight-turn thread script and two Do goals) stands for production prefix reuse; the A/B measures only that shape."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "gateway_sender and capture_analytics are tested only through httpx mock transports; the real SSE stream and the real cost-core response are covered only by the live run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The eval harness names each report by date only (write_report), so reruns sharing a folder overwrite each other; the runbook uses a folder per rerun, and conftest.py could add a rerun suffix later."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "gateway_sender repeats the SSE loop of VerevonClient._collect_sse because invoke_stream has no provider argument; a provider argument on invoke_stream would let the driver reuse it (client.py is not owned here)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A Do run that pauses for approval still ends in done, so the drive line counts it as without error; the driver does not mark pauses."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Eval parity compares verdict sets only, so cases skipped for missing fixtures stay invisible to the A/B until EVAL_CAPABILITIES covers them."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The ledger entry stays proposed until the owner decides on the measured table; the decision then moves it to implemented or rejected."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "make selftest runs only tests/test_runner.py until the Makefile line is applied, so CI will not run the 33 new tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "make eval and make selftest need the POSIX .venv/bin layout; the venv made here is Windows-style (.venv/Scripts), so those make targets cannot run on this host."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The gitignored eval-lab .venv was created in this worktree to run the tests; remove it once the lead has its own environment."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing live was run, so hit rate, write share and eval pass rate on the openai or azure-openai pinned route are unmeasured; the switch must stay off until the A/B table and the owner decision exist."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The capture token needs cost:org:read for the eval organisation, and cost-core's accepted audience may differ from the model-gateway token that drive mints; verify before the live run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Write share can read 0.0% on OpenAI-API routes if the provider reports no cache-creation count, so it is not evidence of writes there."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "drive closes the window 20 seconds after the last stream; if cost-core lags the usage envelope, capture under-counts, so compare the analytics request count with the successful turns before accepting an arm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "gateway_sender and capture_analytics are tested only through httpx mock transports; the real SSE stream and the real cost-core response are covered only by the live run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "make selftest runs only tests/test_runner.py until the Makefile line is applied, so CI skips the 33 new tests."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "gateway_sender repeats the SSE read loop of VerevonClient because invoke_stream has no provider argument; add one later so the driver can reuse it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The gitignored eval-lab .venv in this worktree was created only to run the tests; remove it when no longer needed."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Built the code half. plan is the dry run: it prints the 26 planned requests and checks the two routes against their source files. drive sends three threads of eight turns and two Do runs, every request pinned to the chosen provider (openai or azure-openai), and writes counts-only turns.json and window.json; it refuses an arm folder that was already driven. capture saves cost-core analytics for the arm's window and validates the body before saving. compare prints the A/B table: pinned-route requests and input share, hit rate, write share, miss reasons, drive counts, eval pass rate with min and max over reruns, and per-case parity. The runbook is the evidence template and the procedure. No product switch was added (every switch stays as it is); ZDR does not apply (synthetic eval-org traffic, counts only, no text stored). Not run here: anything live (drive, capture, make eval, docker, the DB harness), and make selftest, because its .venv/bin path does not exist on this Windows host (the same pytest command was run instead). The .venv is gitignored and was created inside eval-lab-py for these tests. Other modified files in the worktree (model-gateway compaction.rs, sse.rs, http_routes.rs, tool_loop.rs) belong to the parallel WS02-S11 slice and were not touched. Nothing staged, committed, reset or pushed."
+  },
+  {
+   "id": "WS01-S14.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm --dir \"apps/Frontend Plane/verevonv3\" exec vitest run apps/verevon-web/src/components/trust/trust-data.test.ts (default forks pool)",
+     "outcome": "not run: the forks worker did not start within 60 s (vitest-pool timeout), zero tests executed; a host problem, not a test result"
+    },
+    {
+     "command": "pnpm --dir \"apps/Frontend Plane/verevonv3\" exec vitest run --config apps/verevon-web/vitest.config.mts --pool=threads apps/verevon-web/src/components/trust/trust-data.test.ts",
+     "outcome": "no test files found: that config includes src/**/*.test.tsx only; not a test result"
+    },
+    {
+     "command": "pnpm --dir \"apps/Frontend Plane/verevonv3\" exec vitest run --pool=threads apps/verevon-web/src/components/trust/trust-data.test.ts",
+     "outcome": "passed: 1 file, 109 tests passed (trust-data drift test on the unchanged trust-claims.ts; run before the postmortem edit; grep shows no evidence anchor in the trust folder names the postmortem)"
+    },
+    {
+     "command": "python3 CRLF/LF count of postmortem 0002 after the edits (script in the scratchpad, not the repo)",
+     "outcome": "CRLF 310 equals LF 310; git diff --stat 20 insertions, 7 deletions; diff reviewed"
+    },
+    {
+     "command": "git diff -- trust-claims.ts",
+     "outcome": "empty: trust-claims.ts unchanged"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert the four blocks (items 2 to 5 of this list, in that order) immediately before the first line that starts with '## ' (today '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)'), one blank line between blocks, ASCII text, keep the file's CRLF endings. Newest first.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (block 1 of 4, audit delivery): '## 2026-10-23 - Audit delivery is proven only by the final read; the alerts and the replay tooling are built (WS01-S14)' then '**Status: implemented in source; delivery not yet proven.** The Used by AI? trail and postmortem 0002 move from 'not delivered' to 'delivered' only when the final read has passed on a live stack and its evidence file is indexed: the replay gates in the postmortem, then steps 1 to 5 of docs/compliance/evidence/trust-claims-pending-reverification.md section 6. Built in source: the Model Plane broker stream (provisioned 2026-10-05, deployed); the publisher fix, the requeue function and migration 0043 (WS01-S2, commit 7b1d27fb9; deployed state not read since 2026-10-06, and a 2026-10-22 dev-stack rebuild of session-core exists, ledger row 4bf17b08); the outbox alert rules in apps/Control Plane/observability/rules/audit-delivery.rules.yml (WS01-S1, not yet seen firing). The authority-mismatch alert is ControlAuditCoreAuthorityMismatch in apps/Control Plane/observability/rules/audit-core.rules.yml (WS06-S0). The replay of the 4,992 stuck rows waits for the Space role gate on GET /api/v1/audit or the owner's recorded acceptance (K2-11). Public wording is unchanged by this entry.'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (block 2 of 4, ZDR lapse): '## 2026-10-23 - A lapsed ZDR attestation no longer aborts boot; it refuses ZDR until re-verified (WS01-S5, DEC-33 D14)' then '**Status: implemented in source, no switch; the boot proof and the lapse alerts are open.** ZdrAttestation::resolve_lenient maps an Expired or NotYetEffective attestation to NotInForce. inference-core (config.rs, resolve_zdr) then boots the surface without ZDR, logs an ERROR and records the review-by gauge mp_inference_zdr_attestation_review_by_timestamp_seconds{surface}. Every other evidence error stays fatal at boot: incomplete or malformed fields, a digest mismatch and a legacy boolean with no evidence. supports_zdr is evaluated against today's date inside capabilities() for the OpenAI and Anthropic providers, so a lapse grants no ZDR and is re-read on each call. Not done: the ZdrAttestationReviewDue and ZdrAttestationLapsed alerts and the :8082 scrape (D1-139, D1-143), and a dev-stack boot with a lapsed attestation (D1-140, D1-142). The ledger entry '2026-10-03 The organisation's ZDR switch is gated on an attested provider' flips to implemented only after the S7 live pass, which is external.'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (block 3 of 4, migrations): '## 2026-10-23 - Session-core migrations are additive after the cutoff; the ignore-missing switch defaults off (WS01-S9)' then '**Status: implemented, switch off.** SESSION_CORE_MIGRATION_IGNORE_MISSING is read at session-core start through a strict parser: only the literal true enables it, and it defaults to false, as Appendix B N6 requires. Only the rollback overlay of WS01 S10 and S12 sets it true, and the default flips only after S12 evidence. scripts/tests/migration-expand-contract-test.sh keeps post-cutoff session-core migrations additive: a non-additive change needs a '-- contract:' marker and a matching revert/<name>.down.sql, and every new session-core migration needs a revert file. Grandfathered: session-core 0044 to 0048 (0044 and 0048 drop a constraint they replace) and capability-core 0003 to 0005. Before the switch is ever set true: check that an older binary boots over 0044 to 0048 (D1-068, D1-070) and run the ignored DB test (D1-072). Runbook: apps/Model Plane/docs/runbooks/migration-policy.md.'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (block 4 of 4, provisioner): '## 2026-10-23 - nats-provisioner ships in the signed release artifact (WS01-S8)' then '**Status: implemented in source; the release-mode build is proven only by the S12 candidate.** scripts/release-artifact.sh lists nats-provisioner in SERVICES and DOCKERFILES, and deploy/docker-compose.release.yml overlays it with build: !reset null, an image from NATS_PROVISIONER_RELEASE_IMAGE and pull_policy: never. Rule for every new Model compose service: it goes into SERVICES, the release overlay and the release tests in the same change (WS01-S8). Not proven: a release-mode artifact that contains the provisioner image (D1-086, D1-087), and the three release-*.sh tests, which need Linux or CI because Windows Python has no O_NOFOLLOW (D1-088, D1-090, D1-091).'",
+    "shared-edit docs/compliance/evidence/trust-claims-pending-reverification.md: in section 6, directly after the paragraph that begins '**Re-verification, all of it, before any sentence below is changed.**' (the numbered steps 1 to 5 follow it), add: 'Status on 2026-10-23: steps 1 to 5 are not read on a live stack. The code half of WS01-S14 changed no sentence and left trust-claims.ts unchanged; PendingItem d is not adopted (owner decision) and the counsel wording is external (DEC-33 D14). Rows 36 to 41 stay as published until all five steps pass.' When a step passes on a live read, add under that step the date, the stack and the evidence file name. Then run node docs/compliance/evidence/tools/check-citations.mjs and node --test docs/compliance/evidence/tools/*.test.mjs (section 5 of this file).",
+    "lead (live, read-only; NOT run in this slice, needs docker and a live stack): trust-claims section 6 steps 1 to 5 and the postmortem final read, in this order, all recorded in one file docs/compliance/evidence/live-reads-audit-delivery-<date>.txt: (a) before any S2 deploy step, read the running session-core image revision (docker inspect) and SELECT version, success FROM _sqlx_migrations WHERE version = 43 on session_core, because the 2026-10-22 rebuild may already carry the publisher fix; (b) bash 'apps/Model Plane/scripts/tests/audit-delivery-proof.sh' --stage final (read-only: outbox, broker, durables, audit_events); (c) step 2: one tool-using chat turn on the stack, then its reserved and final audit_events rows within seconds; (d) step 3: GET /api/v1/audit?event=tool_action through the gateway as an organisation member (data_category, zdr, tool) and the Used by AI? column; (e) step 4: controlplane-prometheus /api/v1/rules lists group model-audit-delivery with five rules, mp_session_audit_outbox_terminal_by_subject reads 0 for every class, and promtool check and test pass on audit-delivery.rules.yml and its test file (D1-001); (f) step 5: name each read with its date and stack; a developer-stack read is not production.",
+    "shared-edit docs/compliance/evidence/README.md: add one Contents row after the row for live-reads-audit-delivery-2026-10-06.txt, only once the final-read file is committed: | `live-reads-audit-delivery-<date>.txt` | The final read of the audit-delivery path: postmortem 0002 replay gates and trust-claims section 6 steps 1 to 5 (broker stream and durables, outbox and audit_events counts, the gateway read, the Prometheus rules and metric). | Read-only commands on a named stack, each named in the file; written by the lead. |",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: insert before the line '## Critical blocked behavior' a section titled '## WS01 close-out state (2026-10-23, code half)' containing this text, then the table, then the closing sentence. Text: 'Source state of the WS01 slices as of 2026-10-23, from the build plan queue and commits. Nothing in this table is live-verified.' Table rows (header first): | Slice | Source state (commit) | Still open | / |---|---|---| / | S0 live ZDR and session-core wave | done (landed before this batch) | none listed here | / | S1 audit alert rules | committed 2f8b8caa9 | rules seen loaded and firing on the running Prometheus | / | S2 publisher fix, migration 0043, replay | partial, committed 7b1d27fb9 | live deploy, canary, 5,000-row replay (gated by K2-11), final read | / | S3 auth-core membership audit outbox | done, committed 12d9b6070 | Postgres cases; live rebuild with before and after counts | / | S4 Application Plane audit stream | partial, committed b73f44847 | live provisioning on app-nats; one application event in audit_events | / | S5 ZDR attestation lifecycle | partial, committed c6a0ff7c4 | three release-*.sh tests on Linux or CI; boot proof with a lapsed attestation; lapse alerts | / | S6 Z-41b closure | done, committed db07dc0fa | live proof waits for an attested route | / | S7 Z-60 pass 1 | code done, committed ae4f8b936 | blocked-external: ordered live deploy and fail-closed transcript | / | S8 nats-provisioner in the signed artifact | done, committed 80dff45f1 | release-mode artifact with the provisioner image (S12) | / | S9 migration expand/contract | done, committed 99d3b9bb7 | ignored DB test; switch stays false until S12 evidence | / | S10 rollback rehearsal tooling | done, committed 59a37b72d | the real rehearsal (S12, blocked-external) | / | S11 thresholds, signed-manifest gate, CI | done, committed 9b1f81d0b | CI run on a pushed branch | / | S12 signed baseline, candidate, rehearsal | code half partial, committed 2e9cb3c7e | blocked-external: signing keys and signed artifacts | / | S13 Z-40 attestation, Z-60 pass 2 | code half partial, committed 998bc7db9 | blocked-external: attested surface and pass 2 transcript | / | S14 close-out | code half done (see the postmortem and this section) | blocked-external: counsel wording and PendingItem d decision; section 6 reads. Closing sentence: 'Not shown as proven anywhere in this section: audit delivery end to end (WS01-S2 final read), a lapsed attestation booting on a stack (WS01-S5), any attested ZDR provider (WS01-S13).' Note: this insert moves the S12 lines 241-250 down; apply the S12 edits to the same file in the same pass.",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: append to the paragraph under '### Live local protocol; no immutable rollback' this sentence: 'Source: the rollback rehearsal tooling (WS01-S10, 59a37b72d) and the operator runbook (WS01-S12 code half, 2e9cb3c7e) are committed; the signed baseline, candidate and rehearsal evidence (WS01-S12) do not exist yet.'",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: append to the paragraph under '### All-ZDR versus provider availability' this sentence: 'Source: WS01-S5 (c6a0ff7c4) makes a lapsed attestation non-fatal: the surface boots without ZDR, logs an error and grants no ZDR. Its boot proof on a stack and its lapse alerts are open.'",
+    "lead: after the shared edits are applied and the live final read has run, mark WS01-S14.code done in the queue (it is done now for the code half); WS01-S14 (external half) stays blocked-external until counsel wording and the PendingItem d decision exist. Do not adopt PendingItem d in trust-claims.ts without the owner's decision.",
+    "lead: the WS06 handoff (proven delivery baseline before any chain insert path, replay first) has no evidence file yet; WS06-S4 in this batch must not treat the replay as done. Merge the depth_findings of this slice into docs/plans/model-plane-depth-register.md."
+   ],
+   "deviations": [
+    "Postmortem 0002 status paragraph and follow-ups 2 and 3 were edited (the row names the postmortem status); the status describes what the 2026-10-06 reads and the repository show, not delivery, because the final read has not run.",
+    "No new close-out script or evidence file was created: the S14 row names no new file, and the evidence is the lead's live run.",
+    "trust-claims.ts was not changed: the row keeps the wording, and PendingItem d is an owner decision.",
+    "The four shared files were not edited; their exact lines are in lead_todo as shared-edit items.",
+    "The drift test was run with --pool=threads because the default pool could not start a worker on this host."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/MODEL_PLANE_STATUS.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "docs/compliance/evidence/README.md",
+    "docs/compliance/evidence/trust-claims-pending-reverification.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Trust-claims section 6 steps 1 to 5 and the postmortem final read need docker and a live stack, so the lead must run them. The lead must also check the running session-core image revision and _sqlx_migrations 43 before any S2 deploy step.",
+     "The four shared files (MODEL_PLANE_STATUS.md, decisions/ledger.md, evidence README.md, trust-claims-pending-reverification.md) still need the lead's shared-edit lines from the implementer's lead_todo; the row's 'rows updated, evidence indexed' is incomplete until then.",
+     "Promtool check and test of audit-delivery.rules.yml need the Docker image, so they are lead-only."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Trust-claims section 6 steps 1 to 5 and the postmortem final read are not run on a live stack, so no sentence, status or ledger entry may move to delivered yet (already open as D1-041 and D1-047)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The running session-core may already carry the publisher fix and migration 0043, because the 2026-10-22 dev-stack rebuild (ledger row 4bf17b08) was made from the worktree; the lead must read the running image revision and _sqlx_migrations before the S2 deploy step."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "PendingItem d adoption and the counsel wording for trust rows 36 to 41 are external (DEC-33 D14, Q-7a2-11); trust-claims.ts was left unchanged and the trust-data drift test passes on it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The ZDR lapse alerts ZdrAttestationReviewDue and ZdrAttestationLapsed and the inference-core :8082 scrape job are not written (D1-139, D1-143), so a lapse is visible only in logs and the gauge."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The WS01-S1 row names audit-core rules (AuditCoreAuthorityMismatch, Malformed, StoreError, ConsumerLag, ModelBusDown) that audit-delivery.rules.yml does not contain; the rules that exist are ControlAuditCoreAuthorityMismatch, ControlAuditCoreStoreError, ControlAuditCoreMalformed, ControlAuditCoreConsumerPending and ControlAuditCoreNATSDisconnected in audit-core.rules.yml (WS06-S0), and no rule named ModelBusDown exists."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The WS01-S9 plan row says the ignore-missing switch defaults true, while Appendix B N6 and the shipped code default it false; the plan row should be marked superseded by N6 so that no later reader flips it on the row's word."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "On this host the default vitest forks pool could not start its worker (60 s timeout, zero tests run), so trust-data.test.ts ran only with --pool=threads (109 tests passed); section 5 of the pending doc should name the pool that works."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The promtool checks of audit-delivery.rules.yml and its test file were not run here because they need the Docker image the S1 row names; the lead runs them with the live read."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "MODEL_PLANE_STATUS.md has no WS01 rows and was last reconciled on 2026-07-16; the proposed WS01 table in lead_todo is the first dated record of the slices in that file."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "No close-out script was built because the S14 row names no new file; the section 6 reads are manual plus scripts/tests/audit-delivery-proof.sh --stage final, and a one-command runner needs its own named file in a later slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The WS06 handoff needs a proven delivery baseline before any chain insert path, which does not exist yet; WS06-S4 in this batch must not treat the replay as done."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Audit delivery is not proven end to end: the final read (postmortem replay gates plus trust-claims section 6 steps 1 to 5) has not run on a live stack, so no wording may move to 'delivered'."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "PendingItem d adoption and the counsel wording for trust rows 36 to 41 are external (DEC-33 D14); trust-claims.ts is correctly left unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The WS01-S1 row names audit-core alert names that differ from the shipped ControlAuditCore* rules, and ControlAuditCoreAuthorityMismatch has no bus filter, so it counts refusals on every bus; the postmortem now says this, but the plan row should be reconciled."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The WS01-S9 plan row says the ignore-missing switch defaults true, while Appendix B N6 and the shipped code default it false; the row should be marked superseded by N6."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The default vitest forks pool could not start on this host, so the trust-data drift test ran only with --pool=threads; this should be noted in section 5 of the pending-reverification doc."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The ZDR lapse alerts ZdrAttestationReviewDue and ZdrAttestationLapsed and the inference-core :8082 scrape job are not written, so a lapse is visible only in logs and the gauge."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The postmortem body still says the alert file was absent in other places at the time of the 2026-10-06 reads; this is acceptable as a dated record, but a reader may need a pointer to the updated status."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS01-S14 code half. trust-claims.ts is unchanged: the wording stays, PendingItem d is not adopted (owner decision), and the counsel edit is external (DEC-33 D14). The owned postmortem 0002 was edited with CRLF kept: the status paragraph now says the 2026-10-06 reads showed the publisher fix built and not deployed, that the deployed state after that is unknown (a 2026-10-22 dev-stack session-core rebuild exists), that no replay is recorded, and that the alert rules in the repository are not yet seen firing; follow-ups 2 and 3 now point at the WS01-S1 rules file and at WS06-S0's ControlAuditCoreAuthorityMismatch. The final read (trust-claims section 6 steps 1 to 5 and the postmortem replay gates) needs docker and a live stack, so it was not run and is not claimed. The four shared files (MODEL_PLANE_STATUS.md, decisions/ledger.md, evidence README.md, trust-claims-pending-reverification.md) were not edited; their exact lines are in lead_todo. Files outside this slice show changes from other slices of this batch in the same worktree (for example model-gateway compaction.rs and audit-core internal/verifier/); none of them was touched here."
+  }
+ ]
+}

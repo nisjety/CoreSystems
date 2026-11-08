@@ -1,0 +1,379 @@
+{
+ "batchId": "W1-22",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS07-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0064_skill_revisions.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0064_skill_revisions.down.sql",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/mcp_auth_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_revision_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "go vet ./... and go test ./... (apps/Model Plane/go/services/capability-core, GOFLAGS unset)",
+     "outcome": "all packages pass, including the new TestPatchWritesRevisionWithActor, TestDeleteWritesRevisionWithActor, TestCreateWritesRevisionWithActor, TestPromotionIsRecordedAsPromoted, TestPromotionOfAnInvisibleSourceCreatesNothing, TestPromotionMustCreateAnOrgSkill, TestSkillMutationWithoutATransactionIsRefused and TestSkillActorSettingsMatchTheMigration (the GUC pin; ran, not skipped)"
+    },
+    {
+     "command": "buf build; buf lint --path model_plane/v1/sessions.proto (native buf 1.72)",
+     "outcome": "proto builds; no lint finding on any new service, message or enum"
+    },
+    {
+     "command": "rustfmt --edition 2021 --check src/grpc.rs src/gdpr.rs (syntax parse only)",
+     "outcome": "both files parse; this is NOT a type check"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo check -p session-core --bin session-core --tests",
+     "outcome": "BLOCKED, not run to completion: mp-orchestration fails with E0063 in crates/mp-orchestration/src/proto_shim.rs:294 (ApprovalStateChanged is missing cause_code, decision_source, rule_id and 2 more fields) because another slice added fields to orchestration.proto in the shared tree. Retried over about 40 minutes; it never cleared. No Rust test of this slice has been compiled or run."
+    }
+   ],
+   "db_tests_written": [
+    "trigger_records_every_mutation_even_from_capability_core_sql",
+    "undo_restores_before_snapshot",
+    "non_owner_cannot_decide_or_undo",
+    "revision_cap_keeps_50"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: line 294, add the missing ApprovalStateChanged fields (cause_code, decision_source, rule_id and the 2 others) or ..Default::default(); nothing in session-core compiles until then",
+    "After that, from apps/Model Plane/rust run with CARGO_INCREMENTAL=0: cargo test -q -p session-core --bin session-core skill_revision; cargo test -q -p session-core --bin session-core revision_trigger; cargo test -q -p session-core --bin session-core ledger_; cargo test -q -p session-core --bin session-core learning_governance; cargo test -q -p session-core --bin session-core purge_ (gdpr total is now 28 and the order guard has a new assertion); and cargo test -q -p session-core --bin session-core upsert_agent_skill. Fix anything the first type check turns up in grpc.rs; it was written without a compile.",
+    "Run the 4 ignored DB tests through the DB harness (scripts/tests/session-core-db-tests.sh): trigger_records_every_mutation_even_from_capability_core_sql, undo_restores_before_snapshot, non_owner_cannot_decide_or_undo, revision_cap_keeps_50. Also re-run the existing S7 skill DB tests and list_agent_skills_scope_enforcement_against_real_pg, since the trigger now fires on every agent_skills write and the list query gained a revision subselect.",
+    "Run buf generate (native buf 1.72) for apps/Model Plane/go/gen so the Go bindings include LearningGovernanceService and the new messages. I did not touch go/gen. Then run buf breaking against baseline (additive only) and update proto/buf-lint-baseline.json only if the ratchet reports a new finding (buf lint showed none on the new symbols).",
+    "Rebuild session-core and capability-core. Apply migration 0064 (it applies on boot). Live proof from the S7 rig: accept a proposal, edit it through PATCH /api/v1/skills/{id}, undo the edit, and capture the skill_revisions rows and ListLearningLedger output with grpcurl. Confirm the actor is user-a on the registry edit; before capability-core is rebuilt, expect 'unattributed'.",
+    "Optionally add model_plane.v1.LearningGovernanceService to HEALTH_SERVICE_NAMES (array length 9 to 10, plus the pinning test). I left it out because MessageSearch is not in the list either."
+   ],
+   "deviations": [
+    "The three RPCs are in a new service LearningGovernanceService, not appended to SessionCore, so the SessionCore mocks stay source-compatible. This follows the existing MessageSearch and ThreadAutonomy precedent.",
+    "skill_revisions has an extra owner_user_id column that the plan's column list lacks. It is needed for the owner-scoped ledger without a join to a row that may be deleted. It also has a 'created' action, which the plan's action list lacks, because an insert by a human is not an edit.",
+    "UndoLearningEntry refuses a memory entry with failed_precondition memory_undo_via_delete. The ledger lists extractor memories, but erasing them stays on the existing delete path, which also writes forgotten_memory_ids and erases the semantic copy. This avoids a second writer of agent_memory. The plan says the ledger covers memory rows but does not say how to undo one.",
+    "Only the newest entry of a skill can be undone, because every change leaves a revision, so the newest after-state is the current row. Undoing an older entry returns entry_superseded.",
+    "DecideSkillProposal and UndoLearningEntry refuse ZDR user credentials. ListLearningLedger allows them but returns no memory entries (memory_skip_reason=zdr).",
+    "I did not edit zdr-posture-matrix.json or its sha256. The slice adds no retention posture and no matrix row is needed."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs (line 294 needs the new ApprovalStateChanged fields, for example ..Default::default(); this blocks every cargo build that depends on mp-orchestration, including session-core)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the 4 ignored PG tests (trigger_records_every_mutation_even_from_capability_core_sql, undo_restores_before_snapshot, non_owner_cannot_decide_or_undo, revision_cap_keeps_50) through scripts/tests/session-core-db-tests.sh. Also re-run the S7 skill DB tests and list_agent_skills_scope_enforcement_against_real_pg. The trigger, RESTORE_SKILL_SQL (jsonb_to_record) and the ledger SQL have never run against Postgres.",
+     "Apply migration 0064 on a real database (PG16) and run the revert file once.",
+     "Run buf generate for go/gen (it still lacks LearningGovernanceService), then rebuild session-core and capability-core.",
+     "Live proof: accept a proposal, edit it via PATCH /api/v1/skills/{id}, undo, and capture the skill_revisions rows and the ListLearningLedger output. Confirm actor user-a on the registry edit and 'unattributed' before capability-core is redeployed.",
+     "Optionally add LearningGovernanceService to HEALTH_SERVICE_NAMES."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "None of the Rust code of this slice (grpc.rs service, helpers, gdpr.rs, nine tests) has been type-checked or run, because mp-orchestration does not compile in the shared tree (another slice's orchestration.proto change); a first compile may surface errors."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "gdpr.rs only has the org purge, so skill_revisions and the S7 owner-scoped agent_skills rows are erased with the organization but there is no per-user erasure; a user-level erasure path must delete agent_skills, then skill_revisions, by owner_user_id (the revision text is a copy of the skill text)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "A learned memory on the ledger cannot be undone through UndoLearningEntry (it returns memory_undo_via_delete); S9 must route its Undo button for kind=memory to DeleteMemory, and restoring a superseded memory (supersedes_id) is not built."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until capability-core is rebuilt and deployed with this change, registry edits log as actor_kind 'unattributed'; a second writer added later that sets no settings also logs as 'unattributed', so S10's governance script should count unattributed revisions as a failure."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner decision needed on ZDR: Decide and Undo refuse ZDR user credentials (they would copy skill text into a new revision), while the ledger read is allowed without memories; confirm this against DEC-32 and the waived-run rule, which the code does not special-case beyond the credential's zdr flag."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the 64 KB truncated snapshot (undo returns snapshot_truncated) or the name_taken refusal on restore; both need a DB case."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "list_agent_skills now runs a correlated subselect on skill_revisions per row on the hot skill-cache path; the unique (skill_id, revision) index serves it, but a lateral join or a revision column on agent_skills is the fix if the skill count per org grows."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The trigger's action vocabulary adds 'created' to the plan's list; S9's UI mapping and the docs must carry the extra value, and the CHECK constraint must be extended by any later slice that adds an action."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Promotion's source check (shared and accepted) is covered with a fake QueryRow only; a real-Postgres capability-core test of the visibility predicate would catch SQL drift between the list and the promotion query."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The trigger SQL, the whole-row RESTORE_SKILL_SQL (jsonb_to_record into agent_skills) and the ledger UNION queries have only been parse-checked and unit-tested; the four plan DB tests must pass before the behaviour is relied on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "There is no per-user erasure: skill_revisions and the owner's agent_skills rows are purged only with the organization (gdpr.rs), yet before/after snapshots and 'deleted' revisions hold the skill text. A user-level erasure path must delete agent_skills then skill_revisions by owner_user_id."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until capability-core is redeployed, and for any later writer that sets no mp.* settings, revisions are logged as actor_kind 'unattributed'; S10's governance script should fail on unattributed revisions."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "A kind=memory ledger entry cannot be undone through UndoLearningEntry (memory_undo_via_delete); S9 must route Undo for memories to DeleteMemory, and restoring a superseded memory is not built."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ZDR: Decide and Undo refuse ZDR credentials because they write revision text. Confirm with DEC-32 that this includes waived runs, and note that capability-core PATCH/DELETE is not ZDR-aware and writes revisions for any caller."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test covers a snapshot over 64 KB (undo should return snapshot_truncated), a name_taken refusal on restore, or undo of a 'deleted' or 'created' entry. Promotion's visibility predicate is tested only against a fake QueryRow, so the list and promotion SQL could drift apart."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Undo and the ledger are owner-only with owner_user_id='' for org skills, so admin edits to org skills appear in no ledger and cannot be undone through this API; the plan's 'owner' wording does not cover org skills."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "list_agent_skills now runs a correlated MAX(revision) subselect per row on the hot skill-cache path; the unique (skill_id, revision) index serves it, but a revision column on agent_skills would be cheaper if skill counts grow."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The trigger computes revision as MAX+1 without a lock beyond the agent_skills row lock; two concurrent inserts of the same skill id on a restore after a delete would collide on the unique (skill_id, revision) and surface as an internal error."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The action vocabulary adds 'created' to the plan's list, and the schema adds owner_user_id; S9's UI mapping and docs must carry both, and the CHECK must be extended by any later slice that adds an action."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Migration numbers 0059-0063 are still unused in the tree (reserved for other slices); sqlx tolerates this, but those slices will land after 0064 is applied."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "authority",
+    "data-loss"
+   ],
+   "notes": "The Go half is done and passing. The Rust half is written but not compiled or run. A cargo check of session-core cannot get past mp-orchestration (see tests_run), and proto_shim.rs is not mine to touch, so I did not patch it. The Rust code parses; the type check and the unit and DB tests are for the lead once proto_shim.rs is fixed.\n\nMigration 0064 adds the table skill_revisions and the trigger agent_skills_revision_trg. Every insert, update or delete of a skill logs a revision with the actor. Writers name themselves with transaction-local settings (mp.actor_kind, mp.actor_id, mp.run_id, mp.thread_id, mp.reason, mp.skill_action). A writer that names nobody is logged as 'unattributed'. An update that only touches updated_at is skipped. Snapshots over 64 KB are stored as a truncated marker. The newest 50 revisions of each skill are kept. A revert file ships beside it.\n\nsession-core (grpc.rs):\n- upsert_agent_skill and set_agent_skill_enabled now run in a transaction that names the actor. set_agent_skill_enabled previously ran on the pool without one.\n- UpsertAgentSkillResponse.revision and AgentSkill.revision are now filled.\n- New service LearningGovernanceService, registered with the interceptor, with three RPCs. I made it a separate service so the five SessionCore mocks in model-gateway and execution-core keep compiling, the same way MessageSearch was added.\n  - DecideSkillProposal: owner only, proposed rows only. Accept enables the skill; reject disables it. ZDR credentials are refused.\n  - UndoLearningEntry: owner only, newest entry of a skill only, refused if already undone, truncated or the name is now taken. It restores the before-snapshot, deletes the skill if the entry created it, and marks undone_by.\n  - ListLearningLedger: owner only, newest first, keyset cursor. It returns skill revisions plus extractor-written memories, and memories are gated by the same state as the memory list.\n- gdpr.rs: skill_revisions is purged after agent_skills, because deleting a skill writes a 'deleted' revision that holds its text. The order is pinned by a test.\n\ncapability-core (registry_apis.go): PATCH, DELETE and POST run in a transaction that sets the actor from the verified principal, never from the body. POST accepts promoted_from (admin, scope org only, the source must be an accepted user skill shared with the caller). It is recorded as 'promoted'. A database without Begin refuses skill mutations. I added two fields to the shared test fake in mcp_auth_test.go and its Begin in the new test file.\n\nRust tests written, none run:\n- Unit tests: skill_revision_settings_match_the_migration, revision_trigger_covers_every_mutation_and_keeps_fifty, ledger_cursor_round_trips_and_rejects_garbage, ledger_kinds_are_closed, learning_governance_is_the_owners_alone.\n- Ignored PG tests: trigger_records_every_mutation_even_from_capability_core_sql, undo_restores_before_snapshot, non_owner_cannot_decide_or_undo, revision_cap_keeps_50.\n\nNo switch added; behaviour changes only through the new RPCs and the trigger."
+  },
+  {
+   "id": "WS08-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/scrub_checkpoint_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --lib (full) [with 3 foreign DecideApprovalRequest literals temporarily patched and reverted, see notes]",
+     "outcome": "1416 passed, 0 failed (includes the new run_attachment_tests, images_ride_every_round_of_the_run, children_do_not_inherit_attachments, run_inputs_released_on_terminal_and_on_cancel, a_run_without_attachments_sends_no_image_and_no_note, attachments_are_split_into_files_and_images_without_a_copy)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test scrub_checkpoint_test [same temporary patch]",
+     "outcome": "9 passed (new a_fold_of_a_run_with_attachments_carries_the_note_but_never_the_bytes)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full) [same temporary patch]",
+     "outcome": "2316 passed, 0 failed, 4 ignored (includes new do_attachment_tests and the zdr_posture call-site inventory)"
+    },
+    {
+     "command": "cargo test -q -p mp-contracts --test proto_wire_parity_execution",
+     "outcome": "13 passed (new golden for RunAgentRequest.attachments field 20)"
+    },
+    {
+     "command": "pnpm vitest run src/features/chat/lib/attachment-policy.test.ts",
+     "outcome": "18 passed"
+    },
+    {
+     "command": "pnpm typecheck (grep for attachment-policy / DashboardComposer)",
+     "outcome": "no errors in the two files I changed (whole-repo typecheck not otherwise judged; pre-existing failures elsewhere)"
+    },
+    {
+     "command": "git diff HEAD -U0 on execution.proto, field lines only",
+     "outcome": "exactly one added field line: repeated RunAttachment attachments = 20; no field line removed or renumbered (Appendix B N2 additivity proof)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/browser_events.rs: add `..Default::default()` (or decision_source/scope) to the two pb::DecideApprovalRequest literals at ~:355 and ~:436, and apps/Model Plane/rust/services/model-gateway/src/approvals.rs ~:135; the workspace does not compile without it (owned by the slice that changed sessions.proto)",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs ~:893: `let ro_inputs = crate::run_inputs::global().get(org_id, run_id);` must return None for a delegated child (thread depth or a root-only flag from run_rounds into the dispatch) so children_do_not_inherit_attachments also holds for code_interpreter files",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/attachment_policy.rs: add `modes.do_attachments` (true when CHAT_DO_ATTACHMENTS_ENABLED is the literal true) to the declared policy JSON; apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts parseAttachmentPolicy: read it; then switch the composer from VITE_CHAT_DO_ATTACHMENTS_ENABLED to it",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml model-gateway block: pass-through line `CHAT_DO_ATTACHMENTS_ENABLED: ${CHAT_DO_ATTACHMENTS_ENABLED:-false}`",
+    "regenerate Go bindings (buf generate) for execution.proto and add the Go mirror of the RunAgentRequest field-20 wire golden (hex 0a027231a201130a0161 1205612e637376 2003 3203312c32 3801, spaces removed) in go/gen/model_plane/v1/proto_wire_parity_execution_test.go; run `buf breaking` against the baseline",
+    "after rebuild of execution-core and model-gateway with CHAT_DO_ATTACHMENTS_ENABLED=true: live Do run 'analyse attached sales.xlsx and write a summary' with approvals; capture the plan, the code_interpreter steps, the run record, and confirm a cancel mid-run drops the registry (run_inputs log) and a ZDR turn is refused with the typed code",
+    "add golden rows (Do, attachment, ZDR) to zdr_feature_table.rs / zdr_posture_matrix.rs [live-only] and run `bash scripts/tests/zdr-contract-sync.test.sh`"
+   ],
+   "deviations": [
+    "FE gate uses VITE_CHAT_DO_ATTACHMENTS_ENABLED instead of attachment_policy.modes.do_attachments (policy parser and attachment_policy.rs are not owned)",
+    "do_images_unsupported reason kept in the FE union for a Do turn without the switch or without the model-vision context (i18n catalogues not owned)",
+    "image decoding for Do is a local helper in sse.rs (do_run_attachments) rather than a vision_parts.rs method (not owned)",
+    "execution-core validates images locally in grpc.rs because mp_contracts::attachments::validate refuses kind image by design; files-first ordering is a boundary invariant (enforce_run_attachments partitions by move, no byte copy)",
+    "added the field-20 wire golden to mp-contracts/tests/proto_wire_parity_execution.rs (test file beside the proto change)",
+    "DecideApprovalRequest literals in browser_events.rs and approvals.rs were patched temporarily to compile and reverted; not part of this slice"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/attachments.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/attachment_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/vision_parts.rs",
+    "apps/Model Plane/rust/services/execution-core/src/run_inputs.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/approvals.rs"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The live worktree does not compile: browser_events.rs (lines 355 and 436) and model-gateway approvals.rs (line 135) still build DecideApprovalRequest without decision_source and scope. The owning slice must fix them before any in-place `cargo test`.",
+     "Shared edit in runtime_loop/mod.rs near line 893: the code_interpreter lookup of RunInputs must return None for a delegated child.",
+     "Shared edits for the server-declared gate: attachment_policy.rs (modes.do_attachments), chat-client.ts (parseAttachmentPolicy) and deploy/docker-compose.yml (CHAT_DO_ATTACHMENTS_ENABLED pass-through).",
+     "Regenerate the Go bindings (buf generate), add the Go field-20 golden test, and run `buf breaking` against the baseline.",
+     "Live proof: rebuild execution-core and model-gateway with CHAT_DO_ATTACHMENTS_ENABLED=true and run a Do turn 'analyse attached sales.xlsx and write a summary' with approvals. Capture the plan, the code_interpreter steps and the run record, confirm a mid-run cancel drops the run_inputs registry, and confirm a ZDR turn is refused with the typed code.",
+     "Add the (Do, attachment, ZDR) golden rows to zdr_feature_table.rs and zdr_posture_matrix.rs and run scripts/tests/zdr-contract-sync.test.sh.",
+     "Run the full `cargo test -p execution-core --all-targets -p model-gateway` in the real tree once it compiles, to confirm the six copy-only failures (two in execution-core, four in model-gateway) pass there."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Subagent children share the parent's run_id and runtime_loop/mod.rs `run_inputs::global().get(org_id, run_id)` hands them the parent's attached files in code_interpreter; plan requires no inheritance. Needs a shared-edit in mod.rs (pass depth or a root-only flag to the lookup)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Do runs that await approval or park return from run_agent, so the RunInputs guard drops and the files are gone on the continuation segment or in-place resume, while the restored messages still hold the sandbox note saying attachments/ exists; plan v1 wants a typed attachments_expired signal instead. Images are likewise not re-sent after a resume."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "RunInputs TTL is 15 minutes (run_inputs.rs, not owned) and is swept on the next registration, so a Do run longer than 15 minutes can lose its files mid-run; TTL should be refreshed or derived from the run deadline."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Server-declared gate missing: attachment_policy.rs needs modes.do_attachments (and chat-client.ts parseAttachmentPolicy the field) so the FE can read it from /v1/models instead of the build-time VITE_CHAT_DO_ATTACHMENTS_ENABLED; compose pass-through for CHAT_DO_ATTACHMENTS_ENABLED is also not added (deploy/docker-compose.yml not owned)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Golden rows (Do, attachment, ZDR) in zdr_feature_table.rs / zdr_posture_matrix.rs [live-only] and the Go mirror of the field-20 wire parity test are not written; an end-to-end gateway test that a Do turn with the switch on reaches RunAgentRequest.attachments (via invoke_stream_sse) is not written, only the pure builder and helper tests."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "do_run_attachments in sse.rs duplicates the image mime/base64 decode of vision_parts::ImageParts::from_validated; expose the decoded bytes there and delete the copy. Cloning file bytes out of ValidatedAttachments leaves one non-zeroed transient copy per Do turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Images on a Do turn are checked against the catalogue only when it is readable; when it is not, inference-core's fail-closed vision_unsupported ends a round mid-run rather than refusing before the run exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Persisted thread text does not hold the image (follow-ups cannot re-read it), same as Ask S4; and the FE Do path sending kind:'file' bytes depends on S5's modes.sandbox_files, not wired here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Subagent children still inherit the attached FILES. A child is built with `req: parent.req` and the parent's run_id, and `runtime_loop/mod.rs:893` calls `run_inputs::global().get(org_id, run_id)` with no depth check, so a child's code_interpreter reads `attachments/`. The plan says children do not inherit attachments. The test `children_do_not_inherit_attachments` covers only images and the note. The fix is a shared edit in mod.rs: pass depth or a root-only flag into the lookup, and add a test where a child code_interpreter step sees no files. Must land before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A parked, resumed or continuation Do run loses its files, because the RunInputs guard lives only inside the run_agent call. The restored messages still hold the sandbox note saying `attachments/` exists, and images are not re-sent (`image_parts` is empty on the restored and parked paths). The plan wants a typed `attachments_expired` refusal or signal instead of a silent mismatch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run-inputs TTL (15 minutes, in run_inputs.rs, not owned) is swept on the next registration, so a Do run longer than 15 minutes can lose its files mid-run. Derive the TTL from the run deadline or refresh it while the guard is alive."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The server-declared gate is missing: `attachment_policy.rs` needs `modes.do_attachments`, and `parseAttachmentPolicy` in chat-client.ts needs to read it. Until then the composer reads the build-time VITE_CHAT_DO_ATTACHMENTS_ENABLED and can drift from the server switch. The `CHAT_DO_ATTACHMENTS_ENABLED` pass-through in deploy/docker-compose.yml is also not added, so the switch cannot reach a deployed model-gateway container."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no end-to-end gateway test that a Do turn with the switch on carries its attachments through `invoke_stream_sse` into `RunAgentRequest.attachments`. Only the pure builder, the helper and the request-builder tests exist. The golden rows (Do, attachment, ZDR) in zdr_feature_table.rs and zdr_posture_matrix.rs, and `bash scripts/tests/zdr-contract-sync.test.sh`, are also still to do."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The scrub_checkpoint_test addition only shows that the fold has no field an attachment could ride in, and that a hand-built note is not credential-shaped. It never drives a real saved checkpoint from a run that carries attachments."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`image_parts: image_parts.clone()` copies every image's bytes on every round, and the clones are not zeroed. The gateway's `do_run_attachments` and the clone of ValidatedAttachments' file bytes leave transient copies as well. Use shared bytes (`Arc` or `Bytes`) or hand over the parts by reference, and zero them on drop."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When the catalogue is unreadable, an image on a Do turn is not refused before the run exists. inference-core's `vision_unsupported` later ends a round in mid-run. This is a documented choice; consider refusing up front when the catalogue read fails and the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Persisted thread text does not hold the image, so follow-up turns cannot re-read it. FE Do turns that send kind:'file' bytes also depend on S5's modes.sandbox_files, which is not wired here."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Go mirror of the field-20 wire-parity golden is not written (go/gen/model_plane/v1/proto_wire_parity_execution_test.go). Go bindings have not been regenerated for execution.proto, and `buf breaking` has not been run."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In sse.rs the doc comment `One-shot SSE stream that emits a single structured error...` is now attached to the new DO_ATTACHMENTS_VAR constant, and `error_stream` has lost it. Move the new block above that comment."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "`do_run_attachments` duplicates the image mime and base64 decode in vision_parts::ImageParts::from_validated. Expose the decoded bytes there and delete the copy."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "data-loss"
+   ],
+   "notes": "Built to the row: RunAgentRequest.attachments = 20; model-gateway builds the list behind CHAT_DO_ATTACHMENTS_ENABLED (strict parser, default off) and the Do + image refusal does not apply when it is on; execution-core judges the list at the RunAgent boundary (ZDR/waived refused, files by mp_contracts::attachments::validate, images by local bounds); the run registers files in RunInputs for the loop's scope (guard drops on terminal, error and cancel); the seed gets the sandbox note before the goal; images ride as image_parts on every InferRequest at the goal's index; a child gets no note and no images; the fold has no field for attachments.\n\nSTATUS PARTIAL for two reasons. (1) Children still inherit the FILES through code_interpreter: a subagent runs inside its parent's run_id and runtime_loop/mod.rs reads RunInputs by (org_id, run_id) only (not my file). (2) The workspace did not compile at the start because another slice added decision_source/scope to DecideApprovalRequest (sessions.proto) and left 3 literals unfixed in files I do not own (execution-core/src/browser_events.rs x2, model-gateway/src/approvals.rs x1). To run my tests I temporarily added `..Default::default()` to those 3 literals and reverted them byte-exact after each run (git diff of both files is empty, no marker left). Those 3 sites still fail to compile until their owner fixes them.\n\nDeviations: the plan names attachment_policy.modes.do_attachments for the FE gate; the policy parser (chat-client.ts) and attachment_policy.rs are not mine, so the composer reads VITE_CHAT_DO_ATTACHMENTS_ENABLED (same pattern as VITE_CHAT_VISION_AS_PARTS_ENABLED) and the do_images_unsupported reason is kept, now only for a Do turn without the switch or without the model-vision context. The Do-side image decode lives in sse.rs (do_run_attachments) because vision_parts.rs exposes no accessor for decoded bytes. The catalogue list_models call stays inline in invoke_stream_sse because zdr_posture.rs inventories inference call sites by function name."
+  }
+ ]
+}

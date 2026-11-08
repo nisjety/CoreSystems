@@ -1,0 +1,140 @@
+[
+ {
+  "key": "mg-agentic-stream-stop",
+  "rows": [],
+  "title": "mg-agentic-stream-stop",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\run_control.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\cancel_registry.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib agentic",
+    "outcome": "30 passed; 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib run_control",
+    "outcome": "29 passed; 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib cancel",
+    "outcome": "20 passed; 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo check -q -p model-gateway --all-targets",
+    "outcome": "exit 0, no errors or warnings printed",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Not live-proven: the dispatch abort dropping Execution Core's RunAgent loop and the cross-replica Stop of a Do run are proven only with fakes and the loopback hub. A Stop on the Anthropic stack (local cancel route, durable /v1/orchestration/runs/{run_id}/cancel, and from a peer replica) should go into the Wave 1 live proofs.",
+   "A stopped Do run's usage is never ledgered, because the RunAgent response is dropped. The code comment documents this, but it is a cost/accounting gap the owner may want logged as a decision.",
+   "A Stop set after `connected` but before follow_agentic_run starts (the dispatch construction and RUN_STARTED window) is only seen on the follow's first tick, which fires immediately. A dispatch-construction failure in that window gets its own failure frame, not `stopped`.",
+   "The new run_control test (a_do_run_stream_is_stoppable_by_run_id_from_a_peer...) exercises the existing registry/bus mechanism, so on its own it would pass on the old code. The regression protection for the wiring comes from the sse.rs source-shape test and the new follow_agentic_run signature and tests.",
+   "In the durable-cancel case, Session Core already terminalized the run. The gateway's own CancelRun then answers false, so no second RUN_CANCELLED is published on the run subject. This relies on CancelRun staying idempotent and answering cancelled=false for already-terminal runs.",
+   "A park continue that is stopped is now terminalized (cancelled) in Session Core. This is the one exception to the park regime, which never terminalizes, and it is documented in a comment. Worth stating to the owner as a behaviour change."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Owner decisions and side effects, for the lead.\n1. Cost gap (needs a decision). The abort drops the RunAgent call before Execution Core returns RunUsage. The AGENT_USAGE envelope is published only from the dispatch task on an Ok answer, so a stopped Do run writes no usage. This contradicts the 2026-10-22 ledger entry (\"billed tokens are not lost to a follower that gave up\"). Either accept it and reconcile from execution-core's per-round info log (the in-flight round is not logged), or have Execution Core read its own cancel latch (grpc.rs cancel_run ~:1657, never read by the loop) and return usage on cancel. The second is an Execution Core change outside this packet.\n2. No switch. Local and durable Stop now reach Do runs with the bus off, because the packet asked for unconditional registration. The peer bus stays behind MODEL_GATEWAY_RUN_CONTROL_BUS. Confirm this fits the default-off rule.\n3. Drain. Do streams count in cancels.active(), so shutdown waits up to MODEL_GATEWAY_DRAIN_SECS (default 120) for in-flight Do runs.\n4. Resume. ProducerLiveness (sse.rs:8140 and :8257) now reports Do request ids as live. Resuming one holds a tail with no buffered frames until the run ends, instead of a 404. Decide: refuse resume for run-only streams, or buffer Do frames.\n5. Spent continuations and park continues. A Stop on either now cancels the run in Session Core. The park case is what the packet asked for; the spent case follows from the same arm. Those regimes' comments say the gateway never terminalizes them, so confirm a user Stop is the exception.\n6. RUN_CANCELLED is published only when CancelRun returns cancelled=true. Already terminal: info log, nothing published. CancelRun failure: warn log with run id and code, nothing published, and the run stays for session-core recovery. This is my reading of \"close the attempt the way the other exits do\".\n7. \"Distinct cancelled outcome\" is the aborted dispatch's cancelled JoinError (Ok(Err(e)) with e.is_cancelled()), and the arm also checks the stop flag. There is no new enum variant, so follow_agentic_run's return type and the deadline tests stay byte-identical. An explicit variant would change the deadline tests' type names.\n8. Test edits. The deadline test bodies are unchanged. The `follow` helper now delegates to `follow_stoppable`, which takes the flag. AGENTIC_STOP_POLL_INTERVAL joined the test imports.\n9. Known window. A Stop between `connected` and spawn_run_dispatch (run-context and plan reads) still starts the RunAgent call and aborts it at the first tick, so one provider round may start. A flag check before the spawn would close it; not done.\n10. Latency. With the bus on, attach can take up to 250 ms before `connected`, as on the Ask path.\n11. Checked, no change needed. A peer queue message for a Do stream is refused (enqueue_checked gives NoActiveStream, then not_found, then NoOwner). ZDR never reaches the agentic branch, because the `if effective_zdr` block returns first. Bus traffic for Do runs is ids only.\n12. Scope notes. The computed task text said \"Files you may edit: (none)\"; I followed the packet record's three files. session_flow.rs is unchanged, and CancelRun is built in sse.rs the way http_routes cancel_run builds it. My new lines are rustfmt-clean; pre-existing rustfmt diffs in these files were left alone. The untracked tests/zdr_mcp_observation_golden.rs belongs to another packet and was not touched.",
+  "summary": "Packet mg-agentic-stream-stop (row D1-229) is implemented. Do runs (agentic_run_stream in sse.rs) now register for Stop before `connected`: a cancel-registry entry plus a run-control bus listener, released by a new `Registration` drop guard (cancel_registry.rs, `CancelRegistry::hold`). follow_agentic_run takes the stream's cancel flag; on a Stop it aborts the dispatch, which drops the Execution Core call (run_agent awaits the loop inline, verified), and returns at once, before the deadline and the drain grace. The deadline behaviour is unchanged (detach, never abort). The stream then sends the Ask path's `stopped` frame, asks Session Core to cancel the run (RunService.CancelRun, reason user_requested, built like http_routes cancel_run), and publishes the existing RUN_CANCELLED type on the run subject when Session Core confirms the cancel. Peer queue messages for a Do stream are refused, not acknowledged, so attach needed no fix. The Ask path, the two tool loops and Execution Core are unchanged. Seven new tests, all passing. Every packet check is green, and so are the full model-gateway lib suite and the e2e, orchestration, two-replica and ZDR source-scan suites. Not live-proven: the abort and the cross-replica Stop are proven only against fakes and the loopback hub."
+ },
+ {
+  "key": "zdr-mcp-goldens",
+  "rows": [],
+  "title": "zdr-mcp-goldens",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\zdr_mcp_golden.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\zdr_mcp_observation_golden.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\README.md"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -q -p execution-core --test zdr_mcp_golden",
+    "outcome": "3 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test zdr_mcp_observation_golden",
+    "outcome": "3 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test zdr_posture_matrix",
+    "outcome": "6 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+    "outcome": "87 ok, 22 not ok, none from this packet: 20 are cross-plane goldens Quarry-v2 and Data Plane v2 have not vendored yet, 2 are CRLF working copies of zdr-posture-matrix.json.sha256 (index content identical, i/lf). No contract file changed.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The execution-core offer side ('no mcp__ tool is offered' under zdr) is covered only by source-text pins on runtime_loop/agent.rs, not driven behaviourally. merged_tool_defs_governed is private, and the packet allowed edits only to the README and the new test files, so no #[doc(hidden)] seam could be added. A later packet could expose a narrow test seam and drive the offer per matrix row.",
+   "Waived rows in execution-core go through the public execute_step, which hard-codes waived=false (runtime_loop/mod.rs:434-436, the 'never runs a waived step (Z-18)' comment). So the golden proves those rows reach the policy, not that the waived mcp_execution refusal holds per row. That refusal is pinned only by the crate-private unit test, using hand-built flags. The coder's suggestion to loop that unit test over the matrix's waived rows needs edits to src/runtime_loop/mod.rs.",
+   "On the gateway side, mcp_contract replays require_explicit_zdr_contract (grpc.rs:322-333, checked, it matches) instead of calling it, because VerifiedIdentity cannot be built outside grpc_auth. If the real gate drifts, only the source pins in the_mcp_gates_are_wired_to_the_plain_route_posture catch it. Those pins are layout-tolerant but brittle to renames.",
+   "Two rows are pinned as known limits rather than closed. e_explicit_zdr_raises_persistent_token (zdr in the matrix) and e_temporary_chat_refuses_subscription_org_off (refuse) both look persistent on the plain-route ListMcpTools path, because ListMcpToolsRequest has no explicit-ZDR field. So the gateway would write an observation if such a caller listed tools directly. Execution-core's retention_bound guard and the run-boundary refusal are the only controls today. This needs an owner decision: add an explicit_zdr field to the listing RPC, or record the execution-core guard as the control.",
+   "scripts/tests/zdr-contract-sync.test.sh is red: 87 passed, 22 failed. The failures are in Quarry-v2 and Data Plane v2 goldens, the auth-core pin, and the zdr-posture-matrix.json.sha256 copies in mp-contracts and model-gateway. None of those paths is modified, so the failures look pre-existing, but the packet's 'must stay green' check is unmet until the lead triages them separately.",
+   "Both goldens hard-code the row counts (27, split 4/3/2/18). Any change to the matrix fails them on purpose and forces a review, which adds upkeep."
+  ],
+  "db_tests": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:436 passes waived=false in the public execute_step, and the test at :3224-3274 (an_mcp_tool_is_refused_under_zdr_or_a_waived_route_before_the_gate_is_asked, using the crate-private execute_step_with_subagent) drives waived=true only with hand-built flags. Add a loop over the matrix's waived rows there, so the waived MCP refusal at :714 is driven by the vendored matrix. This is the one gap in the execution-core golden that needs a src-side test.",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: offered_tools at :927-959 and merged_tool_defs_governed at :1106-1281 are private, so the offer side is only pinned by wiring. Add an in-crate test in agent.rs's tests module that calls merged_tool_defs_governed for every matrix row, with a fake GovernedSource that offers an mcp__ tool and ToolClassGate::Enforce, and asserts that no mcp__ name is offered when retention_bound is true.",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1260 appends client-declared tools with append_untrusted_tool_defs_sorted(&mut tools, client_tools) and no zdr guard. A client-declared mcp__ name therefore reaches the offer of a zdr run and is refused only at execution (mod.rs:714). The matrix claim 'no mcp__ tool is offered' holds for registry-sourced tools only. Owner or lead decision: strip mcp__ names from client_tools when retention_bound is true (a src change), or accept it. Not verified whether the gateway strips such names before execution-core.",
+   "apps/Model Plane/proto/model_plane/v1/gateway.proto:1123-1135 (ListMcpToolsRequest: request_id, org_id, user_id, unstaged; no explicit-ZDR field) and apps/Model Plane/rust/services/model-gateway/src/grpc.rs:1997-2013 (list_mcp_tools observes on identity.zdr_for(Route::plain(false)) only). Owner decision for the pinned row e_explicit_zdr_raises_persistent_token: add an explicit flag to the listing RPC (proto change, buf regeneration), or accept execution-core's !zdr guard (agent.rs:1154, retention_bound at :936) as the control. The observation golden pins this row until decided, and fails if it changes."
+  ],
+  "deploy_notes": "Concurrency and environment: the model-gateway runs compiled the tree as it stood, including the concurrent mg-agentic-stream-stop packet's uncommitted edits to src/sse.rs, src/run_control.rs and src/cancel_registry.rs. I did not touch those files. The new tests use only public APIs, so those edits should not affect them, but a clean run after that packet lands is worth doing. Target caveat: cargo -q output does not show whether model-gateway was recompiled in C:/dev/mp-target-w2, and the stale warm-target note applies, so cargo clean -p model-gateway -p execution-core against that target would settle it.\n\nInterpretation: the computed task text said 'Files you may edit or create: (none)', while the packet record lists files [apps/Model Plane/api/contracts/README.md] and two new_files. I followed the packet record. No git write operation, docker command or .env read was run.",
+  "summary": "zdr-mcp-goldens: two new goldens and one README paragraph. Both goldens pass and the existing zdr_posture_matrix test still passes. The contract-sync script is red with 22 failures outside this packet, which predate it. No src, matrix or .sha256 file was touched.\n\nexecution-core tests/zdr_mcp_golden.rs: all 27 rows are decided by mp_contracts::retention::resolve_turn. The 18 refused rows never start a run, so they are skipped. The 4 zdr rows are refused as mcp_execution by runtime_loop::execute_step before the capability policy is asked. The 3 persistent and 2 waived rows reach the policy exactly once. Waived rows are driven as non-waived, because the public entry passes waived=false (mod.rs:436). The offer side is covered by source-wiring pins only, because merged_tool_defs_governed is private.\n\nmodel-gateway tests/zdr_mcp_observation_golden.rs: all 27 rows are decided on Route::plain(false), the route the MCP RPCs use. Zdr rows that are not pinned write nothing and are refused as mcp_execution. The 3 persistent rows and the 2 pinned rows write one POST each (5 in total), counted at a mock capability-core through the real spawn_observation. Waived and refused rows write nothing and are refused on the plain route.\n\nTwo rows are pinned as known limits, not accepted: e_explicit_zdr_raises_persistent_token (zdr in the matrix) and e_temporary_chat_refuses_subscription_org_off (refuse). On the plain route the gateway sees both as persistent, because ListMcpToolsRequest has no explicit-ZDR field. Execution-core does not list tools for a retention-bound run, and the refused turn is refused at the run boundary, so no write happens end to end. Owner decision needed; see needs_other_files."
+ },
+ {
+  "key": "audit-compliance-db-test",
+  "rows": [],
+  "title": "audit-compliance-db-test",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/store/compliance_db_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet ./internal/store/",
+    "outcome": "No output, exit clean.",
+    "passed": true
+   },
+   {
+    "command": "go test ./internal/store/ -count=1",
+    "outcome": "ok (4.8s), 0 FAIL lines. The 7 new TestComplianceDB* tests (Filters, KeysForOneOrg, KeysetPaging, ManifestEnds, OrgIsolation, WindowIsContiguousWhenIngestIsNotOrdered, WindowResolution) compile and SKIP without TEST_DATABASE_URL; non-DB tests pass.",
+    "passed": true
+   },
+   {
+    "command": "go build ./...",
+    "outcome": "No output, build clean.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The 7 DB tests (56 subtests) in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/store/compliance_db_test.go have not run yet; they only compile and skip. D1-386 closes only after the lead runs `go test ./internal/store/ -count=1 -run TestComplianceDB -v` with TEST_DATABASE_URL set to a disposable Postgres.",
+   "The change adds tests only and leaves compliance.go untouched, so there is no old code for it to fail against. By hand, against compliance.go, these expected values are correct: both window ends inclusive (>= and <=); the non-monotone window gives seq 2..4; NextSeq is the last seq only when limit+1 rows come back; limits 0, -1 and 5000 clamp to 1000; an empty window returns a non-nil empty list; a keyless store, a nil *KeyRing and a verify-only ring all leave the manifest unsigned; keys sort as audit-new then audit-old.",
+   "TestComplianceDBKeysForOneOrg calls Store.Attest, which attests every unattested chain head in the database, not just this test's orgs. The orgB-retired-key case relies on Attest skipping a head that is already attested (the NOT EXISTS in attest.go), which holds today. It also attests leftover orgs from other tests, so the database must stay disposable, as the coder noted.",
+   "restampIngestedAt resets audit_chain_heads.head_hash with a plain pool.Exec, the same way backdateAndRechain does. If a later migration guards that table with the maintenance trigger, both helpers break together.",
+   "Stale comment, out of scope: compliance.go lines 34-37 say a manifest is unsigned until KeyRing exposes SignPayload. chain/sign.go:209 already has SignPayload, and the test asserts the ring-signed default."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No deploy. Run the DB tests only on a disposable Postgres: TestComplianceDBKeysForOneOrg calls Attest, which attests every unattested chain head in that database. Each other test restamps ingested_at only on its own fresh orgs.",
+  "summary": "Added compliance_db_test.go (package store_test) with 7 DB-backed top-level tests and 56 subtests. They pin exact values the compliance SQL does not cover in compliance_test.go: window bounds (both ends inclusive, single instant, between rows, empty windows, open ends, contiguous range when ingest order is not monotone); keyset paging (page sizes 1, 3 and 4, out-of-range limits, cursors past the head); each filter column alone and combined, exact and case-sensitive matching, and empty values meaning no filter; two-org isolation for events, windows, manifests and empty-org refusal; manifest ends and signing (test signer, key ring, keyless store, verify-only ring, never-chained org); keys per org after a key rotation. Rows get distinct ingested_at values through a rechain helper (the backdateAndRechain approach), and each test checks chain validity first. I read compliance.go against each case and found no bug, so compliance.go is unchanged. The DB tests were not run (no Postgres here); they compile and skip without TEST_DATABASE_URL. Stale comment, not changed: compliance.go lines 34-37 say a manifest is served unsigned until KeyRing exposes SignPayload, but sign.go (around line 208) already has it, so the default path signs with the ring. The test asserts that current behaviour. Lead ran the DB tests on 2026-10-28 on a disposable Postgres: go test ./internal/store/ with TEST_DATABASE_URL: 64 PASS, 0 FAIL, 0 SKIP (the seven new TestComplianceDB* tests among them)."
+ }
+]

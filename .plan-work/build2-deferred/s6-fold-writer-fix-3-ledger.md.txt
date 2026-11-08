@@ -1,0 +1,4 @@
+// intended path: apps/Model Plane/docs/decisions/ledger.md
+Append to the 2026-10-18 S6 writer-rules entry:
+
+- Fold-writer rule added after adversarial review: the `pre_effect` fold carries the outcome of every call the loop refused before dispatch (not offered, truncated, over the rung, a leaf role), in `round_in_flight.completed`, matched by `call_id` with an empty `step_id`; the `pause` fold already did. A call with an empty `step_id` was refused and is never dispatched by a resume. Reason: some refusals cannot be re-derived on resume (the truncated-call refusal depends on the original response's `stop_reason`, which the fold does not carry), and without the saved outcome a resume cannot tell 'refused' from 'never dispatched', so it could dispatch a call this loop had refused, with truncated arguments or beyond its authority.

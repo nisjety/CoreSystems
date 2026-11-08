@@ -1,0 +1,583 @@
+{
+ "batchId": "W1-19",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS03-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "586 passed, 0 failed, 208 ignored (DB)"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core recover_parks",
+     "outcome": "compiles; 5 DB tests, all ignored (need DATABASE_URL); NOT run, the lead runs the harness"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib park",
+     "outcome": "54 passed, 0 failed"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test durable_loop_contract",
+     "outcome": "31 passed, 0 failed"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib park",
+     "outcome": "does not compile: E0063 missing field `attachments` in ExecuteStepRequest at model-gateway/src/browser_run.rs:1212 and tools.rs:192. Neither file is mine. The cause is the uncommitted execution.proto change from another slice. Not run."
+    },
+    {
+     "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+     "outcome": "sse taxonomy up to date (27 events)"
+    },
+    {
+     "command": "cd 'apps/Model Plane' && buf breaking proto --against proto/baseline.binpb",
+     "outcome": "exit 0 (no proto change made)"
+    }
+   ],
+   "db_tests_written": [
+    "recover_parks_a_crashed_run_is_parked_not_ended_and_a_continuation_claims_it",
+    "recover_parks_crash_park_off_is_the_committed_worker",
+    "recover_parks_a_fold_no_continuation_could_resume_is_not_parked",
+    "recover_parks_a_thread_held_by_a_writer_leaves_the_run_alone",
+    "recover_parks_a_crash_park_is_not_claimed_once_its_thread_moved"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block add `SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}` next to SESSION_CORE_PARK_RECOVERY_ENABLED (still open from W1-18).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the 2026-10-24 entry 'S8-B: the session-core half of crash-park is built behind SESSION_CORE_CRASH_PARK_ENABLED (default off)', with the text in .plan-work/execution/results/W1-18.json (notes) and the line at ledger.md:314. Add that the executor markers and the zombie stop are NOT built, so the worker parks nothing yet.",
+    "Run the session-core DB harness (scripts/tests/session-core-db-tests.sh), clean case first, including the five recover_parks_* tests and the park and loop_checkpoint DB tests. Still unproven against Postgres: the park_crashed SQL, the claim re-check, the SKIP LOCKED thread lock, the heartbeat push, and the assumptions of one RUN_TERMINAL receipt for zero-retention and waived runs and of the planted-fold insert satisfying the table CHECKs.",
+    "If S8-B is to go on, give one slice ownership of park.rs, fold.rs, durable_loop_contract.rs and mp-contracts loop_fold.rs together with agent.rs. Until then the S8-B executor half cannot land. The flip (4) and the S8-B go-ahead stay owner decisions, and nothing may be flipped before that half lands and the live proof runs.",
+    "Before any model-gateway test run, resolve the `attachments` field on ExecuteStepRequest in model-gateway/src/browser_run.rs:1212 and tools.rs:192 (another slice's uncommitted execution.proto change). That is why model-gateway lib tests do not compile in the tree now."
+   ],
+   "deviations": [
+    "No code written. The two remaining S8-B executor items (round-fold park markers, zombie stop) sit in files the slice does not own (park.rs, fold.rs, durable_loop_contract.rs, mp-contracts loop_fold.rs). The guard test also forbids agent.rs from naming the park keys. I did not work around the ownership rule or the guard.",
+    "The plan's `cargo test -q -p execution-core -p model-gateway -p session-core --all-targets` was not run as written. Non-lib targets fail on Windows (known), and model-gateway's lib test target does not compile because of another slice's uncommitted execution.proto change. I ran the session-core bin, execution-core lib and execution-core durable_loop_contract targets instead."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (a function that writes EXT_PARKS, EXT_ROUTE_MODEL, EXT_ROUTE_CONNECTION and EXT_CHILD_CEILING onto a run_parkable round fold, never on an approval continuation or on client or MCP-tool runs, plus the resumed run's park count)",
+    "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (the park-key guard at lines ~1498-1515 and its mutation rows near line 5105 must allow the new writer)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (an accessor true only when the writer failed on a Stale or Closed save, for the zombie stop)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs (shared THREAD_WATERMARK key, 900 s crash-park grace and round-budget defaults 12 and 32, now session-core-local copies)",
+    "apps/Model Plane/deploy/docker-compose.yml (SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false} in the session-core block)",
+    "apps/Model Plane/docs/decisions/ledger.md (the 2026-10-24 S8-B session-core-half entry, with flip order and kill order)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "S8-B is NOT complete: the executor half is unbuilt (round-fold park markers, zombie stop), so the plan row 'killed execution-core becomes parked(crash_interrupted) within deadline and resumes by click' cannot be met. Do not mark WS03-S8 done; keep it partial.",
+     "Run the session-core DB harness (scripts/tests/session-core-db-tests.sh), clean case first, including the five recover_parks_* tests and the park and loop_checkpoint DB tests. The park_crashed SQL, the claim re-check, the SKIP LOCKED thread lock and the heartbeat push are source-verified only.",
+     "Assign one slice ownership of park.rs, fold.rs, durable_loop_contract.rs and mp-contracts loop_fold.rs together with agent.rs for the executor half. Rebuild session-core and execution-core, then run the live proof: kill execution-core past the deadline, observe parked crash_interrupted, park_not_due, resume by continue, TTL expiry.",
+     "ledger.md still lacks the 2026-10-24 S8-B session-core-half entry (flip order, kill order, and that the executor half is not built). Line 314 is only the pending to-do.",
+     "S8-A's flip (4) and the S8-B go-ahead remain owner decisions. The park reasons credential_window, provider_exhausted and reauth_required have never been shown live."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Nothing writes the four park keys on executor round folds, so with SESSION_CORE_CRASH_PARK_ENABLED on every crash-park candidate is refused route_unrecorded and the worker parks nothing; the writer needs park.rs, an amended durable_loop_contract.rs guard and the resumed run's park count, on run_parkable round folds only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Zombie loop: a loop silent past the 15 min deadline plus the 900 s grace can be crash parked and continued while alive; the executor must stop a run_parkable loop at its first Stale or Closed fold save before any inference, append or receipt, which needs a FoldWriter accessor (fold.rs) because `is_failed()` is also true for a permanent store refusal."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "park_crashed, the claim re-check, the SKIP LOCKED thread lock and push_crash_park are source-verified only; the five recover_parks_* DB tests have never run, and the live proof (kill execution-core past the deadline, park_not_due, resume by continue, TTL expiry) needs the executor half first."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8-B go-ahead and design, the park TTL (86400 s with no UI resume and no thread notice) and flip (4) remain owner decisions; the session-core half has had no independent review."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The W1-18 P1 about a stale thread_watermark closing a legitimate later park is not reachable: build_fold and park_fold create fresh extensions, so the executor never copies the stamp forward and save() overwrites it on round folds; downgrade it, optionally pinning with a source guard that build_fold does not copy the claimed fold's extensions."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "model-gateway lib tests do not compile in the shared tree (missing `attachments` in ExecuteStepRequest literals at browser_run.rs:1212 and tools.rs:192) because of another slice's uncommitted execution.proto change, so model-gateway park tests could not be run this pass."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Move THREAD_WATERMARK_KEY, the 900 s grace and the round-budget defaults (12, 32) into mp-contracts::loop_fold so session-core and execution-core share one pinned definition."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A crash park writes CHECKPOINT_SAVED but emits no RunParked event or run_parked frame, so decide how the run console and the gateway's park wording should read RunDetail.park_reason crash_interrupted for a park the user never saw start."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the executor writes the four park keys on run_parkable round folds, enabling SESSION_CORE_CRASH_PARK_ENABLED parks nothing (every candidate is refused route_unrecorded); it needs a new park.rs writer called at the agent.rs:4206 round-save site, an amended durable_loop_contract.rs guard with mutation rows, and the resumed run's park count."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Zombie loop: a loop silent past the 15 min deadline plus the 900 s grace can be crash parked and continued while still alive, so the executor must stop at its first Stale or Closed fold save, which needs a fold.rs accessor because is_failed() (fold.rs:1001) is also true for a permanent refusal."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The five recover_parks_* DB tests have never run, so park_crashed, the claim re-check, the SKIP LOCKED thread lock and push_crash_park are unproven against Postgres, as are the one-RUN_TERMINAL-receipt and planted-fold CHECK assumptions."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8-B go-ahead, the park TTL default (86400 s with no UI resume and no thread notice) and flip (4) remain owner decisions, and the session-core half of crash-park has had no review other than W1-18's single pass."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Move THREAD_WATERMARK_KEY, the 900 s crash-park grace and the round-budget defaults (12, 32) into mp-contracts::loop_fold, instead of session-core keeping local copies with a keep-in-sync comment."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A crash park writes CHECKPOINT_SAVED but emits no RunParked event or run_parked frame, so decide how the run console and the gateway's wording should read RunDetail.park_reason crash_interrupted for a park the user never saw start."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "If the thread_watermark P1 from W1-18 is downgraded as the implementer proposes, pin it with a source guard that build_fold does not copy the claimed fold's extensions."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss",
+    "audit"
+   ],
+   "notes": "I made no edits; this is the same blocker W1-18 reported. When I started, the owned files had no uncommitted changes. HEAD already holds S8-A (executor park, resume, run_parked frame, RunParked 24 and RunResumed 25, chat-client handling, TTL expiry, spare of parked and resuming folds) and the session-core half of S8-B (crash park behind SESSION_CORE_CRASH_PARK_ENABLED, default off). The only work left is the executor half of S8-B. None of it can be built without unowned files, and the park-key source guard forbids the shortcut through agent.rs.\n\n(1) Markers on round folds. The worker refuses every crash-park candidate as route_unrecorded until the executor writes parks-so-far, route model, connection id and child ceiling on round folds of run_parkable loops. `fold::build_fold` makes fresh extensions each time. The four keys are written only in `park::park_fold`, and `tests/durable_loop_contract.rs` (lines ~1498-1515) fails if agent.rs, or park.rs outside `park_fold`, names any of them. So the writer has to be a new function in park.rs, called from the round-save site in agent.rs (`folds.save_round(fold)`, about line 4206 in the loop-end block), with the guard amended and mutation rows added.\n\n(2) Zombie stop. `FoldWriter` lets agent.rs ask only `is_failed()`, which is also true for a store that refused the run for good (`SaveError::Refused`). Stopping on every failed writer would change flag-on behaviour for runs that are not zombies. It needs an accessor in fold.rs that is true only for a Stale or Closed save.\n\n(3) The thread_watermark P1 from W1-18 (a stale stamp closing a legitimate later park) is not reachable with the code as built. `build_fold` and `park_fold` make fresh extensions, so a resumed executor never carries the stamp into a later fold. Only session-core's own re-seal of a crash park and the round-fold stamp in `save()` write that key, and `save()` overwrites it. Nothing needs to change in loop_checkpoint.rs, so I changed nothing. The finding can be downgraded to P3, with a source guard on `build_fold` if wanted.\n\nAll new switches stay off. Nothing is switched on, so behaviour is unchanged."
+  },
+  {
+   "id": "WS07-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/org-core/internal/http/agent_policy_handler.go",
+    "apps/Control Plane/org-core/internal/http/agent_policy_handler_test.go",
+    "apps/Control Plane/org-core/internal/http/handlers.go",
+    "apps/Control Plane/org-core/internal/http/server.go",
+    "apps/Control Plane/org-core/internal/http/service_auth.go",
+    "apps/Control Plane/org-core/internal/http/service_auth_test.go",
+    "apps/Control Plane/org-core/internal/org/agent_policy_postgres_test.go",
+    "apps/Control Plane/org-core/internal/org/repository.go",
+    "apps/Control Plane/org-core/internal/org/service_enhanced.go",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/organization-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/organization-client.test.ts",
+    "apps/Model Plane/rust/services/session-core/migrations/0057_org_learning_policy_mirror.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0057_org_learning_policy_mirror.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/org_policy.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_control.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Control Plane/org-core' && go vet ./... && go test ./...",
+     "outcome": "all packages ok. New: agent_policy_handler_test.go (route mounted, only-the-policy body, 404/500/503, own-scope 401/403 incl. org:read:any and retention-scope holders, NewServer wiring), service_auth_test.go (scope mapping incl. nil for other verbs/paths, :any machine-only), normalize/validation tests in agent_policy_postgres_test.go. The Postgres round-trip test skips without CONTROL_LIFECYCLE_TEST_DATABASE_URL (NOT run)."
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "596 passed, 0 failed, 210 ignored (DB). org_policy: 10 passed incl. stale_mirror_denies_generation_when_fail_closed, unset_credentials_idle_quietly, strict switch vocabulary, mirror decision table, wiremock fetch tests (headers, 404 = defaults, 500/403 = error, path-segment escaping), migration pins. Existing memory_control/dreaming source-scan and gdpr tests still green. cargo clippy on the bin: clean for org_policy.rs."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && cargo test -q --manifest-path apps/gateway/Cargo.toml --bin verevon-gateway-rs",
+     "outcome": "726 passed, 1 ignored, 0 failed; includes org_agent_policy_requires_admin (member 403 with no org-core call; admin forwarded with exact body) and org_agent_policy_refuses_anything_but_the_documented_shape."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm vitest run src/shared/api/organization-client.test.ts src/features/settings/components/WorkspaceSettingsPage.negative-render.test.tsx src/features/settings/components/WorkspaceSettingsPage.zdr-gate.test.tsx",
+     "outcome": "3 files, 39 tests passed"
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm vitest run src/shared/actions",
+     "outcome": "10 FAILED, all with one cause: no model-access row for org.update_agent_learning_policy (catalog-manifest.test.ts, admission-contract.test.ts). model-access.ts and agent-action-admission.json are not mine; the lead applies the shared-edit below, after which these must be re-run."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm typecheck (filtered to my files)",
+     "outcome": "only error in my files is the same missing model-access.ts row (TS2741); all other errors are pre-existing (remote-core, quarry-client)."
+    }
+   ],
+   "db_tests_written": [
+    "cargo test -q -p session-core --bin session-core org_policy::tests::policy_poll_marks_disabled_and_sets_watermark -- --ignored --test-threads=1",
+    "cargo test -q -p session-core --bin session-core org_policy::tests::pending_filter_leaves_out_what_org_policy_forbids -- --ignored --test-threads=1",
+    "go test ./internal/org -run TestControlLifecycleAgentLearningPolicyRoundTripsThroughPostgres in apps/Control Plane/org-core with CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set (disposable lifecycle DB; skips otherwise)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: in the org block next to 'org.update_support_ai_mode', add the line  'org.update_agent_learning_policy': exempt('human_identity_or_security', 'external_write'),  Then regenerate the golden: cd 'apps/Frontend Plane/verevonv3' && VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts (rewrites src/shared/api/contracts/agent-action-admission.json with the new row, schemaHash computed by the test), then pnpm vitest run src/shared/actions and pnpm typecheck must be green for those files; the JSON is vendored by other planes, so run their pinning tests (capability-core).",
+    "shared-edit apps/Control Plane/docker-compose.yml: line 543-544 ORG_CORE_SERVICE_CREDENTIALS (one JSON line; merge by hand): change the session-core principal's \"scopes\":[\"org:read:any\"] to \"scopes\":[\"org:read:any\",\"org:agent-policy:read:any\"]. Do not touch any token. Check that retention_posture_contract_test.go and org-core's registry validation still pass after the edit (go test ./internal/http in apps/Control Plane/org-core).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block (service starts near line 795) add: ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080} ; SESSION_ORG_CORE_SERVICE_TOKEN: ${SESSION_ORG_CORE_SERVICE_TOKEN:-} ; ORG_POLICY_POLL_SECS: ${ORG_POLICY_POLL_SECS:-60} ; ORG_POLICY_MAX_STALE: ${ORG_POLICY_MAX_STALE:-900} ; ORG_POLICY_FAIL_CLOSED: ${ORG_POLICY_FAIL_CLOSED:-false} ; ORG_LEARNING_DEFAULT: ${ORG_LEARNING_DEFAULT:-disabled}. In the production overlay (apps/Model Plane/deploy/docker-compose.production.yml) set ORG_POLICY_FAIL_CLOSED to \"true\" for session-core. ORG_POLICY_MAX_STALE is in seconds (900 = 15 min). Leaving SESSION_ORG_CORE_SERVICE_TOKEN empty keeps the whole mirror dormant; never print or copy the token value.",
+    "shared-edit apps/Model Plane/deploy/.env.example: document the six variables above (ORG_POLICY_FAIL_CLOSED only the literal true enables; ORG_LEARNING_DEFAULT only the literal proposals enables).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add a 2026-10-24 entry 'WS07-S4: org memory and learning policy lives in org-core metadata.agentLearning, mirrored into session-core org_learning_policy_mirror (0057)'. State: fail-closed under ORG_POLICY_FAIL_CLOSED only (default off); ungoverned (byte-identical) while no service token and no fail-closed switch; strict reading of org-core values (unknown = restrictive); watermark memory_enabled_since set on disabled->allowed so the disabled period is never mined (Dreaming predicate and permits_extraction); poller is the only refresher (no pull-through); table renamed from org_agent_policy to org_learning_policy_mirror to avoid WS25-S7; DEC-14 one read contract stays OrgAgentPolicy JSON in a later move.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md and MODEL_PLANE_STATUS.md: org memory/learning policy owner = org-core (metadata.agentLearning); session-core holds only the mirror; mark as source-built, not live-verified.",
+    "Rebuild org-core via 'apps/Control Plane/scripts/run-control-plane.sh' (not bare docker compose build) and session-core via the Model Plane compose.sh recipe; roll org-core first, then session-core env. Scope grant must reach org-core before session-core is given the token.",
+    "Run the DB harness for the two ignored session-core tests listed in db_tests_written (read the clean case first), and the org-core Go Postgres test against a disposable lifecycle DB.",
+    "Live proof (plan DoD): admin PATCH /api/v1/orgs/<org>/settings {\"agentLearningPolicy\":{\"memory\":\"disabled\"}} through the gateway; org-core GET /internal/orgs/<org>/agent-policy with the service token; mirror row appears within ORG_POLICY_POLL_SECS; a member chat shows no recall and Dreaming logs no extraction; re-enable and confirm the disabled-period messages are not mined (memory_enabled_since set).",
+    "Confirm apps/Control Plane/auth-core plane-token-scopes.spec.ts is unchanged (it is: nothing in auth-core was touched; no org-core scope appears in it)."
+   ],
+   "deviations": [
+    "apps/Control Plane/docker-compose.production.yml left unchanged: that overlay does not define ORG_CORE_SERVICE_CREDENTIALS or any session-core scope (it inherits them from the base docker-compose.yml, which is a shared file handed to the lead), so there is nothing to change in it.",
+    "Mirror table is named org_learning_policy_mirror (plan row says org_agent_policy) to follow section 4.4's rename for migration 0057 and avoid colliding with capability-core's org_agent_policy (WS25-S7).",
+    "No on-demand pull-through at the gate: resolve reads only the mirror row; the poller (default 60 s, also enumerates every org with a thread) is the sole refresher. A never-fetched org is Unavailable under ORG_POLICY_FAIL_CLOSED=true until the first poll.",
+    "When neither SESSION_ORG_CORE_SERVICE_TOKEN (with ORG_CORE_URL) nor ORG_POLICY_FAIL_CLOSED is set, the module is ungoverned (memory allowed, learning unrestricted) so behaviour is byte-identical to before; ORG_LEARNING_DEFAULT (strict: only 'proposals' enables, default disabled) only applies once credentials are configured and an org has no mirror row yet.",
+    "The new registry action is added without its model-access.ts row and admission-contract JSON entry (files not owned), so pnpm typecheck and src/shared/actions tests are red until the lead applies the shared-edit below."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (required row for the new action; typecheck fails without it)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (golden, regenerated with VEREVON_UPDATE_GOLDEN=1)",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs (memory_controls_view still returns org_learning_policy: String::new(); should report the org learning mode)",
+    "apps/Control Plane/docker-compose.yml and apps/Model Plane/deploy/docker-compose.yml (shared, lines below)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edit: apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts needs the org.update_agent_learning_policy row. Until then pnpm typecheck has one TS2741 and the 10 src/shared/actions tests (catalog-manifest, admission-contract) fail. Regenerate agent-action-admission.json with VEREVON_UPDATE_GOLDEN=1, re-run src/shared/actions and typecheck, and run the capability-core pinning tests on the vendored JSON.",
+     "Lead shared-edit: apps/Control Plane/docker-compose.yml line ~543 must grant the session-core principal org:agent-policy:read:any. Then re-run go test ./internal/http in org-core, including the retention_posture contract test and the registry validation.",
+     "Lead shared-edit: apps/Model Plane/deploy/docker-compose.yml, the production overlay and .env.example need the six variables ORG_CORE_URL, SESSION_ORG_CORE_SERVICE_TOKEN, ORG_POLICY_POLL_SECS, ORG_POLICY_MAX_STALE, ORG_POLICY_FAIL_CLOSED and ORG_LEARNING_DEFAULT. Production sets ORG_POLICY_FAIL_CLOSED to true only after the token and scope are in place.",
+     "Lead docs edits: decisions ledger entry, capability-ownership-matrix.md and MODEL_PLANE_STATUS.md (owner = org-core, session-core holds a mirror, source-built not live-verified).",
+     "Run the two ignored session-core DB tests (policy_poll_marks_disabled_and_sets_watermark, pending_filter_leaves_out_what_org_policy_forbids) on the DB harness. Run the org-core Go Postgres round-trip (TestControlLifecycleAgentLearningPolicyRoundTripsThroughPostgres) against a disposable lifecycle DB.",
+     "Rebuild org-core via run-control-plane.sh and session-core via compose.sh. Roll org-core and the scope grant first, then give session-core the token.",
+     "Live proof per the DoD: admin PATCH through the gateway, org-core GET with the service token, the mirror row appearing within the poll interval, a member chat showing skipped_org_policy, Dreaming extracting nothing, and re-enable not mining the disabled period (memory_enabled_since set)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "memory_grpc.rs (not owned) still reports org_learning_policy as an empty string in GetMemoryControls; it should report the mirrored learning mode so the UI and WS02 can show org-level learning state."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The org-core registry principal 'session-core' (token env SESSION_ORG_CORE_SERVICE_TOKEN) is the Control Plane's own session-core identity per the plan; granting org:agent-policy:read:any to it grants it to that service as well. If Model Plane session-core should have its own identity, a separate principal and token must be registered; owner/lead call before the token is set on the Model Plane service."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Unproven against real Postgres/org-core: the jsonb_set writer, the mirror upsert/watermark SQL, pending_filter inside the real Dreaming queries, the LEFT JOIN in memory_control::stored_inputs, and the rollout order (org-core scope first)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Learning review itself is not yet gated by the org opt-in beyond run announcement: capability-core's sessionreview consumer and skill sink (WS07-S7) must read GetMemoryControls before any transcript read; until then LEARNING_REVIEW_ENABLED must stay off for orgs that have not opted in."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A disable followed by a re-enable inside one poll interval is never seen by the poller, so no watermark is set and the messages written in that window can be mined; closing it needs org-core to expose a disabled-until/changed-at marker or the revision to drive a watermark."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With ORG_POLICY_FAIL_CLOSED=true a brand-new org (no mirror row yet) is Unavailable until the first poll (up to ORG_POLICY_POLL_SECS); no on-demand pull-through was built. The poller is sequential over every org with a thread, with no jitter or concurrency, so large fleets lengthen the effective staleness."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When fail-closed is on and the mirror is stale, a Dreaming write that raced past the pending filter is refused by permits_extraction after its message is already recorded as dreamt, so that message is consumed without being mined; the filter makes this a narrow race, not a steady-state loss."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component test for the two new SettingsSelect rows (optimistic update, revert on error, disabled for non-admin and while memory is disabled); only the existing negative-render and zdr-gate suites ran. Also no end-to-end test that GetMemoryControls reflects org_disabled / policy_unavailable from a real mirror row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "gdpr purge of org_learning_policy_mirror is covered only by the total() count and the static ordering tests; the DB purge test fixture was not extended to seed a mirror row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Postgres test for the org-core writer does not cover concurrent PATCHes of the two rows (revision monotonicity under contention) and does not exercise RLS with a foreign org scope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "metadata.agentLearning stores updatedBy (a user id) inside the organization record that any member can read through GET /api/v1/orgs/:id; harmless today but worth stripping from the member view when org metadata is next narrowed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The learning-review select is disabled while org memory is disabled, which hides a stored 'proposals' value from being switched off in that state; consider allowing the off direction."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Deviation from the plan row: there is no pull-through at the gate, so the poller is the only refresher. With ORG_POLICY_FAIL_CLOSED=true, a brand-new org (or one the poller has not reached) is Unavailable, which refuses memory and learning, for up to ORG_POLICY_POLL_SECS. The poller is also sequential over every org with a thread, so large fleets lengthen staleness. Decide this before production turns fail-closed on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ORG_POLICY_FAIL_CLOSED=true with SESSION_ORG_CORE_SERVICE_TOKEN unset (or the org-core scope not yet granted) refuses memory for every org. The code logs an ERROR once, but the rollout order (org-core scope, then token, then fail-closed) must be enforced by the lead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "memory_grpc.rs (not owned) still reports org_learning_policy as an empty string in GetMemoryControls, so the UI and WS02 cannot show org-level learning state. Needed before the policy is surfaced to members."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Learning review is gated only at announcement through learning_events and resolve(learning_allowed). capability-core's sessionreview consumer and skill sink (WS07-S7) must read GetMemoryControls before any transcript read. LEARNING_REVIEW_ENABLED must stay off for non-opted-in orgs until then."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The org-core registry principal 'session-core' is shared with the Control Plane's session-core identity. Granting it org:agent-policy:read:any grants that to the Control Plane service too. The owner or lead should decide whether Model Plane session-core gets its own principal and token before the token is set."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Unproven against real Postgres: the jsonb_set writer, the mirror upsert and watermark SQL, pending_filter inside the real Dreaming queries, the LEFT JOIN in memory_control::stored_inputs, and permits_extraction's watermark subquery."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A disable then re-enable inside one poll interval is never seen by the poller, so no watermark is set and messages from that window can be mined. Closing it needs org-core to expose a changed-at marker, or the revision to drive the watermark."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The SPA's agentLearningPolicyFrom treats a non-object metadata.agentLearning (for example a stored string) as the defaults (allow), while org-core's normalizeAgentLearningPolicy reads a damaged object as memory disabled. The UI can show Allowed while enforcement is disabled. The client test pins the divergent behaviour (policyFor('nonsense'))."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With fail-closed on and a stale mirror, a Dreaming write that raced past the pending filter is refused by permits_extraction after its message is already marked dreamt, so that message is consumed without being mined. This is a narrow race."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component test for the two new SettingsSelect rows (optimistic update, revert on error, disabled for non-admin and while memory is disabled). Also no test that GetMemoryControls reflects org_disabled or policy_unavailable from a real mirror row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gdpr purge of org_learning_policy_mirror is covered only by the total() count; the DB purge fixture was not extended to seed a mirror row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The org-core Postgres test does not cover concurrent PATCHes (revision monotonicity under contention) or RLS with a foreign org scope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "metadata.agentLearning stores updatedBy (a user id), and the organization record is readable by any member through GET /api/v1/orgs/:id. Strip it from the member view when org metadata is next narrowed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The learning-review select is disabled while org memory is disabled, so a stored 'proposals' value cannot be switched off in that state. Consider allowing the off direction."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt --check reports one wrapping diff in org_policy.rs (the mirror_row signature). Run cargo fmt on the file."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "auth"
+   ],
+   "notes": "Built end to end with every new switch off-by-default. org-core: metadata.agentLearning {memory allow|disabled, learningReview disabled|proposals, revision, updatedAt, updatedBy} written by a single jsonb_set UPDATE under WithOrgScope (partial update keeps the other row, bumps revision), read by GET /internal/orgs/:orgId/agent-policy (no-store, 404 missing org, detail-free 500, 503 with no reader) behind the new scope org:agent-policy:read:any (machine-only because of :any; org:read:any and org:retention:read:any do not open it). Unknown stored values read restrictive (memory disabled, learning disabled); a damaged object reads memory disabled. updateOrgSettings accepts agentLearningPolicy as the third exclusive key. session-core: migration 0057 org_learning_policy_mirror (+ revert); org_policy.rs holds GateSettings (strict parser: only literal 'true' enables ORG_POLICY_FAIL_CLOSED, only literal 'proposals' enables ORG_LEARNING_DEFAULT), the mirror decision table, the poller (service headers x-service-id session-core / x-service-token, per-org refresh, 404 = defaults, failure leaves the row to age) and the watermark upsert (memory_enabled_since set only on disabled->allowed). memory_control::resolve/resolve_in_tx fold the mirror in (learning_allowed &= org learning opt-in); with no credentials and no fail-closed switch the module is ungoverned and answers exactly as before. dreaming.rs: pending_filter applied to load_pending_messages and load_preceding_context; permits_extraction also refuses messages at or before the watermark. gdpr purges the mirror. Gateway: PATCH settings validates the policy shape; action org.update_agent_learning_policy (high risk, requires approval, reversible) dispatched through update_org_settings. SPA: two SettingsSelect rows (Minne, Laering fra samtaler) in OrgSecuritySection, client getOrganizationAgentLearningPolicy/updateOrganizationAgentLearningPolicy. Status is partial only because three shared or unowned edits (below) are needed before the SPA test suite and the full plan DoD are green, and because the DB tests and live proof are lead-run."
+  },
+  {
+   "id": "WS08-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/attachments.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/execution-core/src/run_inputs.rs",
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+    "apps/Model Plane/rust/services/execution-core/src/executor.rs",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/turn_attachments.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tools.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/context_recovery_contract.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.sandbox-files.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --lib step_attachment_tests (6 consecutive runs, CARGO_INCREMENTAL=0)",
+     "outcome": "5 passed each run, 0 failures in 6 of 6 (previously failed in 5 of 6)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib",
+     "outcome": "1354 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test context_recovery_contract",
+     "outcome": "3 passed, 0 failed (the_prompt_snapshot_follows_the_round_not_the_turn passes again)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [],
+   "deviations": [
+    "Edited four files outside the owned list, each a compile or guard-test necessity, please confirm or relocate: execution-core/src/lib.rs (one line, pub mod run_inputs), model-gateway/src/lib.rs (one line, pub mod turn_attachments), model-gateway/src/browser_run.rs (one line, attachments: Vec::new() in its ExecuteStepRequest literal), model-gateway/src/zdr_posture.rs (one CALL_SITES row renamed to run_tool_rounds_for_model_with_attachments).",
+    "Did not edit http_routes.rs: modes.sandbox_files is already published by WS08-S2's AttachmentPolicy::declared.",
+    "The chip text in DashboardComposer.tsx is not built (file not owned)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (invoke_stream_sse and the tool-rounds call near line 2732)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (attached-file chip)",
+    "apps/Model Plane/deploy/docker-compose.yml (CHAT_SANDBOX_ATTACHMENTS_ENABLED pass-through env line on model-gateway)",
+    "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (buf generate output)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "bash apps/Model Plane/scripts/verify-sandbox-isolation.sh and the Linux-gated bwrap tests (an_attachment_is_readable_by_the_code, writing_into_the_attachments_directory_fails_read_only) were not run: they need docker (forbidden to the verifier) and skip on this Windows host. Run them in the rust:1 container; evidence needed: EROFS on writes into attachments/, bwrap argv with --ro-bind, no verevon-code-* temp dir left on the host.",
+     "Go bindings: apps/Model Plane/go/gen/model_plane/v1/execution.pb.go must be regenerated with buf generate, then buf lint/breaking, for the new RunAttachment, RunAttachmentKind and ExecuteStepRequest.attachments.",
+     "sse.rs shared edit: invoke_stream_sse must build ValidatedAttachments::from_invoke(&attachments, sandbox_staging_enabled(), zdr) and call run_tool_rounds_for_model_with_attachments. Until then CHAT_SANDBOX_ATTACHMENTS_ENABLED must stay off, because the policy would accept kind:file attachments that nothing stages.",
+     "apps/Model Plane/deploy/docker-compose.yml: CHAT_SANDBOX_ATTACHMENTS_ENABLED pass-through env line on model-gateway (and CHAT_ATTACHMENT_MAX_TOTAL_BYTES on execution-core if the cap is ever raised).",
+     "Frontend chip text 'Brukes av kodekjoring (skrivebeskyttet)' in DashboardComposer.tsx (file not in the owned set) is not built.",
+     "End-to-end live evidence from the plan row (flag on: SSE tool_call/tool_result, output attachment event, execution-core bwrap argv log, second call returning Read-only file system, follow-up without re-attach has no file) is not collected."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until sse.rs calls run_tool_rounds_for_model_with_attachments, turning CHAT_SANDBOX_ATTACHMENTS_ENABLED on makes AttachmentPolicy accept kind:file attachments that nothing stages: files would be silently dropped. Keep the switch off until the sse.rs shared edit is in."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Kernel read-only enforcement (EROFS on writes into attachments/, nested ro-bind inside the writable bind) and removal of the 0555 directory are unproven on Linux: the bwrap tests skip on Windows."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Persistent Space roots: staging reuses StagedInputs there and removes the directory afterwards, but no test covers a persistent root, and the assumption that the reserved name attachments is free in Space workspaces (WS22 exclusion, WS19 skills) is unverified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RunInputs is keyed (org_id, run_id) and shared by all steps of a run, so a concurrent code_interpreter step of the same run with no attachments can also read the registered files; same run authority, S6 (Do) should decide whether that is intended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The sandbox note is appended as the last system message of the tool-round prompt on a turn with files, which breaks prompt-cache prefix stability only for those turns; WS02 prompt ordering may want a fixed position."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No db or live test of the zdr row for code_interpreter staging beyond the existing zdr_feature_table file-attachment row; the executor refusal is unit-tested but not through a real gRPC server."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Pre-existing failures in files not touched for those assertions: attachment_policy_contract::the_real_stream_route_carries_the_body_limit (http_routes.rs:200 local wrapper) and zdr_refusal_inventory (untyped ZDR refusal at browser_run.rs:802)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Zeroing in run_inputs is a plain fill plus black_box because unsafe is forbidden and no zeroize crate is a dependency; copies in the workspace file and gRPC request buffer are not zeroed. Adding zeroize needs a Cargo.toml change."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Per-file and total caps in mp-contracts (8 MiB each, 16 MiB total, 8 files) are ceilings above the gateway's declared 1 MB / 3 MiB / 3 files so a cap raise (OD18) is configuration only; align with decode limit headroom when WS08-S7 lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "toStreamAttachments reads getAttachmentPolicy() at call time, so a turn composed before the catalogue loaded sends no file bytes; the server then sees only inlined text, the safe direction."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Edits outside the owned list: execution-core/src/lib.rs and model-gateway/src/lib.rs (one pub mod line each, unavoidable for the new modules), model-gateway/src/browser_run.rs (attachments: Vec::new() in a struct literal, compile necessity), model-gateway/src/zdr_posture.rs (CALL_SITES row renamed to run_tool_rounds_for_model_with_attachments) and tests/context_recovery_contract.rs (re-pointed after the entry-point split). Each is minimal and forced by the design; the lead should accept them explicitly or relocate them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Persistent Space roots: StagedInputs::stage calls remove_staged_dir(root/attachments), whose set_mode(dir, 0o755) follows symlinks. A program in an earlier call of the same run can plant attachments as a symlink to a host path, and the next staging call chmods the target as the execution-core user (the existing program-file write has the same symlink-following exposure). Before enabling staging for Space-bound turns, check symlink_metadata and unlink a non-directory entry without chmod. The same function also deletes a legitimate Space file or directory named attachments (reserved-name assumption, no test)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "CHAT_SANDBOX_ATTACHMENTS_ENABLED is read by sandbox_staging_enabled() but nothing calls it yet (sse.rs pending), while attachment_policy.rs already publishes modes.sandbox_files from the same variable, so the FE would send file bytes that the server drops. The switch must stay off until the sse.rs hand-off lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Kernel read-only enforcement (EROFS for both an existing file and a new file in attachments/), the 0555 directory removal on Drop, and the argv order (ro-bind after the writable --bind) are only unit-tested on argv shape here; the behavioural bwrap tests skipped on Windows and need the Linux container run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan row names a golden (code_interpreter staging, ZDR) in zdr_feature_table.rs and a log-redaction test; neither was added. The ZDR and waived refusal is covered only by unit tests of register_step_attachments and handle_code_interpreter, not through a real gRPC server."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RunInputs is keyed (org_id, run_id) and shared by every code_interpreter step of the run, so a concurrent step of the same run that carried no attachments can still read the registered files; S6 (Do) must decide whether that is intended. A repeat registration of a run silently keeps the first list (the later steps' lists are ignored)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The sandbox note is pushed as the last system message of the tool-round prompt only on turns with files, so prompt-cache prefix stability is lost for those turns; WS02 prompt ordering may want a fixed slot."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Zeroing is fill(0) plus black_box on the registry copy only; the gRPC request buffer, the workspace file and the gateway's RunAttachment copies are not zeroed (no zeroize dependency). Also the ZDR/waived check in execute_step uses req.zdr || caller.zdr || caller.zdr_waiver, while the gateway-side handle_code_interpreter checks only zdr (execution-core is the backstop)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "execution-core/src/code_interpreter.rs test writing_into_the_attachments_directory_fails_read_only has a raw line break inside the .join(\"...\") string literal (a scripted-edit artifact, around line 1585) instead of the \\n escape; it compiles and passes but is a stray LF in the source."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The literal-true switch parser is duplicated (attachment_policy.rs:174 and turn_attachments.rs enabled_with) and the mp-contracts caps (8 MiB per file, 16 MiB total, 8 files) are ceilings above the gateway's declared 1 MB / 3 MiB / 3 files; align both when WS08-S7 lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Pre-existing failures outside the slice: execution-core org_policy_characterisation (agent.rs dispatch shape drifted), model-gateway attachment_policy_contract::the_real_stream_route_carries_the_body_limit (http_routes.rs) and zdr_refusal_inventory (untyped ZDR refusal at browser_run.rs:802). They keep the plan's all-targets commands red until fixed by their owners."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Fix 1: in grpc.rs step_attachment_tests, step() now takes the run id and every test uses its own run id (run-none, run-refused, run-wrong-tool, run-tampered, run-unsafe-name, run-held) under a shared ORG const, so no two tests touch the same key in the process-global run_inputs registry. Fix 2: context_recovery_contract.rs the_prompt_snapshot_follows_the_round_not_the_turn now asserts run_tool_rounds delegates to run_tool_rounds_for_model, that run_tool_rounds_for_model delegates to run_tool_rounds_for_model_with_attachments, and points the round-loop and snapshot assertions at run_tool_rounds_for_model_with_attachments. CRLF style preserved in both files (CRLF count equals LF count). Status stays partial for the original reason: sse.rs still must call run_tool_rounds_for_model_with_attachments (lead shared edit below); keep CHAT_SANDBOX_ATTACHMENTS_ENABLED off until then. The earlier pre-existing failures in attachment_policy_contract (http_routes.rs) and zdr_refusal_inventory (browser_run.rs:802) are in files I did not touch for those assertions and were not re-run this round."
+  }
+ ]
+}

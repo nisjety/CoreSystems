@@ -1,0 +1,3088 @@
+diff --git a/apps/Model Plane/go/services/sandbox-manager/internal/server/egress_tier_test.go b/apps/Model Plane/go/services/sandbox-manager/internal/server/egress_tier_test.go
+new file mode 100644
+index 000000000..638b8abc1
+--- /dev/null
++++ b/apps/Model Plane/go/services/sandbox-manager/internal/server/egress_tier_test.go	
+@@ -0,0 +1,112 @@
++package server
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
++	"google.golang.org/protobuf/types/known/durationpb"
++
++	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
++)
++
++// acquireSpaceLease runs one Space-scoped AcquireLease against a verifier that
++// grants egressTier, and returns the response and the expectation the verifier
++// was given.
++func acquireSpaceLease(t *testing.T, s *Server, egressTier string) (*AcquireLeaseResponse, authz.CapabilityExpectation) {
++	t.Helper()
++	var got authz.CapabilityExpectation
++	s.capabilityVerify = func(_ string, _ string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
++		got = expect
++		return authz.VerifiedCapability{
++			Claims:     authz.SpaceCapabilityClaims{BackendID: "backend-1", Egress: "registries"},
++			EgressTier: egressTier,
++		}, nil
++	}
++	s.backendID = "backend-1"
++	resp, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
++		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
++		CapabilityDecision: "signed-token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
++	})
++	if err != nil {
++		t.Fatalf("AcquireLease: unexpected error: %v", err)
++	}
++	return resp, got
++}
++
++// Off, the response is unchanged and the verifier keeps its refusal rule.
++func TestEgressTiersOffLeavesTheResponseUnsetAndTheRefusalRuleInPlace(t *testing.T) {
++	s := newTestServer()
++	resp, expect := acquireSpaceLease(t, s, authz.EgressTierRegistries)
++	if resp.GetEgressTier() != mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED {
++		t.Fatalf("EgressTier = %v, want UNSPECIFIED while the switch is off", resp.GetEgressTier())
++	}
++	if expect.GrantEgressAtOff {
++		t.Fatal("the verifier must keep refusing an ungranted egress claim while the switch is off")
++	}
++	l, err := s.leases.GetAny(context.Background(), resp.GetLeaseId(), "org-1", "user-1", "backend-1")
++	if err != nil {
++		t.Fatalf("GetAny: %v", err)
++	}
++	if l.EgressTierPermitted != authz.EgressTierOff {
++		t.Fatalf("EgressTierPermitted = %q, want off while the switch is off", l.EgressTierPermitted)
++	}
++}
++
++// On, the granted tier is recorded on the lease and reported back.
++func TestEgressTiersOnRecordsAndReportsTheGrantedTier(t *testing.T) {
++	for _, tc := range []struct {
++		granted string
++		want    mpv1.SandboxEgressTier
++	}{
++		{authz.EgressTierOff, mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF},
++		{authz.EgressTierRegistries, mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_REGISTRIES},
++		{authz.EgressTierAllowlist, mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_ALLOWLIST},
++	} {
++		s := newTestServer().WithEgressTiers(true)
++		resp, expect := acquireSpaceLease(t, s, tc.granted)
++		if !expect.GrantEgressAtOff {
++			t.Fatal("D-E2: with the switch on the verifier must grant an ungranted claim at off")
++		}
++		if resp.GetEgressTier() != tc.want {
++			t.Fatalf("granted %q: EgressTier = %v, want %v", tc.granted, resp.GetEgressTier(), tc.want)
++		}
++		l, err := s.leases.GetAny(context.Background(), resp.GetLeaseId(), "org-1", "user-1", "backend-1")
++		if err != nil {
++			t.Fatalf("GetAny: %v", err)
++		}
++		if l.EgressTierPermitted != tc.granted {
++			t.Fatalf("EgressTierPermitted = %q, want %q", l.EgressTierPermitted, tc.granted)
++		}
++	}
++}
++
++// 'all' is not storable in Wave 3, and an unknown word is never a wider reach.
++func TestPermittedEgressTierNeverRecordsAllOrAnUnknownWord(t *testing.T) {
++	for _, granted := range []string{authz.EgressTierAll, "everything", "", "Registries"} {
++		if got := permittedEgressTier(true, granted); got != authz.EgressTierOff {
++			t.Fatalf("permittedEgressTier(true, %q) = %q, want off", granted, got)
++		}
++	}
++	if got := permittedEgressTier(false, authz.EgressTierAllowlist); got != authz.EgressTierOff {
++		t.Fatalf("switch off must record off, got %q", got)
++	}
++	if got := egressTierProto("unknown"); got != mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF {
++		t.Fatalf("egressTierProto(unknown) = %v, want OFF", got)
++	}
++}
++
++// A non-Space lease has no decision and so no egress.
++func TestANonSpaceLeaseRecordsEgressOff(t *testing.T) {
++	s := newTestServer().WithEgressTiers(true)
++	resp, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
++		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
++	})
++	if err != nil {
++		t.Fatalf("AcquireLease: %v", err)
++	}
++	if resp.GetEgressTier() != mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF {
++		t.Fatalf("EgressTier = %v, want OFF", resp.GetEgressTier())
++	}
++}
+diff --git a/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go b/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go
+index 453a45f79..27d00a69b 100644
+--- a/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go	
++++ b/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go	
+@@ -65,6 +65,12 @@ type Server struct {
+ 	// refuses before it removes anything while either is nil.
+ 	threadErase ThreadEraser
+ 	threadBlobs threadworkspace.BlobEraser
++	// egressTiersEnabled is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3). Off, every
++	// lease records egress off, the response leaves egress_tier unset, and an
++	// egress-capable claim the decision does not grant is refused exactly as
++	// before. On, that claim gets its lease at off instead (D-E2) and the
++	// granted tier is recorded on the lease and reported back.
++	egressTiersEnabled bool
+ }
+ 
+ // NewServer constructs a Server with the given stores. Space capability
+@@ -114,6 +120,41 @@ func (s *Server) WithThreadErasure(rows ThreadEraser, blobs threadworkspace.Blob
+ 	return s
+ }
+ 
++// WithEgressTiers wires the SANDBOX_MANAGER_EGRESS_TIERS switch (EP-9 E3). See
++// the egressTiersEnabled field for what it changes.
++func (s *Server) WithEgressTiers(enabled bool) *Server {
++	s.egressTiersEnabled = enabled
++	return s
++}
++
++// egressTierProto maps a recorded tier word onto the wire enum. A word this
++// build does not know reads as OFF, never as a wider reach.
++func egressTierProto(tier string) mpv1.SandboxEgressTier {
++	switch tier {
++	case authz.EgressTierRegistries:
++		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_REGISTRIES
++	case authz.EgressTierAllowlist:
++		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_ALLOWLIST
++	default:
++		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF
++	}
++}
++
++// permittedEgressTier is the tier a lease records for a verified decision.
++// 'all' is not storable in Wave 3 (D-E3): the verifier never grants it today,
++// and a decision that did is recorded as off rather than as the widest reach.
++func permittedEgressTier(enabled bool, granted string) string {
++	if !enabled {
++		return authz.EgressTierOff
++	}
++	switch granted {
++	case authz.EgressTierRegistries, authz.EgressTierAllowlist:
++		return granted
++	default:
++		return authz.EgressTierOff
++	}
++}
++
+ // AcquireLease creates a new lease for the requested scope.
+ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*AcquireLeaseResponse, error) {
+ 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "AcquireLease")))
+@@ -157,6 +198,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
+ 	spaceID := strings.TrimSpace(req.GetSpaceId())
+ 	backendID := ""
+ 	processesPermitted := false
++	egressTier := authz.EgressTierOff
+ 	var grant lease.SpaceGrant
+ 	if spaceID != "" {
+ 		if s.capabilityVerify == nil {
+@@ -164,6 +206,11 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
+ 		}
+ 		verified, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
+ 			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
++			// D-E2: with the switch on, an egress-capable claim the decision
++			// does not grant is verified at off instead of refused, as an
++			// ungranted process claim already is. execution-core enforces
++			// the recorded tier at its per-call boundary.
++			GrantEgressAtOff: s.egressTiersEnabled,
+ 		})
+ 		if err != nil {
+ 			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
+@@ -187,8 +234,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
+ 		// Control decision is in hand — and it becomes the ceiling the human
+ 		// read path applies to every process this lease admits (0004).
+ 		grant.RecipientAudienceRevision = verified.RecipientAudienceRevision
++		// Recorded for the same reason as processesPermitted: nothing later
++		// holds the decision. Hosts are never recorded, only the tier word.
++		egressTier = permittedEgressTier(s.egressTiersEnabled, verified.EgressTier)
+ 	}
+ 	grant.ProcessesPermitted = processesPermitted
++	grant.EgressTierPermitted = egressTier
+ 
+ 	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, grant, ttl)
+ 	if err != nil {
+@@ -196,6 +247,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
+ 		return nil, mapErr(err)
+ 	}
+ 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
++	// Unset while the switch is off, so the response is unchanged; read back
++	// off the created lease otherwise, like processes_permitted.
++	responseEgressTier := mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED
++	if s.egressTiersEnabled {
++		responseEgressTier = egressTierProto(l.EgressTierPermitted)
++	}
+ 	return &AcquireLeaseResponse{
+ 		LeaseId:   l.ID,
+ 		Endpoint:  l.Endpoint,
+@@ -210,6 +267,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
+ 		// preparing a spawn `RegisterProcess` would deny; that denial remains
+ 		// the authoritative one.
+ 		ProcessesPermitted: l.ProcessesPermitted,
++		EgressTier:         responseEgressTier,
+ 	}, nil
+ }
+ 
+diff --git a/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.down.sql b/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.down.sql
+new file mode 100644
+index 000000000..c36f0ed34
+--- /dev/null
++++ b/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.down.sql	
+@@ -0,0 +1,2 @@
++ALTER TABLE leases DROP CONSTRAINT IF EXISTS leases_egress_tier_permitted_check;
++ALTER TABLE leases DROP COLUMN IF EXISTS egress_tier_permitted;
+diff --git a/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.up.sql b/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.up.sql
+new file mode 100644
+index 000000000..c42d1d036
+--- /dev/null
++++ b/apps/Model Plane/go/services/sandbox-manager/migrations/0008_lease_egress_tier.up.sql	
+@@ -0,0 +1,20 @@
++-- EP-9 E3 sandbox egress: the egress tier a lease permits, decided once at
++-- acquire from the verified Control decision and kept on the row, as
++-- processes_permitted is (0003). Idempotent: the entrypoint re-runs every
++-- up.sql at each boot, with no ledger.
++--
++-- Hosts and paths are never stored here, only the tier word. 'all' is not
++-- storable in Wave 3 (D-E3), so the check refuses it as well as any unknown
++-- word. An existing row reads as off, which is what every lease granted so
++-- far was.
++ALTER TABLE leases ADD COLUMN IF NOT EXISTS egress_tier_permitted TEXT NOT NULL DEFAULT 'off';
++DO $$
++BEGIN
++    IF NOT EXISTS (
++        SELECT 1 FROM pg_constraint WHERE conname = 'leases_egress_tier_permitted_check'
++    ) THEN
++        ALTER TABLE leases ADD CONSTRAINT leases_egress_tier_permitted_check
++            CHECK (egress_tier_permitted IN ('off', 'registries', 'allowlist'));
++    END IF;
++END
++$$;
+diff --git a/apps/Model Plane/proto/model_plane/v1/sandboxes.proto b/apps/Model Plane/proto/model_plane/v1/sandboxes.proto
+index c6a26e7d3..5df136f98 100644
+--- a/apps/Model Plane/proto/model_plane/v1/sandboxes.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/sandboxes.proto	
+@@ -188,6 +188,33 @@ message AcquireLeaseResponse {
+   // `RegisterProcess` will deny; the registry's own check remains the
+   // authoritative one. Always false for a non-Space lease.
+   bool processes_permitted = 6;
++
++  // The sandbox egress tier this lease permits (EP-9 E3): the tier Control
++  // granted for the claim, persisted on the lease row like
++  // processes_permitted. A backend that claims egress the Space is not
++  // entitled to gets its lease at OFF rather than a refusal (D-E2).
++  // execution-core enforces the tier per call at its socket proxy and never
++  // goes above it. A non-Space lease is OFF. UNSPECIFIED (an older
++  // sandbox-manager, or its SANDBOX_MANAGER_EGRESS_TIERS switch off) is read
++  // as OFF.
++  SandboxEgressTier egress_tier = 7;
++}
++
++// Sandbox egress tiers (EP-9 D-E3), ordered by reach: each tier admits
++// strictly more hosts than the one before. A reader that meets a value it
++// does not know treats it as OFF, never as a wider reach.
++enum SandboxEgressTier {
++  // Not set; read as OFF.
++  SANDBOX_EGRESS_TIER_UNSPECIFIED = 0;
++  // No network: the sandbox has no route out at all.
++  SANDBOX_EGRESS_TIER_OFF = 1;
++  // A fixed, reviewed list of package registries.
++  SANDBOX_EGRESS_TIER_REGISTRIES = 2;
++  // The registries plus the Space's own allow-list.
++  SANDBOX_EGRESS_TIER_ALLOWLIST = 3;
++  // Unrestricted. In the vocabulary but not storable in Wave 3: Control
++  // refuses it and sandbox-manager never records it.
++  SANDBOX_EGRESS_TIER_ALL = 4;
+ }
+ 
+ message ReleaseLeaseRequest {
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/egress_tiers.rs b/apps/Model Plane/rust/crates/mp-contracts/src/egress_tiers.rs
+new file mode 100644
+index 000000000..206e476d0
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/egress_tiers.rs	
+@@ -0,0 +1,291 @@
++//! Sandbox egress tiers (EP-9 D-E3) and the hosts each one admits (E3).
++//!
++//! # The vocabulary
++//!
++//! A closed, ordered set: `off < registries < allowlist < all`. Each tier
++//! reaches strictly more of the network than the one before, so the tier a
++//! call runs at is the minimum of every ceiling that applies to it (the
++//! deployment switch, the lease, the run). A word this build does not know is
++//! `off`, never a wider reach, because every reader here is deciding how much
++//! network to grant.
++//!
++//! `all` is in the vocabulary so the wire can name it, but nothing grants it in
++//! Wave 3: Control refuses to store it, sandbox-manager records it as `off`,
++//! and the deployment switch reads it as `off`.
++//!
++//! # The hosts
++//!
++//! `registries` admits [`REGISTRY_HOSTS`], a short fixed list kept small on
++//! purpose: a CONNECT proxy sees the host, not the path, so every listed host
++//! is a host data can leave through. `allowlist` admits those plus the Space's
++//! own list from Control. Matching is exact on the canonical host name: no
++//! wildcard, no suffix match, no IP literal.
++
++use crate::sandbox_report::NetworkTier;
++
++/// Package registries the `registries` tier admits. Reviewed list; adding a
++/// host widens every Space at that tier, so it is a ledger change, not a tweak.
++pub const REGISTRY_HOSTS: &[&str] = &[
++    "pypi.org",
++    "files.pythonhosted.org",
++    "registry.npmjs.org",
++];
++
++/// The most hosts a Space allow-list may hold. Control enforces the same bound
++/// on write (E2); a longer list read here is refused as a whole.
++pub const MAX_ALLOWLIST_HOSTS: usize = 32;
++
++/// The legacy capability claim, which Control and sandbox-manager read as `off`.
++/// The claim for `off` stays this word so a deployment with egress switched off
++/// presents exactly the claim it did before tiers existed.
++pub const LEGACY_OFF_CLAIM: &str = "disabled_by_default";
++
++/// The position of `tier` in the order of reach.
++#[must_use]
++pub const fn rank(tier: NetworkTier) -> u8 {
++    match tier {
++        NetworkTier::Off => 0,
++        NetworkTier::Registries => 1,
++        NetworkTier::Allowlist => 2,
++        NetworkTier::All => 3,
++    }
++}
++
++/// The narrower of two tiers.
++#[must_use]
++pub const fn min_tier(a: NetworkTier, b: NetworkTier) -> NetworkTier {
++    if rank(a) <= rank(b) {
++        a
++    } else {
++        b
++    }
++}
++
++/// A tier word as Control and sandbox-manager spell it (`off`, `registries`,
++/// `allowlist`, `all`, or the legacy `disabled_by_default`). Anything else,
++/// including a different case, is `off`.
++#[must_use]
++pub fn parse_wire(raw: &str) -> NetworkTier {
++    match raw {
++        "registries" => NetworkTier::Registries,
++        "allowlist" => NetworkTier::Allowlist,
++        "all" => NetworkTier::All,
++        _ => NetworkTier::Off,
++    }
++}
++
++/// The deployment switch (`EXECUTION_SANDBOX_EGRESS`). Only the exact words
++/// `registries` and `allowlist` raise it; unset, empty, `all`, a typo or a
++/// different case leave it `off`, because this switch grants egress.
++#[must_use]
++pub fn parse_switch(raw: Option<&str>) -> NetworkTier {
++    match raw {
++        Some("registries") => NetworkTier::Registries,
++        Some("allowlist") => NetworkTier::Allowlist,
++        _ => NetworkTier::Off,
++    }
++}
++
++/// The `egress` value a backend claims for `tier` in its capability profile.
++#[must_use]
++pub const fn claim(tier: NetworkTier) -> &'static str {
++    match tier {
++        NetworkTier::Off => LEGACY_OFF_CLAIM,
++        NetworkTier::Registries => "registries",
++        NetworkTier::Allowlist => "allowlist",
++        NetworkTier::All => "all",
++    }
++}
++
++/// The canonical form of a host name, or `None` when `raw` is not one: ASCII
++/// letters, digits and hyphens in dot-separated labels of 1 to 63 characters,
++/// at least two labels, at most 253 characters, lower-cased, one trailing dot
++/// dropped. An IP literal is not a host name (its last label is numeric, or it
++/// holds a colon), so it is refused here and never reaches a resolver.
++#[must_use]
++pub fn canonical_host(raw: &str) -> Option<String> {
++    let host = raw.strip_suffix('.').unwrap_or(raw).to_ascii_lowercase();
++    if host.is_empty() || host.len() > 253 {
++        return None;
++    }
++    let labels: Vec<&str> = host.split('.').collect();
++    if labels.len() < 2 {
++        return None;
++    }
++    let valid_label = |label: &&str| {
++        !label.is_empty()
++            && label.len() <= 63
++            && !label.starts_with('-')
++            && !label.ends_with('-')
++            && label
++                .bytes()
++                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
++    };
++    if !labels.iter().all(valid_label) {
++        return None;
++    }
++    // A top-level label is never all digits; one that is makes this an IPv4 literal.
++    if labels
++        .last()
++        .is_some_and(|tld| tld.bytes().all(|byte| byte.is_ascii_digit()))
++    {
++        return None;
++    }
++    Some(host)
++}
++
++/// Whether a call at `tier` may reach `host`. `allowlist` is the Space's list
++/// as Control returned it; entries that are not canonical host names never
++/// match. `host` must already be canonical ([`canonical_host`]).
++#[must_use]
++pub fn host_admitted(tier: NetworkTier, host: &str, allowlist: &[String]) -> bool {
++    let registry = || REGISTRY_HOSTS.contains(&host);
++    match tier {
++        NetworkTier::Off => false,
++        NetworkTier::Registries => registry(),
++        NetworkTier::Allowlist => {
++            registry()
++                || (allowlist.len() <= MAX_ALLOWLIST_HOSTS
++                    && allowlist
++                        .iter()
++                        .any(|entry| canonical_host(entry).as_deref() == Some(host)))
++        }
++        // Not storable in Wave 3; nothing produces it, and it is named here
++        // only so the match is total.
++        NetworkTier::All => true,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const TIERS: [NetworkTier; 4] = [
++        NetworkTier::Off,
++        NetworkTier::Registries,
++        NetworkTier::Allowlist,
++        NetworkTier::All,
++    ];
++
++    #[test]
++    fn the_order_of_reach_is_strict() {
++        for pair in TIERS.windows(2) {
++            assert!(rank(pair[0]) < rank(pair[1]));
++        }
++    }
++
++    #[test]
++    fn min_tier_takes_the_narrower_whatever_the_order() {
++        for a in TIERS {
++            for b in TIERS {
++                let narrower = min_tier(a, b);
++                assert_eq!(narrower, min_tier(b, a));
++                assert_eq!(rank(narrower), rank(a).min(rank(b)));
++            }
++        }
++    }
++
++    #[test]
++    fn the_switch_is_raised_only_by_its_two_exact_words() {
++        assert_eq!(parse_switch(Some("registries")), NetworkTier::Registries);
++        assert_eq!(parse_switch(Some("allowlist")), NetworkTier::Allowlist);
++        for raw in [
++            None,
++            Some(""),
++            Some("off"),
++            Some("all"),
++            Some("true"),
++            Some("Registries"),
++            Some(" registries"),
++            Some("registries "),
++        ] {
++            assert_eq!(parse_switch(raw), NetworkTier::Off, "{raw:?}");
++        }
++    }
++
++    #[test]
++    fn an_unknown_wire_word_is_off() {
++        assert_eq!(parse_wire("registries"), NetworkTier::Registries);
++        assert_eq!(parse_wire("allowlist"), NetworkTier::Allowlist);
++        assert_eq!(parse_wire("all"), NetworkTier::All);
++        for raw in ["off", LEGACY_OFF_CLAIM, "", "ALL", "open", "allow_list"] {
++            assert_eq!(parse_wire(raw), NetworkTier::Off, "{raw}");
++        }
++    }
++
++    #[test]
++    fn the_off_claim_is_the_legacy_word_and_the_others_round_trip() {
++        assert_eq!(claim(NetworkTier::Off), LEGACY_OFF_CLAIM);
++        for tier in TIERS {
++            assert_eq!(parse_wire(claim(tier)), tier);
++        }
++    }
++
++    #[test]
++    fn canonical_host_lowercases_and_refuses_what_is_not_a_name() {
++        assert_eq!(canonical_host("PyPI.org.").as_deref(), Some("pypi.org"));
++        assert_eq!(
++            canonical_host("files.pythonhosted.org").as_deref(),
++            Some("files.pythonhosted.org")
++        );
++        for raw in [
++            "",
++            "localhost",
++            "10.0.0.1",
++            "169.254.169.254",
++            "[::1]",
++            "::1",
++            "pypi.org:443",
++            "user@pypi.org",
++            "*.pypi.org",
++            "-bad.org",
++            "bad-.org",
++            "a..org",
++            "pypi.org/simple",
++            "pyp\u{ed}.org",
++        ] {
++            assert!(canonical_host(raw).is_none(), "{raw} must not be a host");
++        }
++        assert!(canonical_host(&format!("{}.org", "a".repeat(64))).is_none());
++    }
++
++    #[test]
++    fn off_admits_nothing() {
++        for host in REGISTRY_HOSTS {
++            assert!(!host_admitted(NetworkTier::Off, host, &[]));
++        }
++    }
++
++    #[test]
++    fn registries_admits_exactly_the_reviewed_list() {
++        for host in REGISTRY_HOSTS {
++            assert!(host_admitted(NetworkTier::Registries, host, &[]));
++        }
++        for host in ["example.org", "evil.pypi.org", "pypi.org.evil.com", "npmjs.org"] {
++            assert!(!host_admitted(NetworkTier::Registries, host, &[]), "{host}");
++        }
++        // The Space list does not widen the registries tier.
++        let list = vec!["example.org".to_owned()];
++        assert!(!host_admitted(NetworkTier::Registries, "example.org", &list));
++    }
++
++    #[test]
++    fn allowlist_admits_the_registries_and_the_space_list_exactly() {
++        let list = vec!["Data.Example.org".to_owned(), "10.0.0.1".to_owned()];
++        assert!(host_admitted(NetworkTier::Allowlist, "pypi.org", &list));
++        assert!(host_admitted(NetworkTier::Allowlist, "data.example.org", &list));
++        assert!(!host_admitted(NetworkTier::Allowlist, "example.org", &list));
++        assert!(!host_admitted(NetworkTier::Allowlist, "x.data.example.org", &list));
++        assert!(!host_admitted(NetworkTier::Allowlist, "10.0.0.1", &list));
++    }
++
++    #[test]
++    fn an_over_long_space_list_admits_none_of_its_hosts() {
++        let list: Vec<String> = (0..=MAX_ALLOWLIST_HOSTS)
++            .map(|index| format!("host{index}.example.org"))
++            .collect();
++        assert!(!host_admitted(NetworkTier::Allowlist, "host0.example.org", &list));
++        // The registries are still reachable: the bound refuses the list, not the tier.
++        assert!(host_admitted(NetworkTier::Allowlist, "pypi.org", &list));
++    }
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 272a5c9ec..f144baf5d 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -11,6 +11,7 @@ pub mod deck_manifest;
+ pub mod deck_theme;
+ pub mod durable_gate;
+ pub mod effect_ledger;
++pub mod egress_tiers;
+ pub mod lifecycle_notice;
+ pub mod loop_fold;
+ pub mod loop_guard;
+diff --git a/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs b/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs
+index 19146c521..81396eef5 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs	
+@@ -54,6 +54,7 @@ use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
+ use mp_contracts::sandbox_report::{Enforcement, NetworkTier, SandboxReport};
+ use sha2::{Digest, Sha256};
+ 
++use crate::egress_proxy::{CallEgress, EgressCounts, EgressProxy};
+ use crate::executor;
+ use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
+ use crate::run_inputs::InputSet;
+@@ -215,6 +216,11 @@ struct CodeResult {
+     /// while the switch is off.
+     #[serde(skip_serializing_if = "Option::is_none")]
+     sandbox: Option<SandboxReport>,
++    /// Distinct hosts the call's egress proxy admitted and refused (EP-9 E3).
++    /// Present only for a call that ran at a tier above off, so every other
++    /// result is unchanged. Counts only: no host name or path is returned.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    egress: Option<EgressCounts>,
+ }
+ 
+ /// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
+@@ -265,6 +271,22 @@ fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxRepo
+     }
+ }
+ 
++/// The report for a run that went out through its own live proxy (EP-9 E3). The
++/// namespace was unshared and the proxy admitted only the tier's hosts, so the
++/// boundary is one the sandbox applied itself: `full`, named by the tier the
++/// call ran at rather than by the policy's host list.
++fn proxied_enforcement_report(sandboxed: bool, tier: NetworkTier) -> SandboxReport {
++    SandboxReport {
++        sandboxed,
++        network: tier,
++        enforcement: if sandboxed {
++            Enforcement::Full
++        } else {
++            Enforcement::Unenforced
++        },
++    }
++}
++
+ /// Parse and validate a `code_interpreter` tool input.
+ ///
+ /// # Errors
+@@ -622,6 +644,36 @@ pub async fn run_with_skills(
+     ro_inputs: Option<Arc<InputSet>>,
+     skills: Option<&Path>,
+     lease_id: Option<&str>,
++) -> Result<String, String> {
++    run_with_egress(
++        tool_input,
++        run_id,
++        step_id,
++        workspace_root,
++        ro_inputs,
++        skills,
++        lease_id,
++        &CallEgress::off(),
++    )
++    .await
++}
++
++/// [`run_with_skills`] at an egress tier (EP-9 E3). `egress` is built by the
++/// caller with [`CallEgress::resolve`] from the deployment switch, the lease's
++/// recorded tier and the run's ceiling, never from the tool input. At `off`
++/// this is exactly [`run_with_skills`]; above it the call runs behind its own
++/// proxy, and a proxy that cannot start fails the call rather than running it
++/// without one.
++#[allow(clippy::too_many_arguments)]
++pub async fn run_with_egress(
++    tool_input: &str,
++    run_id: &str,
++    step_id: &str,
++    workspace_root: Option<&Path>,
++    ro_inputs: Option<Arc<InputSet>>,
++    skills: Option<&Path>,
++    lease_id: Option<&str>,
++    egress: &CallEgress,
+ ) -> Result<String, String> {
+     let admission = executor::SpawnAdmission {
+         space_scoped: workspace_root.is_some(),
+@@ -636,6 +688,7 @@ pub async fn run_with_skills(
+         skills,
+         executor::code_exec_timeout(),
+         &admission,
++        egress,
+     )
+     .await
+ }
+@@ -693,11 +746,13 @@ async fn run_staged_with_skills(
+         skills,
+         timeout,
+         &executor::SpawnAdmission::NOT_SPACE,
++        &CallEgress::off(),
+     )
+     .await
+ }
+ 
+-/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9).
++/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9)
++/// and the call's egress tier (EP-9 E3).
+ #[allow(clippy::too_many_arguments)]
+ async fn run_admitted(
+     tool_input: &str,
+@@ -708,17 +763,18 @@ async fn run_admitted(
+     skills: Option<&Path>,
+     timeout: Duration,
+     admission: &executor::SpawnAdmission<'_>,
++    egress: &CallEgress,
+ ) -> Result<String, String> {
+     let mut request = parse_request(tool_input)?;
+     request.ro_inputs = ro_inputs;
+ 
+     if let Some(root) = workspace_root {
+-        return run_in_root(&request, root, timeout, true, skills, admission).await;
++        return run_in_root(&request, root, timeout, true, skills, admission, egress).await;
+     }
+ 
+     let workspace = Workspace::create(run_id, step_id)
+         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
+-    run_in_root(&request, workspace.path(), timeout, false, skills, admission).await
++    run_in_root(&request, workspace.path(), timeout, false, skills, admission, egress).await
+     // `workspace` drops here — and on every `?` above — removing the directory.
+ }
+ 
+@@ -732,6 +788,7 @@ async fn run_admitted(
+ /// already existed, byte-for-byte unchanged, before THIS call started (not
+ /// just this call's own staged inputs) — otherwise every call in a run would
+ /// re-report every file any earlier call, or hydrate, ever produced.
++#[allow(clippy::too_many_arguments)]
+ async fn run_in_root(
+     request: &CodeRequest,
+     root: &Path,
+@@ -739,6 +796,7 @@ async fn run_in_root(
+     persistent: bool,
+     skills: Option<&Path>,
+     admission: &executor::SpawnAdmission<'_>,
++    egress: &CallEgress,
+ ) -> Result<String, String> {
+     let pre_call_baseline = if persistent {
+         snapshot_file_hashes(root)
+@@ -802,22 +860,42 @@ async fn run_in_root(
+     // `open("out.xlsx","wb")` work while the rest of the container stays
+     // untouchable — and the `attachments/` bind then makes that one directory
+     // read-only again.
++    //
++    // EP-9 E3: a call at a tier above off runs behind its own proxy, started
++    // here and stopped when the call returns. Its policy names the tier's hosts
++    // so the admission gate sees an allow-list, but the proxy is what enforces
++    // it; with no proxy the call does not run.
++    let proxy = if egress.is_tiered() {
++        Some(EgressProxy::start(egress).map_err(|error| {
++            format!("code_interpreter could not start its egress proxy: {error}")
++        })?)
++    } else {
++        None
++    };
+     let policy = MpSandboxPolicy::WorkspaceWrite {
+         writable_roots: vec![root.to_path_buf()],
+-        network: MpNetworkPolicy::Disabled,
++        network: if proxy.is_some() {
++            MpNetworkPolicy::AllowDomains(egress.admitted_hosts())
++        } else {
++            MpNetworkPolicy::Disabled
++        },
+     };
+-    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
++    let mut env = child_env(root);
++    env.extend(egress.child_env());
++    let outcome = executor::execute_sandboxed_with_egress(
+         &policy,
+         request.language.program(),
+         &[program_file.to_owned()],
+         root,
+-        &child_env(root),
++        &env,
+         &ro_binds,
+         timeout,
+         admission,
++        proxy.as_ref(),
+     )
+     .await
+     .map_err(|error| format!("code_interpreter execution failed: {error}"))?;
++    let egress_counts = proxy.map(EgressProxy::finish);
+ 
+     let mut staged: Vec<&str> = Vec::with_capacity(request.files_in.len() + 1);
+     staged.push(program_file);
+@@ -826,8 +904,13 @@ async fn run_in_root(
+     let office = office_verify::verify_outputs(&files).await;
+ 
+     // Attached only while the switch is on, so the result is byte-identical without it.
+-    let sandbox = enforcement_report_requested()
+-        .then(|| enforcement_report(outcome.sandboxed, &policy.network()));
++    let sandbox = enforcement_report_requested().then(|| {
++        if egress_counts.is_some() {
++            proxied_enforcement_report(outcome.sandboxed, egress.tier)
++        } else {
++            enforcement_report(outcome.sandboxed, &policy.network())
++        }
++    });
+ 
+     serde_json::to_string(&CodeResult {
+         stdout: outcome.stdout,
+@@ -843,6 +926,7 @@ async fn run_in_root(
+             limit_hit: outcome.limit_hit,
+         },
+         sandbox,
++        egress: egress_counts,
+     })
+     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
+ }
+@@ -1139,6 +1223,7 @@ mod tests {
+                 limit_hit: None,
+             },
+             sandbox: None,
++            egress: None,
+         };
+         assert_eq!(
+             serde_json::to_string(&result).expect("serializes"),
+@@ -1164,6 +1249,7 @@ mod tests {
+                 limit_hit: None,
+             },
+             sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled)),
++            egress: None,
+         };
+         let json = serde_json::to_string(&result).expect("serializes");
+         assert!(
+@@ -1174,6 +1260,121 @@ mod tests {
+         );
+     }
+ 
++    /// EP-9 E3: a tiered call's report names its tier as fully enforced, and its
++    /// host counts follow the report. Counts only: no host is named.
++    #[test]
++    fn a_proxied_call_reports_its_tier_and_its_host_counts() {
++        let result = CodeResult {
++            stdout: String::new(),
++            stderr: String::new(),
++            exit_code: 0,
++            files: Vec::new(),
++            verification: Vec::new(),
++            verification_unchecked: 0,
++            previews: Vec::new(),
++            execution: ExecutionInfo {
++                sandboxed: true,
++                limits: "enforced",
++                limit_hit: None,
++            },
++            sandbox: Some(proxied_enforcement_report(true, NetworkTier::Registries)),
++            egress: Some(EgressCounts {
++                allowed_hosts: 2,
++                denied_hosts: 1,
++            }),
++        };
++        let json = serde_json::to_string(&result).expect("serializes");
++        assert!(
++            json.ends_with(
++                r#""sandbox":{"sandboxed":true,"network":"registries","enforcement":"full"},"egress":{"allowed_hosts":2,"denied_hosts":1}}"#
++            ),
++            "json: {json}"
++        );
++        assert_eq!(
++            proxied_enforcement_report(false, NetworkTier::Registries).enforcement,
++            Enforcement::Unenforced
++        );
++    }
++
++    /// An untiered call never starts a proxy, never gets proxy variables, and so
++    /// runs exactly as before E3: same policy, same environment, same result keys.
++    #[test]
++    fn an_untiered_call_is_unchanged_by_the_egress_seam() {
++        let off = CallEgress::off();
++        assert!(!off.is_tiered());
++        let ws = Path::new("/tmp/verevon-code-x");
++        let mut env = child_env(ws);
++        env.extend(off.child_env());
++        assert_eq!(env, child_env(ws));
++    }
++
++    /// A tiered call whose proxy cannot start never runs: the program is not
++    /// spawned without its boundary. A host without Unix sockets cannot start one.
++    #[cfg(not(unix))]
++    #[tokio::test]
++    async fn a_tiered_call_without_a_proxy_does_not_run() {
++        let egress = CallEgress::resolve(
++            NetworkTier::Registries,
++            NetworkTier::Registries,
++            NetworkTier::All,
++            &[],
++        );
++        let error = run_with_egress(
++            r#"{"code":"print(1)"}"#,
++            "run-egress",
++            "step-0",
++            None,
++            None,
++            None,
++            None,
++            &egress,
++        )
++        .await
++        .expect_err("no proxy, no run");
++        assert!(error.contains("egress proxy"), "{error}");
++    }
++
++    /// The boundary for real (Linux with bubblewrap and the bridge installed, as
++    /// in the CI container and the image): a program at the registries tier
++    /// cannot reach a host off the list, through the proxy or around it, and the
++    /// refusal is counted. Skipped where the sandbox or the bridge is missing.
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    async fn a_python_child_cannot_reach_an_unlisted_host() {
++        if !crate::sandbox::is_supported() || !crate::egress_proxy::bridge_available() {
++            return;
++        }
++        let egress = CallEgress::resolve(
++            NetworkTier::Registries,
++            NetworkTier::Registries,
++            NetworkTier::All,
++            &[],
++        );
++        let code = r#"
++import socket, urllib.request
++try:
++    urllib.request.urlopen("https://example.org/", timeout=10)
++    print("proxied:reached")
++except Exception as error:
++    print("proxied:refused")
++try:
++    socket.create_connection(("93.184.215.14", 443), timeout=5)
++    print("direct:reached")
++except OSError:
++    print("direct:refused")
++"#;
++        let input = serde_json::json!({ "code": code }).to_string();
++        let output = run_with_egress(&input, "run-egress", "step-0", None, None, None, None, &egress)
++            .await
++            .expect("the call runs");
++        let result: serde_json::Value = serde_json::from_str(&output).expect("json");
++        let stdout = result["stdout"].as_str().unwrap_or_default();
++        assert!(stdout.contains("proxied:refused"), "{stdout}");
++        assert!(stdout.contains("direct:refused"), "{stdout}");
++        assert_eq!(result["egress"]["denied_hosts"], 1, "{output}");
++        assert_eq!(result["egress"]["allowed_hosts"], 0, "{output}");
++    }
++
+     /// Only the exact value `true` enables the report, so a typo or another
+     /// spelling leaves every result as it was.
+     #[test]
+diff --git a/apps/Model Plane/rust/services/execution-core/src/egress_proxy.rs b/apps/Model Plane/rust/services/execution-core/src/egress_proxy.rs
+new file mode 100644
+index 000000000..16cbbda10
+--- /dev/null
++++ b/apps/Model Plane/rust/services/execution-core/src/egress_proxy.rs	
+@@ -0,0 +1,1215 @@
++//! The per-call egress proxy (EP-9 E3, D-E1): the host half of a tiered
++//! `code_interpreter` call's network boundary.
++//!
++//! # The boundary
++//!
++//! A tiered call runs with its network namespace unshared, so it has loopback
++//! and no route out. Its one path out is a Unix socket this module listens on
++//! and the sandbox binds in, reached from inside through `mp-netbridge` on
++//! `127.0.0.1:3128` where the program's proxy variables point. Everything the
++//! program sends leaves through here or not at all, so the allow-list is a
++//! boundary, not advice the program may ignore.
++//!
++//! # What the proxy admits
++//!
++//! `CONNECT host:443` and nothing else: no plain-HTTP forwarding, no other
++//! port, no IP literal. The host must be a canonical name the call's tier
++//! admits ([`mp_contracts::egress_tiers::host_admitted`]). The proxy resolves
++//! the name itself and refuses it when ANY answer is a private, loopback,
++//! link-local, metadata or otherwise non-public address, then connects to the
++//! address it checked, so a name cannot be re-pointed between check and use.
++//! This is the idea of Quarry's DNS guard, written fresh here with its own
++//! tests: no crate crosses the plane boundary.
++//!
++//! # What it keeps
++//!
++//! Counts of distinct allowed and denied hosts, returned in the tool result,
++//! and a log line per decision naming the host only. A CONNECT carries no path,
++//! and nothing from inside the tunnel is read, so no content is kept anywhere:
++//! there is nothing here for zero data retention to propagate to. ZDR and
++//! waived runs never get a tier above off in the first place (the run ceiling
++//! in `runtime_loop::agent`).
++//!
++//! # Residual risk
++//!
++//! A CONNECT proxy sees the host, not the request inside the tunnel, so data
++//! can leave inside a request to an admitted host. That is why the registries
++//! list is short and reviewed, `all` is not grantable, and every run that must
++//! not leak (ZDR, waived, plan mode, tainted, locked down) is held at off.
++
++use std::collections::BTreeSet;
++use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
++use std::path::{Path, PathBuf};
++use std::sync::{Arc, Mutex, OnceLock};
++#[cfg(unix)]
++use std::time::Duration;
++
++use mp_contracts::egress_tiers;
++use mp_contracts::sandbox_report::NetworkTier;
++
++/// The deployment switch: `off` (default), `registries` or `allowlist`. Only
++/// those exact words raise it; anything else is off, because it grants egress.
++pub const EGRESS_SWITCH_ENV: &str = "EXECUTION_SANDBOX_EGRESS";
++
++/// The bridge binary the sandbox image ships (`rust/tools/mp-netbridge`).
++pub const NETBRIDGE_BIN: &str = "/usr/local/bin/mp-netbridge";
++
++/// Where the program's proxy variables point inside the sandbox.
++pub const SANDBOX_PROXY_URL: &str = "http://127.0.0.1:3128";
++
++/// The only port a tunnel may open: package registries and allow-listed hosts
++/// are reached over HTTPS.
++pub const TUNNEL_PORT: u16 = 443;
++
++/// The host directory every call's socket directory is made under; covered by
++/// an empty tmpfs inside every sandbox (see `sandbox::EgressBridge`).
++const SOCKET_ROOT_NAME: &str = "verevon-egress";
++
++/// The longest request head read before a CONNECT is refused.
++#[cfg(unix)]
++const MAX_REQUEST_HEAD: usize = 8 * 1024;
++
++/// How long a client may take to send its CONNECT, and the upstream to accept.
++#[cfg(unix)]
++const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
++#[cfg(unix)]
++const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
++
++/// The deployment switch, read once: it is a property of the deployment.
++#[must_use]
++pub fn switch_tier() -> NetworkTier {
++    static TIER: OnceLock<NetworkTier> = OnceLock::new();
++    *TIER.get_or_init(|| egress_tiers::parse_switch(std::env::var(EGRESS_SWITCH_ENV).ok().as_deref()))
++}
++
++/// Whether the bridge binary is present in this image, decided once. A host
++/// without it cannot enforce a tier and claims off.
++#[must_use]
++pub fn bridge_available() -> bool {
++    static AVAILABLE: OnceLock<bool> = OnceLock::new();
++    *AVAILABLE.get_or_init(|| cfg!(unix) && Path::new(NETBRIDGE_BIN).is_file())
++}
++
++/// What one call may reach: its tier, and the Space's list when the tier is
++/// `allowlist`. Built by [`CallEgress::resolve`], never from tool input.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct CallEgress {
++    pub tier: NetworkTier,
++    pub allowlist: Vec<String>,
++}
++
++impl CallEgress {
++    /// No network: what every call gets unless all three ceilings allow more.
++    #[must_use]
++    pub fn off() -> Self {
++        Self {
++            tier: NetworkTier::Off,
++            allowlist: Vec::new(),
++        }
++    }
++
++    /// The tier a call runs at: the narrowest of the deployment switch, the
++    /// lease (what Control granted the Space and sandbox-manager recorded) and
++    /// the run (forced off for ZDR, waived, plan-mode, tainted and locked-down
++    /// runs). The Space's list is kept only when the result is `allowlist`.
++    #[must_use]
++    pub fn resolve(
++        switch: NetworkTier,
++        lease: NetworkTier,
++        run: NetworkTier,
++        allowlist: &[String],
++    ) -> Self {
++        let tier = egress_tiers::min_tier(egress_tiers::min_tier(switch, lease), run);
++        // `all` is not grantable in Wave 3, whichever ceiling named it.
++        let tier = if tier == NetworkTier::All {
++            NetworkTier::Off
++        } else {
++            tier
++        };
++        Self {
++            tier,
++            allowlist: if tier == NetworkTier::Allowlist {
++                allowlist.to_vec()
++            } else {
++                Vec::new()
++            },
++        }
++    }
++
++    /// Whether the call needs a proxy at all.
++    #[must_use]
++    pub fn is_tiered(&self) -> bool {
++        self.tier != NetworkTier::Off
++    }
++
++    /// The hosts the call may reach, for the policy's `AllowDomains` and the
++    /// report. Informational: the proxy decides per connection.
++    #[must_use]
++    pub fn admitted_hosts(&self) -> Vec<String> {
++        let mut hosts: Vec<String> = egress_tiers::REGISTRY_HOSTS
++            .iter()
++            .map(|host| (*host).to_owned())
++            .collect();
++        if self.tier == NetworkTier::Allowlist {
++            hosts.extend(
++                self.allowlist
++                    .iter()
++                    .filter_map(|entry| egress_tiers::canonical_host(entry)),
++            );
++        }
++        if self.tier == NetworkTier::Off {
++            hosts.clear();
++        }
++        hosts
++    }
++
++    /// The proxy variables the program runs with. Every common spelling, so
++    /// pip, npm, curl and Python's `urllib` all find the bridge.
++    #[must_use]
++    pub fn child_env(&self) -> Vec<(String, String)> {
++        if !self.is_tiered() {
++            return Vec::new();
++        }
++        [
++            "HTTPS_PROXY",
++            "https_proxy",
++            "HTTP_PROXY",
++            "http_proxy",
++            "npm_config_https_proxy",
++            "npm_config_proxy",
++        ]
++        .iter()
++        .map(|key| ((*key).to_owned(), SANDBOX_PROXY_URL.to_owned()))
++        .collect()
++    }
++}
++
++/// The tier a Space lease recorded, from `AcquireLeaseResponse.egress_tier`.
++/// Unspecified (an older sandbox-manager, or its switch off), `all` (never
++/// recorded in Wave 3) and a value this build does not know are all `off`.
++#[must_use]
++pub fn lease_tier(raw: i32) -> NetworkTier {
++    use mp_contracts::model_plane::v1::SandboxEgressTier;
++    match SandboxEgressTier::try_from(raw) {
++        Ok(SandboxEgressTier::Registries) => NetworkTier::Registries,
++        Ok(SandboxEgressTier::Allowlist) => NetworkTier::Allowlist,
++        _ => NetworkTier::Off,
++    }
++}
++
++/// What a run is at the moment a call dispatches, as far as its egress goes.
++/// Independent facts, any one of which holds the call at off.
++#[allow(clippy::struct_excessive_bools)]
++#[derive(Debug, Clone, Copy, Default)]
++pub struct RunEgressFacts {
++    /// The run is zero data retention.
++    pub zdr: bool,
++    /// The run's route is waived (DEC-32): it counts as zero retention for
++    /// every new egress.
++    pub waived: bool,
++    /// The run is in plan mode.
++    pub plan_mode: bool,
++    /// The run has read flagged content: a connector read in this round or an
++    /// earlier one, or a content-safety screen (WS23-S3).
++    pub tainted: bool,
++    /// The run states the read-only autonomy rung: where plan mode lands, and
++    /// where an org's lockdown or read-only mode cap is meant to land.
++    pub read_only_rung: bool,
++}
++
++/// The run's ceiling for its next call (EP-9 D-E3): off for a run that must
++/// not leak, otherwise `all`, which here means "no run-level limit" (the
++/// deployment switch and the lease still bound the call, and the call tier is
++/// never `all`).
++#[must_use]
++pub fn run_ceiling(facts: RunEgressFacts) -> NetworkTier {
++    if facts.zdr || facts.waived || facts.plan_mode || facts.tainted || facts.read_only_rung {
++        NetworkTier::Off
++    } else {
++        NetworkTier::All
++    }
++}
++
++/// What one Do run's `code_interpreter` calls may reach, held for the run's
++/// life: the run's own ceiling (set by the run loop, lowered to off once the
++/// run is tainted) and what its Space lease recorded (set when the lease is
++/// acquired). Kept here rather than threaded through every dispatch layer, and
++/// read at the spawn site, so no tool input can name or widen it.
++///
++/// A run with no entry runs at off: an `ExecuteStep` call, a run on a
++/// deployment with the switch off, and a run whose loop has already ended.
++#[derive(Debug, Default)]
++pub struct RunEgressRegistry {
++    runs: Mutex<std::collections::HashMap<(String, String), RunEntry>>,
++}
++
++#[derive(Debug, Clone)]
++struct RunEntry {
++    ceiling: NetworkTier,
++    lease: NetworkTier,
++    allowlist: Vec<String>,
++}
++
++/// The process-wide registry.
++#[must_use]
++pub fn run_egress() -> &'static RunEgressRegistry {
++    static REGISTRY: OnceLock<RunEgressRegistry> = OnceLock::new();
++    REGISTRY.get_or_init(RunEgressRegistry::default)
++}
++
++/// Removes a run's entry when the run loop that registered it ends, by any
++/// path: a terminal, an error or a dropped future.
++#[derive(Debug)]
++#[must_use = "the run's egress entry is removed when the guard drops"]
++pub struct RunEgressGuard {
++    registry: &'static RunEgressRegistry,
++    key: (String, String),
++}
++
++impl Drop for RunEgressGuard {
++    fn drop(&mut self) {
++        if let Ok(mut runs) = self.registry.runs.lock() {
++            runs.remove(&self.key);
++        }
++    }
++}
++
++impl RunEgressRegistry {
++    /// Holds an entry for the run until the guard drops. Both halves start at
++    /// off: the ceiling is set per call by [`RunEgressRegistry::set_ceiling`],
++    /// the lease half by [`RunEgressRegistry::record_lease`].
++    pub fn register(&'static self, org_id: &str, run_id: &str) -> RunEgressGuard {
++        let key = (org_id.to_owned(), run_id.to_owned());
++        if let Ok(mut runs) = self.runs.lock() {
++            runs.insert(
++                key.clone(),
++                RunEntry {
++                    ceiling: NetworkTier::Off,
++                    lease: NetworkTier::Off,
++                    allowlist: Vec::new(),
++                },
++            );
++        }
++        RunEgressGuard {
++            registry: self,
++            key,
++        }
++    }
++
++    /// Sets the run's ceiling for the call about to dispatch. The run loop
++    /// computes it before every `code_interpreter` call from what the run is
++    /// at that moment ([`run_ceiling`]), so a taint or plan mode that arrives
++    /// mid-run holds the next call at off.
++    pub fn set_ceiling(&self, org_id: &str, run_id: &str, ceiling: NetworkTier) {
++        if let Ok(mut runs) = self.runs.lock() {
++            if let Some(entry) = runs.get_mut(&(org_id.to_owned(), run_id.to_owned())) {
++                entry.ceiling = ceiling;
++            }
++        }
++    }
++
++    /// Records what the run's Space lease permits: the tier sandbox-manager
++    /// recorded and the Space's list from the Control decision the lease was
++    /// granted on. Ignored for a run that is not registered, so it stays off.
++    pub fn record_lease(&self, org_id: &str, run_id: &str, tier: NetworkTier, allowlist: &[String]) {
++        if let Ok(mut runs) = self.runs.lock() {
++            if let Some(entry) = runs.get_mut(&(org_id.to_owned(), run_id.to_owned())) {
++                entry.lease = tier;
++                entry.allowlist = allowlist.to_vec();
++            }
++        }
++    }
++
++    /// What the run's next call may reach under the deployment switch.
++    #[must_use]
++    pub fn call_egress(&self, org_id: &str, run_id: &str) -> CallEgress {
++        self.call_egress_with(switch_tier(), org_id, run_id)
++    }
++
++    /// [`RunEgressRegistry::call_egress`] with the switch injected.
++    #[must_use]
++    pub fn call_egress_with(&self, switch: NetworkTier, org_id: &str, run_id: &str) -> CallEgress {
++        let entry = self
++            .runs
++            .lock()
++            .ok()
++            .and_then(|runs| runs.get(&(org_id.to_owned(), run_id.to_owned())).cloned());
++        match entry {
++            Some(entry) => CallEgress::resolve(switch, entry.lease, entry.ceiling, &entry.allowlist),
++            None => CallEgress::off(),
++        }
++    }
++}
++
++/// Distinct hosts the proxy admitted and refused during one call.
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
++pub struct EgressCounts {
++    pub allowed_hosts: usize,
++    pub denied_hosts: usize,
++}
++
++/// Why a CONNECT was refused. The client sees only the status line.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Denial {
++    /// The head was not a well-formed HTTP request, or was too long.
++    Malformed,
++    /// A method other than CONNECT (plain-HTTP forwarding is not offered).
++    NotConnect,
++    /// A port other than [`TUNNEL_PORT`].
++    Port,
++    /// The target is not a canonical host name (an IP literal, for one).
++    NotAHostName,
++    /// The call's tier does not admit the host.
++    NotListed,
++    /// The name did not resolve.
++    Unresolved,
++    /// The name resolved to an address that is not public.
++    NonPublicAddress,
++    /// The upstream did not accept the connection.
++    Upstream,
++}
++
++impl Denial {
++    /// The response the client gets.
++    #[must_use]
++    pub const fn response(self) -> &'static [u8] {
++        match self {
++            Self::Malformed => b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n",
++            Self::NotConnect => b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n",
++            Self::Port | Self::NotAHostName | Self::NotListed | Self::NonPublicAddress => {
++                b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"
++            }
++            Self::Unresolved | Self::Upstream => b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n",
++        }
++    }
++
++    /// A short label for the log line.
++    #[must_use]
++    pub const fn label(self) -> &'static str {
++        match self {
++            Self::Malformed => "malformed",
++            Self::NotConnect => "not_connect",
++            Self::Port => "port",
++            Self::NotAHostName => "not_a_host_name",
++            Self::NotListed => "not_listed",
++            Self::Unresolved => "unresolved",
++            Self::NonPublicAddress => "non_public_address",
++            Self::Upstream => "upstream",
++        }
++    }
++}
++
++/// The success reply that opens the tunnel.
++#[cfg(unix)]
++const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection established\r\n\r\n";
++
++/// The target of a CONNECT request head: `CONNECT host:port HTTP/1.x`. Only
++/// the request line is read; headers are ignored.
++///
++/// # Errors
++/// [`Denial::Malformed`] or [`Denial::NotConnect`].
++pub fn parse_connect(head: &[u8]) -> Result<(String, u16), Denial> {
++    let text = std::str::from_utf8(head).map_err(|_| Denial::Malformed)?;
++    let line = text.split("\r\n").next().ok_or(Denial::Malformed)?;
++    let mut parts = line.split(' ');
++    let (Some(method), Some(target), Some(version), None) =
++        (parts.next(), parts.next(), parts.next(), parts.next())
++    else {
++        return Err(Denial::Malformed);
++    };
++    if !version.starts_with("HTTP/1.") {
++        return Err(Denial::Malformed);
++    }
++    if method != "CONNECT" {
++        return Err(Denial::NotConnect);
++    }
++    // An IPv6 literal is bracketed; it is split here and refused as a non-name.
++    let (host, port) = target.rsplit_once(':').ok_or(Denial::Malformed)?;
++    let port: u16 = port.parse().map_err(|_| Denial::Malformed)?;
++    if host.is_empty() {
++        return Err(Denial::Malformed);
++    }
++    Ok((host.to_owned(), port))
++}
++
++/// The canonical host a call may tunnel to, before any resolution.
++///
++/// # Errors
++/// [`Denial::Port`], [`Denial::NotAHostName`] or [`Denial::NotListed`].
++pub fn admit_target(egress: &CallEgress, host: &str, port: u16) -> Result<String, Denial> {
++    if port != TUNNEL_PORT {
++        return Err(Denial::Port);
++    }
++    let host = egress_tiers::canonical_host(host).ok_or(Denial::NotAHostName)?;
++    if !egress_tiers::host_admitted(egress.tier, &host, &egress.allowlist) {
++        return Err(Denial::NotListed);
++    }
++    Ok(host)
++}
++
++/// Whether `ip` is a public unicast address a sandbox may reach. Refuses
++/// loopback, private (RFC 1918, ULA), link-local (which holds the cloud
++/// metadata address 169.254.169.254), carrier-grade NAT, unspecified,
++/// broadcast, multicast, documentation and benchmarking ranges, the
++/// `0.0.0.0/8` and `240.0.0.0/4` blocks, and an IPv4-mapped or NAT64 IPv6
++/// address whose IPv4 part is any of those.
++#[must_use]
++pub fn is_public_address(ip: IpAddr) -> bool {
++    match ip {
++        IpAddr::V4(v4) => is_public_v4(v4),
++        IpAddr::V6(v6) => is_public_v6(v6),
++    }
++}
++
++fn is_public_v4(ip: Ipv4Addr) -> bool {
++    let [a, b, c, _] = ip.octets();
++    !(ip.is_unspecified()
++        || ip.is_loopback()
++        || ip.is_private()
++        || ip.is_link_local()
++        || ip.is_broadcast()
++        || ip.is_multicast()
++        || ip.is_documentation()
++        || a == 0
++        || a >= 240
++        // 100.64.0.0/10, carrier-grade NAT.
++        || (a == 100 && (64..=127).contains(&b))
++        // 192.0.0.0/24, IETF protocol assignments.
++        || (a == 192 && b == 0 && c == 0)
++        // 198.18.0.0/15, benchmarking.
++        || (a == 198 && (b == 18 || b == 19)))
++}
++
++fn is_public_v6(ip: Ipv6Addr) -> bool {
++    if let Some(v4) = ip.to_ipv4_mapped() {
++        return is_public_v4(v4);
++    }
++    let segments = ip.segments();
++    // 64:ff9b::/96, NAT64: the embedded IPv4 address decides.
++    if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
++        let [_, _, _, _, _, _, high, low] = segments;
++        let [a, b] = high.to_be_bytes();
++        let [c, d] = low.to_be_bytes();
++        return is_public_v4(Ipv4Addr::new(a, b, c, d));
++    }
++    !(ip.is_unspecified()
++        || ip.is_loopback()
++        || ip.is_multicast()
++        // fc00::/7, unique local.
++        || (segments[0] & 0xfe00) == 0xfc00
++        // fe80::/10, link-local.
++        || (segments[0] & 0xffc0) == 0xfe80
++        // 2001:db8::/32, documentation.
++        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
++        // ::/96, the deprecated IPv4-compatible block.
++        || segments[..6] == [0, 0, 0, 0, 0, 0])
++}
++
++/// The address to connect to, chosen from a name's answers. Refuses the name
++/// when ANY answer fails `permitted`: a name that answers with one public and
++/// one private address is treated as an attempt to reach the private one.
++///
++/// # Errors
++/// [`Denial::Unresolved`] for no answers, [`Denial::NonPublicAddress`] otherwise.
++pub fn choose_address(
++    answers: &[SocketAddr],
++    permitted: fn(IpAddr) -> bool,
++) -> Result<SocketAddr, Denial> {
++    let first = answers.first().ok_or(Denial::Unresolved)?;
++    if answers.iter().any(|answer| !permitted(answer.ip())) {
++        return Err(Denial::NonPublicAddress);
++    }
++    Ok(*first)
++}
++
++/// Resolves a host name. Injected so tests can answer with any address.
++pub type Resolver = Arc<
++    dyn Fn(String, u16) -> futures::future::BoxFuture<'static, std::io::Result<Vec<SocketAddr>>>
++        + Send
++        + Sync,
++>;
++
++/// The system resolver.
++fn system_resolver() -> Resolver {
++    Arc::new(|host: String, port: u16| {
++        Box::pin(async move {
++            Ok(tokio::net::lookup_host((host.as_str(), port))
++                .await?
++                .collect::<Vec<_>>())
++        })
++    })
++}
++
++/// Distinct hosts seen by one call's proxy.
++#[derive(Debug, Default)]
++struct Tally {
++    allowed: BTreeSet<String>,
++    denied: BTreeSet<String>,
++}
++
++/// The longest host name kept in the tally. A refused target can be anything
++/// the program wrote, so the key is bounded.
++const MAX_TALLIED_HOST: usize = 253;
++
++impl Tally {
++    #[cfg_attr(not(unix), allow(dead_code))]
++    fn record(&mut self, host: &str, allowed: bool) {
++        let key: String = host.chars().take(MAX_TALLIED_HOST).collect::<String>().to_ascii_lowercase();
++        if allowed {
++            self.allowed.insert(key);
++        } else {
++            self.denied.insert(key);
++        }
++    }
++
++    fn counts(&self) -> EgressCounts {
++        EgressCounts {
++            allowed_hosts: self.allowed.len(),
++            denied_hosts: self.denied.len(),
++        }
++    }
++}
++
++/// One call's running proxy. Dropping it stops the proxy and removes the
++/// socket directory; [`EgressProxy::finish`] does the same and returns the
++/// counts.
++pub struct EgressProxy {
++    root: PathBuf,
++    dir: PathBuf,
++    socket: PathBuf,
++    tally: Arc<Mutex<Tally>>,
++    task: tokio::task::JoinHandle<()>,
++}
++
++impl std::fmt::Debug for EgressProxy {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("EgressProxy")
++            .field("socket", &self.socket)
++            .field("live", &self.is_live())
++            .finish_non_exhaustive()
++    }
++}
++
++/// The host directory every call's socket directory is made under.
++#[must_use]
++pub fn socket_root() -> PathBuf {
++    std::env::temp_dir().join(SOCKET_ROOT_NAME)
++}
++
++impl EgressProxy {
++    /// Start the proxy for one call: a fresh private directory under
++    /// [`socket_root`], a socket in it, and an accept loop admitting what
++    /// `egress` allows.
++    ///
++    /// # Errors
++    /// `Unsupported` for an untiered call or a host without Unix sockets; the
++    /// filesystem or bind error otherwise. The call must not run without it.
++    pub fn start(egress: &CallEgress) -> std::io::Result<Self> {
++        Self::start_with(egress, &socket_root(), system_resolver(), is_public_address)
++    }
++
++    /// [`EgressProxy::start`] with the root, the resolver and the address
++    /// guard injected: the testable seam. Production always passes
++    /// [`is_public_address`].
++    pub(crate) fn start_with(
++        egress: &CallEgress,
++        root: &Path,
++        resolver: Resolver,
++        permitted: fn(IpAddr) -> bool,
++    ) -> std::io::Result<Self> {
++        if !egress.is_tiered() {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::Unsupported,
++                "an untiered call has no egress proxy",
++            ));
++        }
++        Self::listen(egress.clone(), root, resolver, permitted)
++    }
++
++    #[cfg(unix)]
++    fn listen(
++        egress: CallEgress,
++        root: &Path,
++        resolver: Resolver,
++        permitted: fn(IpAddr) -> bool,
++    ) -> std::io::Result<Self> {
++        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++        std::fs::DirBuilder::new()
++            .recursive(true)
++            .mode(0o700)
++            .create(root)?;
++        let dir = root.join(format!(
++            "call-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++        ));
++        // A fresh directory, never a reused one: `create`, not `create_all`.
++        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
++        let socket = dir.join(crate::sandbox::SANDBOX_SOCKET_NAME);
++        let listener = match tokio::net::UnixListener::bind(&socket) {
++            Ok(listener) => listener,
++            Err(error) => {
++                let _ = std::fs::remove_dir_all(&dir);
++                return Err(error);
++            }
++        };
++        // The sandbox user may differ from ours under a user namespace; the
++        // directory's 0700 is what keeps other host processes out.
++        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))?;
++        let tally = Arc::new(Mutex::new(Tally::default()));
++        let egress = Arc::new(egress);
++        let task = {
++            let tally = Arc::clone(&tally);
++            tokio::spawn(async move {
++                loop {
++                    let Ok((stream, _)) = listener.accept().await else {
++                        return;
++                    };
++                    let (egress, tally, resolver) =
++                        (Arc::clone(&egress), Arc::clone(&tally), Arc::clone(&resolver));
++                    tokio::spawn(async move {
++                        serve(stream, &egress, &tally, &resolver, permitted).await;
++                    });
++                }
++            })
++        };
++        Ok(Self {
++            root: root.to_path_buf(),
++            dir,
++            socket,
++            tally,
++            task,
++        })
++    }
++
++    #[cfg(not(unix))]
++    fn listen(
++        _egress: CallEgress,
++        _root: &Path,
++        _resolver: Resolver,
++        _permitted: fn(IpAddr) -> bool,
++    ) -> std::io::Result<Self> {
++        Err(std::io::Error::new(
++            std::io::ErrorKind::Unsupported,
++            "the egress proxy needs Unix sockets, which this host does not have",
++        ))
++    }
++
++    /// The host directory every call's socket lives under.
++    #[must_use]
++    pub fn socket_root(&self) -> &Path {
++        &self.root
++    }
++
++    /// This call's socket on the host.
++    #[must_use]
++    pub fn socket_path(&self) -> &Path {
++        &self.socket
++    }
++
++    /// Whether the accept loop is still running. The spawn gate checks this,
++    /// not a proxy environment variable, before it admits a network policy.
++    #[must_use]
++    pub fn is_live(&self) -> bool {
++        !self.task.is_finished() && self.socket.exists()
++    }
++
++    /// Stop the proxy and return the call's counts.
++    #[must_use]
++    pub fn finish(self) -> EgressCounts {
++        let counts = self
++            .tally
++            .lock()
++            .map(|tally| tally.counts())
++            .unwrap_or_default();
++        // `self` drops here: the loop stops and the directory goes.
++        counts
++    }
++}
++
++impl Drop for EgressProxy {
++    fn drop(&mut self) {
++        self.task.abort();
++        let _ = std::fs::remove_dir_all(&self.dir);
++    }
++}
++
++/// Serve one connection: read the CONNECT, decide, then tunnel or refuse.
++#[cfg(unix)]
++async fn serve(
++    mut stream: tokio::net::UnixStream,
++    egress: &CallEgress,
++    tally: &Mutex<Tally>,
++    resolver: &Resolver,
++    permitted: fn(IpAddr) -> bool,
++) {
++    use tokio::io::AsyncWriteExt;
++
++    let decision = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await {
++        Ok(Ok(head)) => decide(&head, egress, resolver, permitted).await,
++        Ok(Err(_)) | Err(_) => Err((None, Denial::Malformed)),
++    };
++    match decision {
++        Ok((host, mut upstream)) => {
++            record(tally, &host, true);
++            tracing::info!(host = %host, "sandbox egress: tunnel opened");
++            if stream.write_all(ESTABLISHED).await.is_ok() {
++                let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
++            }
++        }
++        Err((host, denial)) => {
++            if let Some(host) = &host {
++                record(tally, host, false);
++            }
++            tracing::info!(
++                host = host.as_deref().unwrap_or(""),
++                reason = denial.label(),
++                "sandbox egress: refused"
++            );
++            let _ = stream.write_all(denial.response()).await;
++        }
++    }
++}
++
++#[cfg(unix)]
++fn record(tally: &Mutex<Tally>, host: &str, allowed: bool) {
++    if let Ok(mut tally) = tally.lock() {
++        tally.record(host, allowed);
++    }
++}
++
++/// The decision for one request head: the canonical host and an open upstream
++/// connection, or the denial with the host it named (when it named one).
++#[cfg(unix)]
++async fn decide(
++    head: &[u8],
++    egress: &CallEgress,
++    resolver: &Resolver,
++    permitted: fn(IpAddr) -> bool,
++) -> Result<(String, tokio::net::TcpStream), (Option<String>, Denial)> {
++    let (raw_host, port) = parse_connect(head).map_err(|denial| (None, denial))?;
++    let host = admit_target(egress, &raw_host, port).map_err(|denial| (Some(raw_host), denial))?;
++    let answers = (resolver.as_ref())(host.clone(), port)
++        .await
++        .map_err(|_| (Some(host.clone()), Denial::Unresolved))?;
++    let address = choose_address(&answers, permitted).map_err(|denial| (Some(host.clone()), denial))?;
++    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(address)).await
++    {
++        Ok(Ok(upstream)) => Ok((host, upstream)),
++        _ => Err((Some(host), Denial::Upstream)),
++    }
++}
++
++/// Read up to the end of the request head (`\r\n\r\n`). A CONNECT client sends
++/// nothing after its head until it has the reply, so nothing is lost by
++/// stopping there.
++#[cfg(unix)]
++async fn read_head(stream: &mut tokio::net::UnixStream) -> std::io::Result<Vec<u8>> {
++    use tokio::io::AsyncReadExt;
++
++    let mut head = Vec::with_capacity(512);
++    let mut byte = [0u8; 1];
++    while !head.ends_with(b"\r\n\r\n") {
++        if head.len() >= MAX_REQUEST_HEAD {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "request head too long",
++            ));
++        }
++        if stream.read(&mut byte).await? == 0 {
++            return Err(std::io::ErrorKind::UnexpectedEof.into());
++        }
++        head.push(byte[0]);
++    }
++    Ok(head)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn registries() -> CallEgress {
++        CallEgress::resolve(
++            NetworkTier::Registries,
++            NetworkTier::Registries,
++            NetworkTier::All,
++            &[],
++        )
++    }
++
++    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
++        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
++    }
++
++    #[test]
++    fn the_call_tier_is_the_narrowest_ceiling() {
++        use NetworkTier::{All, Allowlist, Off, Registries};
++        assert_eq!(CallEgress::resolve(Off, Allowlist, All, &[]).tier, Off);
++        assert_eq!(CallEgress::resolve(Allowlist, Off, All, &[]).tier, Off);
++        assert_eq!(CallEgress::resolve(Allowlist, Allowlist, Off, &[]).tier, Off);
++        assert_eq!(CallEgress::resolve(Registries, Allowlist, All, &[]).tier, Registries);
++        assert_eq!(CallEgress::resolve(Allowlist, Registries, All, &[]).tier, Registries);
++        assert_eq!(CallEgress::resolve(Allowlist, Allowlist, All, &[]).tier, Allowlist);
++        // `all` is never granted, even when every ceiling names it.
++        assert_eq!(CallEgress::resolve(All, All, All, &[]).tier, Off);
++    }
++
++    #[test]
++    fn the_space_list_is_kept_only_at_the_allowlist_tier() {
++        let list = vec!["data.example.org".to_owned()];
++        let at_registries =
++            CallEgress::resolve(NetworkTier::Allowlist, NetworkTier::Registries, NetworkTier::All, &list);
++        assert!(at_registries.allowlist.is_empty());
++        let at_allowlist =
++            CallEgress::resolve(NetworkTier::Allowlist, NetworkTier::Allowlist, NetworkTier::All, &list);
++        assert_eq!(at_allowlist.allowlist, list);
++        assert!(at_allowlist.admitted_hosts().contains(&"data.example.org".to_owned()));
++    }
++
++    #[test]
++    fn an_untiered_call_gets_no_proxy_variables_and_no_hosts() {
++        let off = CallEgress::off();
++        assert!(!off.is_tiered());
++        assert!(off.child_env().is_empty());
++        assert!(off.admitted_hosts().is_empty());
++        let tiered = registries().child_env();
++        assert!(tiered.contains(&("HTTPS_PROXY".to_owned(), SANDBOX_PROXY_URL.to_owned())));
++        assert!(tiered.contains(&("npm_config_https_proxy".to_owned(), SANDBOX_PROXY_URL.to_owned())));
++    }
++
++    #[test]
++    fn only_a_well_formed_connect_parses() {
++        assert_eq!(
++            parse_connect(b"CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org:443\r\n\r\n"),
++            Ok(("pypi.org".to_owned(), 443))
++        );
++        assert_eq!(
++            parse_connect(b"GET http://pypi.org/simple/ HTTP/1.1\r\n\r\n"),
++            Err(Denial::NotConnect)
++        );
++        for head in [
++            &b"CONNECT pypi.org HTTP/1.1\r\n\r\n"[..],
++            b"CONNECT pypi.org:https HTTP/1.1\r\n\r\n",
++            b"CONNECT :443 HTTP/1.1\r\n\r\n",
++            b"CONNECT pypi.org:443 SPDY/3\r\n\r\n",
++            b"CONNECT pypi.org:443\r\n\r\n",
++            b"\xff\xfe",
++        ] {
++            assert_eq!(parse_connect(head), Err(Denial::Malformed), "{head:?}");
++        }
++    }
++
++    #[test]
++    fn the_proxy_admits_a_listed_host_and_refuses_an_unlisted_one() {
++        let egress = registries();
++        assert_eq!(admit_target(&egress, "PyPI.org", 443), Ok("pypi.org".to_owned()));
++        assert_eq!(admit_target(&egress, "example.org", 443), Err(Denial::NotListed));
++        assert_eq!(admit_target(&egress, "pypi.org", 80), Err(Denial::Port));
++        assert_eq!(admit_target(&CallEgress::off(), "pypi.org", 443), Err(Denial::NotListed));
++    }
++
++    #[test]
++    fn the_proxy_refuses_an_ip_literal() {
++        let egress = registries();
++        for literal in ["151.101.0.223", "10.0.0.1", "169.254.169.254", "[2a04:4e42::223]", "::1"] {
++            assert_eq!(
++                admit_target(&egress, literal, 443),
++                Err(Denial::NotAHostName),
++                "{literal}"
++            );
++        }
++    }
++
++    #[test]
++    fn a_name_resolving_to_a_private_or_metadata_address_is_refused() {
++        for ip in [
++            v4(10, 0, 0, 1),
++            v4(169, 254, 169, 254),
++            v4(127, 0, 0, 1),
++            v4(192, 168, 1, 1),
++            v4(172, 16, 0, 1),
++            v4(100, 64, 0, 1),
++            v4(0, 0, 0, 0),
++            v4(255, 255, 255, 255),
++            IpAddr::V6(Ipv6Addr::LOCALHOST),
++            IpAddr::V6("fd00::1".parse().unwrap()),
++            IpAddr::V6("fe80::1".parse().unwrap()),
++            IpAddr::V6("::ffff:169.254.169.254".parse().unwrap()),
++            IpAddr::V6("64:ff9b::a00:1".parse().unwrap()),
++        ] {
++            assert!(!is_public_address(ip), "{ip} must not be public");
++            assert_eq!(
++                choose_address(&[SocketAddr::new(ip, 443)], is_public_address),
++                Err(Denial::NonPublicAddress),
++                "{ip}"
++            );
++        }
++        for ip in [
++            v4(151, 101, 0, 223),
++            IpAddr::V6("2a04:4e42::223".parse().unwrap()),
++        ] {
++            assert!(is_public_address(ip), "{ip} is public");
++        }
++    }
++
++    #[test]
++    fn one_private_answer_among_public_ones_refuses_the_name() {
++        let answers = [
++            SocketAddr::new(v4(151, 101, 0, 223), 443),
++            SocketAddr::new(v4(10, 0, 0, 1), 443),
++        ];
++        assert_eq!(
++            choose_address(&answers, is_public_address),
++            Err(Denial::NonPublicAddress)
++        );
++        assert_eq!(choose_address(&[], is_public_address), Err(Denial::Unresolved));
++    }
++
++    #[test]
++    fn the_tally_counts_distinct_hosts_case_blind() {
++        let mut tally = Tally::default();
++        tally.record("pypi.org", true);
++        tally.record("PyPI.org", true);
++        tally.record("example.org", false);
++        tally.record("example.org", false);
++        tally.record("10.0.0.1", false);
++        assert_eq!(
++            tally.counts(),
++            EgressCounts {
++                allowed_hosts: 1,
++                denied_hosts: 2
++            }
++        );
++        assert_eq!(
++            serde_json::to_string(&tally.counts()).unwrap(),
++            r#"{"allowed_hosts":1,"denied_hosts":2}"#
++        );
++    }
++
++    #[test]
++    fn an_untiered_call_cannot_start_a_proxy() {
++        let err = EgressProxy::start_with(
++            &CallEgress::off(),
++            &std::env::temp_dir().join("verevon-egress-test-off"),
++            system_resolver(),
++            is_public_address,
++        )
++        .expect_err("no proxy for an untiered call");
++        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
++    }
++
++    #[test]
++    fn a_lease_tier_reads_off_unless_it_names_a_grantable_tier() {
++        use mp_contracts::model_plane::v1::SandboxEgressTier;
++        assert_eq!(lease_tier(SandboxEgressTier::Registries as i32), NetworkTier::Registries);
++        assert_eq!(lease_tier(SandboxEgressTier::Allowlist as i32), NetworkTier::Allowlist);
++        for raw in [
++            SandboxEgressTier::Unspecified as i32,
++            SandboxEgressTier::Off as i32,
++            SandboxEgressTier::All as i32,
++            99,
++            -1,
++        ] {
++            assert_eq!(lease_tier(raw), NetworkTier::Off, "{raw}");
++        }
++    }
++
++    /// D-E3: ZDR, waived, plan-mode, tainted and read-only runs are held at
++    /// off; any one of them is enough.
++    #[test]
++    fn a_run_that_must_not_leak_is_held_at_off() {
++        assert_eq!(run_ceiling(RunEgressFacts::default()), NetworkTier::All);
++        let each: [fn(&mut RunEgressFacts); 5] = [
++            |facts| facts.zdr = true,
++            |facts| facts.waived = true,
++            |facts| facts.plan_mode = true,
++            |facts| facts.tainted = true,
++            |facts| facts.read_only_rung = true,
++        ];
++        for (index, set) in each.iter().enumerate() {
++            let mut facts = RunEgressFacts::default();
++            set(&mut facts);
++            assert_eq!(run_ceiling(facts), NetworkTier::Off, "fact {index}");
++            // Whatever the switch and the lease allow, the call is off.
++            assert!(!CallEgress::resolve(
++                NetworkTier::Allowlist,
++                NetworkTier::Allowlist,
++                run_ceiling(facts),
++                &["data.example.org".to_owned()],
++            )
++            .is_tiered());
++        }
++    }
++
++    fn registry() -> &'static RunEgressRegistry {
++        Box::leak(Box::new(RunEgressRegistry::default()))
++    }
++
++    #[test]
++    fn an_unregistered_run_is_off_whatever_its_lease_says() {
++        let runs = registry();
++        runs.record_lease("org-a", "run-1", NetworkTier::Allowlist, &["data.example.org".to_owned()]);
++        assert_eq!(
++            runs.call_egress_with(NetworkTier::Allowlist, "org-a", "run-1"),
++            CallEgress::off()
++        );
++    }
++
++    #[test]
++    fn a_registered_run_takes_the_narrowest_of_switch_lease_and_ceiling() {
++        let runs = registry();
++        let _guard = runs.register("org-a", "run-1");
++        let list = vec!["data.example.org".to_owned()];
++        // Nothing set yet: a fresh entry is off on both halves.
++        runs.record_lease("org-a", "run-1", NetworkTier::Allowlist, &list);
++        assert!(!runs.call_egress_with(NetworkTier::Allowlist, "org-a", "run-1").is_tiered());
++        runs.set_ceiling("org-a", "run-1", NetworkTier::All);
++        let call = runs.call_egress_with(NetworkTier::Allowlist, "org-a", "run-1");
++        assert_eq!(call.tier, NetworkTier::Allowlist);
++        assert_eq!(call.allowlist, list);
++        assert_eq!(
++            runs.call_egress_with(NetworkTier::Registries, "org-a", "run-1").tier,
++            NetworkTier::Registries
++        );
++        assert!(!runs.call_egress_with(NetworkTier::Off, "org-a", "run-1").is_tiered());
++        // Another org's run of the same id sees nothing of it.
++        assert!(!runs.call_egress_with(NetworkTier::Allowlist, "org-b", "run-1").is_tiered());
++    }
++
++    #[test]
++    fn a_run_whose_ceiling_drops_is_off_and_its_entry_goes_with_the_guard() {
++        let runs = registry();
++        let guard = runs.register("org-a", "run-1");
++        runs.set_ceiling("org-a", "run-1", NetworkTier::All);
++        runs.record_lease("org-a", "run-1", NetworkTier::Registries, &[]);
++        assert!(runs.call_egress_with(NetworkTier::Registries, "org-a", "run-1").is_tiered());
++        // Tainted mid-run: the next call's ceiling is off, the lease unchanged.
++        runs.set_ceiling(
++            "org-a",
++            "run-1",
++            run_ceiling(RunEgressFacts {
++                tainted: true,
++                ..RunEgressFacts::default()
++            }),
++        );
++        assert!(!runs.call_egress_with(NetworkTier::Registries, "org-a", "run-1").is_tiered());
++        drop(guard);
++        runs.set_ceiling("org-a", "run-1", NetworkTier::All);
++        runs.record_lease("org-a", "run-1", NetworkTier::Registries, &[]);
++        assert_eq!(
++            runs.call_egress_with(NetworkTier::Registries, "org-a", "run-1"),
++            CallEgress::off()
++        );
++    }
++
++    #[test]
++    fn the_switch_reads_off_unless_its_exact_word_is_set() {
++        // The process-wide value is whatever the test environment holds; the
++        // parse rule itself is pinned in mp-contracts. Here: the value is one
++        // of the three a switch can produce.
++        assert!(matches!(
++            switch_tier(),
++            NetworkTier::Off | NetworkTier::Registries | NetworkTier::Allowlist
++        ));
++    }
++
++    /// End to end through a real socket: a resolver that maps every name to a
++    /// private address is refused with 403, a refused host is counted, and the
++    /// directory is gone after `finish`.
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn the_proxy_refuses_a_listed_name_that_resolves_privately() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++        let root = std::env::temp_dir().join(format!("verevon-egress-test-{}", std::process::id()));
++        let private: Resolver = Arc::new(|_host: String, port: u16| {
++            Box::pin(async move { Ok(vec![SocketAddr::new(v4(10, 0, 0, 1), port)]) })
++        });
++        let proxy = EgressProxy::start_with(&registries(), &root, private, is_public_address)
++            .expect("the proxy starts");
++        assert!(proxy.is_live());
++
++        let mut client = tokio::net::UnixStream::connect(proxy.socket_path())
++            .await
++            .expect("connect");
++        client
++            .write_all(b"CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org:443\r\n\r\n")
++            .await
++            .unwrap();
++        let mut reply = Vec::new();
++        client.read_to_end(&mut reply).await.unwrap();
++        assert!(reply.starts_with(b"HTTP/1.1 403"), "{}", String::from_utf8_lossy(&reply));
++
++        let mut unlisted = tokio::net::UnixStream::connect(proxy.socket_path())
++            .await
++            .expect("connect");
++        unlisted
++            .write_all(b"CONNECT example.org:443 HTTP/1.1\r\n\r\n")
++            .await
++            .unwrap();
++        let mut reply = Vec::new();
++        unlisted.read_to_end(&mut reply).await.unwrap();
++        assert!(reply.starts_with(b"HTTP/1.1 403"));
++
++        let dir = proxy.socket_path().parent().unwrap().to_path_buf();
++        let counts = proxy.finish();
++        assert_eq!(
++            counts,
++            EgressCounts {
++                allowed_hosts: 0,
++                denied_hosts: 2
++            }
++        );
++        assert!(!dir.exists(), "the call's socket directory is removed");
++        let _ = std::fs::remove_dir_all(&root);
++    }
++
++    /// The admitted path: a listed name whose answer the (test-only) guard
++    /// accepts is tunnelled to it, bytes flow both ways, and it counts as allowed.
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn the_proxy_tunnels_a_listed_host_it_checked() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let upstream_addr = upstream.local_addr().unwrap();
++        tokio::spawn(async move {
++            let (mut conn, _) = upstream.accept().await.unwrap();
++            let mut buf = [0u8; 4];
++            conn.read_exact(&mut buf).await.unwrap();
++            conn.write_all(b"pong").await.unwrap();
++        });
++
++        let root =
++            std::env::temp_dir().join(format!("verevon-egress-test-ok-{}", std::process::id()));
++        let resolver: Resolver = Arc::new(move |_host: String, _port: u16| {
++            Box::pin(async move { Ok(vec![upstream_addr]) })
++        });
++        let proxy = EgressProxy::start_with(&registries(), &root, resolver, |_| true)
++            .expect("the proxy starts");
++        let mut client = tokio::net::UnixStream::connect(proxy.socket_path())
++            .await
++            .unwrap();
++        client
++            .write_all(b"CONNECT files.pythonhosted.org:443 HTTP/1.1\r\n\r\n")
++            .await
++            .unwrap();
++        let mut established = vec![0u8; ESTABLISHED.len()];
++        client.read_exact(&mut established).await.unwrap();
++        assert_eq!(established, ESTABLISHED);
++        client.write_all(b"ping").await.unwrap();
++        let mut pong = [0u8; 4];
++        client.read_exact(&mut pong).await.unwrap();
++        assert_eq!(&pong, b"pong");
++        assert_eq!(
++            proxy.finish(),
++            EgressCounts {
++                allowed_hosts: 1,
++                denied_hosts: 0
++            }
++        );
++        let _ = std::fs::remove_dir_all(&root);
++    }
++}
+diff --git a/apps/Model Plane/rust/services/execution-core/src/executor.rs b/apps/Model Plane/rust/services/execution-core/src/executor.rs
+index 6a3f6c261..61e7e01d6 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/executor.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/executor.rs	
+@@ -23,12 +23,13 @@
+ //! the natural future extension.
+ //!
+ //! SECURITY: the `AllowDomains` network policy is not self-enforcing (see
+-//! `sandbox.rs`) — a caller using it MUST also run behind a configured egress
+-//! proxy or the process gets unrestricted egress. `execute_sandboxed` fails
+-//! closed on both of the ways a policy can go unenforced: the requested local
+-//! filesystem isolation being unavailable, and `AllowDomains` with no egress
+-//! proxy (`HTTPS_PROXY`/`ALL_PROXY`) configured to actually enforce it — see
+-//! `require_requested_isolation`. Neither ever spawns the process.
++//! `sandbox.rs`) — a caller using it MUST also run behind this call's own
++//! egress proxy or the process gets unrestricted egress. `execute_sandboxed`
++//! fails closed on both of the ways a policy can go unenforced: the requested
++//! local filesystem isolation being unavailable, and `AllowDomains` without a
++//! live per-call proxy ([`crate::egress_proxy::EgressProxy`], EP-9 E3) to
++//! enforce it — see `require_requested_isolation`. A proxy environment
++//! variable no longer stands in for one. Neither ever spawns the process.
+ 
+ use crate::policy::{MpSandboxPolicy, ResourceLimits};
+ use crate::{sandbox, scrub};
+@@ -371,28 +372,6 @@ fn scrub_and_cap(raw: &[u8]) -> String {
+     capped
+ }
+ 
+-/// Pure check, split out from the environment read so it's unit-testable
+-/// without mutating real process env vars (forbidden in this crate — see
+-/// `parse_timeout_secs`/`timeout_from_env`). True if any candidate value is
+-/// present and non-blank.
+-fn any_proxy_var_set(candidates: &[Option<&str>]) -> bool {
+-    candidates
+-        .iter()
+-        .any(|value| value.is_some_and(|v| !v.trim().is_empty()))
+-}
+-
+-/// Whether an egress proxy is configured for this process, by the same
+-/// convention curl/most HTTP clients honor: `HTTPS_PROXY` or `ALL_PROXY`,
+-/// either case.
+-fn egress_proxy_configured() -> bool {
+-    any_proxy_var_set(&[
+-        std::env::var("HTTPS_PROXY").ok().as_deref(),
+-        std::env::var("https_proxy").ok().as_deref(),
+-        std::env::var("ALL_PROXY").ok().as_deref(),
+-        std::env::var("all_proxy").ok().as_deref(),
+-    ])
+-}
+-
+ /// A model-authored execution policy must never silently become a host command
+ /// just because the local sandbox substrate is unavailable. `DangerFullAccess`
+ /// is the explicit operator-authored escape hatch; `External` delegates its
+@@ -400,14 +379,14 @@ fn egress_proxy_configured() -> bool {
+ /// a local Bubblewrap request. Every other policy names local filesystem and/or
+ /// egress restrictions and has to fail closed when they cannot be enforced.
+ ///
+-/// `AllowDomains` gets its own check, not just `sandboxed`: `build_bwrap_argv`
+-/// deliberately keeps the network namespace up for it (the allowlist lives at
+-/// an external egress proxy, not in bwrap itself — see `sandbox.rs`'s own
+-/// SECURITY note, tracked as `capability-ownership-matrix.md` §G1's recorded
+-/// requirement). A process can come back `sandboxed: true` — real filesystem
+-/// isolation — while still having FULLY UNRESTRICTED network egress, because
+-/// bwrap alone cannot enforce a domain allowlist. Without this check, that gap
+-/// was silent: `sandboxed` reported success while the allowlist was a no-op.
++/// `AllowDomains` gets its own check, not just `sandboxed`: without an egress
++/// boundary `build_bwrap_argv` keeps the network namespace up for it, and a
++/// process can then come back `sandboxed: true` — real filesystem isolation —
++/// while still having FULLY UNRESTRICTED network egress, because bwrap alone
++/// cannot enforce a domain allowlist. So it is admitted only with this call's
++/// own live proxy behind it (EP-9 E3), whose argv unshares the namespace and
++/// leaves the proxy socket as the one way out. A proxy environment variable is
++/// not trusted to stand in for one.
+ /// The same fail-closed gate every one-shot spawn runs, for callers that
+ /// build their own `tokio::process::Command` rather than going through
+ /// [`execute_sandboxed_in_dir`] — S4.2's background process host needs piped
+@@ -416,7 +395,7 @@ fn egress_proxy_configured() -> bool {
+ ///
+ /// # Errors
+ /// `Unsupported` when the policy demands local isolation this host cannot
+-/// provide, or when `AllowDomains` has no egress proxy behind it.
++/// provide, or when a network policy has no live per-call proxy behind it.
+ ///
+ /// WS06-S9: this is the one admission gate every spawn path calls, and it takes
+ /// a [`SpawnAdmission`] with no default, so a new spawn path that omits the
+@@ -426,7 +405,9 @@ pub(crate) fn require_spawn_admission(
+     sandboxed: bool,
+     admission: &SpawnAdmission<'_>,
+ ) -> std::io::Result<()> {
+-    require_spawn_admission_with(policy, sandboxed, egress_proxy_configured(), admission)
++    // No per-call proxy on this path, so no network policy is admitted here; a
++    // tiered call is admitted by `execute_sandboxed_with_egress`.
++    require_spawn_admission_with(policy, sandboxed, false, admission)
+ }
+ 
+ /// What a spawn site knows about the Space it runs for (WS06-S9). Built by the
+@@ -450,17 +431,26 @@ impl SpawnAdmission<'_> {
+ }
+ 
+ /// Pure half of [`require_spawn_admission`]. Rules, in order: the isolation
+-/// check; no network other than `Disabled` (sandbox egress does not exist, and
+-/// the proxy environment variable is no longer trusted to stand in for it);
+-/// no `DangerFullAccess`/`External` for a Space; a Space spawn needs a lease.
++/// check; no network other than `Disabled`, except `AllowDomains` behind this
++/// call's live proxy (EP-9 E3; the proxy environment variable is not trusted to
++/// stand in for one, and `AllowAll` is never admitted); no
++/// `DangerFullAccess`/`External` for a Space; a Space spawn needs a lease.
+ fn require_spawn_admission_with(
+     policy: &MpSandboxPolicy,
+     sandboxed: bool,
+-    egress_proxy_configured: bool,
++    egress_proxy_live: bool,
+     admission: &SpawnAdmission<'_>,
+ ) -> std::io::Result<()> {
+-    require_requested_isolation(policy, sandboxed, egress_proxy_configured)?;
+-    if policy.network().allows_any_network() {
++    require_requested_isolation(policy, sandboxed, egress_proxy_live)?;
++    // Only a wrapped process has the unshared namespace that makes the proxy
++    // the one way out; an unwrapped one (`External`) would keep host network.
++    let proxied = egress_proxy_live
++        && sandboxed
++        && matches!(
++            policy.network(),
++            crate::policy::MpNetworkPolicy::AllowDomains(_)
++        );
++    if policy.network().allows_any_network() && !proxied {
+         return Err(std::io::Error::new(
+             std::io::ErrorKind::Unsupported,
+             "sandbox egress is not available; refusing a spawn with network access",
+@@ -489,7 +479,7 @@ fn require_spawn_admission_with(
+ fn require_requested_isolation(
+     policy: &MpSandboxPolicy,
+     sandboxed: bool,
+-    egress_proxy_configured: bool,
++    egress_proxy_live: bool,
+ ) -> std::io::Result<()> {
+     let requires_local_isolation = matches!(
+         policy,
+@@ -504,12 +494,12 @@ fn require_requested_isolation(
+     if matches!(
+         policy.network(),
+         crate::policy::MpNetworkPolicy::AllowDomains(_)
+-    ) && !egress_proxy_configured
++    ) && !egress_proxy_live
+     {
+         return Err(std::io::Error::new(
+             std::io::ErrorKind::Unsupported,
+-            "AllowDomains egress policy requires an egress proxy (HTTPS_PROXY/ALL_PROXY); \
+-             none is configured, refusing to grant unrestricted network egress",
++            "AllowDomains egress policy requires this call's egress proxy; \
++             none is running, refusing to grant unrestricted network egress",
+         ));
+     }
+     Ok(())
+@@ -635,6 +625,34 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
+     ro_binds: &[(PathBuf, PathBuf)],
+     timeout: Duration,
+     admission: &SpawnAdmission<'_>,
++) -> std::io::Result<ExecOutcome> {
++    execute_sandboxed_with_egress(
++        policy, program, args, cwd, env, ro_binds, timeout, admission, None,
++    )
++    .await
++}
++
++/// [`execute_sandboxed_in_dir_with_ro_binds`] behind a per-call egress proxy
++/// (EP-9 E3). With `egress` the namespace is unshared, this call's socket is
++/// the one way out, the program runs under the bridge, and `AllowDomains` is
++/// admitted because the proxy that enforces it is live; the admission and the
++/// argv are built from the same proxy, so one cannot be had without the other.
++/// `None` is exactly [`execute_sandboxed_in_dir_with_ro_binds`].
++///
++/// # Errors
++/// As [`execute_sandboxed_in_dir_with_ro_binds`]; a network policy whose proxy
++/// is not live is refused before any spawn.
++#[allow(clippy::too_many_arguments)]
++pub async fn execute_sandboxed_with_egress(
++    policy: &MpSandboxPolicy,
++    program: &str,
++    args: &[String],
++    cwd: &Path,
++    env: &[(String, String)],
++    ro_binds: &[(PathBuf, PathBuf)],
++    timeout: Duration,
++    admission: &SpawnAdmission<'_>,
++    egress: Option<&crate::egress_proxy::EgressProxy>,
+ ) -> std::io::Result<ExecOutcome> {
+     // WS06-S8: per-spawn ceilings sized from this call's wall-clock budget.
+     let limits = crate::policy::limits_for(timeout);
+@@ -643,9 +661,19 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
+         env: sandbox::SandboxEnv::Only(env),
+         extra_ro_binds: ro_binds,
+         limits: limits.as_ref(),
++        egress: egress.map(|proxy| sandbox::EgressBridge {
++            socket_root: proxy.socket_root(),
++            socket: proxy.socket_path(),
++            bridge_program: crate::egress_proxy::NETBRIDGE_BIN,
++        }),
+     };
+     let cmd = sandbox::wrap_command_with(policy, program, args, options);
+-    require_spawn_admission(policy, cmd.sandboxed, admission)?;
++    require_spawn_admission_with(
++        policy,
++        cmd.sandboxed,
++        egress.is_some_and(crate::egress_proxy::EgressProxy::is_live),
++        admission,
++    )?;
+     require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
+     require_limits_applied_for(limits.as_ref(), &cmd)?;
+     spawn_capture(&cmd, Some(cwd), Some(env), timeout, limits.as_ref()).await
+@@ -882,7 +910,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn allow_domains_with_an_egress_proxy_configured_is_accepted() {
++    fn allow_domains_with_a_live_egress_proxy_is_accepted() {
+         let policy = MpSandboxPolicy::WorkspaceWrite {
+             writable_roots: vec![],
+             network: crate::policy::MpNetworkPolicy::AllowDomains(
+@@ -915,18 +943,6 @@ mod tests {
+         .is_ok());
+     }
+ 
+-    #[test]
+-    fn any_proxy_var_set_is_true_only_for_a_non_blank_candidate() {
+-        assert!(!any_proxy_var_set(&[None, None, None, None]));
+-        assert!(!any_proxy_var_set(&[Some(""), Some("   "), None, None]));
+-        assert!(any_proxy_var_set(&[
+-            None,
+-            None,
+-            Some("http://proxy:3128"),
+-            None
+-        ]));
+-    }
+-
+     // External => wrap_command returns a transparent passthrough, so these run
+     // the real binary directly and work cross-platform (no bwrap). They used
+     // DangerFullAccess until WS06-S9, which refuses its AllowAll network before
+@@ -1459,18 +1475,19 @@ mod tests {
+ 
+     #[test]
+     fn egress_policies_are_refused_for_every_spawn_with_the_egress_message() {
+-        for network in [
+-            crate::policy::MpNetworkPolicy::AllowAll,
+-            crate::policy::MpNetworkPolicy::AllowDomains(vec!["api.example.com".into()]),
+-        ] {
+-            // Even with an egress proxy configured and a lease in hand.
+-            let err = require_spawn_admission_with(&ro(network), true, true, &SPACE_WITH_LEASE)
+-                .expect_err("egress");
+-            assert!(
+-                err.to_string().contains("sandbox egress is not available"),
+-                "{err}"
+-            );
+-        }
++        // AllowAll is refused even with a live proxy and a lease in hand: the
++        // proxy enforces a list, and AllowAll names none.
++        let err = require_spawn_admission_with(
++            &ro(crate::policy::MpNetworkPolicy::AllowAll),
++            true,
++            true,
++            &SPACE_WITH_LEASE,
++        )
++        .expect_err("egress");
++        assert!(
++            err.to_string().contains("sandbox egress is not available"),
++            "{err}"
++        );
+         let err = require_spawn_admission_with(
+             &MpSandboxPolicy::DangerFullAccess,
+             true,
+@@ -1493,6 +1510,33 @@ mod tests {
+         assert!(err.to_string().contains("sandbox egress is not available"));
+     }
+ 
++    /// EP-9 E3: an allow-list is admitted only with this call's proxy live, and
++    /// only for a wrapped process; the proxy environment variable is not read.
++    #[test]
++    fn allow_domains_is_admitted_only_behind_a_live_proxy_in_a_wrapped_process() {
++        let allow = || crate::policy::MpNetworkPolicy::AllowDomains(vec!["pypi.org".into()]);
++        assert!(require_spawn_admission_with(&ro(allow()), true, true, &SPACE_WITH_LEASE).is_ok());
++        assert!(
++            require_spawn_admission_with(&ro(allow()), true, true, &SpawnAdmission::NOT_SPACE)
++                .is_ok()
++        );
++        let err = require_spawn_admission_with(&ro(allow()), true, false, &SPACE_WITH_LEASE)
++            .expect_err("no proxy");
++        assert!(err.to_string().contains("egress proxy"), "{err}");
++        // `External` is not wrapped, so its process would keep host network.
++        let external = MpSandboxPolicy::External { network: allow() };
++        let err = require_spawn_admission_with(&external, false, true, &SpawnAdmission::NOT_SPACE)
++            .expect_err("unwrapped");
++        assert!(
++            err.to_string().contains("sandbox egress is not available"),
++            "{err}"
++        );
++        // The ordinary gate never sees a proxy, so it refuses an allow-list.
++        let err = require_spawn_admission(&ro(allow()), true, &SpawnAdmission::NOT_SPACE)
++            .expect_err("no per-call proxy on the ordinary path");
++        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
++    }
++
+     #[test]
+     fn external_policy_is_refused_for_a_space_but_not_for_other_spawns() {
+         let external = MpSandboxPolicy::External {
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index a0f1e777f..fa4e10138 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -2036,6 +2036,11 @@ async fn run_agent_with_route_parkable(
+     // The attached files, held for the whole run and released when this scope ends on any
+     // path, a cancelled request included (WS08-S6).
+     let _run_inputs = register_run_inputs(&req, deadline)?;
++    // The entry this run's `code_interpreter` calls take their egress tier from (EP-9 E3), held
++    // and released the same way. None with the switch off, so every call runs with no network.
++    let _run_egress = (crate::egress_proxy::switch_tier()
++        != mp_contracts::sandbox_report::NetworkTier::Off)
++        .then(|| crate::egress_proxy::run_egress().register(&req.org_id, &req.run_id));
+ 
+     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
+     // then either restore the paused loop from its fold (the in-place resume) or start the
+@@ -4627,6 +4632,23 @@ async fn run_rounds(
+                             screening_taint: false,
+                         });
+                     }
++                    // The run's egress ceiling for this call (EP-9 E3, D-E3), from what the run is
++                    // now: a taint or plan mode that arrived since the last call holds this one at
++                    // off. The calls of one round see the same facts, so they agree.
++                    if call.name == "code_interpreter" {
++                        crate::egress_proxy::run_egress().set_ceiling(
++                            &req.org_id,
++                            &req.run_id,
++                            crate::egress_proxy::run_ceiling(crate::egress_proxy::RunEgressFacts {
++                                zdr,
++                                waived: ctx.route.is_waived(),
++                                plan_mode: req.plan_mode,
++                                tainted: read_in_round || ctx.taint.is_marked(),
++                                read_only_rung: req.autonomy_rung
++                                    == pb::AutonomyRung::ReadOnly as i32,
++                            }),
++                        );
++                    }
+                     let ledger_entry = if ctx.effect_ledger {
+                         let entry = runtime_loop::effect::entry_for_run_call(
+                             &run_gate,
+diff --git a/apps/Model Plane/rust/services/execution-core/src/sandbox.rs b/apps/Model Plane/rust/services/execution-core/src/sandbox.rs
+index c3b98905b..5d697fe80 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/sandbox.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/sandbox.rs	
+@@ -125,6 +125,39 @@ pub struct LaunchOptions<'a> {
+     /// command comes back with `limits_applied == false` and the spawn site
+     /// refuses it (fail closed).
+     pub limits: Option<&'a ResourceLimits>,
++    /// The per-call egress boundary (EP-9 E3). `None` (every existing caller)
++    /// leaves the argv exactly as before. `Some` always unshares the network
++    /// namespace, whatever the policy's network says, and runs the program
++    /// under the bridge so its only way out is this call's proxy socket.
++    pub egress: Option<EgressBridge<'a>>,
++}
++
++/// The sandbox half of a tiered call's egress boundary (EP-9 D-E1): the host
++/// paths the argv needs to give the sandbox exactly one proxy socket.
++#[derive(Debug, Clone, Copy)]
++pub struct EgressBridge<'a> {
++    /// The host directory every call's proxy socket lives under. It is covered
++    /// by an empty tmpfs inside the sandbox, because a path-named Unix socket
++    /// is reachable from any network namespace: without the cover, a program
++    /// could connect to another call's proxy, and so to another Space's list.
++    pub socket_root: &'a Path,
++    /// This call's socket on the host, bound into the sandbox at
++    /// [`EgressBridge::sandbox_socket`].
++    pub socket: &'a Path,
++    /// The bridge binary run inside the sandbox (`mp-netbridge`).
++    pub bridge_program: &'a str,
++}
++
++/// The file name the call's socket takes inside the sandbox.
++pub const SANDBOX_SOCKET_NAME: &str = "egress.sock";
++
++impl EgressBridge<'_> {
++    /// Where the program's bridge finds the proxy inside the sandbox: inside
++    /// the covered root, so it is the one socket there.
++    #[must_use]
++    pub fn sandbox_socket(&self) -> PathBuf {
++        self.socket_root.join(SANDBOX_SOCKET_NAME)
++    }
+ }
+ 
+ /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
+@@ -234,9 +267,22 @@ fn assemble_argv(
+     // process gets unrestricted egress, silently defeating the allowlist. This
+     // pure builder stays env-free by design; the check belongs at the spawn
+     // site. Tracked in capability-ownership-matrix §G1.
+-    if matches!(network, MpNetworkPolicy::Disabled) {
++    //
++    // EP-9 E3: a call with an egress boundary is the exception that makes
++    // `AllowDomains` enforceable. Its namespace is unshared like `Disabled`, so
++    // it has loopback and no route out, and the one path out is its own proxy
++    // socket, bound in after the socket root is covered (later mounts win).
++    if matches!(network, MpNetworkPolicy::Disabled) || options.egress.is_some() {
+         argv.push("--unshare-net".into());
+     }
++    if let Some(egress) = &options.egress {
++        let root = egress.socket_root.to_string_lossy().into_owned();
++        argv.push("--tmpfs".into());
++        argv.push(root);
++        argv.push("--bind".into());
++        argv.push(egress.socket.to_string_lossy().into_owned());
++        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
++    }
+ 
+     // Placed after the binds so the directory it names is already mounted in the
+     // sandbox by the time bwrap chdirs into it.
+@@ -246,6 +292,13 @@ fn assemble_argv(
+     }
+ 
+     argv.push("--".into());
++    // The bridge runs the program as its child, so the program and its
++    // arguments reach it unchanged after the bridge's own separator.
++    if let Some(egress) = &options.egress {
++        argv.push(egress.bridge_program.to_owned());
++        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
++        argv.push("--".into());
++    }
+     argv.push(program.to_owned());
+     argv.extend(cmd_args.iter().cloned());
+     argv
+@@ -413,7 +466,11 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
+             PROCESSES_BOUNDED_ONESHOT
+         },
+         backup: false,
+-        egress: "disabled_by_default",
++        egress: mp_contracts::egress_tiers::claim(enforceable_egress_tier(
++            crate::egress_proxy::switch_tier(),
++            local_isolation_available,
++            crate::egress_proxy::bridge_available(),
++        )),
+         credential_mode: "credential_free",
+         limits: if local_isolation_available
+             && LimitsConfig::current().mode == LimitsMode::Enforce
+@@ -426,6 +483,26 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
+     }
+ }
+ 
++/// The highest egress tier this host can enforce, which is what it claims to
++/// Control (EP-9 E3). The deployment switch is the ceiling, and it only counts
++/// where bubblewrap can unshare the namespace and the bridge binary is in the
++/// image: a claim this host cannot keep would be signed by Control and then
++/// refused, or worse, honoured without a boundary. With the switch off the
++/// claim is the legacy `disabled_by_default`, so the profile and its digest are
++/// unchanged.
++#[must_use]
++pub fn enforceable_egress_tier(
++    switch: mp_contracts::sandbox_report::NetworkTier,
++    local_isolation_available: bool,
++    bridge_available: bool,
++) -> mp_contracts::sandbox_report::NetworkTier {
++    if local_isolation_available && bridge_available {
++        switch
++    } else {
++        mp_contracts::sandbox_report::NetworkTier::Off
++    }
++}
++
+ #[cfg(target_os = "linux")]
+ fn probe_bwrap() -> bool {
+     // The smallest argv that exercises what the real one needs: a read-only
+@@ -557,7 +634,19 @@ mod tests {
+         assert_eq!(profile.local_isolation_available, is_supported());
+         assert_eq!(profile.persistence, "ephemeral");
+         assert!(!profile.backup);
+-        assert_eq!(profile.egress, "disabled_by_default");
++        // EP-9 E3: the claim is the switch's tier only where it can be enforced,
++        // and the legacy word otherwise (always, with the switch off).
++        assert_eq!(
++            profile.egress,
++            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
++                crate::egress_proxy::switch_tier(),
++                is_supported(),
++                crate::egress_proxy::bridge_available(),
++            ))
++        );
++        if crate::egress_proxy::switch_tier() == mp_contracts::sandbox_report::NetworkTier::Off {
++            assert_eq!(profile.egress, "disabled_by_default");
++        }
+         assert_eq!(profile.credential_mode, "credential_free");
+         // `processes` is the one field an operator can change, so this asserts
+         // the RELATIONSHIP rather than a constant: it may report the stronger
+@@ -897,6 +986,138 @@ mod tests {
+         assert!(!argv.iter().any(|a| a == "--unshare-net"));
+     }
+ 
++    // -- EP-9 E3 egress boundary ------------------------------------------
++
++    fn bridge<'a>(root: &'a Path, socket: &'a Path) -> EgressBridge<'a> {
++        EgressBridge {
++            socket_root: root,
++            socket,
++            bridge_program: "/usr/local/bin/mp-netbridge",
++        }
++    }
++
++    /// A tiered call keeps no host network, whatever its policy's network says:
++    /// the namespace is unshared and the one way out is the bound socket.
++    #[test]
++    fn an_egress_call_always_unshares_the_network() {
++        let root = PathBuf::from("/tmp/verevon-egress");
++        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
++        for network in [
++            MpNetworkPolicy::Disabled,
++            MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
++            MpNetworkPolicy::AllowAll,
++        ] {
++            let p = MpSandboxPolicy::WorkspaceWrite {
++                writable_roots: vec![PathBuf::from("/work")],
++                network,
++            };
++            let argv = build_bwrap_argv_with(
++                &p,
++                "python3",
++                &args(&["main.py"]),
++                LaunchOptions {
++                    egress: Some(bridge(&root, &socket)),
++                    ..LaunchOptions::default()
++                },
++            )
++            .expect("wrapped");
++            assert_eq!(
++                argv.iter().filter(|a| *a == "--unshare-net").count(),
++                1,
++                "{argv:?}"
++            );
++        }
++    }
++
++    /// Every call's socket root is covered, so a program cannot reach another
++    /// call's proxy through the shared host path; its own socket is bound back in
++    /// after the cover, and the program runs under the bridge.
++    #[test]
++    fn an_egress_call_covers_the_socket_root_and_runs_under_the_bridge() {
++        let root = PathBuf::from("/tmp/verevon-egress");
++        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
++        let p = MpSandboxPolicy::WorkspaceWrite {
++            writable_roots: vec![PathBuf::from("/work")],
++            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
++        };
++        let argv = build_bwrap_argv_with(
++            &p,
++            "python3",
++            &args(&["main.py"]),
++            LaunchOptions {
++                egress: Some(bridge(&root, &socket)),
++                ..LaunchOptions::default()
++            },
++        )
++        .expect("wrapped");
++        let ro_root = argv.iter().position(|a| a == "/").expect("read-only root");
++        let cover = argv
++            .iter()
++            .position(|a| a == "/tmp/verevon-egress")
++            .expect("socket root covered");
++        assert_eq!(argv[cover - 1], "--tmpfs");
++        assert!(cover > ro_root, "the cover must follow the read-only root: {argv:?}");
++        assert!(windowed(
++            &argv,
++            &[
++                "--bind",
++                "/tmp/verevon-egress/call-1/egress.sock",
++                "/tmp/verevon-egress/egress.sock"
++            ]
++        ));
++        let own_socket = argv
++            .iter()
++            .position(|a| a == "/tmp/verevon-egress/call-1/egress.sock")
++            .expect("own socket bound");
++        assert!(own_socket > cover, "the own socket must be bound after the cover");
++        assert!(windowed(
++            &argv,
++            &[
++                "--",
++                "/usr/local/bin/mp-netbridge",
++                "/tmp/verevon-egress/egress.sock",
++                "--",
++                "python3",
++                "main.py"
++            ]
++        ));
++    }
++
++    /// Without a boundary the argv is exactly what it was before E3.
++    #[test]
++    fn no_egress_bridge_leaves_the_argv_unchanged() {
++        let p = MpSandboxPolicy::ReadOnly {
++            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
++        };
++        let argv = build_bwrap_argv(&p, "curl", &args(&["x"])).expect("wrapped");
++        assert!(!argv.iter().any(|a| a == "--unshare-net"));
++        assert!(windowed(&argv, &["--", "curl", "x"]));
++        assert!(!argv.iter().any(|a| a.contains("mp-netbridge")));
++    }
++
++    #[test]
++    fn the_egress_claim_needs_isolation_and_the_bridge() {
++        use mp_contracts::sandbox_report::NetworkTier;
++        for tier in [NetworkTier::Registries, NetworkTier::Allowlist] {
++            assert_eq!(enforceable_egress_tier(tier, true, true), tier);
++            assert_eq!(enforceable_egress_tier(tier, false, true), NetworkTier::Off);
++            assert_eq!(enforceable_egress_tier(tier, true, false), NetworkTier::Off);
++        }
++        assert_eq!(
++            enforceable_egress_tier(NetworkTier::Off, true, true),
++            NetworkTier::Off
++        );
++        assert_eq!(
++            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
++                NetworkTier::Off,
++                true,
++                true
++            )),
++            "disabled_by_default",
++            "switch off keeps the legacy claim, so the profile digest is unchanged"
++        );
++    }
++
+     #[test]
+     fn danger_full_access_and_external_are_passthrough() {
+         assert!(build_bwrap_argv(&MpSandboxPolicy::DangerFullAccess, "sh", &[]).is_none());
+diff --git a/apps/Model Plane/rust/services/execution-core/tests/zdr_refusal_inventory.rs b/apps/Model Plane/rust/services/execution-core/tests/zdr_refusal_inventory.rs
+index b89eec943..2e4dc56ea 100644
+--- a/apps/Model Plane/rust/services/execution-core/tests/zdr_refusal_inventory.rs	
++++ b/apps/Model Plane/rust/services/execution-core/tests/zdr_refusal_inventory.rs	
+@@ -86,6 +86,31 @@ fn the_named_sites_are_typed_where_they_are_declared() {
+     }
+ }
+ 
++/// Sandbox egress (EP-9 E3) is held at off for a zero-retention or waived run rather than
++/// refused: the tier is never asked for in a tool input, so there is no request to refuse, and
++/// the call runs with no network. That hold is the ZDR boundary for this egress, so it is pinned
++/// here beside the refusals: the run's ceiling reads both facts, and the run loop supplies both.
++#[test]
++fn sandbox_egress_is_held_off_for_zero_retention_and_waived_runs() {
++    let proxy = std::fs::read_to_string(src_path("egress_proxy.rs")).expect("egress_proxy.rs");
++    assert!(
++        proxy.contains("if facts.zdr || facts.waived"),
++        "egress_proxy::run_ceiling must hold a ZDR or waived run at off"
++    );
++    let agent =
++        std::fs::read_to_string(src_path("runtime_loop/agent.rs")).expect("runtime_loop/agent.rs");
++    for needle in [
++        "crate::egress_proxy::run_ceiling(",
++        "zdr,",
++        "waived: ctx.route.is_waived(),",
++    ] {
++        assert!(
++            agent.contains(needle),
++            "the run loop must set the egress ceiling from the run's ZDR and waiver facts: {needle}"
++        );
++    }
++}
++
+ fn src_path(file: &str) -> PathBuf {
+     Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file)
+ }
+diff --git a/apps/Model Plane/rust/tools/mp-netbridge/Cargo.toml b/apps/Model Plane/rust/tools/mp-netbridge/Cargo.toml
+new file mode 100644
+index 000000000..1b852a22a
+--- /dev/null
++++ b/apps/Model Plane/rust/tools/mp-netbridge/Cargo.toml	
+@@ -0,0 +1,13 @@
++[package]
++name = "mp-netbridge"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++description = "Inside a network-less sandbox, bridges 127.0.0.1:3128 to the per-call egress proxy socket (EP-9 E3)."
++
++[lints]
++workspace = true
++
++# Standard library only: this binary runs inside every tiered sandbox, so it
++# carries no dependency that could widen what the sandbox can do.
++[dependencies]
+diff --git a/apps/Model Plane/rust/tools/mp-netbridge/src/main.rs b/apps/Model Plane/rust/tools/mp-netbridge/src/main.rs
+new file mode 100644
+index 000000000..3c5782a2b
+--- /dev/null
++++ b/apps/Model Plane/rust/tools/mp-netbridge/src/main.rs	
+@@ -0,0 +1,216 @@
++//! `mp-netbridge` - the sandbox half of the egress boundary (EP-9 E3, D-E1).
++//!
++//! A tiered `code_interpreter` call runs in a sandbox whose network namespace
++//! is unshared: it has a loopback interface and no route out. The one path out
++//! is a Unix socket execution-core binds into the sandbox, behind which its
++//! per-call CONNECT proxy admits only the tier's hosts. This binary is the
++//! adapter in between: it listens on `127.0.0.1:3128` inside the namespace,
++//! where `HTTPS_PROXY` points the program, forwards every connection byte for
++//! byte to the socket, and runs the program as its child.
++//!
++//! It decides nothing. Which hosts are reachable is the proxy's decision, made
++//! outside the sandbox where the program cannot touch it; this binary only
++//! carries bytes, so a fault here can lose a connection but never widen one.
++//!
++//! Usage: `mp-netbridge <socket-path> -- <program> [args...]`. The exit code is
++//! the program's, `128 + signal` when it died of one, and 125 when the bridge
++//! itself could not start (the program is then never run).
++
++use std::process::ExitCode;
++
++/// Where the program's proxy variables point. Fixed: the sandbox's loopback is
++/// its own, so nothing else can be listening there.
++#[cfg_attr(not(unix), allow(dead_code))]
++const LISTEN_ADDR: &str = "127.0.0.1:3128";
++
++/// The bridge could not start; the program was not run.
++const EXIT_BRIDGE_FAILED: u8 = 125;
++
++/// A parsed command line.
++#[derive(Debug, PartialEq, Eq)]
++#[cfg_attr(not(unix), allow(dead_code))]
++struct Invocation {
++    socket: String,
++    program: String,
++    args: Vec<String>,
++}
++
++/// `<socket> -- <program> [args...]`, nothing else. The separator is required
++/// so a program argument can never be read as the socket.
++fn parse_args(raw: &[String]) -> Result<Invocation, String> {
++    match raw {
++        [socket, separator, program, args @ ..] if separator == "--" && !socket.is_empty() => {
++            Ok(Invocation {
++                socket: socket.clone(),
++                program: program.clone(),
++                args: args.to_vec(),
++            })
++        }
++        _ => Err("usage: mp-netbridge <socket-path> -- <program> [args...]".to_owned()),
++    }
++}
++
++fn main() -> ExitCode {
++    let raw: Vec<String> = std::env::args().skip(1).collect();
++    let invocation = match parse_args(&raw) {
++        Ok(invocation) => invocation,
++        Err(message) => {
++            eprintln!("mp-netbridge: {message}");
++            return ExitCode::from(EXIT_BRIDGE_FAILED);
++        }
++    };
++    run(&invocation)
++}
++
++#[cfg(unix)]
++fn run(invocation: &Invocation) -> ExitCode {
++    use std::net::TcpListener;
++    use std::os::unix::process::ExitStatusExt;
++
++    let listener = match TcpListener::bind(LISTEN_ADDR) {
++        Ok(listener) => listener,
++        Err(error) => {
++            eprintln!("mp-netbridge: cannot listen on {LISTEN_ADDR}: {error}");
++            return ExitCode::from(EXIT_BRIDGE_FAILED);
++        }
++    };
++    let socket = invocation.socket.clone();
++    // Detached: the accept loop ends with the process, after the program exits.
++    std::thread::spawn(move || accept_loop(&listener, &socket));
++
++    let status = match std::process::Command::new(&invocation.program)
++        .args(&invocation.args)
++        .status()
++    {
++        Ok(status) => status,
++        Err(error) => {
++            eprintln!("mp-netbridge: cannot run {}: {error}", invocation.program);
++            return ExitCode::from(EXIT_BRIDGE_FAILED);
++        }
++    };
++    let code = status
++        .code()
++        .or_else(|| status.signal().map(|signal| 128 + signal))
++        .unwrap_or(1);
++    ExitCode::from(u8::try_from(code).unwrap_or(1))
++}
++
++#[cfg(not(unix))]
++fn run(_invocation: &Invocation) -> ExitCode {
++    eprintln!("mp-netbridge: Unix sockets are required; this host has none");
++    ExitCode::from(EXIT_BRIDGE_FAILED)
++}
++
++/// Forward every accepted connection to the proxy socket. A connection the
++/// socket refuses is closed, which the program sees as a failed proxy connect.
++#[cfg(unix)]
++fn accept_loop(listener: &std::net::TcpListener, socket: &str) {
++    for stream in listener.incoming() {
++        let Ok(tcp) = stream else { continue };
++        let Ok(unix) = std::os::unix::net::UnixStream::connect(socket) else {
++            continue;
++        };
++        std::thread::spawn(move || splice(tcp, unix));
++    }
++}
++
++/// Copy both directions until each side closes, then shut the other side's
++/// write half so a half-closed exchange (a request fully sent, a response still
++/// coming) finishes instead of hanging.
++#[cfg(unix)]
++fn splice(tcp: std::net::TcpStream, unix: std::os::unix::net::UnixStream) {
++    use std::net::Shutdown;
++
++    let (Ok(mut tcp_read), Ok(mut unix_read)) = (tcp.try_clone(), unix.try_clone()) else {
++        return;
++    };
++    let (mut tcp_write, mut unix_write) = (tcp, unix);
++    let upstream = std::thread::spawn(move || {
++        let _ = std::io::copy(&mut tcp_read, &mut unix_write);
++        let _ = unix_write.shutdown(Shutdown::Write);
++    });
++    let _ = std::io::copy(&mut unix_read, &mut tcp_write);
++    let _ = tcp_write.shutdown(Shutdown::Write);
++    let _ = upstream.join();
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn strings(values: &[&str]) -> Vec<String> {
++        values.iter().map(|value| (*value).to_owned()).collect()
++    }
++
++    #[test]
++    fn the_command_line_needs_a_socket_the_separator_and_a_program() {
++        assert_eq!(
++            parse_args(&strings(&["/run/egress.sock", "--", "python3", "main.py"])),
++            Ok(Invocation {
++                socket: "/run/egress.sock".to_owned(),
++                program: "python3".to_owned(),
++                args: strings(&["main.py"]),
++            })
++        );
++        assert_eq!(
++            parse_args(&strings(&["/run/egress.sock", "--", "sh"]))
++                .expect("no program arguments is fine")
++                .args,
++            Vec::<String>::new()
++        );
++        for raw in [
++            &[][..],
++            &["/run/egress.sock"][..],
++            &["/run/egress.sock", "--"][..],
++            &["/run/egress.sock", "python3", "main.py"][..],
++            &["", "--", "python3"][..],
++            &["--", "python3"][..],
++        ] {
++            assert!(parse_args(&strings(raw)).is_err(), "{raw:?}");
++        }
++    }
++
++    #[test]
++    fn the_listen_address_is_loopback_on_the_proxy_port() {
++        let address: std::net::SocketAddr = LISTEN_ADDR.parse().expect("a socket address");
++        assert!(address.ip().is_loopback());
++        assert_eq!(address.port(), 3128);
++    }
++
++    /// Bytes go both ways through the bridge, and a half-close finishes.
++    #[cfg(unix)]
++    #[test]
++    fn a_connection_is_spliced_to_the_socket_both_ways() {
++        use std::io::{Read, Write};
++        use std::os::unix::net::UnixListener;
++
++        let dir = std::env::temp_dir().join(format!("mp-netbridge-test-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).expect("a test directory");
++        let socket = dir.join("egress.sock");
++        let proxy = UnixListener::bind(&socket).expect("a test socket");
++        let echo = std::thread::spawn(move || {
++            let (mut conn, _) = proxy.accept().expect("a bridged connection");
++            let mut request = Vec::new();
++            conn.read_to_end(&mut request).expect("the request");
++            conn.write_all(b"reply:").expect("write");
++            conn.write_all(&request).expect("write");
++        });
++
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
++        let address = listener.local_addr().expect("an address");
++        let socket_path = socket.to_string_lossy().into_owned();
++        std::thread::spawn(move || accept_loop(&listener, &socket_path));
++
++        let mut client = std::net::TcpStream::connect(address).expect("connect");
++        client.write_all(b"ping").expect("send");
++        client
++            .shutdown(std::net::Shutdown::Write)
++            .expect("half-close");
++        let mut reply = Vec::new();
++        client.read_to_end(&mut reply).expect("the reply");
++        assert_eq!(reply, b"reply:ping");
++        echo.join().expect("the echo side");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++}

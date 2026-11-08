@@ -1,0 +1,396 @@
+{
+ "batchId": "W3-23",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-11-S8",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_541e91d6-57b-1",
+   "files_changed": [
+    "apps/Model Plane/go/services/capability-core/internal/api/skill_import.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skill_import_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/import_draft.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.import.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "The slice's code and tests are written. Nothing was compiled or run, as the code-first rule requires. The patch (62 KB, not empty) is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-23/EP-11-S8.patch.\n\n**capability-core**\n- New `POST /api/v1/skills/import` in `skill_import.go`. It is mounted only when `SkillImportFromLookup` is true: `SKILL_IMPORT_ENABLED` must be the literal `true`, and `SKILL_BUNDLES_ENABLED` and `SKILL_DRAFT_PUBLISH` must also be on.\n- Checks before anything is written:\n  - A ZDR principal, or one with no retention posture, gets the typed `zdr_feature_not_supported` with feature `skill_authoring` (already in zdr-refusals.json).\n  - Only a person may import; a service or API key gets 403.\n  - Org scope is admin-only; the default scope is `user`, with the owner bound to the verified caller.\n- The file is detected by zip magic bytes:\n  - A zip goes through `skillbundle.Parse`, plus the deck checks while they are on.\n  - Anything else goes through the new `skillbundle.ParseSkillFile`, which gives the same closed refusal codes.\n- What gets written:\n  - The skill row is created accepted and switched off (`enabled=false`), with empty triggers.\n  - The draft is filled from `agent_skill_version_body` plus the draft bundle's `bundle_sha256`.\n  - A zip with files beside SKILL.md is also stored as a `state='draft'` bundle (new `skillbundle.PutImportedDraft`).\n  - All of this is one `mutateSkill` transaction with reason `imported`. A name clash answers 409 `skill_name_taken`.\n- No proto or migration.\n\n**BFF (`agent_actions.rs`)**\n- New route `/api/v1/skills/import` with a 12 MiB body limit.\n- Only `{content_base64, scope}` is forwarded, and a missing scope is sent as `user`.\n- An admin may import any scope. A member may import only scope `user`, and only while `SKILL_MEMBER_AUTHORING` is on.\n\n**SPA**\n- \"Import from file\" button, shown only when the listing says `import_enabled`.\n- New `importSkillFile` client call, which refuses a file over 8 MiB plus 256 KiB before reading it.\n- New action `skills.import`.\n\n**Deviations from the design**\n1. The file travels as base64 inside JSON instead of multipart. The model-gateway proxy (`proxy_to_capability_core`) and the BFF proxy only forward JSON. The audio routes set the precedent for this.\n2. The whole lint runs on every import, whatever `SKILL_LINT_MODE` says, on the same reasoning as the kind rules: no stored row predates an import. Counting still follows the mode.\n3. Files beside SKILL.md are admin-only, like the bundle route. They also need `SKILL_BUNDLE_RETENTION`, or the answer is 409, because without retention a publish never makes a draft bundle live. A zip holding only SKILL.md imports as the lone file.\n4. `zdr-posture-matrix.json` is left unchanged: the hard rule forbids rows for feature refusals. The refusal is in code, and the docs row is in lead_todo.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: directly after the line `api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)` add `api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)`",
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go: (1) in `type SkillsHandler struct` after the `bundleRetention bool` field add `\\t// importEnabled is SKILL_IMPORT_ENABLED (EP-11 S8, with bundles and drafts): on, the listing says so\\n\\t// and the Skills page offers an import; off, every body is as it was.\\n\\timportEnabled bool`; (2) in `NewSkillsHandler` add `importEnabled: SkillImportFromLookup(os.Getenv)` to the struct literal; (3) in listOrCreate GET, after the `if h.draftPublish { body[\"drafts_enabled\"] = true }` block add `\\t\\t// EP-11 S8: the Skills page offers an import only when the listing says it is on.\\n\\t\\tif h.importEnabled {\\n\\t\\t\\tbody[\"import_enabled\"] = true\\n\\t\\t}`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in the Skills route block, directly BEFORE `.route(\"/v1/skills/:id\", get(get_skill_proxy)...)`, add `.route(\"/v1/skills/import\", post(import_skill_proxy).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)))`; add near the other skill proxies: `/// EP-11 S8: a skill imported from a SKILL.md or a zip, sent as base64 inside JSON; capability-core\\n/// answers 404 while SKILL_IMPORT_ENABLED is off. 12 MiB carries the largest bundle in base64.\\nconst SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;\\nasync fn import_skill_proxy(State(s): State<AppState>, Extension(c): Extension<Claims>, bearer: VerifiedCapabilityBearer, Json(b): Json<Value>) -> Result<Json<Value>, HttpJsonError> {\\n    proxy_to_capability_core(&s, &c, &bearer, \"skills/import\", \"POST\", Some(&b)).await\\n}` (do NOT inject org_id; capability-core ignores it anyway). If a durable-mutation inventory test lists proxy routes, add this one.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `'skills.version.restore': exempt('agent_cannot_self_govern', 'context_write'),` add `'skills.import': exempt('agent_cannot_self_govern', 'context_write'),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: bump `expect(ids).toHaveLength(316)` by one (to whatever the batch total is +1) and add the comment line `// +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.` above it",
+    "regenerate the agent-action-admission golden (src/shared/api/contracts/agent-action-admission.json) for the new skills.import action",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: capability-core environment add `SKILL_IMPORT_ENABLED: ${SKILL_IMPORT_ENABLED:-false}`",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): add entry 'EP-11 D9 (2026-11-04, owner, recommended option): skill bundle upload and skill import are org configuration, not conversation content; allowed for non-ZDR principals, refused for a ZDR principal (authz.go:81 plus a typed zdr_feature_not_supported/skill_authoring in the import handler); SKILL_IMPORT_ENABLED stays off until D2-379/D2-383 are fixed (register D2-384).'",
+    "shared-edit apps/Model Plane/docs/ZDR.md: after the '/learn (EP-11 S7)' table row add `| **Skill import (EP-11 S8)** | Refused for ZDR principals | capability-core POST /api/v1/skills/import refuses a ZDR or posture-less principal (authz.go:81, and the handler answers zdr_feature_not_supported with feature skill_authoring) before reading the file; model-gateway refuses a ZDR token before forwarding (no posture-matrix row). Imported text and files are org configuration (D9), stored as a switched-off draft and draft bundle, erased with the skill and the org. Built dark behind SKILL_IMPORT_ENABLED (off; needs SKILL_BUNDLES_ENABLED and SKILL_DRAFT_PUBLISH). |`",
+    "guard compiles/tests: go test ./internal/api/... ./internal/skillbundle/... && go vet ./... in capability-core; cargo test for the gateway (BFF); vitest src/features/settings/components and src/shared/actions"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/docs/ZDR.md"
+   ],
+   "deviations": [
+    "The file is sent as base64 inside JSON (`{content_base64, scope}`), not as multipart. The model-gateway and BFF proxies only forward JSON; the audio routes are the precedent. Body limits are 12 MiB at the BFF and model-gateway, and about 11.4 MiB at capability-core.",
+    "The whole skill lint (error findings refuse) runs on every import whatever SKILL_LINT_MODE says, as the kind rules do, because no stored row predates an import. Metrics are counted only when the mode is not off.",
+    "Files beside SKILL.md are admin-only (like PUT /bundle) and need SKILL_BUNDLE_RETENTION (409 skill_import_bundle_unavailable without it). A zip holding only SKILL.md imports as the lone file, which a member may import.",
+    "The imported row is created accepted and switched off, and its live fields already hold the imported text. So session-core 0108 cuts v1 at insert, and the draft carries the bundle digest. Publishing a lone SKILL.md cuts no new version (the digest is unchanged); publishing a zip import cuts v2 with the bundle. Publish does not switch the skill on.",
+    "zdr-posture-matrix.json is not edited (hard rule: no rows for feature refusals). The design's e_skill_import_refused_for_zdr_token goes to docs/ZDR.md through lead_todo."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SKILL_IMPORT_ENABLED must stay off until D2-379/D2-383 (any org member can read every bundle body through the gRPC reads) are fixed, because import adds bundles from third-party files."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "An imported skill is created switched off and publish never enables it, so the person must publish and then switch it on (the SPA note says so). Either accept this two-step flow or make publish of an imported row enable it (a registry_apis.go change)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Version v1 is cut at insert from the imported text, not at publish, because session-core 0108 versions every accepted insert. The live proof's 'a turn pins v1' holds for a lone SKILL.md, but a zip import pins v2 (v1 has no bundle)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof not run: import a hand-zipped public skill folder through SPA, BFF, model-gateway and capability-core (base64 path, 12 MiB limits), see it as a switched-off Draft, publish, switch on, and check that a turn pins its version and skill_file lists the files."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "PutImportedDraft (state='draft' insert, blobs, files, audit) is covered only through the fake recordingTx in skill_import_test.go, with no Postgres integration test of the skill_bundles state column and draft-bundle publish path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The import transaction writes two revisions (created on insert, then edited when the draft opens, both with reason 'imported'), so the Skills history shows two entries for one import."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The SPA imports an admin's file as scope 'org' and a member's as 'user', with no scope picker; an admin cannot import a private skill from the page."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S10",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_541e91d6-57b-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-23/EP-4-S10.patch (79,917 bytes, LF, every touched file was LF). Per the code-first order nothing was compiled or run.\n\nWhat I built:\n- **Model gateway, `mcp_app_calls.rs` (new).** Switch `MCP_APP_TOOL_CALLS`, read once; only the literal `true` turns it on.\n  - `validate` checks the body `{run_id, server_id, tool, arguments, frame_nonce}`. It refuses a server_id containing `__`, arguments that are not a JSON object or are over 16 KiB, and a nonce that is not `[A-Za-z0-9_-]{16,128}`.\n  - `admit_binding` lets a call through only when there is exactly one binding, its id starts `cap.mcp_tool.`, review_state is `approved`, effective_policy is `allow`, the class is `read` and the effective floor is `none`. Anything else gets `app_call_requires_chat`.\n  - `FrameRateLimiter` allows 10 calls per (org, user, nonce) and 60 per (org, user) in a sliding 60 s window, and refuses rather than grow past its bound.\n  - `call_app_tool` runs: rate limit, then the run-owner check through `session_flow::require_durable_run_owner_with_token` (a non-owner gets `not_found`), registry hydration, `mcp_apps::authorize` (same server, allowlist, enabled, https), `ResolveToolBindings` with the viewer's own capability bearer, then `ExecuteStep{mcp__srv__tool, permission_mode ask, run_id, user_id, zdr false}` with the four delegated bearers, as `tools.rs` does for code_interpreter, under a 20 s timeout.\n  - A paused step is answered `app_call_requires_chat`. Output is scrubbed with `mp_scrub` and capped at 64 KiB on a char boundary. Each call writes one audit line (ids, tool, class, outcome); the arguments and the output are never in it, and `ValidatedCall`'s Debug leaves the arguments out.\n  - Tests: all six names from the design plus five extra checks.\n- **`http_routes.rs`.** Added `POST /v1/mcp-apps/tool-call` as a new block. It answers 404 when the switch is off, 403 `zdr_feature_not_supported`/`mcp_execution` for a ZDR or waived caller, 400 `invalid_request`, and 401 `delegated_credential_required`; every error uses the typed envelope. Route tests cover these four cases.\n- **BFF `domains/mcp.rs`.** A pass-through that forwards only the five known body keys. It mints the model, capability, session, execution and inference tokens, plus a best-effort data-plane token, and adds no scoping header. Two tests pin this.\n- **SPA.**\n  - `chat-client.ts` has `callMcpAppTool` with tests.\n  - The bridge gets `mcpAppToolCallsEnabled` (`VITE_MCP_APP_TOOL_CALLS === 'true'`), `createMcpAppToolCaller` (returns null when off or when there is no run), and a `toolCaller` option. `tools/call` is forwarded with a client-side bound of 10 per minute, and the late answer is posted to the frame window that asked. `serverTools` is advertised only when a caller is present; with no caller, behaviour is byte-identical to before. Tests include `tools_call_forwards_when_on` and `refusal_maps_to_jsonrpc_error`.\n  - The action contract `chat.mcp_app_tool_call` (risk medium, ownerPlane model, not model-executable) is added; the registry count test goes from 316 to 317.\n\nI did not touch execution-core. `ExecuteStep` already sends `mcp__` names through `execute_step_inner`, then `execute_mcp`, with `signed_class` from the capability evaluation (`execute_governed_mcp` when `MCP_DO_TOOLS` is on), so no new arm was needed. No migration or proto changes; the zdr-posture-matrix is untouched.",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs: change `async fn proxy_model_json_with_delegations(` to `pub(crate) async fn proxy_model_json_with_delegations(` (the BFF tool-call handler in domains/mcp.rs needs capability + session + execution + data-plane + inference on one request; no other helper sends all five)",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `  'chat.stage_mcp_app_message': exempt('ui_state_only', 'read'),` add `  'chat.mcp_app_tool_call': exempt('agent_cannot_self_govern', 'read'),`",
+    "regenerate apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (new action chat.mcp_app_tool_call)",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx (wiring, needed before VITE_MCP_APP_TOOL_CALLS does anything): (1) import `createMcpAppToolCaller` from '../lib/mcp-app-bridge'; (2) add `runId?: string` to the props of McpAppsForAnswer, McpAppFrame and McpAppDocument and pass `runId={props.runId}` down at `<McpAppFrame ...>` and `<McpAppDocument ...>`; (3) in McpAppDocument's `createMcpAppBridgeHost({...})` add `toolCaller: createMcpAppToolCaller({ runId: props.runId, serverId: props.serverId }),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: in the EP-4 S9 block `<McpAppsForAnswer calls=... />` add the prop `runId={props.message.runId}`",
+    "guard: run `cargo fmt` on model-gateway src/mcp_app_calls.rs and http_routes.rs (written without running rustfmt), then cargo test -p model-gateway --lib mcp_app_calls, mcp_app_tool_call_route_tests, the BFF cargo tests, and vitest on mcp-app-bridge.test.ts, chat-client.test.ts, action-registry.test.ts",
+    "S12 (not this slice): set MCP_APP_TOOL_CALLS=${MCP_APP_TOOL_CALLS:-false} on model-gateway in apps/Model Plane/deploy/docker-compose.yml (no execution-core switch, since no EC arm was added); add a docs/ZDR.md row (app tool call refused on ZDR or waived tokens with mcp_execution); document VITE_MCP_APP_TOOL_CALLS for the owner's .env.example; add the D13 ledger entry. Do NOT add an e_zdr_token_mcp_app_tool_call_refused row to zdr-posture-matrix.json: it is a feature refusal, so the hard rule says it does not get a row."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With TOOL_CLASS_GATE off, or when execution-core has no run view for the run, `evaluate_call(Ask, \"mcp__...\")` returns AwaitApproval, so ExecuteStep creates a durable approval row for every app call before the gateway answers app_call_requires_chat. Turn the switch on only with TOOL_CLASS_GATE=enforce and MCP_DO_TOOLS=read, or add an execution-core guard."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ExecuteStep saves a checkpoint and advances the run's StateStore snapshot (step_index+1, status Completed or Failed). An app call on a finished run can therefore rewrite that run's snapshot, and a failed call can mark it Failed. Execution-core needs a side-step mode, or a live check that this is harmless."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With MCP_DO_TOOLS on, `execute_governed_mcp` needs `permission::run_view(org, run, tool)` from execution-core's in-process LRU. After an execution-core restart, an eviction, or on another replica, app calls fail with \"not bound for this run\" (the gateway reports tool_call_failed)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "I read D13's \"class none/read\" as registry class `read` with effective floor `none`, review_state `approved` and effective_policy `allow`, because the tool_class vocabulary has no `none` class."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-frame (10/min) and per-viewer (60/min) limits live in one gateway replica's memory. With N replicas a frame can make up to 10*N calls per minute until WS04 adds shared limits."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test runs call_app_tool end to end with gRPC doubles for session-core ResolveRunOwner, capability-core ResolveToolBindings and execution-core ExecuteStep. The order of the checks and the error mapping are covered only by the unit tests and route tests."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Still to prove live: with a fixture app, echo_read (read) completes and the run log shows the gate's v2 evidence; create_item (write) gets app_call_requires_chat; a Space member who is not the run owner gets not_found; a ZDR token gets the typed mcp_execution refusal; the 11th call from one frame within a minute gets rate_limited."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The SPA wiring (McpAppFrame runId plus toolCaller, and ChatMessages runId) is a shared edit in lead_todo. Until it lands, VITE_MCP_APP_TOOL_CALLS has no effect and tools/call is still refused."
+    }
+   ],
+   "deviations": [
+    "execution-core was not touched: ExecuteStep already sends mcp__ names through execute_mcp with the signed class.",
+    "Added a per-viewer bound (60 per minute) beside the per-frame bound of 10 per minute, so minting fresh frame nonces cannot get around D13's frame limit.",
+    "Waived (DEC-32) callers are refused along with ZDR ones, as section 5's ZDR clause asks.",
+    "Upstream error text never reaches the app; it gets typed codes only (not_found, rate_limited, app_call_requires_chat, tool_call_failed, ...).",
+    "The BFF handler needs proxy_model_json_with_delegations made pub(crate) in chat/shared.rs, which is not my file (see lead_todo)."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S5",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_541e91d6-57b-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+   ],
+   "notes": "The slice is built but nothing has been compiled or run, per the code-first order. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-23/EP-12-S5.patch (63 KB, staged in the isolated worktree; not committed).\n\n**New file `agent_api_routes.rs`**\n- It holds the five routes. GET runs/:run_id answers `{data:{run}}`; the run is projected from `run_detail_value` down to the golden's Run fields, and its metadata keeps only origin and api_key_id.\n- GET runs/:run_id/events first calls GetRun with the key's own bearer, so a run the key does not own is a typed run_not_found. Only then does it call `sse::run_events_sse` with that bearer. The people's `/v1/runs/:id/events` route is unchanged.\n- POST runs/:run_id/cancel calls RunService.CancelRun with reason `api_key_requested`.\n- GET threads/:id/runs and threads/:id/messages are cursor-paged (default 20, at most 100) with `{data, meta, links}`. Messages are user and assistant turns only, with no human posts.\n- Every route first checks, in order: the caller is a key (otherwise 401 api_key_invalid), it holds agent:runs (otherwise 403 agent_api_scope_missing), and its posture is Persistent through zdr_posture::decide_for (otherwise 412 zdr_feature_not_supported, details.feature agent_api, before any upstream call). Only then does it require the key's session bearer.\n- All errors use the typed envelope with an object `details`. Path ids and cursors must be 1 to 128 of [A-Za-z0-9_-]. Query names form a closed set.\n- Switch `MODEL_GATEWAY_AGENT_API` uses the strict parser (`loop_fold::switch_from`). While it is off the router is empty, so behaviour is unchanged.\n\n**auth.rs**\n- New `AGENT_API_KEY_ROUTES` (five shapes), `API_KEY_SCOPE_AGENT_RUNS`, and `api_key_route_scope(method, path, agent_api)`. The key arm of `authorize_principal_route` uses them. Off, the allow-list is exactly the INNH-10 pair, and the switch is read only for Agent API paths.\n- New `VerifiedApiKeySessionBearer` and `verify_delegated_api_key_session_bearer`. Exactly one x-session-authorization header is accepted, with aud session-core, the same sub, org, key_id and acting_user_id, scope agent:runs, and equal zdr and waiver (a mismatch is the typed zdr_posture_mismatch). It is accepted only on an Agent API route while the switch is on; every other delegation stays forbidden.\n\n**http_routes.rs**\n- `authed_routes()` now delegates to `authed_routes_with(agent_api)`, which merges the new router.\n- `run_detail_value` is now pub(crate).\n- The INNH-10 route-fence test now uses `authed_routes_with(true)`, so it proves a key reaches none of the new routes while the switch is off.\n\n**Tests written (not run):** agent_api_routes::tests (switch_off_routes_are_absent, api_key_needs_agent_runs_scope, zdr_key_is_refused_before_upstream, session_bearer_must_match_the_key, user_principal_cannot_use_agent_routes, errors_are_typed_envelopes, run_projection_matches_run_detail_value, plus path, page-query and page-body tests). auth::tests gains api_key_route_scope_is_a_table_over_the_agent_api_switch, an authorize-route test over the switch, and a session-bearer binding test with a JWKS mock.\n\n**Departures from the design:**\n- The handlers take `Option<Extension<VerifiedApiKeySessionBearer>>` so a missing bearer gets the typed api_key_invalid; the type has no FromRequestParts extractor.\n- The ZDR refusal uses the Agent API envelope with `details.feature`, as the S3 contract requires, not the catalogue body the export route returns.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs: in no_raw_retention_claim_is_read_outside_the_named_inventory's RAW_READ_INVENTORY, right after the (\"auth.rs\", \"verify_delegated_api_key_browser_bearer\", ...) row, add: (\n                \"auth.rs\",\n                \"verify_delegated_api_key_session_bearer\",\n                \"posture equality between an api key's ingress and session bearers, not a decision\",\n            ), (without it that lint fails on the new function's claims.zdr comparison)",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block, after the MODEL_GATEWAY_THREAD_EXPORT line, add:\n      # EP-12 S5: the Agent API read and control routes (/v1/agent/*) for API keys with agent:runs. Only the literal true.\n      MODEL_GATEWAY_AGENT_API: ${MODEL_GATEWAY_AGENT_API:-false}",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in the feature table after the 'session-core api_key principal (EP-12 S4)' row, add: | **Agent API read and control routes (EP-12 S5)** | Refused for ZDR api_key tokens | model-gateway refuses every /v1/agent/* route with 412 zdr_feature_not_supported (details.feature agent_api) before any upstream call, for any posture that is not persistent; no posture-matrix row (pinned by agent_api_routes::tests::zdr_key_is_refused_before_upstream). Built dark behind MODEL_GATEWAY_AGENT_API (off). |",
+    "needs session-core (not this slice): add (\"/model_plane.v1.OrchestrationCoreService/StreamRunEvents\", false) to SC/auth.rs API_KEY_METHODS, wrap OrchestrationCoreServiceServer in crate::auth::RpcPathStamp in SC/grpc.rs, and admit the api_key principal on authorize_operation(\"orchestration:read\"); until then GET /v1/agent/runs/:id/events opens and then emits a run_events_unavailable error event for a key",
+    "guard: run rustfmt on agent_api_routes.rs and auth.rs (lines were hand-wrapped to 100 columns but rustfmt was not run), then cargo test -q -p model-gateway --lib agent_api_routes, auth::tests and api_key_route_fence_tests"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+    "apps/Model Plane/rust/services/session-core/src/auth.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/ZDR.md"
+   ],
+   "deviations": [
+    "The design said the routes are 'not merged' while the switch is off; that holds via authed_routes_with(enabled()). In addition the INNH-10 fence test merges them unconditionally (authed_routes_with(true)), so it proves a key is refused there while the switch is off.",
+    "The ZDR refusal on /v1/agent/* is the Agent API typed envelope {error:{code:zdr_feature_not_supported,message,details:{feature:agent_api}}} at 412, as the S3 golden and spec require, not the catalogue body thread_export_routes returns.",
+    "A user principal on /v1/agent/* passes the route policy (unchanged user arm) and is refused by the handler with 401 api_key_invalid before any upstream call (D4).",
+    "links.next is emitted as '/threads/{id}/runs?after=..&limit=..', a path relative to the public prefix /api/agent/v1."
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Session-core's API_KEY_METHODS lacks OrchestrationCoreService/StreamRunEvents and that service is not RpcPathStamp-wrapped, so the Agent API events route cannot stream for a key until session-core admits that read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The key's cancel does not stop a live in-process turn (the chat cancel_run uses run_control.cancel_run with claims.user_id); S7's detached Ask task must register a key-scoped cancel or a cancelled API run keeps generating."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "With S2, S4 and S5 on, prove a key reads, lists and cancels only its own runs and threads, and gets 404 run_not_found or thread_not_found for a person's run or another key's thread (this relies on session-core's authorize_run_owner and authorize_thread_owner for api_key callers)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the five handlers against a Session Core double, because the RunService trait is large and changes under parallel slices; projection, paging, cursor and error mapping are unit-tested, upstream wiring is not."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Agent cancel_run is not in zdr_posture's DURABLE_MUTATIONS lint, because its ZDR gate sits in admit() and the lint checks only the handler body for zdr_or_refuse or continuation_gate."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Upstream Unauthenticated maps to 401 api_key_invalid and ResourceExhausted to 503 upstream_unavailable, because the contract has no retry_after value to give for a Session Core throttle."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S11",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_541e91d6-57b-4",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts"
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: insert the row `  'thread.export': exempt('no_owner_executor', 'read'),` directly after the line `  'chat.inspect_run_request': exempt('no_owner_executor', 'read'),` (currently line 345) inside the MODEL_ACCESS object. Required: the registry is `as const`, so ActionId is a literal union and MODEL_ACCESS (Readonly<Record<ActionId, ...>>) fails typecheck without it; the thread.export test also reads this row.",
+    "guard, after the batch: regenerate the agent-action admission golden with `VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts` in apps/Frontend Plane/verevonv3 (prefix pnpm commands with pnpm_config_verify_deps_before_run=false), refresh apps/Model Plane/api/contracts/agent-action-admission.json.sha256, and re-vendor the byte-identical copies listed in apps/Model Plane/api/contracts/README.md. Do this once after EP-4-S10 (chat.mcp_app_tool_call) also lands, since both add registry ids.",
+    "guard, rebase note: action-registry.test.ts P-SPA1 now expects 317 (316 before this slice). Any other batch slice that adds a registry id must bump the same assertion and add its own ledger line on rebase.",
+    "guard, verification: `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit` in apps/Frontend Plane/verevonv3; `pnpm exec vitest run src/shared/actions/chat-history.test.ts src/shared/actions/action-registry.test.ts`; `cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets history` (the BFF tests sit in domains::chat::history::thread_export_handler_tests, which the history filter selects).",
+    "No regeneration needed for proto, migrations, the prompt-tool manifest or zdr-posture-matrix: no proto or migration changed, thread.export is not model-eligible so agent-tools.ts never offers it, and the export refusals live upstream in model-gateway and session-core."
+   ],
+   "deviations": [
+    "Test module is domains::chat::history::thread_export_handler_tests (tests export_proxies_owner_bearer_only and export_preserves_content_disposition), not a history::tests module as the design names; it sits beside the handler, as thread_goal_handler_tests and fork_handler_tests do."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Support-origin chat threads are exportable through this route (no origin check, unlike fork) and EP-12 S9 refuses only Space threads, so the owner must decide support-thread exportability before MODEL_GATEWAY_THREAD_EXPORT is switched on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Prove the relay live with the switch on: a persistent thread's JSON and Markdown bodies come back byte-identical with Content-Disposition and no-store, and with it off the upstream thread_export_disabled 404 passes through unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The relay buffers the whole rendering before replying, so one export holds about one copy of the conversation in gateway memory (the upstream text cap is 8 MiB per EP-12 S9)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "BFF-originated export refusals reuse chat helpers whose bodies carry no details key, while the upstream refusals carry an object details, so the two shapes differ."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The registry id thread.export does not follow the registry's chat.* prefix; a later rename moves the admission golden, the chat-history union and the SPA client together."
+    }
+   ],
+   "notes": "Built the thread.export contract and the BFF relay; code and unit tests written, nothing built or run (code-first order). Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-23/EP-12-S11.patch (22,479 bytes, six files, generated from model-plane a8414b6; a reverse --check against the worktree passes). Contract: chat-history.ts gets a thread.export union member (format json|markdown, profile full|redacted, neither defaulted) and an exported strict threadExportInput; action-registry.ts gets one thread.export entry (model plane, low risk, no approval, reversible, output contentType and filename) and the count moves 316 to 317 with a ledger line. BFF: GET /api/v1/chat/threads/{thread_id}/export in domains/chat.rs; export_thread in history.rs forwards only format and profile (encoded; an absent choice stays absent), the owner's model bearer and x-session-authorization, plus x-user-id and x-org-id from the verified session as the other chat relays do (model-gateway reads those two only on its dev-bypass path). The body is relayed unparsed with Content-Type, Content-Disposition (default attachment), nosniff and no-store; a JSON refusal (404 thread_export_disabled, 412 thread_not_exportable, the ZDR conversation_export body) passes through verbatim; a non-JSON upstream failure becomes upstream_unavailable. No durable chat-thread lookup runs first (fork and goal do it): it would answer thread_not_found to a ZDR caller in place of the designed refusal, and Session Core stays the exportability authority (D8). No BFF switch is added; the upstream MODEL_GATEWAY_THREAD_EXPORT is the only gate.",
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-11-S8, EP-4-S10, EP-12-S5, EP-12-S11 (in that order), then git reset -q and git diff --stat",
+    "outcome": "All four patches applied. The only conflict was action-registry.test.ts: EP-12-S11 and EP-4-S10 added competing ledger lines on the length assertion. Both are kept, the EP-11-S8 line is added and the count goes to 319. git diff --stat shows every slice's files changed; the new files are untracked after the unstage.",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run --pool=forks src/shared/actions/admission-contract.test.ts (generation step)",
+    "outcome": "5/5 passed. The golden gained skills.import, thread.export and chat.mcp_app_tool_call. It was copied byte for byte to the 4 vendored copies; the new sha256 a7f12975...b103 is in the .sha256 file and in the zdr-contract-sync.test.sh pin, and sha256sum -c reports OK.",
+    "clean": true
+   },
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=4 cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust)",
+    "outcome": "Finished with no errors. The only warnings in touched files are 2 pre-existing unused-Json warnings at http_routes.rs:20878/20881 in old test code.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets (same env)",
+    "outcome": "Finished with no errors. The only warnings are pre-existing ones in files outside the batch.",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (apps/Model Plane/go/services/capability-core, go.work)",
+    "outcome": "Both produced no output; vet exit 0",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (apps/Frontend Plane/verevonv3)",
+    "outcome": "Exit 0 with 0 errors. The 1 pre-existing error in the baseline no longer shows.",
+    "clean": true
+   },
+   {
+    "command": "rustfmt --check counts on touched gateway/BFF files vs HEAD",
+    "outcome": "auth.rs 23 = HEAD 23, http_routes.rs 209 = HEAD 209, agent_actions.rs 38 = HEAD 38, chat/history.rs 8 = HEAD 8. All remaining diffs predate the batch; the new modules are fully formatted.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-11-S8 / EP-4-S10 / EP-12-S11",
+    "what": "Resolved the 3-way conflict by keeping both slices' ledger comments. Added the EP-11-S8 line ('+1 after EP-11-S8 registered skills.import, ...') and set toHaveLength(319): 316 plus 3 new ids."
+   },
+   {
+    "file": "apps/Model Plane/go/services/capability-core/internal/api/skill_import.go",
+    "slice": "EP-11-S8",
+    "what": "Changed the doc comment from \"($3, '' for a lone SKILL.md)\" to \"($3, empty for a lone SKILL.md)\". gofmt was rewriting the '' to a typographic quote; the file is now gofmt-clean."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs, agent_api_routes.rs",
+    "slice": "EP-4-S10 / EP-12-S5",
+    "what": "Ran rustfmt on these new files, as the builders asked; they stay LF."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/auth.rs, http_routes.rs; apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs, chat/history.rs",
+    "slice": "EP-12-S5 / EP-4-S10 / EP-11-S8 / EP-12-S11",
+    "what": "Applied rustfmt only to hunks the batch added, using a scratch script that keeps each rustfmt change only if it falls entirely on added lines. Whole-file formatting would have rewritten hundreds of pre-existing unformatted spots. rustfmt --check counts now equal HEAD's."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "slice": "EP-4-S10 (shared edit)",
+    "what": "The working copy was already CRLF while HEAD is LF, so the one-word pub(crate) edit produced a 4242-line diff. Converted the file back to HEAD's LF, leaving a 1-line diff."
+   }
+  ],
+  "still_broken": [],
+  "regenerated": [
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (VEREVON_UPDATE_GOLDEN; adds skills.import, thread.export, chat.mcp_app_tool_call)",
+   "apps/Model Plane/api/contracts/agent-action-admission.json (byte copy)",
+   "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json (byte copy)",
+   "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json (byte copy)",
+   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json (byte copy)",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256 -> a7f129753e1938fd8ed0ed5ecfbeb50f68635d48d511ae54c17e5213f530b103 *agent-action-admission.json",
+   "scripts/tests/zdr-contract-sync.test.sh agent-action-admission pin (12f0cb85... -> a7f12975...)"
+  ],
+  "shared_edits_applied": [
+   "capability-core cmd/main.go: api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux) after the SkillBundles handler (EP-11-S8)",
+   "capability-core internal/api/registry_apis.go: importEnabled field + NewSkillsHandler literal + listing body import_enabled (EP-11-S8)",
+   "model-gateway http_routes.rs: /v1/skills/import route (DefaultBodyLimit 12 MiB) before /v1/skills/:id, plus SKILL_IMPORT_BODY_LIMIT_BYTES and import_skill_proxy after create_skill_proxy. The org_id is not injected. No route-inventory test lists skill proxies, so none needed the route (EP-11-S8)",
+   "verevonv3 model-access.ts: 'skills.import' (EP-11-S8), 'thread.export' (EP-12-S11), 'chat.mcp_app_tool_call' (EP-4-S10)",
+   "verevonv3 action-registry.test.ts: length 319 with the EP-11-S8 ledger line",
+   "apps/Model Plane/deploy/docker-compose.yml: SKILL_IMPORT_ENABLED (capability-core, default false) and MODEL_GATEWAY_AGENT_API (model-gateway after MODEL_GATEWAY_THREAD_EXPORT, default false)",
+   "apps/Model Plane/docs/ZDR.md: Skill import (EP-11 S8) row after /learn; Agent API read and control routes (EP-12 S5) row after the session-core api_key principal row",
+   "verevonv3 gateway domains/chat/shared.rs: proxy_model_json_with_delegations made pub(crate) (EP-4-S10)",
+   "verevonv3 McpAppFrame.tsx: imports createMcpAppToolCaller, adds runId?: string to McpAppsForAnswer, McpAppFrame and McpAppDocument and passes it down, and adds toolCaller to createMcpAppBridgeHost (EP-4-S10)",
+   "verevonv3 ChatMessages.tsx: runId={props.message.runId} on McpAppsForAnswer (EP-4-S10)",
+   "model-gateway zdr_posture.rs RAW_READ_INVENTORY: verify_delegated_api_key_session_bearer row (CRLF kept) (EP-12-S5)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md EP-11 D9 entry (lead books the ledger)",
+   "EP-4-S10 'S12 (not this slice)' items: MCP_APP_TOOL_CALLS compose line, ZDR.md row, .env.example VITE_MCP_APP_TOOL_CALLS, D13 ledger entry. These are deferred to S12 by the builder.",
+   "EP-12-S5 session-core needs (SC auth.rs API_KEY_METHODS StreamRunEvents, RpcPathStamp wrap in grpc.rs, orchestration:read for api_key): these call for design work in another slice, not a shared edit. Until then, GET /v1/agent/runs/:id/events for a key emits run_events_unavailable.",
+   "Guard test runs listed in lead_todo (go test, cargo test, vitest): skipped because the task forbids tests beyond the golden generation step"
+  ],
+  "notes": "The batch compiles. Rust Model Plane workspace, the verevonv3 gateway, capability-core Go build and vet, and the tsc6 app typecheck all pass, with tsc at 0 errors.\n\n- No proto, migration, prompt, SSE or posture-matrix file changed, so steps 2, 4 and 4b were not needed.\n- The only git writes were the four git apply --3way runs and one git reset -q. The new files are untracked: skill_import.go, skill_import_test.go, import_draft.go, agent_api_routes.rs, mcp_app_calls.rs and SkillsSection.import.test.tsx.\n- The ZDR.md S8 row says model-gateway refuses a ZDR token before forwarding. proxy_to_capability_core calls require_non_zdr_durable_mutation for writes, so the new POST proxy is covered.\n- Whitespace: git diff --check flags trailing whitespace on the zdr_posture.rs lines. That is the CR of a file committed as CRLF, which is expected.\n- shared.rs line endings: the file had silently become CRLF on disk while HEAD is LF. It was restored to LF; the lead may want to check other files in this worktree for the same drift.\n- Pending for the lead: the ledger D9 entry, the EP-12-S5 session-core follow-up, and the EP-4-S10 S12 items."
+ }
+}

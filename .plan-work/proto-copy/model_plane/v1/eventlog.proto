@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "model_plane/v1/events.proto";
+
+// EventLog — durable, append-only event log surface.
+//
+// Ownership: session-core owns the Postgres `events` table (see
+// `rust/services/session-core/migrations/0002_events_and_ordinals.sql`). This
+// service is the canonical RPC facade over that table for:
+//   - producers that emit one-off or bursty events (AppendEvent)
+//   - consumers that replay historical state (QueryEvents)
+//   - consumers that follow the live tail (SubscribeEvents)
+//
+// Idempotency: AppendEvent honours the envelope's (org_id, idempotency_key)
+// uniqueness constraint. A duplicate append returns the prior event rather
+// than creating a second row; `deduplicated=true` in the response.
+//
+// Ordering: within a run_id, events are ordered by (ts, event_id). Across runs,
+// ordering is per-org by (ts, event_id). step_ordinal is monotonic per-run for
+// STEP_COMPLETED / ACTION_COMPLETED and is assigned by the DB trigger in
+// migration 0002 — producers MUST NOT set it.
+service EventLog {
+  // AppendEvent writes a single Event to the log.
+  rpc AppendEvent(AppendEventRequest) returns (AppendEventResponse);
+
+  // QueryEvents returns a filtered, paginated slice of historical events.
+  rpc QueryEvents(QueryEventsRequest) returns (QueryEventsResponse);
+
+  // SubscribeEvents streams events matching the filter as they are appended.
+  // Initial replay of historical events (if `from_cursor` is set) is followed
+  // by a tailing subscription until the client disconnects or the server
+  // drops the stream.
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream Event);
+}
+
+message AppendEventRequest {
+  // Event to append. event_id / ts / producer may be populated by the
+  // caller; if empty, the server fills them. idempotency_key, when set,
+  // MUST be unique per org_id.
+  Event event = 1;
+}
+
+message AppendEventResponse {
+  // The stored event (including server-filled fields).
+  Event event = 1;
+
+  // True when the append matched an existing (org_id, idempotency_key) row
+  // and no new event was written.
+  bool deduplicated = 2;
+}
+
+// EventFilter narrows the event set across Query / Subscribe. All fields are
+// AND-ed together; empty fields are wildcards.
+message EventFilter {
+  // Tenant (required for cross-run queries to avoid leaking other tenants).
+  string org_id = 1;
+
+  // Run scope (optional; empty means all runs for the org).
+  string run_id = 2;
+
+  // Event types to include; empty = all types.
+  repeated EventType event_types = 3;
+
+  // Correlation-id scope (optional).
+  string correlation_id = 4;
+
+  // Resource reference (optional; e.g. "thread/{id}").
+  string resource_ref = 5;
+}
+
+// Cursor is an opaque server-issued marker for resumable queries + subscriptions.
+// Format is server-defined (currently base64 over (ts, event_id) pair). Clients
+// MUST treat cursor values as opaque — do not attempt to parse or forge them.
+message Cursor {
+  // Opaque cursor value. Empty = start-from-beginning.
+  string value = 1;
+}
+
+message QueryEventsRequest {
+  // Filter to apply.
+  EventFilter filter = 1;
+
+  // Continuation cursor from a prior response (empty = start).
+  Cursor cursor = 2;
+
+  // Max events to return in this page. Server clamps to [1, 500].
+  uint32 limit = 3;
+
+  // When true, return events in descending (ts, event_id) order.
+  // Default false (oldest-first).
+  bool reverse = 4;
+}
+
+message QueryEventsResponse {
+  // Matching events in the requested order.
+  repeated Event events = 1;
+
+  // Cursor to pass back for the next page. Empty when exhausted.
+  Cursor next_cursor = 2;
+
+  // True when more results are available beyond this page.
+  bool has_more = 3;
+}
+
+message SubscribeEventsRequest {
+  // Filter to apply.
+  EventFilter filter = 1;
+
+  // Optional replay cursor. Empty = tail live only (no historical replay).
+  // Non-empty = replay from the cursor forward, then tail live.
+  Cursor from_cursor = 2;
+}

@@ -1,0 +1,59 @@
+[
+ {
+  "key": "mg-aux-models-configurable",
+  "rows": [],
+  "title": "mg-aux-models-configurable",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\deploy\\docker-compose.yml"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib aux_model",
+    "outcome": "2 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib title",
+    "outcome": "12 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib follow_up",
+    "outcome": "6 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo check -q -p model-gateway --all-targets",
+    "outcome": "clean, no output, no errors",
+    "passed": true
+   },
+   {
+    "command": "bash scripts/tests/ws04-run-control-switches-compose-test.sh (model-gateway compose env test)",
+    "outcome": "contract passed, exit 0",
+    "passed": true
+   },
+   {
+    "command": "bash scripts/tests/letta-tool-search-compose-contract-test.sh",
+    "outcome": "contract passed, exit 0",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The env read inside aux_model() (OnceLock plus std::env::var) is not covered by a test. The tests cover the pure aux_model_from() and check that the three builders use aux_model(), which returns the default in tests. So whether MODEL_GATEWAY_AUX_MODEL actually reaches the requests is only proven by the live run on the Anthropic stack. Live check: set it to a model the chain serves (for example claude-haiku-5-5), restart model-gateway, and confirm the title and follow_ups phases in turn_timing no longer show outcome error.",
+   "This is an old-code regression test in the compile sense only: aux_model_from and the request builders did not exist before, so the old code fails to build the test. No runtime assertion would have failed on the old constants.",
+   "Stale doc reference outside this task's files: apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:258 still names `sse::TITLE_MODEL`, which no longer exists. A doc-only follow-up should change it to `sse::AUX_MODEL_DEFAULT`. apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md:844 also describes TITLE_MODEL and FOLLOW_UPS_MODEL as compile-time with no env override, which is now out of date.",
+   "The value is read once per process, so changing MODEL_GATEWAY_AUX_MODEL needs a model-gateway restart. The operator must also confirm the chosen model is in the inference chain's roster, or all three calls keep failing silently as before.",
+   "Line endings were kept (sse.rs and docker-compose.yml are LF in the worktree and LF at HEAD). On the subscription route the turn's own model, zdr and residency are still used. The judge still takes the turn's zdr flag, and nothing new is logged beyond the model name."
+  ],
+  "db_tests": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:258 (doc comment only, not edited per the packet): \"/// Still a *tier* here, unlike `sse::TITLE_MODEL`, which had to be pinned to a\" refers to a constant that no longer exists. Suggested doc-only change: `sse::AUX_MODEL_DEFAULT`. It does not affect compilation or tests."
+  ],
+  "deploy_notes": "Set MODEL_GATEWAY_AUX_MODEL in the deploy env for the Anthropic-only stack (for example claude-haiku-5-5). The value is read once per process at first use, so restart model-gateway after setting it. Leave it unset to keep gpt-4o-mini. Confirm the chosen model is in the chain's roster before the live run; I did not verify that. I did not read or write any .env file. The compose change only adds the empty-default passthrough, so no deploy step beyond the usual container restart is needed.",
+  "summary": "MODEL_GATEWAY_AUX_MODEL (D1-807) now selects the model for the thread title, follow-up chips and source judge. Unset, empty or blank keeps gpt-4o-mini, so a deployment that does not set it sends the same requests as before. aux_model() reads the value once per process through the pure aux_model_from(). The three per-call constants became one AUX_MODEL_DEFAULT because one setting drives all three; keeping three equal constants would leave two unused. Their rationale comments moved onto the default and the accessor. The three InferRequest literals are now pure builders (title_request, follow_ups_request, verification_judge_request) that still pass through subscription_scoped_request, so the request fields are unchanged and a unit test can check the model each request carries. Subscription routes keep the turn's own model, as before. The setting is a model name, not a boolean switch, so the literal-switch parser rule does not apply. Logging adds nothing beyond the model name, and the judge keeps the turn's zdr flag. Budgets, timeouts, prompts and the call set are untouched, and deep_research.rs is not edited."
+ }
+]

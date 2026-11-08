@@ -1,0 +1,824 @@
+{
+ "batchId": "W3-08",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-8-S4",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/memory.proto",
+    "apps/Model Plane/rust/services/session-core/migrations/0100_user_profiles.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0100_user_profiles.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/user_profile.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/memory.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.profile.test.tsx",
+    "apps/Model Plane/api/contracts/zdr-refusals.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "docs/plans/wave3/evidence/EP-8-S4.md"
+   ],
+   "notes": "I wrote the code and tests for the whole slice. Nothing was run (code-first order). The guard's compile needs lead_todo items 1, 4 and 5 applied first: without them session-core's debug_assert on the ZDR feature key and the two MG MemoryService mocks break the build. Session-core gets the user_profiles table in migration 0100 (round B moves round A's 0072 to 0100-0104, and EP-8 S4 is the first of those; 0072 is taken here by space_event_log). The migration also widens the closed memory_control_events.event CHECK with 'profile_edited' and 'profile_rebuilt', so profile changes are audited without content. The revert file undoes both. user_profile.rs holds the pure builder: stated rows, then unknown-provenance rows, then inferred rows at confidence 0.8 or more; one line per key and per text; ordered preference, fact, instruction; cut at 1400 characters on a line boundary. The loader reads session-core agent_memory scope='user' rows only: accepted, latest, unexpired, session_id NULL, source_links <> '{}', legacy Space-room rows excluded. It never reads Letta blocks (C8). It also has rebuild (under the user lock through resolve_in_tx; refused unless generation_allowed; an edited profile is kept unless force; writes nothing when unchanged), save_edit (allowed while paused, refused when hidden, revision checked under the lock), drop_sources and delete_in_tx. The three MemoryService RPCs are in memory_grpc.rs, behind a profile_enabled field read once from SESSION_USER_PROFILE_ENABLED with the strict parser. With the switch off they return failed_precondition profile_not_enabled after authorization and before any DB read. A ZDR Get answers empty with skip_reason=zdr. ZDR and waived Set/Rebuild get Refusal::feature_not_supported(\"user_profile\"). Erasure is not switched: a memory delete drops its built line in the same transaction, ResetMemory deletes the row, and the org purge deletes the org's rows (PurgeSummary.user_profiles). The end of each Dreaming cycle rebuilds, without force, for each person whose user rows the cycle wrote; that list stays empty while the switch is off. The model-gateway routes are GET/PUT /v1/memories/profile and POST /v1/memories/profile/rebuild, with org and user taken from the claims. The BFF proxies /api/v1/memory/profile and /api/v1/memory/profile/rebuild. The SPA has getProfile, saveProfile and rebuildProfile, the actions memory.profile.save and memory.profile.rebuild (both exempt, human-only), and a Profile card above the memory list. The card is hidden on profile_not_enabled or a 404, so the existing MemorySection tests keep their output. It has a textarea with a 1400-character counter, 'Bygd fra N minner' with each line linking to #memory-<id>, the count of deleted sources for an edited profile, and the paused/off/ZDR states per D8. The evidence stub is in docs/plans/wave3/evidence/EP-8-S4.md.",
+   "deviations": [
+    "Migration is 0100_user_profiles (not 0072): 0072 is held by 0072_space_event_log on this branch; round B's renumber map puts EP-8 S4 at 0100.",
+    "A memory delete removes its line from a built profile at once, in the delete's own transaction (drop_sources), instead of waiting for the next rebuild. An edited profile is kept and reports sources_deleted_since_edit.",
+    "Unknown-provenance rows (the deterministic phrase matcher's, which carry thread/message links) are included as a middle tier between stated and inferred. Without them a fresh install's profile would be nearly empty, because the matcher's rows classify as Unknown.",
+    "Added content-free audit events profile_edited/profile_rebuilt. This needed the 0100 migration to replace the closed memory_control_events_event_check (NOT VALID then VALIDATE). The revert deletes those events and restores the 0051 set.",
+    "There is no 'GDPR user erasure' path in session-core: gdpr.rs acts only on subject_type organization. The profile is erased by the org purge (gdpr_erasure_deletes_profile tests that path) and by ResetMemory.",
+    "A rebuild that would produce identical content and sources writes nothing and does not bump the revision, to protect the later S5 prefix cache.",
+    "A waived credential may Get (read) its profile, matching ListMemory's MemoryRetention rule. Only writes are refused for waived callers.",
+    "The switch is checked after authorization (a wrong-user caller gets PermissionDenied, not profile_not_enabled)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in `pub const FEATURES`, after the `sandbox_workspace` entry, add `    Feature {\\n        key: \"user_profile\",\\n        label: \"the standing profile\",\\n    },`. Required before session-core and model-gateway tests run: feature_not_supported debug_asserts the key and from_status drops unknown keys. Both JSON copies were already edited to match catalogue_text().",
+    "regen ZDR catalogue pins: recompute apps/Model Plane/api/contracts/zdr-refusals.json.sha256 (the sha256 of the LF file is 5a14940f482bd0af7b546a0b620d1357c9c5a292518cd70f826fe49fe878caaf; confirm it equals mp_contracts::zdr_refusal::catalogue_text()). Copy that .sha256 to apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256. Re-vendor the json and .sha256 to apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/ and apps/Model Plane/go/pkg/zdrrefusal/. Update the pin on scripts/tests/zdr-contract-sync.test.sh line 118 (`apps/Model Plane/api/contracts/zdr-refusals.json|025c8c...`) to the new digest. Then run bash scripts/tests/zdr-contract-sync.test.sh.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: in the feature key union, after `  | 'sandbox_workspace'`, add `  | 'user_profile'`. In the labels map, after the `sandbox_workspace:` line, add `  user_profile: { no: 'den faste profilen', en: 'the standing profile' },`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs, `impl ... MemoryService for MockMemoryService`: after `reset_memory`, add three methods `get_user_profile(&self, _: Request<mp_contracts::model_plane::v1::GetUserProfileRequest>)`, `set_user_profile(... SetUserProfileRequest)` and `rebuild_user_profile(... RebuildUserProfileRequest)`, each returning `Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status>` as `Err(Status::unimplemented(\"<name> not needed in test\"))`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs, `impl mpv1::memory_service_server::MemoryService for MockMemory`: add the same three methods (mpv1::GetUserProfileRequest / SetUserProfileRequest / RebuildUserProfileRequest -> mpv1::UserProfileResponse), each returning Err(Status::unimplemented(..)).",
+    "shared-edit apps/Model Plane/api/contracts/space-surface.v1.json (then re-vendor model-gateway/tests/fixtures/space-surface.v1.json and re-pin both .sha256): add two rows modelled on mg:PUT:/v1/memories/controls. Row 1: {\"id\":\"mg:PUT:/v1/memories/profile\",\"kind\":\"route\",\"plane\":\"model\",\"service\":\"model-gateway\",\"method\":\"PUT\",\"path\":\"/v1/memories/profile\",\"handler\":\"http_routes.rs::set_user_profile\",\"decision_type\":\"token_posture\",\"min_role\":\"authenticated\",\"zdr_class\":\"refuse\",\"basis\":\"guard:set_user_profile\",\"idempotency\":\"unspecified\",\"flag\":\"SESSION_USER_PROFILE_ENABLED\",\"payload_allow_list\":[],\"reason\":\"Session Core refuses a ZDR or waived credential before it stores the profile (memory_grpc.rs set_user_profile).\"}. Row 2 is the same for \"mg:POST:/v1/memories/profile/rebuild\" (method POST, path /v1/memories/profile/rebuild, handler http_routes.rs::rebuild_user_profile, basis guard:rebuild_user_profile, reason naming rebuild_user_profile). If the flag field must stay null by schema, use null. Needed for zdr_posture.rs every_non_get_route_is_classified.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml, session-core environment: next to `      MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}`, add `      SESSION_USER_PROFILE_ENABLED: ${SESSION_USER_PROFILE_ENABLED:-false}`.",
+    "owner: apps/Model Plane/deploy/.env.example add `SESSION_USER_PROFILE_ENABLED=false` (default off; only the literal true enables it).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md, newest first: 'EP-8 S4 (2026-11-03): The standing profile is deterministic and follows the memory decision of the turn (D7, D8). Built from session-core accepted scope=user rows with a source link (never Letta blocks, never org/thread/Space/agent rows); paused = listed and editable, not rebuilt; off/org disabled = hidden; reset and org erasure delete it; a memory delete drops its built line in the same transaction; ZDR/waived writes refused zdr_feature_not_supported(user_profile). Store: session-core user_profiles (migration 0100).'",
+    "shared-edit apps/Model Plane/ZDR.md: add the store row 'user_profiles (session-core, EP-8 S4): ZDR read empty skip_reason=zdr; ZDR and waived Set/Rebuild refused zdr_feature_not_supported feature user_profile; erased by ResetMemory, memory delete (built lines) and organization erasure; Dreaming rebuild reads only accepted rows, and waived threads produce none.'",
+    "regen: cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against proto/baseline.binpb && buf generate, plus the checked-in Go bindings under MP/go/gen/model_plane/v1 (memory.pb.go, memory_grpc.pb.go). All Go servers embed UnimplementedMemoryServiceServer and the capability-core fake embeds the client interface, so no Go source change is needed.",
+    "regen: the agent-action-admission golden (src/shared/api/contracts/agent-action-admission.json) for the new actions memory.profile.save and memory.profile.rebuild.",
+    "migration number: session-core 0100_user_profiles (+ revert/0100_user_profiles.down.sql) holds round B's renumbered slot for EP-8 S4. Record it in 00-integration-round-b.md's renumber table if it is not already there.",
+    "run: cargo test -q -p session-core --lib user_profile, then --lib gdpr, then --lib memory_grpc. Then the session-core DB harness with --ignored for the 7 named DB tests (in user_profile.rs). Then cargo test -q -p model-gateway --lib user_profile_route_tests, then --lib zdr_posture. Then the BFF: cargo test --manifest-path apps/gateway/Cargo.toml --all-targets profile. Then pnpm exec vitest run src/features/settings/components/MemorySection.profile.test.tsx src/features/settings/components/MemorySection.test.tsx src/shared/actions src/shared/api/memory-client.test.ts, and tsc6 -p tsconfig.app.json."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Model Plane/api/contracts/space-surface.v1.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json",
+    "scripts/tests/zdr-contract-sync.test.sh"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The S4 live proof is not done: seed three stated memories, run one Dreaming cycle with SESSION_USER_PROFILE_ENABLED=true, check three linked lines, edit one line, delete one memory, then a non-forced rebuild must keep the edit and show '1 kilde(r) er slettet'; capture psql rows of user_profiles and memory_control_events."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before switch-on, run the read-only report counting scope='user' agent_memory rows whose source_links point at Space-thread messages written before S2. The builder already excludes legacy room-origin rows through legacy_room_origin_space(true), but rows whose Space thread was since deleted would not be caught by that subquery."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "session-core has no GDPR user-subject erasure (gdpr.rs parse_erasure_event returns None for subject_type 'user'). user_profiles, like agent_memory, is erased only by ResetMemory and the org purge, so the design's 'GDPR user erasure deletes the row' has no path to hook into."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Personal rows written by inline append extraction or IndexMemory (save_memory, 'remember this') reach the profile only at the next Dreaming cycle that persists a user row for that person, or when they press Rebuild. Dreaming only rebuilds for people it wrote rows for in that cycle."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Deleting a memory does not scrub the person's own edited profile text: the edited row keeps its wording and reports sources_deleted_since_edit. Only ResetMemory and the org purge remove it. This follows design D7, but the DPO should confirm it for a 'forget this' request."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "GetUserProfile serves a waived (DEC-32) credential, as ListMemory does. S5 must apply the turn's memory decision and the waiver itself and must not inject the profile on a waived run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "D2-480: capability-core writes agent_memory around the gate with review_state 'accepted'. The builder's source_links <> '{}' filter keeps those rows out only if capability-core writes no links; check this before switch-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing in this slice was compiled or run (code-first). That covers the 8 session-core unit tests, the 7 DB-harness tests, 2 model-gateway route tests, 3 BFF tests, 8 SPA card tests and 1 registry test; the guard must run them after the shared edits."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "docs/capability-ownership-matrix.md does not list the new session-core user_profiles store (owner session-core; capability-core never reads it). Add a row when the matrix is next touched."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "MemoryGrpc reads SESSION_USER_PROFILE_ENABLED once at construction while Dreaming reads it each cycle. Flipping the switch needs a session-core restart to make the RPCs agree with Dreaming."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-2-S3",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\zdr-posture-matrix.json"
+   ],
+   "notes": "Built batched web_search and per-turn search refs, behind MODEL_GATEWAY_WEB_SEARCH_BATCH (strict literal true, default off). On a batched turn web_search accepts queries (1-4 distinct, run concurrently, each with the turn's allow_paid_providers), merges by rank, de-duplicates by canonical_url_key, caps at 8, and gives every hit a ref w{n} from an in-memory TurnRefs map held by the chat tool loop and dropped at turn end. fetch_url accepts ref in place of url; an unissued ref is refused. The merged payload is screened once, as before. Refs appear in the gated text only when issued. The schema (queries, ref) is advertised only on a batched turn, and the argument check uses the turn's own decision. Off: turn_refs is None everywhere, so the web_search and fetch_url arms, schema, duplicate keys, gate question and gated text take their previous paths and messages. Scheduled lane and deep research untouched (deep research passes None). No proto, no migration. Added row e_zdr_token_batched_web_search_refused to the canonical ZDR matrix (31 rows). Code and tests are written but NOT compiled or run (code-first rule); read-only checks only (git diff, grep, sha256sum). Unit and mock tests (wiremock Quarry double) are named batched_search_* so they match the requested filter.",
+   "deviations": [
+    "De-dup uses tool_loop::canonical_url_key (keeps query parameters), not deep_research::normalize_url_key as the design names: that function drops the query string, so ?id=1 and ?id=2 would collapse, and the comment at tool_loop.rs canonical_url_key says so. deep_research.rs is in the batch file list but is unchanged.",
+    "fetch_url takes a search ref. read_page and find_in_page keep the parked-result handle ref (res_...) shipped in EP-2-S2; the design line that says S2's tools accept a search ref via the URL they hold is not implemented.",
+    "Forced pre-loop web searches (run_forced_web_search and run_forced_web_search_for_model, called from sse.rs) issue no refs, because threading the turn's refs needs an sse.rs change and sse.rs is owned by EP-7-S3 in this batch.",
+    "The relevance gate scores a batch against its queries joined with spaces as one question; the design is silent on how a batch is judged.",
+    "A batch fails whole when any one query fails (error names the query); the design is silent on partial failure.",
+    "builtin_argument_problem takes the turn's batched-search decision, so a batched call is validated against the schema its turn offered; this changes the signature used by 7 test call sites, all updated to pass false.",
+    "The ZDR row mirrors the S2 reader row (decision zdr, code org_zdr). The batched refusal itself is proved by the existing browse_web to web_search refusal in tests/zdr_feature_table.rs, not by the new row."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, directly after line 244 `      MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}`, insert `      MODEL_GATEWAY_WEB_SEARCH_BATCH: ${MODEL_GATEWAY_WEB_SEARCH_BATCH:-false}` (LF file, six spaces).",
+    "shared-edit apps/Model Plane/deploy/.env.example: no sibling switch line exists there, so this slice adds nothing; the owner decides whether to add MODEL_GATEWAY_WEB_SEARCH_BATCH=false (CRLF file; owner-only per the repo rule).",
+    "shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256: set the content to `eea374f9cf522bc34479be208f6d2ede6b97a87c7687f4c0141f54522dd73434  zdr-posture-matrix.json` (sha256 of the LF canonical file as edited; 31 enforcement rows).",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh (GOLDENS, about line 111): replace c20446479a810ff59a9a2dcf7e9dfeb23371e3ceadaeeb49263ad2f916a21cba with eea374f9cf522bc34479be208f6d2ede6b97a87c7687f4c0141f54522dd73434 for apps/Model Plane/api/contracts/zdr-posture-matrix.json.",
+    "shared-edit re-vendor (byte-identical copy of apps/Model Plane/api/contracts/zdr-posture-matrix.json, plus the new .sha256 beside each): apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json, apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json, apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json (and their .sha256 pins).",
+    "shared-edit ENFORCEMENT_ROWS 30 -> 31: apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs:30, apps/Model Plane/rust/services/model-gateway/tests/zdr_mcp_observation_golden.rs:40, apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs:57, apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs:40.",
+    "optional shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs, the_web_reader_goldens_are_rows_decided_as_named list: add (\"e_zdr_token_batched_web_search_refused\", \"zdr\").",
+    "After the pin chain, run the ZDR checks: node scripts/tests/zdr-contract-schema.mjs; node --test scripts/tests/zdr-contract-schema.test.mjs; bash scripts/tests/zdr-contract-sync.test.sh. This slice ran none of them.",
+    "Guard compile and tests: cargo test -q -p model-gateway --lib tool_loop::tests::batched_search; cargo test -q -p model-gateway --lib tool_loop (the web_search arm, duplicate keys and argument check changed on the off path as well, and existing tests were updated); cargo test -q -p model-gateway --test zdr_posture_matrix (fails until the pin chain above lands); cargo test -q -p mp-contracts --test prompt_tool_manifest (expected unchanged).",
+    "Prompt-tool manifest: no regeneration expected, because the batched definitions are built by advertise_batched_search outside the pinned ToolDefinition literals and the pub fn builtin_tool_defs body has no literal block. Regenerate with MP_UPDATE_PROMPT_MANIFEST=1 only if the test reports drift; that drift would also trip scripts/gates/scenario-touch.py, which then needs an eval case or a reviewed exception.",
+    "rustfmt was not run (code-first rule). If the repo gates on it, the guard should run cargo fmt -p model-gateway -- --check and format only the hunks in tool_loop.rs.",
+    "Design text to correct: docs/plans/wave3/EP-2-research-and-citations.md S3 names deep_research::normalize_url_key for de-dup, which drops query strings; the code uses tool_loop::canonical_url_key. Also drop the 'S2's tools via the URL they hold' clause from S3, since it is not built.",
+    "Optional ledger entry (owner or lead, not in this slice's files): record D9 in apps/Model Plane/docs/decisions/ledger.md: batched search only on the chat tool loop, at most four queries, per-query paid entitlement, refs held in memory per turn."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof yet: the design's F3 (one three-query call, a fetch_url by ref, Quarry edge logs showing three searches, and round count against the switch off) must run before MODEL_GATEWAY_WEB_SEARCH_BATCH is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The relevance gate judges a batch against its queries joined into one question (searched_question), so a hit that answers one query can be set aside for missing the other queries' terms; check kept counts on a live batch before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Refs are issued to every merged hit, including hits the gate later sets aside, and they are sequential, so a model can guess an unshown ref (w5 after w4) and fetch a set-aside page; only refs shown in the gated text should resolve."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The merge drops hits beyond eight without saying so, and the gate's 'found' count is the capped number, so the model cannot see that hits were cut; the gated header should state the cap when it applies."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Forced pre-loop searches (run_forced_web_search and run_forced_web_search_for_model, called from sse.rs) issue no refs, so their hits show no [wN] label; threading the turn's refs needs an sse.rs change, and EP-7-S3 owns sse.rs in this batch."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A batch fails whole when one query fails, discarding hits Quarry already returned and billed; a visible partial-result note would need a new field in gated_web_search_output."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'ref' now names a search ref (w2) in fetch_url and a parked-result handle (res_...) in read_page and find_in_page; the same word in one schema invites mixing them, so rename one before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Refs live per process, so a turn resumed on another replica gets 'was not issued' for every ref; this fails closed but is untested (design risk 5)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Nothing caps provider calls beyond the schema text and the four-query check; each batch is up to four billed Quarry searches (D2-321), so the live proof must record search counts per round."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new ZDR row proves the posture only; the batched refusal rests on the existing browse_web to web_search refusal in tests/zdr_feature_table.rs, which does not name batched calls."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves the scheduled lane never offers or accepts 'queries'; the lane sits outside this loop (execution-core scheduled_agent.rs), so a contract test there belongs in a later slice."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rerank_report_of reads only the first merged item's rerank status, so the coverage line disappears when the first hit came from an unreranked query."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "advertise_batched_search restates the web_search and fetch_url parameter schemas as text beside the literal definitions, so a later edit to one must be repeated in the other."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "TurnRefs has no cap; it grows by at most eight entries per search call and is dropped with the turn."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256",
+    "scripts/tests/zdr-contract-sync.test.sh",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json.sha256",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json.sha256",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json.sha256",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_mcp_observation_golden.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S3",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/provider_writes.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_descriptor.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_edit.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/approval_edit_golden.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/approval-edit-cases.json",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-edit-limits.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-edit-limits.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/contracts/approval-edit-cases.json",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/contracts/approval-edit-cases.json.sha256"
+   ],
+   "notes": "The slice is built but nothing has been compiled or run, per the code-first order.\n\n- **Fingerprint move:** `descriptor_scope` and `action_fingerprint` now live in the new `mp-contracts/src/approval_descriptor.rs`. `continuation_descriptor` in `agent.rs` calls them and keeps the same error mapping.\n- **Byte identity:** the lockfile shows serde_json has no indexmap dependency, so maps serialise with sorted keys. I worked out the canonical JSON and its blake3 hash offline with a scratch pure-Python blake3 (it matches the official vectors for \"\" and \"abc\"). Hash: `fb6e264c...87f1`.\n- **Three tests pin it:** mp-contracts `the_fingerprint_of_a_fixed_scope_is_pinned` (canonical string and hex) and `the_scope_matches_the_pre_move_construction` (compared with the old inline code). In execution-core, the new `fingerprint_is_byte_identical_after_the_move` checks the hex and also recomputes the hash the old way.\n- **`provider_effect_summary`:** moved into `provider_writes.rs` with its constants, `is_mail_send`, `mail_recipients` (both now `pub`) and `one_line`, plus 3 new tests. `integration_tools.rs` re-exports it with `pub use`, so callers and the existing tests do not change.\n- **`approval_edit.rs`:** adds `MailSendPatch`, `apply_edit`, `EditedCall` and `EditError`.\n  - The patch JSON keys are `to`, `subject` and `bodyText`, and unknown keys are refused.\n  - Checks run in this order: is the call editable (`not_editable`), then recipients, subject, body, then `no_change`.\n  - A body edit drops `bodyHtml`. Recipients come back as a list. The subject is trimmed and checked in bytes, as integration-corev2 does.\n  - The address check is stricter than Go's `mail.ParseAddress`.\n- **Golden:** `approval-edit-cases.json` has 19 cases plus the limits, codes and edited field names. A `$repeat` form stands in for the oversized subject and body. The Rust test pins sha256 `e54250eb...c792`, and the SPA holds a byte-identical copy with a `.sha256` file beside it.\n- **SPA:** `approval-edit-limits.ts` holds the constants and `checkMailEditLimits`, which checks limits only. The vitest checks the pin, the limits, the codes and every case's `client` result.\n- **Line endings:** `lib.rs`, `agent.rs` and `integration_tools.rs` stay CRLF; `provider_writes.rs` and the new files are LF. `.gitattributes` forces LF on json and ts.\n\nNo wire, proto, migration or switch change.",
+   "deviations": [
+    "Added a 7th closed code `invalid_body` (blank `bodyText`). The design lists six, but integration-corev2 refuses a send with no body, an edited body drops `bodyHtml`, and none of the six codes describes this. S4 and S6 must map it too.",
+    "The vendored SPA copy lives in new files `src/shared/approvals/contracts/approval-edit-cases.json` and `.sha256`, not in the slice's file list. They follow the zdr-refusals pattern.",
+    "The patch's JSON key for the body is `bodyText`, the mail body's own name. The audit field name is `body_text`, as the design says."
+   ],
+   "lead_todo": [
+    "The guard compiles and runs: cargo test -q -p mp-contracts approval_edit approval_descriptor provider_writes; cargo test -q -p mp-contracts --test approval_edit_golden; cargo test -q -p execution-core --lib continuation_descriptor fingerprint_is_byte_identical_after_the_move provider_effect_summary; pnpm exec vitest run src/shared/approvals/approval-edit-limits.test.ts; cargo fmt --all -- --check (approval_descriptor.rs and approval_edit.rs may need fmt).",
+    "If only the pinned hex `fb6e264cffc1d147d1c1307b38b33f873bffa1854049bfe6c204fcf6a41887f1` fails, while the legacy-recompute assertion in the same test and the canonical-string assertion pass, my offline blake3 was wrong. Re-pin that hex in both `approval_descriptor.rs` and `agent.rs` to the value printed. Any other failure is a real drift: stop."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "EditError has a 7th code `invalid_body` for a blank body; the S4 gateway mapping (422) and the S6 SPA copy must cover it, and the design's D2 row should list it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The SPA's golden copy is pinned only by the shared sha256 in two tests; scripts/tests/zdr-contract-sync.test.sh (or the equivalent) does not yet compare the two `approval-edit-cases.json` copies byte for byte."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "JS `String.trim` also strips U+FEFF while Rust `str::trim` does not, so a subject padded with a BOM could pass the SPA limit check and fail the server's (the server stays the authority)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The recipient check refuses quoted local parts, comments and display names with commas that Go's net/mail accepts; S6 should say plainly why such an address is refused."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "S1's planned `write_preview.rs` should call `provider_writes::mail_recipients` (now pub) instead of copying the split."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S1",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/pptx/scripts/build_deck.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/pptx/scripts/test_build_deck.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/pptx/SKILL.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/builtin_skills_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/deck/good_5_slides.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/deck/overflow_bullets.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/deck/bad_image_path.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/deck/empty_deck.json"
+   ],
+   "notes": "EP-5-S1 is built code first; nothing was run. Owned paths were clean at start (no partial edits). build_deck.py validates manifest v1 with the standard library only (python-pptx is imported inside write_deck), applies the D11 caps and layout/field rules, widens the 4:3 default template to 16:9, builds the slides, estimates text fit from the template geometry, and prints one JSON line {deck, slides[state, findings]}. A refused manifest prints a `refused` object and exits 2 with no file. Pictures must be relative, with no `..`, no absolute path and no symlink in any step. The SKILL.md body is 2,471 characters against the 2,566 cap enforced by builtin_skills.rs. Fixtures: good_5_slides = all ok, overflow_bullets = slide 2 warn, bad_image_path = slides 2 and 3 error, empty_deck = refused. No flag, proto, migration or Dockerfile change; the existing switch BUILTIN_OFFICE_SKILLS_ENABLED (default false) gates it. Decisions taken: `locale` is required; `image` takes a path or up to four; `theme` is refused unless absent or \"default\"; titles over 120 characters are error, and bullet, notes and unplaced-field findings are warn. The Python tests run under unittest because pytest is not installed; the BuildTests skip without python-pptx. The PNG base64 constant in the test is unverified until the guard runs it.",
+   "deviations": [
+    "The design named test methods without a test_ prefix; they carry one so unittest discovers them, and pytest is not used because it is not installed.",
+    "The design asked for the pytest command in model-plane-rust-ci.yml or in apps/Model Plane/scripts/tests/README; no python job exists and the README does not exist, so the unittest command is recorded in the test module docstring.",
+    "The design's Mode 0555 on build_deck.py is not applied: the Dockerfile is unchanged and python3 needs no exec bit.",
+    "builtin_skills_contract.rs has a second assertion beyond the design's file-exists check: the pptx SKILL.md must name the builder path under /opt/verevon/skills/office/pptx/scripts/.",
+    "The refusal object {refused:{id,message}} is a sandbox report read by the model, not an HTTP error body, so it does not use the {error:{code,message,details}} envelope; S2 owns the typed envelope if the builder output is ever surfaced as an API error.",
+    "The image field accepts a single path or a list of up to four paths; the design's manifest v1 text lists only image?, so this is an extension that the design's D11 cap of four images per slide implies."
+   ],
+   "lead_todo": [
+    "No regeneration is needed: mp-contracts tests/fixtures/prompt-tool-manifest.json holds no pptx or office skill text (grep finds only tool ids), and S1 has no proto, migration, deploy or ledger edit.",
+    "Guard compile and test, from apps/Model Plane/rust: cargo test -q -p model-gateway --test builtin_skills_contract --test skill_budget_contract, and cargo test -q -p model-gateway --lib builtin_skills (this runs each_body_fits_a_third_of_the_skill_budget against the 2,471-character pptx body). From apps/Model Plane/skills/office/pptx/scripts: python3 -m unittest discover -s . -p \"test_*.py\" in an environment with python-pptx 1.0.2 installed (BuildTests skip without it).",
+    "Lead decision: no python CI job and no apps/Model Plane/scripts/tests/README exist, so the unittest command is only in the test module docstring; add a CI job or a README if these tests should run automatically (not created by this slice).",
+    "Switch: BUILTIN_OFFICE_SKILLS_ENABLED already exists in apps/Model Plane/deploy/docker-compose.yml at line 348 (default false), and this slice adds no flag, so no shared-edit is needed.",
+    "Image: the existing COPY skills/office/ line in apps/Model Plane/rust/services/execution-core/Dockerfile ships the builder with no Dockerfile change; execution-core needs a rebuild only for the depth-phase live proof, not for the guard."
+   ],
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The builder and its tests have never been executed, so the guard must run the unittest suite with python-pptx 1.0.2 installed: widen(), fill(), place_images() and fit_check() touch python-pptx for the first time there."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The text-fit estimate (CHAR_EM 0.55, LINE_EM 1.2, geometry read from the widened template) is unvalidated against PowerPoint and LibreOffice rendering, so a slide can read ok and still overflow; compare the report with a rendered slide before the switch is turned on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The S1 live proof is deferred: rebuild execution-core, switch BUILTIN_OFFICE_SKILLS_ENABLED on for a proof org, open one deck in PowerPoint and LibreOffice, and run a build with the egress tier off (round B C-B12)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Keep BUILTIN_OFFICE_SKILLS_ENABLED off for real orgs until D2-595 is tuned, because the pptx skill's trigger words 'deck' and 'slide' match by substring and the design makes that tuning a precondition of S1's enablement."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The severity split is this slice's reading of D11 and the test names: a title over 120 characters is error, while over six bullets, bullet text over 90, notes over 2,000 and an unplaced field are warn; the owner should confirm it before S2 mirrors the caps."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The image field takes one path or a list of up to four, which the design's manifest v1 does not spell out, so S2's mp-contracts schema must accept the same shape or the server would refuse a manifest the builder accepts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Pictures have no per-file or per-deck size cap, so a deck of large photos can pass the builder's checks and then fail to save at the sandbox's 64 MiB file ceiling (EXECUTION_SANDBOX_MAX_FILE_MB default), which refuses the whole deck as save_failed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The pptx SKILL body is now 2,471 characters against the 2,566 cap in builtin_skills.rs, leaving 95 characters for later edits, and a matched pptx turn injects about 1,100 more characters of skill text than before."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "widen() scales the default 4:3 master and layouts to 16:9, so slides a user adds later in PowerPoint inherit the scaled placeholder geometry, which one visual check in PowerPoint must confirm."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Nothing in CI runs these python tests: model-plane-rust-ci.yml has no python job and the design's apps/Model Plane/scripts/tests/README does not exist, so the lead must choose where the unittest command is recorded."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The theme field is refused unless absent or 'default' (theme_unsupported); S6 must replace that refusal with the DeckTheme contract and the SKILL text must then mention themes."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The image receives the test module and any local __pycache__ with the builder, because apps/Model Plane/.dockerignore excludes only root-level scripts/ and python/**/__pycache__; exclude test_*.py and __pycache__ if image size matters."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-7-S3",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/goal_judge.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "notes": "Partial because its dependencies are not built. EP-7-S1 is still at todo and EP-7-S2 is blocked-decision. There is no thread_goals table (0091/0092), no thread_goals.rs, no thread_goals.proto / ThreadGoalService / ThreadGoalResponse, no SettleGoalTurn and no GoalBar.tsx in the tree. Everything that does not need them is built.\n\nThe new file C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/goal_judge.rs is pure and LF. It holds:\n- the switch MODEL_GATEWAY_GOAL_JUDGE_ENABLED (literal true only, default off) and `should_judge_turn` (completed outcome only)\n- the closed GoalVerdict set and `goal_judge_prompt`: objective and criteria are one line each inside labelled blocks called data, the answer excerpt keeps its last 4000 characters cut on a character boundary, and closing markers inside data are broken up\n- `goal_judge_request`, built like verification_judge_request: aux_model or the role_routing side-task model, temperature 0, max_tokens 400, a structured_output_schema, sent through subscription_scoped_request. It restates min_privacy_tier and min_residency explicitly and keeps zero retention if either the turn or the route asks for it.\n- `judge_metered_tokens`: metered tokens only, so a subscription call counts 0\n- `parse_goal_verdict`: tolerates a code fence, drops evidence ids that were not supplied and duplicates, caps reasons at 3 x 200 characters, and turns met with no evidence into unsure; unreadable output is unsure.\n\nUnit tests written but not run: switch_reads_literal_true_only, switch_off_makes_no_judge_call, judge_not_called_for_paused_or_failed_turn, judge_prompt_marks_goal_as_data, judge_prompt_without_criteria_or_evidence_says_so, answer_excerpt_prefers_the_tail_on_a_char_boundary, met_without_evidence_downgrades_to_unsure, unreadable_or_unknown_verdict_is_unsure, reasons_are_capped_in_count_and_length, judge_request_is_deterministic_and_structured, judge_request_inherits_privacy_floors, judge_tokens_counted_in_settle.\n\nOther edits: lib.rs gains `pub mod goal_judge;`. In sse.rs, `aux_model` and `subscription_scoped_request` go from private to pub(crate); nothing else in sse.rs changed, so with the switch off behaviour is byte-identical.\n\nNot built, because each piece needs S1/S2:\n- migration 0093 (ALTERs thread_goal_turns from 0092; a migration on a missing table would break session-core startup)\n- the RecordGoalVerdict RPC and proto\n- the thread_goals.rs verdict and user-override store code\n- the sse.rs call site after SettleGoalTurn\n- the GoalBar verdict chip and Mark done / Reopen buttons",
+   "deviations": [
+    "Assumed D3 = separate judge call on the pinned aux_model() (role_routing side-task model when on), closed verdict set met/not_met/blocked/unsure, met needs a cited supplied evidence id, user override both ways (override itself not built: needs S1 UpdateThreadGoal).",
+    "InferPurpose has no GOAL_JUDGE yet; the judge request uses InferPurpose::Validation until EP-13 adds GOAL_JUDGE.",
+    "Migration 0093, thread_goals.proto RecordGoalVerdict, session-core thread_goals.rs verdict code, sse.rs call site and GoalBar.tsx were not written because EP-7-S1/S2 (tables, service, settle, GoalBar) do not exist in the tree.",
+    "Closing-marker neutralisation (`</` -> `< /`) applies to objective, criteria, answer and evidence lines, a small hardening beyond the design's 'framed as data'."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D3 assumed as the design recommends (separate aux-model judge, closed verdict set, met requires a supplied evidence id, user override both ways); the owner must confirm before MODEL_GATEWAY_GOAL_JUDGE_ENABLED is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The goal judge is not wired: after EP-7-S1/S2 land, sse.rs must call goal_judge_request through authenticated_inference_request after SettleGoalTurn for a completed outcome only, count judge_metered_tokens in the settle, call RecordGoalVerdict, and emit goal_progress with last_verdict."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "RecordGoalVerdict (thread_goals.proto), the verdict columns (0093_thread_goal_verdicts or folded into 0092) with a revert file, the user override in UpdateThreadGoal (user_marked_met, reopen bumps revision), and the GoalBar verdict chip plus Mark done/Reopen remain to be built with or after S2, with DB tests verdict_met_closes_goal and user_reopen_bumps_revision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The evidence lines (proof bundle approval receipts, postcondition VerificationResults, tool name and status) have no builder yet, so until one exists every judge call gets an empty evidence list and can never return met."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "When EP-13 adds InferPurpose GOAL_JUDGE and role goal_judge, goal_judge_request must switch from InferPurpose::Validation to the new purpose and role."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's live proof (judge request at temperature 0 on the aux model, met and blocked verdict rows, closing frame) is not done and needs S1-S3 wired on a metered route."
+    }
+   ],
+   "lead_todo": [
+    "Compile and run: cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib goal_judge (written, not run).",
+    "Add MODEL_GATEWAY_GOAL_JUDGE_ENABLED=${MODEL_GATEWAY_GOAL_JUDGE_ENABLED:-false} passthrough to the model-gateway compose service block and the flags registry when the call site is wired (the switch is read only in goal_judge.rs today).",
+    "Keep the queue row EP-7-S3 open (partial): the remaining work depends on EP-7-S1 and EP-7-S2."
+   ],
+   "needs_other_files": [
+    "EP-7-S1 outputs: session-core migrations 0091 and src/thread_goals.rs, proto/model_plane/v1/thread_goals.proto (ThreadGoalService, ThreadGoalResponse), FE GoalBar.tsx",
+    "EP-7-S2 outputs: migration 0092_thread_goal_turns, SettleGoalTurn RPC, the sse.rs settle site"
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-7-S5",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/attention.proto",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/session-core/src/attention.rs",
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/attention.go",
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/attention_test.go",
+    "apps/Application Plane/notification-core/migrations/018_register_goal_stopped.up.sql",
+    "apps/Application Plane/notification-core/migrations/018_register_goal_stopped.down.sql",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.goal.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts"
+   ],
+   "notes": "I wrote the code for this slice but did not run, build or test any of it. The status is partial because nothing creates the goal table or emits goal events yet: EP-7-S1 (the thread_goals table) is still todo and EP-7-S2 is not built.\n\nWhat I built:\n- **Proto:** `AttentionReason ATTENTION_REASON_GOAL = 5` is added and 4 is left alone. `ThreadSummary.goal_status = 29` is added. Both are commented.\n- **session-core `attention.rs`:**\n  - New `goal_attention` gives COMPLETED+GOAL for `met`, and NEEDS_INPUT+GOAL for `budget_reached`, `turns_reached` and `blocked`.\n  - `Pending` gains `goal: Option<GoalFact>`.\n  - In `derive`, a stopped goal counts only when no approval, plan or question is waiting and no run is working. A `met` goal does not hide a failed run that came later.\n  - `fetch_goals` reads the latest goal per thread from `thread_goals`. It reads status and time only, never the objective. It runs only when `SESSION_CORE_THREAD_GOALS_ENABLED` is the literal \"true\", so with the switch off the derivation is unchanged.\n  - `enrich` fills `goal_status`.\n  - I wrote 12 unit tests whose names start with `attention_goal`, so the slice's filter picks them up.\n- **capability-core `runwatch/attention.go`:**\n  - The payload gains optional `reason` and `goal_status` fields.\n  - When the reason is GOAL, the status is a stop status and the state matches what session-core derives, it sends `modelplane.goal_stopped`. The payload keeps the existing content-free field set, with kind `goal_stopped`.\n  - Coalescing and the idempotency key use `ATTENTION_REASON_GOAL`, so a stopped goal does not fold into a question on the same thread.\n  - Items without a reason behave exactly as before. It all stays behind the existing notify switch.\n  - Tests: `TestAttentionNotifierGoalStoppedIsContentFree` plus three more.\n- **notification-core:** migration 018 (up and down) registers `modelplane.goal_stopped`, with in-app and push on and email off.\n- **Frontend:**\n  - New `thread-goal-client.ts` holds the read half: `getThreadGoal` and `normalizeGoalResponse`. After one 404 or `thread_goals_disabled` it stops asking for the rest of the session.\n  - The console gets a read-only `GoalPanel` beside `PlanPanel` (objective, criteria, usage line, status, last verdict, an \"Open in chat\" link). It is read through a resource keyed on `state.threadId` and `historyTick`; a failed read hides the panel.\n  - Tests are in `AgentRunConsole.goal.test.tsx`.\n\nOwner decision D1 (goal bar in the chat thread, console read-only) is taken on the design's recommendation. No new switch.",
+   "deviations": [
+    "Assumed D1 = goal bar lives in the chat thread; the Agent Run Console shows only a read-only GoalPanel with an Open in chat link and no goal creation or editing.",
+    "The goal notification payload keeps the existing closed field set (title, body, message_key, cta_href, cta_label, thread_id, run_id, kind with kind=goal_stopped). It carries no status token, because notification-core's native path refuses any other field. The design asked for the thread id and the status token.",
+    "The notification type is named 'modelplane.goal_stopped', following the modelplane.* convention, rather than the design's 'GOAL_STOPPED'.",
+    "I created apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts, a file EP-7-S1's design names as new. It holds only the read half (getThreadGoal, ThreadGoal type, normalizeGoalResponse); S1 adds set/update to it. The wire shape {goal, found} with camelCase fields is assumed.",
+    "goal_status is filled only inside attention::enrich, so it needs both SESSION_CORE_ATTENTION_ENABLED and SESSION_CORE_THREAD_GOALS_ENABLED. grpc.rs, which would let the goals switch alone fill it, is not my file.",
+    "The switch-name constant GOALS_ENABLED_ENV is defined in attention.rs because S1's thread_goals.rs, which should own it, does not exist yet.",
+    "I added the migration revert file 018_register_goal_stopped.down.sql, which was not in new_files (repository rule: migrations ship a revert file)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in fn attention_reason_name, add the arm `AttentionReason::Goal => Some(\"goal\"),` after `AttentionReason::Input => Some(\"input\"),`, and update its doc comment to mention goal. This match is exhaustive, so model-gateway does not compile after the proto regen without it.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/attention-client.ts: change `export type AttentionReason = 'approval' | 'plan' | 'input'` to include `| 'goal'`, and change `const REASONS` to `['approval', 'plan', 'input', 'goal']`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/attention-stream.ts: change `const REASONS` to `['approval', 'plan', 'input', 'goal']`.",
+    "shared-edit apps/Application Plane/notification-core/internal/http/handlers.go: in isNotificationTypeAuthorized's \"capability-core\" map, add `\"modelplane.goal_stopped\": {},` after `\"modelplane.scheduled_run_outcome\": {},`.",
+    "shared-edit apps/Application Plane/notification-core/internal/notification/service.go: in var nativeTypes, add `\"modelplane.goal_stopped\": {},` after `\"modelplane.scheduled_run_outcome\": {},`.",
+    "Regenerate the proto bindings (Rust mp-contracts, Go gen under apps/Model Plane/go/gen/model_plane/v1, and any TS) for AttentionReason GOAL=5 and ThreadSummary.goal_status=29. Then run buf lint and buf breaking against baseline.binpb.",
+    "Run the slice's test commands. session-core: cargo test -q -p session-core --lib attention_goal. capability-core: GOWORK=off go test ./internal/runwatch/... -run TestAttentionNotifierGoal. Frontend: pnpm exec vitest run src/features/agents/components/AgentRunConsole.goal.test.tsx, plus the existing AgentRunConsole.test.tsx, which now issues an unmocked getThreadGoal; its failure is caught and yields null."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/attention_events.rs: the RUN_ATTENTION sweep must enqueue one item per stopped goal: state from attention::goal_attention, reason ATTENTION_REASON_GOAL, goal_status token, source_id = goal id, run_id = the last goal turn's run. This needs EP-7-S1/S2's thread_goals and thread_goal_turns tables. Keep the existing 4-key golden test for pending-row items.",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs: map ThreadSummary.goal_status into the thread list JSON so the sidebar goal chip can read it (EP-7 S5 design: no second call).",
+    "Attention rail chip for reason 'goal' (the design's FE test list names an attention rail chip test). The rail component is not in this slice's files."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D1 was assumed on the design's recommendation (goal bar in the chat thread; the console shows a read-only GoalPanel with Open in chat and no goal creation); the owner must accept it before the goal switches go on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "attention.rs fetch_goals queries thread_goals(org_id, thread_id, status, updated_at, created_at, id, closed_at TIMESTAMPTZ), which only EP-7-S1's migration 0091 creates, so SESSION_CORE_THREAD_GOALS_ENABLED must stay off until 0091 has landed or every attention read fails."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The push half is dormant: capability-core sends modelplane.goal_stopped only once session-core's attention_events.rs sweep emits RUN_ATTENTION items with reason ATTENTION_REASON_GOAL, which needs S1/S2 and WS16-S4's notify switch."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof still open: a goal reaches turns_reached in a background tab; the rail shows NEEDS_INPUT+GOAL and the Web Push payload from notification-core logs carries no objective text."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No real-Postgres (ignored) test covers fetch_goals (latest goal per thread, cleared and unknown statuses dropped); add one once the 0091 thread_goals migration exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The console now issues one GET /api/v1/chat/threads/{id}/goal per thread even with every switch off; it stops after the first 404 or thread_goals_disabled per tab, but this is one extra request compared with before."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ThreadSummary.goal_status is filled only when both the attention switch and the thread goals switch are on, because ListThreads calls attention::enrich only under the attention switch."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new console classes verevon-run-goal, __objective, __usage, __verdict and __open have no CSS yet; the panel reuses the run-panel and plan-row classes for layout."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "GOALS_ENABLED_ENV in attention.rs duplicates the switch name S1's thread_goals.rs will own; point it at S1's constant when that lands."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-T1",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\docs\\compliance\\evidence\\tools\\scan-egress.mjs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\docs\\compliance\\evidence\\tools\\scan-egress.test.mjs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\repo-gates.yml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\docs\\compliance\\egress-catalogue.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\gen-egress-disclosure.mjs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\gen-egress-disclosure.test.mjs"
+   ],
+   "notes": "Code and unit tests are written; nothing was run (code-first rule). scan-egress.mjs gains --declared FILE: declaredShapeProblems (schema, closed enums, unique ids, each entry's vendor is a catalogue vendor, its hosts are that vendor's, its switches are its gating variables) and declaredProblems (every scanned vendor has an entry; every entry's vendor has evidence). Declared problems fail --strict; without --strict they are printed with exit 0. The egress-catalogue.json has 60 entries covering all 58 built-in vendors (zdr: refused 21, unchanged_no_content 23, not_gated 15, no_retention_attested 1; region TBC everywhere). gen-egress-disclosure.mjs renders the disclosure deterministically (sorted by entry id, LF, no timestamp) and --check compares it after CRLF normalisation; an invalid catalogue is never rendered. The egress-catalogue job runs the scanner tests, the --strict --declared scan and the generator --check. Verified by reading only: the three edited existing files are still uniformly CRLF (0 lines without CR); the new JSON passes a quote-parity check but no parser has run. The generated docs/compliance/generated/egress-disclosure.md is not written (generated code, guard runs the generator).",
+   "lead_todo": [
+    "guard: node scripts/gates/gen-egress-disclosure.mjs (writes docs/compliance/generated/egress-disclosure.md), then node scripts/gates/gen-egress-disclosure.mjs --check; do not hand-write that file.",
+    "guard: node --test docs/compliance/evidence/tools/scan-egress.test.mjs scripts/gates/gen-egress-disclosure.test.mjs (the first parse of egress-catalogue.json).",
+    "guard: node docs/compliance/evidence/tools/scan-egress.mjs --strict --declared docs/compliance/egress-catalogue.json. A stale entry or a missing vendor is fixed in the catalogue (the scan is the truth). Pre-existing unclassified hosts or unmapped credential names are recorded, not hidden in the catalogue.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert a new newest-first section directly above the first '## 2026-11-03' heading (line 25). Heading: '## 2026-11-03 - Egress is declared once per destination; the disclosure is generated and not published before counsel (EP-9 T1, Q-T1)'. Body: the catalogue path, the --strict --declared check, the four zdr values, and the not_gated open findings.",
+    "lead: commit the six files and the generated disclosure together. The egress-catalogue job is non-required for its first week; the owner adds it to the branch rule later. The live proof (one green and one red fixture CI run, with links in the ledger entry) is a depth item."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "cohere-api: the public rerank fallback (api.cohere.ai, used when RERANK_ENDPOINT is unset) sends query text and passages with no ZDR gate or attestation, which CLAUDE.md forbids outside isolated labs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The zdr enum has a fourth value, not_gated, beyond the three the design names; without it the 15 not_gated destinations would need a claim the code does not support. The owner must accept or reject it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Fifteen declared destinations are not_gated (cohere-api, searxng-upstream-engines, brreg, osm-nominatim, eu-procurement, no-public-authorities, letta-tool-search, quarry-proxy-pool, browserbase, postmark, s3-compatible-object-storage, bring-carrier, dhl-express, fedex-carrier, ups-carrier) and need ZDR and counsel review before the disclosure is used."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The refused values for openai-api and anthropic-api rest on a code-reading inference from the sse_events tier tests and have no matrix row, which the design's test-or-row rule does not accept; brave-search and serper-search rely on design-cited line numbers."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "vipps-login: the auth service writes the returned user-info object (personal data) to the console log; this is a retention matter (J12) that the log gate does not cover."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The --strict --declared check has not run on the real tree; the weakest-evidence entries (browserless is comment-only; letta-tool-search, quarry-proxy-pool, shopify, okta-oidc, novu, postmark, s3-compatible-object-storage and searxng-upstream-engines are env-only or signal-only) may have lost evidence since the 2026-10-01 scan, and the stale rule would then fail."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Stract is not declared because the code treats it as in-infrastructure; if QUARRY_EDGE__STRACT_URL points at a hosted Stract, that recipient is undeclared and the scan cannot see it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "egress-catalogue.json has been checked only for quote parity and has not been parsed by any JSON parser; the first parse is the node --test run in lead_todo."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The live proof from the design (one green and one red fixture CI run, linked from the ledger entry) is not done and belongs to the depth phase."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "scan-egress.mjs grows from 1866 to 1981 lines and the size ratchet's growth rule was not checked; docs/compliance/** in the workflow path filters also runs the other repo-gates jobs on docs-only changes."
+    }
+   ],
+   "deviations": [
+    "The zdr enum has four values: not_gated was added beyond the three the design names (see depth finding 2).",
+    "docs/compliance/generated/egress-disclosure.md is not written; the generated file is left to the guard's generator run, following the generated-code rule.",
+    "docs/compliance/** was added to both repo-gates path filters so that a catalogue-only change runs the job; this file was not in the batch's file list but the design's job depends on it.",
+    "google-accounts-apis and microsoft-365-entra-graph each have two entries, split by contacting service (sign-in and API), so there are 60 entries for 58 vendors.",
+    "Hosts that the scan did not see in code (plus.unsplash.com, api.cohere.com) are left out of their entries, so the entries declare observed destinations only."
+   ],
+   "needs_other_files": [],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-T3",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/EffectivePolicyPanel.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/EffectivePolicyPanel.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/effective-policy-panel.css",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/i18n/en.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/i18n/no.ts"
+   ],
+   "notes": "Built the dark effective-policy panel. EffectivePolicyPanel.tsx is new (LF), with its test file (new, written, not run) and effective-policy-panel.css (new, a component stylesheet beyond the declared new_files, LF like chat-fold.css). en.ts and no.ts each gained an effectivePolicy block (33 lines each, CRLF kept, no bare LF). The panel sends no request unless VITE_POLICY_EFFECTIVE_VIEW_ENABLED is the literal true, and it renders nothing on a 404, so it stays hidden until the EP-9-T2 BFF route exists (T2 is not built and not in this batch). It shows each value, the layer that set it ('Set by' only for a layer the server named), a lock with words when a higher layer fixes it, unavailable rows without value or origin, member-redacted values as counts, and an error line in place. Mounts are lead shared edits; both are safe to apply before T2 because the panel hides on 404. No proto, migration, golden, prompt-tool manifest or image change. Nothing was compiled or run, per the batch rule.",
+   "deviations": [
+    "Assumed C-B1 = no change to the panel: round B names no recommended option (it asks the owner to choose whether organization_web_policy is the single store), and the panel renders whatever items T2 returns.",
+    "Assumed D-W1 = (c): web switches as capability-core registry keys, host lists in org-core. The panel has no branch on it.",
+    "Space mount in SpaceRoomHeader.tsx (room details dialog) instead of WorkspaceSettingsPage.tsx: the workspace settings route (App.tsx line 270, /settings/:section) carries no space id, so a panel there would have nothing to read. WorkspaceSettingsPage.tsx is unchanged.",
+    "Added a frontend build switch VITE_POLICY_EFFECTIVE_VIEW_ENABLED (literal 'true', default off) so an off build sends no request. The design names only T2's server switch and the 404 hide.",
+    "Reads GET /api/v1/policy/effective with requestJson from the component (as ThreadWorkspacePanel and AgentModesSection do) instead of a policy.read_effective action contract, because that contract belongs to T2's action-registry edit.",
+    "One new file beyond new_files: effective-policy-panel.css, the component stylesheet (LF, like chat-fold.css)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed C-B1 = no panel change: round B gives no recommended option for the organization_web_policy store question and the panel is store-agnostic, so the owner must still rule C-B1 before T2 ships the web item."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D-W1 = (c) (web switches as capability-core keys, host lists in org-core); the panel has no branch on it, and only the origin of T2's web item depends on the choice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The Space mount is in SpaceRoomHeader.tsx (room details), not WorkspaceSettingsPage.tsx, because the workspace settings route carries no space id; the owner may instead want a Space picker in the space-policy section, which does not exist yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Member redaction is trusted to T2: the panel renders any value the BFF sends, so an admin-only detail reaches a member if T2 sends it as value instead of redacted with count."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The T2 response contract is assumed because T2 is unbuilt: keys approval_posture, zdr, privacy_tier_floor, model_access, routing, budget, web_access and browser_site_mode, scalar values only, and optional unavailable, redacted, count, locked and revision fields; T2 must match or the panel shows raw keys or wrong text."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "String values are shown as received, so an enum code such as read_only reaches a person until T2 sends display text or the copy maps the code."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The loader calls the route directly as ThreadWorkspacePanel and AgentModesSection do, but CLAUDE.md asks for an action contract first, so move it onto T2's policy.read_effective contract when that lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before switch-on, capture 1280 and 375 px screenshots for an admin and a member and check the disclosure by keyboard, on a second dev server because :5173 serves the main checkout, once the T2 route is up."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "jsdom cannot measure layout, so the 375 px requirement rests on a CSS source guard and the live screenshot is the only real check."
+    }
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: after the line `import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'` (line 44) add `import { EffectivePolicyPanel } from './EffectivePolicyPanel'`; after the line `          <ThreadWorkspacePanel threadId={state.threadId ?? ''} />` (line 1174, inside the Show that tests hasMessages(), state.threadId and not temporary) add `          <EffectivePolicyPanel scope={{ kind: 'thread', threadId: state.threadId ?? '' }} />` with the same 10-space indent. The file is LF. Anchor by content, since the import shifts the lines below it by one.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomHeader.tsx: after the line `import { SpaceRoomSettings } from './SpaceRoomSettings'` (line 11) add `import { EffectivePolicyPanel } from '@/features/chat/components/EffectivePolicyPanel'`; in the room-details dialog, after the closing `/>` of the `<SpaceRoomSettings ... />` element (line 220) and before `<Show when={canArchive()}>`, add `              <EffectivePolicyPanel scope={{ kind: 'space', spaceId: props.spaceRef }} />` with a 14-space indent. The file is LF; props.spaceRef is the identifier the /api/v1/spaces routes use. Anchor by content.",
+    "Both mounts are safe before EP-9-T2 lands: with no BFF route the read returns 404 and the panel renders nothing, and with the build switch off it sends no request.",
+    "owner-only: add VITE_POLICY_EFFECTIVE_VIEW_ENABLED=false to apps/Frontend Plane/verevonv3/.env.example. This slice does not edit that file.",
+    "No proto, migration, generated code, golden, prompt-tool manifest or image change is needed for EP-9-T3.",
+    "After the shared edits the guard should run src/features/chat/lib/chat-localization.test.ts, chat-accessibility.test.ts, src/shared/i18n/error-catch-sites.test.ts and src/features/chat/lib/ui-gates.guard.test.ts, the ui-gates lint on EffectivePolicyPanel.tsx, the panel's own vitest file, and the typecheck with node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs (EP-9-T2 BFF route GET /api/v1/policy/effective; not in this batch): the panel stays hidden until it exists.",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts (EP-9-T2 policy.read_effective contract; not in this batch): the panel reads the route directly until then."
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "buf breaking --against baseline.binpb (apps/Model Plane/proto)",
+    "outcome": "exit 0, no breaking change",
+    "clean": true
+   },
+   {
+    "command": "buf lint (apps/Model Plane/proto), filtered to memory/attention/sessions",
+    "outcome": "New lints only for the EP-8-S4 RPCs: UserProfileResponse is shared by 3 RPCs and is not named <Rpc>Response. This is the same style debt as the existing MemoryHealthRequest/Response. Lint has pre-existing debt and was not gated.",
+    "clean": false
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml + copy differing model_plane files + bash apps/Model Plane/scripts/tests/go-gen-drift.sh",
+    "outcome": "Copied attention.pb.go, memory.pb.go, memory_grpc.pb.go and sessions.pb.go. Drift check: 44 generated Go files match.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml + compare ignoring version line/Validate call",
+    "outcome": "memory_pb2.py and sessions_pb2.py differed. Both copied into apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/, keeping the tree's version header and Validate call. attention has no checked-in Python binding.",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5/5 passed. Golden rewritten (+26 lines for memory.profile.save/rebuild) and copied to the 4 MP copies. New sha256 5268958d5e4f579bffeec6ad3a5bd4426594d39c45ad0a8700d123676c7cccdf is pinned in the .sha256 and in zdr-contract-sync.test.sh line 209.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "2/9 FAILED: every_listed_source_contributes_items and prompt_tool_manifest_matches_golden both report that `pub fn builtin_tool_defs()` in tool_loop.rs holds no ToolDefinition blocks. This was already broken at HEAD: the blocks moved into builtin_tool_defs_with (WS16.S8, e9faf71ac), which was merged alongside EP-14-S8's test (a22c66e24). The test reads only the body of builtin_tool_defs(). Nothing was written.",
+    "clean": false
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished with 0 errors. One warning is new from the batch: unused axum::Json at http_routes.rs:18256 and :18259 (EP-8-S4 user_profile_route_tests). The other warnings were already there.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished with 0 errors. The only warnings are pre-existing unused imports.",
+    "clean": true
+   },
+   {
+    "command": "go build ./... in every apps/Model Plane/go workspace module; go vet ./... in gen, pkg/zdrrefusal, capability-core, sandbox-manager",
+    "outcome": "All build ok and vet ok",
+    "clean": true
+   },
+   {
+    "command": "GOWORK=off go build ./... && go vet ./... (apps/Application Plane/notification-core)",
+    "outcome": "build ok, vet ok. gofmt is clean for the edited Go files once CR is ignored.",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+    "outcome": "Exactly 1 error, the pre-existing baseline one in src/shared/api/schedule-contract.test.ts",
+    "clean": true
+   },
+   {
+    "command": "node scripts/gates/gen-egress-disclosure.mjs && --check",
+    "outcome": "Wrote docs/compliance/generated/egress-disclosure.md; --check exit 0",
+    "clean": true
+   },
+   {
+    "command": "cargo fmt --all -- --check -l (apps/Model Plane/rust)",
+    "outcome": "Many files are listed across the workspace. Most of this formatting debt was already there. The new approval_descriptor.rs, approval_edit.rs and approval_edit_golden.rs are listed too. Nothing was reformatted.",
+    "clean": false
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "slice": "EP-7-S5",
+    "what": "Added the AttentionReason::Goal => Some(\"goal\") arm to attention_reason_name and updated its doc comment. The match is exhaustive, so this was needed after the regen."
+   }
+  ],
+  "still_broken": [
+   "apps/Model Plane/rust/crates/mp-contracts/tests/prompt_tool_manifest.rs:70 (and :331): already broken at HEAD, not caused by W3-08. The ToolList signature `pub fn builtin_tool_defs()` points at a body that only delegates; the ToolDefinition blocks live in `pub fn builtin_tool_defs_with(` in tool_loop.rs. That function now also has an `if extract_tool { defs.push(ToolDefinition {..}) }` block. Fixing it means re-pointing the signature, possibly regenerating the manifest, and a scenario-touch review. That is design work for the lead, so I left it."
+  ],
+  "notes": "Every new switch I passed through defaults off. No tests were run except the two generation steps (admission golden and prompt manifest); no docker, nothing committed. Line endings are preserved: the CRLF files (grpc.rs, e2e_invoke_chain_test.rs, zdr_refusal.rs, http_routes.rs, ZDR.md, notification-core handlers.go and service.go) are still all-CRLF, and the LF files are still LF.\n\nPin and vendor work done:\n- **space-surface.v1.json:** new sha256 f1d609930263e4df291b8e3b4e45cbe408e9c0d4d185d71ecee1ac15ecb22567. Copied with its .sha256 to model-gateway tests/fixtures and to the BFF gateway tests/fixtures (that third copy is in VENDORED, so it had to move too). Pinned in zdr-contract-sync.test.sh line 229. The flag field takes the string \"SESSION_USER_PROFILE_ENABLED\"; other rows already carry string flags.\n- **zdr-posture-matrix.json:** pinned at eea374f9… in its .sha256, re-vendored to the 3 fixture copies, sync line 111 updated, ENFORCEMENT_ROWS set to 31 in all 4 tests.\n- **zdr-refusals.json:** pinned at 5a14940f… (I recomputed it: the LF sha of both JSON copies matches the builder's value). Copied to the FE, Quarry and Go zdrrefusal locations; sync line 118 updated. NOT confirmed: whether it equals catalogue_text(). Checking that needs `cargo test -p mp-contracts zdr_refusal`, which I did not run.\n\nFor the lead:\n1. Run the ZDR checks, none of which I ran: `bash scripts/tests/zdr-contract-sync.test.sh`, `node scripts/tests/zdr-contract-schema.mjs` and its `node --test` file.\n2. Migration number: session-core 0100_user_profiles is not in 00-integration-round-b.md. That doc's C-B2 plans to renumber round A's five session-core migrations to 0100-0104, and the tree already holds 0100, 0101, 0103 and 0104 from wave-3 slices. Reconcile before merge. I did not edit that doc.\n3. The http_routes.rs unused-Json warnings in user_profile_route_tests (lines 18256 and 18259) are a cosmetic cleanup for EP-8-S4.\n4. The docs/compliance/generated/egress-disclosure.md file I generated should go in the same commit as the EP-9-T1 files.\n5. EP-7-S3 and EP-7-S5 are partial. Their needs_other_files items (attention_events.rs sweep, history.rs goal_status mapping, the attention rail chip) are open slice work, not compile errors.",
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/attention.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/memory.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/memory_grpc.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/memory_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (+ copies: apps/Model Plane/api/contracts/, capability-core internal/api/testdata/, execution-core tests/fixtures/, model-gateway tests/fixtures/; apps/Model Plane/api/contracts/agent-action-admission.json.sha256; zdr-contract-sync.test.sh line 209)",
+   "docs/compliance/generated/egress-disclosure.md"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: Feature user_profile / 'the standing profile' after sandbox_workspace (EP-8-S4)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: | 'user_profile' in the union + labels entry (EP-8-S4)",
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs MockMemoryService: get_user_profile/set_user_profile/rebuild_user_profile -> unimplemented (EP-8-S4)",
+   "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs MockMemory: same three methods (EP-8-S4)",
+   "apps/Model Plane/api/contracts/space-surface.v1.json: rows mg:PUT:/v1/memories/profile and mg:POST:/v1/memories/profile/rebuild; re-vendored to model-gateway tests/fixtures and BFF gateway tests/fixtures with .sha256; sync pin line 229 (EP-8-S4)",
+   "apps/Model Plane/deploy/docker-compose.yml: session-core SESSION_USER_PROFILE_ENABLED default false (EP-8-S4); model-gateway MODEL_GATEWAY_WEB_SEARCH_BATCH default false (EP-2-S3)",
+   "apps/Model Plane/docs/ZDR.md: standing-profile store row in the section 2 boundary table (EP-8-S4)",
+   "zdr-refusals pin chain: .sha256, FE .sha256, Quarry-v2 fixtures json+sha256, go/pkg/zdrrefusal json+sha256, sync line 118 (EP-8-S4)",
+   "zdr-posture-matrix pin chain: .sha256 = eea374f9..., re-vendored json+sha256 to model-gateway, execution-core, mp-contracts fixtures; sync line 111 (EP-2-S3)",
+   "ENFORCEMENT_ROWS 30 -> 31 in model-gateway tests/zdr_posture_matrix.rs, tests/zdr_mcp_observation_golden.rs, execution-core tests/loop_fold_zdr_matrix.rs, tests/zdr_mcp_golden.rs (EP-2-S3)",
+   "optional: zdr_posture_matrix.rs web-reader goldens list + (e_zdr_token_batched_web_search_refused, zdr) (EP-2-S3)",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs attention_reason_name: Goal arm (EP-7-S5)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/attention-client.ts: AttentionReason | 'goal', REASONS + 'goal' (EP-7-S5)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/attention-stream.ts: REASONS + 'goal' (EP-7-S5)",
+   "apps/Application Plane/notification-core/internal/http/handlers.go: capability-core map + modelplane.goal_stopped (EP-7-S5)",
+   "apps/Application Plane/notification-core/internal/notification/service.go: nativeTypes + modelplane.goal_stopped (EP-7-S5)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: import and mount EffectivePolicyPanel thread scope (EP-9-T3)",
+   "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomHeader.tsx: import and mount EffectivePolicyPanel space scope after SpaceRoomSettings (EP-9-T3)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (EP-8-S4, EP-9-T1, optional EP-2-S3 D9): the lead books these",
+   "apps/Model Plane/deploy/.env.example SESSION_USER_PROFILE_ENABLED / MODEL_GATEWAY_WEB_SEARCH_BATCH: owner only",
+   "apps/Frontend Plane/verevonv3/.env.example VITE_POLICY_EFFECTIVE_VIEW_ENABLED: owner only",
+   "docs/plans/wave3/00-integration-round-b.md migration renumber record for 0100_user_profiles: this is not a shared code edit, and it conflicts with C-B2's plan to give 0100-0104 to round A. Flagged for the lead.",
+   "EP-7-S3 MODEL_GATEWAY_GOAL_JUDGE_ENABLED compose passthrough: the builder deferred it until the call site is wired",
+   "docs/plans/wave3/EP-2-research-and-citations.md design-text correction: a design doc, not a shared code edit; left to the lead"
+  ]
+ }
+}

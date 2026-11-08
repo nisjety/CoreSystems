@@ -1,0 +1,6345 @@
+{
+  "meta": {
+    "source": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+    "sections": [
+      "2.2",
+      "4.2",
+      "4.3",
+      "4.4",
+      "4.5",
+      "4.6"
+    ],
+    "generated": "2026-10-21",
+    "abbreviations": "MG=model-gateway, EC=execution-core, SC=session-core (plan line 505), IC=inference-core, CC=capability-core (plan line 505), FE=apps/Frontend Plane/verevonv3, MP=apps/Model Plane, CP=apps/Control Plane. MG/EC/IC are not defined in the cited sections and are inferred.",
+    "cycle_breakers": [
+      "WS03.S5 / WS05.S1: WS03 ships a stub class table in effect.rs, WS05 replaces it.",
+      "WS02.S6 / WS07.S1: S6 stamps SKIPPED_BY_POLICY(memory_off) once WS07 returns a typed skip reason, else UNAVAILABLE.",
+      "WS09.S8 / WS17.S1: first to start lands, the other rebases.",
+      "[RECONCILE] waived: bool signature vs class seam in EC: WS03.S6 (LoopState refactor plus waived) merges first as one early PR, then WS05.S3/S4; WS05.S1/S2 touch Go and gateway files only so they go earlier."
+    ],
+    "ws_graph_note": "The workstream-level graph is cyclic (for example WS03<->WS04, WS03<->WS05, WS02<->WS07, WS09<->WS12, WS15<->WS16); slice-level order is made acyclic by cycle_breakers and train order.",
+    "critical_paths": [
+      "Spine: WS01.S0 (2-4 d) -> WS02.S4-S7 (17-25 d) -> WS03 S1-S8 (about 63 d, two engineers) -> WS13.S6, WS14.S5, WS16.S3-S6, WS20.S5-S8, WS21.S5",
+      "Tool governance: WS05 S0-S1-S3-S4-S6 (about 25 d) -> WS13.S7, WS23.S3, WS24.S6, WS25.S9",
+      "Ops: WS01 S0-S6-S7-S12-S13 (20-25 d to a signed candidate; S13 set by the external ZDR contract)",
+      "Audit: WS01.S1-S2 (about 5 d) -> WS06 S1-S6 (24-32 d)",
+      "Unattended: WS20 S4-S8 (28-40 d), S6 behind WS03.S6 and DEC-16"
+    ],
+    "anomalies": [
+      "WS01.S2 is a prerequisite for WS06, WS16.S3, WS20.S7 and the deploy harness but is in no 4.6 train row.",
+      "WS03.S8 (park-vs-terminalize, RunParked/RunResumed 24/25, RunDetail 17/18) is named in 4.3/4.5 but T3 omits it.",
+      "WS22.S7 is both in T7 and in the 4.6 gated/optional list (WS22.S7/S8); recorded as T7 with a gated_note.",
+      "WS12.S5 is named in lane A and lane G.",
+      "T1 gate text repeats \"once WS12.S2 is in\" twice (plan wording, kept as in the source).",
+      "2.2 WS12 cell reads \"S3, S6; S5-S10 code can be written\", so S5/S6 are inside the second clause; S6 treated as free, S5 and S7-S10 as code-only.",
+      "4.3 memory.proto row maps \"7; 4, 4; new\" to WS26.S4 / WS07.S1 / WS07.S2 in order (split into three entries here)."
+    ]
+  },
+  "trains": {
+    "slices": {
+      "WS01.S0": {
+        "train": "T0",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 1,
+        "note": "commits 0A-0H",
+        "lane_note": "lane A serial constraint: WS01.S0 goes first (T0, commits 0A-0H); not a lane member"
+      },
+      "WS01.S1": {
+        "train": "T1",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 4
+      },
+      "WS01.S2": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row. 4.7 treats WS01.S1-S2 (audit delivery proven) as a week 1-2 milestone and 4.2 makes S2 the deploy-harness prerequisite, yet the T1 list omits it: integrator should place it in T1 right after WS01.S1."
+      },
+      "WS01.S3": {
+        "train": "T1",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 5
+      },
+      "WS01.S5": {
+        "train": "T1",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 6
+      },
+      "WS01.S6": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 7,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS01.S7": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 1,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS01.S8": {
+        "train": "T1",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 8
+      },
+      "WS01.S9": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS01.S10": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS01.S11": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS01.S12": {
+        "train": "T8",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 2
+      },
+      "WS01.S13": {
+        "train": "T8",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 3
+      },
+      "WS01.S14": {
+        "train": "T8",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 4
+      },
+      "WS02.S1": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 9
+      },
+      "WS02.S2": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 31,
+        "note": "cost-core 0011"
+      },
+      "WS02.S3": {
+        "train": "T2",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 3,
+        "note": "after S5"
+      },
+      "WS02.S4": {
+        "train": "T2",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 1
+      },
+      "WS02.S5": {
+        "train": "T2",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 2,
+        "note": "after S4"
+      },
+      "WS02.S6": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 2
+      },
+      "WS02.S7": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 3
+      },
+      "WS02.S8": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 5,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS02.S9": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in lane E of 4.6 but listed in no train row."
+      },
+      "WS02.S10": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in lane E of 4.6 but listed in no train row."
+      },
+      "WS02.S11": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in lane E of 4.6 but listed in no train row."
+      },
+      "WS02.S12": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1).",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS03.S1": {
+        "train": "T2",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 4
+      },
+      "WS03.S2": {
+        "train": "T2",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 5
+      },
+      "WS03.S3": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 4
+      },
+      "WS03.S4": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 5
+      },
+      "WS03.S5": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 6
+      },
+      "WS03.S6": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 1,
+        "note": "first in train"
+      },
+      "WS03.S7": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 7
+      },
+      "WS03.S8": {
+        "train": "unscheduled",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "unscheduled_reason": "Named in 4.3 (RunParked/RunResumed, RunDetail park_reason), 4.4 and 4.5 (owns park-vs-terminalize) but T3 lists S3,S4,S5,S6,S7 only; lane C says \"WS03 all\"."
+      },
+      "WS04.S1": {
+        "train": "T1",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 10,
+        "note": "dark"
+      },
+      "WS04.S2": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 11
+      },
+      "WS04.S3": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 12
+      },
+      "WS04.S4": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 13
+      },
+      "WS04.S5": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 14
+      },
+      "WS04.S6": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 15
+      },
+      "WS04.S7": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 16
+      },
+      "WS04.S8": {
+        "train": "unscheduled",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS04.S9": {
+        "train": "T8",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 6
+      },
+      "WS05.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 36,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS05.S1": {
+        "train": "T2",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 6
+      },
+      "WS05.S2": {
+        "train": "T3",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 8
+      },
+      "WS05.S3": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 9
+      },
+      "WS05.S4": {
+        "train": "T3",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 10
+      },
+      "WS05.S5": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 36
+      },
+      "WS05.S6": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 37,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS06.S2": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 29
+      },
+      "WS06.S3": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 30
+      },
+      "WS06.S4": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 31
+      },
+      "WS06.S5": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 32
+      },
+      "WS06.S6": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 33
+      },
+      "WS06.S7": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 34
+      },
+      "WS06.S8": {
+        "train": "T6",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 35
+      },
+      "WS07.S1": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 17
+      },
+      "WS07.S2": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 18
+      },
+      "WS07.S3": {
+        "train": "T5",
+        "lane": "B",
+        "lanes": [
+          "B",
+          "G"
+        ],
+        "order_in_train": 14
+      },
+      "WS07.S4": {
+        "train": "T4",
+        "lane": "B",
+        "lanes": [
+          "B",
+          "D"
+        ],
+        "order_in_train": 8
+      },
+      "WS07.S5": {
+        "train": "T5",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 15
+      },
+      "WS07.S6": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1).",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS07.S7": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 9
+      },
+      "WS07.S8": {
+        "train": "T5",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 16
+      },
+      "WS07.S9": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS08.S2": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 24
+      },
+      "WS08.S3": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 25
+      },
+      "WS08.S4": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 26
+      },
+      "WS08.S5": {
+        "train": "T5",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 17,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS08.S6": {
+        "train": "T5",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 18,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS09.S1": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 11
+      },
+      "WS09.S2": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 12
+      },
+      "WS09.S3": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 13
+      },
+      "WS09.S4": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS09.S5": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 14
+      },
+      "WS09.S6": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS09.S7": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS09.S8": {
+        "train": "T4",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 6
+      },
+      "WS09.S9": {
+        "train": "T4",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 7
+      },
+      "WS09.S10": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS10.S0": {
+        "train": "T1",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 19
+      },
+      "WS10.S1": {
+        "train": "T1",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 20
+      },
+      "WS10.S2": {
+        "train": "T4",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 19
+      },
+      "WS10.S3": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 20
+      },
+      "WS10.S4": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 21
+      },
+      "WS10.S5": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 38,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS10.S6": {
+        "train": "T6",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 39
+      },
+      "WS10.S7": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 7,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS11.S1": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 15
+      },
+      "WS11.S2": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 16
+      },
+      "WS11.S3": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 17
+      },
+      "WS11.S4": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 18
+      },
+      "WS11.S5": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 22
+      },
+      "WS11.S6": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 23
+      },
+      "WS11.S7": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS11.S8": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS11.S9": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS12.S1": {
+        "train": "T0",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 2
+      },
+      "WS12.S2": {
+        "train": "T1",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "order_in_train": 1,
+        "note": "buf baseline from the committed state"
+      },
+      "WS12.S3": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 2
+      },
+      "WS12.S4": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS12.S5": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A",
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane A/G of 4.6 but listed in no train row."
+      },
+      "WS12.S6": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 3
+      },
+      "WS12.S7": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS12.S8": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS12.S9": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS12.S10": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS12.S11": {
+        "train": "unscheduled",
+        "lane": "A",
+        "lanes": [
+          "A"
+        ],
+        "unscheduled_reason": "Named in lane A of 4.6 but listed in no train row."
+      },
+      "WS13.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 37,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS13.S1": {
+        "train": "T4",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 14
+      },
+      "WS13.S2": {
+        "train": "T4",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 15
+      },
+      "WS13.S3": {
+        "train": "T4",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 16,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS13.S4": {
+        "train": "T4",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 17,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS13.S5": {
+        "train": "T4",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 18,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS13.S6": {
+        "train": "T5",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 1
+      },
+      "WS13.S7": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Named in 4.2/4.4/4.5 (rule link; folds into 0062 if planned with S6) but in no 4.6 train.",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS13.S8": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 8,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS14.S1": {
+        "train": "T1",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 25
+      },
+      "WS14.S2": {
+        "train": "T5",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 2,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS14.S3": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 1
+      },
+      "WS14.S4": {
+        "train": "T5",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 3
+      },
+      "WS14.S5": {
+        "train": "T5",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 4
+      },
+      "WS14.S7": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 9,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS15.S1": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 27
+      },
+      "WS15.S2": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 28
+      },
+      "WS15.S3": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 29
+      },
+      "WS15.S4": {
+        "train": "T4",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 30
+      },
+      "WS15.S5": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "E"
+        ],
+        "order_in_train": 5
+      },
+      "WS15.S6": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "E"
+        ],
+        "order_in_train": 6
+      },
+      "WS15.S7": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 7
+      },
+      "WS15.S8": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS15.S9": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1)."
+      },
+      "WS16.S1": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 21
+      },
+      "WS16.S2": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 8
+      },
+      "WS16.S3": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 10
+      },
+      "WS16.S4": {
+        "train": "T5",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 9
+      },
+      "WS16.S5": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 16,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS16.S6": {
+        "train": "T7",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 17
+      },
+      "WS16.S7": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 10,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS17.S1": {
+        "train": "T3",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 19
+      },
+      "WS17.S2": {
+        "train": "T3",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "D"
+        ],
+        "order_in_train": 20
+      },
+      "WS17.S3": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 2
+      },
+      "WS17.S4": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "D"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS17.S5": {
+        "train": "unscheduled",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "unscheduled_reason": "Named in 4.2 (needs WS07.S1, WS26; WS22.S5 delete hook) but in no 4.6 train; lane D covers \"WS17\"."
+      },
+      "WS17.S6": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 3
+      },
+      "WS17.S7": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 4
+      },
+      "WS17.S8": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 5
+      },
+      "WS17.S9": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "D"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS18.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 38,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS18.S1": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 19
+      },
+      "WS18.S2": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 20
+      },
+      "WS18.S3": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 21
+      },
+      "WS18.S4": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 22
+      },
+      "WS18.S5": {
+        "train": "T5",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 23,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 39,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S1": {
+        "train": "unscheduled",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "unscheduled_reason": "Named in lane G of 4.6 but listed in no train row."
+      },
+      "WS19.S2": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 16,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S3": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 17,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S4": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 18,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S5": {
+        "train": "T6",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 19
+      },
+      "WS19.S6": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 20
+      },
+      "WS19.S7": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 21
+      },
+      "WS19.S8": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 22,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS19.S9": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 23,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 40,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S1": {
+        "train": "T4",
+        "lane": "D",
+        "lanes": [
+          "D"
+        ],
+        "order_in_train": 11
+      },
+      "WS20.S2": {
+        "train": "T4",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 12,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S3": {
+        "train": "T4",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 13,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S4": {
+        "train": "T7",
+        "lane": "B",
+        "lanes": [
+          "B",
+          "D"
+        ],
+        "order_in_train": 1
+      },
+      "WS20.S5": {
+        "train": "T7",
+        "lane": "D",
+        "lanes": [
+          "D",
+          "F"
+        ],
+        "order_in_train": 2
+      },
+      "WS20.S6": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 3,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S7": {
+        "train": "T7",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 4
+      },
+      "WS20.S8": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 5,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS20.S9": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1).",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 41,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S2": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 6,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S3": {
+        "train": "T7",
+        "lane": "B",
+        "lanes": [
+          "B"
+        ],
+        "order_in_train": 7
+      },
+      "WS21.S4": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 8,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S5": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 9,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S5a": {
+        "train": "T7",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 9,
+        "inherited_train_from": "WS21.S5"
+      },
+      "WS21.S5b": {
+        "train": "T7",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 9,
+        "inherited_train_from": "WS21.S5"
+      },
+      "WS21.S6": {
+        "train": "T7",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 10
+      },
+      "WS21.S7": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 11,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S8": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 12,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S9": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 13,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS21.S10": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 11,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS22.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 42,
+        "note": "other S0 decision-record slice",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS22.S1": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 24
+      },
+      "WS22.S2": {
+        "train": "T6",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 25
+      },
+      "WS22.S3": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 26,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS22.S4": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 27,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS22.S5": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 28
+      },
+      "WS22.S6": {
+        "train": "T7",
+        "lane": "F",
+        "lanes": [
+          "F",
+          "G"
+        ],
+        "order_in_train": 14
+      },
+      "WS22.S7": {
+        "train": "T7",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 15,
+        "gated_note": "Also named in the 4.6 gated/optional paragraph (joins a train only after its decision, 02-decisions.md 2.1); 4.6 train rows still list it.",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS22.S8": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1).",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS23.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 26,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS23.S1": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 27,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS23.S2": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 28,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS23.S3": {
+        "train": "T5",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 24
+      },
+      "WS23.S4": {
+        "train": "T5",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 25
+      },
+      "WS23.S5": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 26
+      },
+      "WS23.S6": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 27
+      },
+      "WS23.S9": {
+        "train": "unscheduled",
+        "lane": null,
+        "lanes": [],
+        "unscheduled_reason": "Gated or optional: 4.6 says these join a train only after their decision (02-decisions.md 2.1).",
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 29,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S1": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 30,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S2": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 1,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S3": {
+        "train": "T6",
+        "lane": "C",
+        "lanes": [
+          "C",
+          "F"
+        ],
+        "order_in_train": 2
+      },
+      "WS24.S4": {
+        "train": "T6",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 3
+      },
+      "WS24.S5": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 4,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S6": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 5
+      },
+      "WS24.S7": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 6,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S8": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 7,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS24.S9": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 12,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS25.S0": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 31,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS25.S1": {
+        "train": "T1",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 32
+      },
+      "WS25.S2": {
+        "train": "T1",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 33
+      },
+      "WS25.S3": {
+        "train": "T1",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 34
+      },
+      "WS25.S4": {
+        "train": "T1",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 35
+      },
+      "WS25.S5": {
+        "train": "T6",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 8
+      },
+      "WS25.S6": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 9,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS25.S7": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 10
+      },
+      "WS25.S8": {
+        "train": "T6",
+        "lane": "F",
+        "lanes": [
+          "F"
+        ],
+        "order_in_train": 11
+      },
+      "WS25.S9": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 12,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS25.S10": {
+        "train": "T6",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 13,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS25.S11": {
+        "train": "T6",
+        "lane": "G",
+        "lanes": [
+          "G"
+        ],
+        "order_in_train": 14
+      },
+      "WS25.S12": {
+        "train": "T8",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 13,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS26.S1": {
+        "train": "T1",
+        "lane": null,
+        "lanes": [],
+        "order_in_train": 21,
+        "lane_note": "no lane stated in 4.6 for this slice"
+      },
+      "WS26.S2": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 28
+      },
+      "WS26.S3": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 22
+      },
+      "WS26.S4": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 29
+      },
+      "WS26.S5": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 30
+      },
+      "WS26.S6": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 31
+      },
+      "WS26.S7": {
+        "train": "T6",
+        "lane": "C",
+        "lanes": [
+          "C"
+        ],
+        "order_in_train": 15
+      },
+      "WS27.S0": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 23
+      },
+      "WS27.S1": {
+        "train": "T1",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 24
+      },
+      "WS27.S2": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 10
+      },
+      "WS27.S3": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 11
+      },
+      "WS27.S4": {
+        "train": "T5",
+        "lane": "G",
+        "lanes": [
+          "G",
+          "E"
+        ],
+        "order_in_train": 12
+      },
+      "WS27.S6": {
+        "train": "T5",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 13
+      },
+      "WS27.S7": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in 4.3 (RouteNote 15/16) but T5 lists WS27 S2-S4,S6 and T8 \"enablements\" only."
+      },
+      "WS27.S9": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in 4.3 (RunUsageProgress 29) and 4.2 but in no 4.6 train."
+      },
+      "WS27.S11": {
+        "train": "unscheduled",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "unscheduled_reason": "Named in 4.2 (WS10 blocks WS27.S11; WS13/WS14 deps) but in no 4.6 train."
+      },
+      "WS27.enablements": {
+        "train": "T8",
+        "lane": "E",
+        "lanes": [
+          "E"
+        ],
+        "order_in_train": 14,
+        "note": "flag enablements; slice ids not stated in 4.6"
+      }
+    },
+    "by_train": {
+      "T0": [
+        "WS01.S0",
+        "WS12.S1"
+      ],
+      "T1": [
+        "WS12.S2",
+        "WS12.S3",
+        "WS12.S6",
+        "WS01.S1",
+        "WS01.S3",
+        "WS01.S5",
+        "WS01.S6",
+        "WS01.S8",
+        "WS02.S1",
+        "WS04.S1",
+        "WS09.S1",
+        "WS09.S2",
+        "WS09.S3",
+        "WS09.S5",
+        "WS11.S1",
+        "WS11.S2",
+        "WS11.S3",
+        "WS11.S4",
+        "WS10.S0",
+        "WS10.S1",
+        "WS26.S1",
+        "WS26.S3",
+        "WS27.S0",
+        "WS27.S1",
+        "WS14.S1",
+        "WS23.S0",
+        "WS23.S1",
+        "WS23.S2",
+        "WS24.S0",
+        "WS24.S1",
+        "WS25.S0",
+        "WS25.S1",
+        "WS25.S2",
+        "WS25.S3",
+        "WS25.S4",
+        "WS05.S0",
+        "WS13.S0",
+        "WS18.S0",
+        "WS19.S0",
+        "WS20.S0",
+        "WS21.S0",
+        "WS22.S0"
+      ],
+      "unscheduled": [
+        "WS01.S2",
+        "WS01.S9",
+        "WS01.S10",
+        "WS01.S11",
+        "WS02.S9",
+        "WS02.S10",
+        "WS02.S11",
+        "WS02.S12",
+        "WS03.S8",
+        "WS04.S8",
+        "WS07.S6",
+        "WS07.S9",
+        "WS09.S4",
+        "WS09.S6",
+        "WS09.S7",
+        "WS09.S10",
+        "WS11.S7",
+        "WS11.S8",
+        "WS11.S9",
+        "WS12.S4",
+        "WS12.S5",
+        "WS12.S7",
+        "WS12.S8",
+        "WS12.S9",
+        "WS12.S10",
+        "WS12.S11",
+        "WS13.S7",
+        "WS15.S8",
+        "WS15.S9",
+        "WS17.S4",
+        "WS17.S5",
+        "WS17.S9",
+        "WS19.S1",
+        "WS20.S9",
+        "WS22.S8",
+        "WS23.S9",
+        "WS27.S7",
+        "WS27.S9",
+        "WS27.S11"
+      ],
+      "T8": [
+        "WS01.S7",
+        "WS01.S12",
+        "WS01.S13",
+        "WS01.S14",
+        "WS02.S8",
+        "WS04.S9",
+        "WS10.S7",
+        "WS13.S8",
+        "WS14.S7",
+        "WS16.S7",
+        "WS21.S10",
+        "WS24.S9",
+        "WS25.S12",
+        "WS27.enablements"
+      ],
+      "T4": [
+        "WS14.S3",
+        "WS17.S3",
+        "WS17.S6",
+        "WS17.S7",
+        "WS17.S8",
+        "WS09.S8",
+        "WS09.S9",
+        "WS07.S4",
+        "WS07.S7",
+        "WS16.S3",
+        "WS20.S1",
+        "WS20.S2",
+        "WS20.S3",
+        "WS13.S1",
+        "WS13.S2",
+        "WS13.S3",
+        "WS13.S4",
+        "WS13.S5",
+        "WS10.S2",
+        "WS10.S3",
+        "WS10.S4",
+        "WS11.S5",
+        "WS11.S6",
+        "WS08.S2",
+        "WS08.S3",
+        "WS08.S4",
+        "WS15.S1",
+        "WS15.S2",
+        "WS15.S3",
+        "WS15.S4",
+        "WS02.S2"
+      ],
+      "T2": [
+        "WS02.S4",
+        "WS02.S5",
+        "WS02.S3",
+        "WS03.S1",
+        "WS03.S2",
+        "WS05.S1"
+      ],
+      "T3": [
+        "WS03.S6",
+        "WS02.S6",
+        "WS02.S7",
+        "WS03.S3",
+        "WS03.S4",
+        "WS03.S5",
+        "WS03.S7",
+        "WS05.S2",
+        "WS05.S3",
+        "WS05.S4",
+        "WS04.S2",
+        "WS04.S3",
+        "WS04.S4",
+        "WS04.S5",
+        "WS04.S6",
+        "WS04.S7",
+        "WS07.S1",
+        "WS07.S2",
+        "WS17.S1",
+        "WS17.S2",
+        "WS16.S1"
+      ],
+      "T6": [
+        "WS24.S2",
+        "WS24.S3",
+        "WS24.S4",
+        "WS24.S5",
+        "WS24.S6",
+        "WS24.S7",
+        "WS24.S8",
+        "WS25.S5",
+        "WS25.S6",
+        "WS25.S7",
+        "WS25.S8",
+        "WS25.S9",
+        "WS25.S10",
+        "WS25.S11",
+        "WS26.S7",
+        "WS19.S2",
+        "WS19.S3",
+        "WS19.S4",
+        "WS19.S5",
+        "WS19.S6",
+        "WS19.S7",
+        "WS19.S8",
+        "WS19.S9",
+        "WS22.S1",
+        "WS22.S2",
+        "WS22.S3",
+        "WS22.S4",
+        "WS22.S5",
+        "WS06.S2",
+        "WS06.S3",
+        "WS06.S4",
+        "WS06.S5",
+        "WS06.S6",
+        "WS06.S7",
+        "WS06.S8",
+        "WS05.S5",
+        "WS05.S6",
+        "WS10.S5",
+        "WS10.S6"
+      ],
+      "T5": [
+        "WS13.S6",
+        "WS14.S2",
+        "WS14.S4",
+        "WS14.S5",
+        "WS15.S5",
+        "WS15.S6",
+        "WS15.S7",
+        "WS16.S2",
+        "WS16.S4",
+        "WS27.S2",
+        "WS27.S3",
+        "WS27.S4",
+        "WS27.S6",
+        "WS07.S3",
+        "WS07.S5",
+        "WS07.S8",
+        "WS08.S5",
+        "WS08.S6",
+        "WS18.S1",
+        "WS18.S2",
+        "WS18.S3",
+        "WS18.S4",
+        "WS18.S5",
+        "WS23.S3",
+        "WS23.S4",
+        "WS23.S5",
+        "WS23.S6",
+        "WS26.S2",
+        "WS26.S4",
+        "WS26.S5",
+        "WS26.S6"
+      ],
+      "T7": [
+        "WS20.S4",
+        "WS20.S5",
+        "WS20.S6",
+        "WS20.S7",
+        "WS20.S8",
+        "WS21.S2",
+        "WS21.S3",
+        "WS21.S4",
+        "WS21.S5",
+        "WS21.S5a",
+        "WS21.S5b",
+        "WS21.S6",
+        "WS21.S7",
+        "WS21.S8",
+        "WS21.S9",
+        "WS22.S6",
+        "WS22.S7",
+        "WS16.S5",
+        "WS16.S6"
+      ]
+    },
+    "train_defs": {
+      "T0": {
+        "name": "Baseline",
+        "gate": "4.1 DoD; taxonomy --check exits 0"
+      },
+      "T1": {
+        "name": "Gates and contract-free wins",
+        "gate": "cargo fmt --all -- --check; cargo check --workspace --all-targets; per-crate tests (--lib on Windows); taxonomy check; zdr-contract-sync.test.sh; buf lint ratchet and buf breaking green once WS12.S2 is in (Appendix B.1 note N2); Go go test ./... && go vet ./... per touched service (no CI reaches MP/go until WS01.S11)"
+      },
+      "T2": {
+        "name": "Spine contracts",
+        "gate": "buf breaking green once WS12.S2 is in (until then the tag-diff evidence of Appendix B.1 note N2); wire-parity goldens (Rust and Go); every RunAgentRequest literal site compiles (cargo check --workspace --all-targets); migration lint (WS01.S9 once merged); ignored DB tests with DATABASE_URL"
+      },
+      "T3": {
+        "name": "Spine behaviour",
+        "gate": "cross_service_loop_contract, autonomy_ladder_contract, compaction_parity_contract, new durable_loop_contract; run_control_two_replica_test.rs; ZDR posture matrix zdr_posture_matrix.rs; Stage 1 /continue proved on a running stack"
+      },
+      "T4": {
+        "name": "Stores and history",
+        "gate": "session-core --all-targets plus ignored DB tests; erasure test rows; every migration has revert/; taxonomy regenerated by the second lander"
+      },
+      "T5": {
+        "name": "Approvals, HITL, events, reads",
+        "gate": "single-use consume tests; ZDR matrix rows for every new store (DEC-32); FE pnpm typecheck && pnpm lint && pnpm test against the recorded baseline"
+      },
+      "T6": {
+        "name": "Tools, policy, files",
+        "gate": "signed-gate tests (forged, unbound, replayed decision refused); org-core and audit-core Go tests with Postgres; sandbox integration tests; release-contract tests for new compose services"
+      },
+      "T7": {
+        "name": "Unattended, browser, computer",
+        "gate": "contract-digest tests; Quarry-side grant verification (QRY session); lease and ZDR erasure tests"
+      },
+      "T8": {
+        "name": "Flips and proof",
+        "gate": "rebuilt images, running stack, one verified flow per flag (repo evidence rule); ZDR-TEST org proof (zdr-live-proof.sh, zdr-live-turn.spec.ts); rollback rehearsal evidence"
+      }
+    },
+    "lane_defs": {
+      "A": "Ops and CI",
+      "B": "Control and Application services (Go)",
+      "C": "Spine (Rust loop) - serial queue, fixed pair of engineers",
+      "D": "Session-core store",
+      "E": "Gateway chat path and inference",
+      "F": "Go capability and sandbox services",
+      "G": "Frontend - serial queue"
+    },
+    "lane_rule": "lane = first explicit lane (A..G) the 4.6 lane table names for the slice, else the lane of a whole-workstream mention; lanes[] lists every lane that names it; null = no lane stated.",
+    "lane_whole_workstream_defaults": {
+      "WS06": "B",
+      "WS03": "C",
+      "WS04": "D",
+      "WS17": "D",
+      "WS11": "E",
+      "WS15": "E",
+      "WS27": "E",
+      "WS09": "G"
+    },
+    "serial_queues": [
+      "C",
+      "E2 (sse.rs)",
+      "G"
+    ],
+    "parallel_lanes": "Lanes A, B, E1 and F touch disjoint source trees and run beside C and D.",
+    "note_slices_not_enumerated": "Slices of whole-workstream lane mentions (WS03, WS04, WS06, WS09, WS11, WS15, WS17, WS27) that appear in no train row are not enumerated here because 4.6 names no ids for them; use lane_whole_workstream_defaults."
+  },
+  "ws_deps": {
+    "WS01": [],
+    "WS02": [
+      "WS01",
+      "WS07"
+    ],
+    "WS03": [
+      "WS01",
+      "WS02",
+      "WS04",
+      "WS05"
+    ],
+    "WS04": [
+      "WS01",
+      "WS03",
+      "WS17"
+    ],
+    "WS05": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS04"
+    ],
+    "WS06": [
+      "WS01"
+    ],
+    "WS07": [
+      "WS01",
+      "WS26"
+    ],
+    "WS08": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS11"
+    ],
+    "WS09": [
+      "WS01",
+      "WS17"
+    ],
+    "WS10": [
+      "WS01",
+      "WS11",
+      "WS12"
+    ],
+    "WS11": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS05",
+      "WS10",
+      "WS12"
+    ],
+    "WS12": [
+      "WS01",
+      "WS09"
+    ],
+    "WS13": [
+      "WS01",
+      "WS03",
+      "WS05",
+      "WS06",
+      "WS12"
+    ],
+    "WS14": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS04",
+      "WS05"
+    ],
+    "WS15": [
+      "WS01",
+      "WS03",
+      "WS09",
+      "WS12",
+      "WS16"
+    ],
+    "WS16": [
+      "WS01",
+      "WS03",
+      "WS12",
+      "WS13",
+      "WS14"
+    ],
+    "WS17": [
+      "WS01",
+      "WS04",
+      "WS07",
+      "WS09",
+      "WS26"
+    ],
+    "WS18": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS12"
+    ],
+    "WS19": [
+      "WS01",
+      "WS05",
+      "WS06",
+      "WS07",
+      "WS08"
+    ],
+    "WS20": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS05",
+      "WS13",
+      "WS16"
+    ],
+    "WS21": [
+      "WS01",
+      "WS03",
+      "WS05",
+      "WS10",
+      "WS13",
+      "WS14"
+    ],
+    "WS22": [
+      "WS01",
+      "WS08",
+      "WS15",
+      "WS17",
+      "WS21"
+    ],
+    "WS23": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS05",
+      "WS08",
+      "WS13",
+      "WS26"
+    ],
+    "WS24": [
+      "WS01",
+      "WS03",
+      "WS05",
+      "WS08",
+      "WS12",
+      "WS13"
+    ],
+    "WS25": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS04",
+      "WS05",
+      "WS10",
+      "WS26"
+    ],
+    "WS26": [
+      "WS01",
+      "WS05",
+      "WS06",
+      "WS07"
+    ],
+    "WS27": [
+      "WS01",
+      "WS02",
+      "WS03",
+      "WS09",
+      "WS10",
+      "WS11",
+      "WS12",
+      "WS13",
+      "WS14"
+    ]
+  },
+  "ws_deps_detail": {
+    "WS01": {
+      "depends_on_text": "none; S0 first. S2 needs S0, S1; S7 needs S0, S6; S12 needs S0, S2, S7, S8-S11",
+      "blocks_text": "everything (S0); WS06 chain, WS16.S3, WS20.S7 (S2); deploy harness for all (S2)",
+      "wave": "W0 + W1"
+    },
+    "WS02": {
+      "depends_on_text": "WS01.S0; S6 needs WS07.S1 skip reason (stub first) and DEC-32; S3 enablement DEC-18",
+      "blocks_text": "WS03.S3 (tag, builder), WS08.S6, WS18.S1/S5, WS20.S5/S6, WS25 params struct, WS27.S1/S3",
+      "wave": "W1"
+    },
+    "WS03": {
+      "depends_on_text": "WS01.S0; WS02.S4 (field order); WS05.S1 (classes; stub first); WS04.S2 (cancel in resumed segments)",
+      "blocks_text": "WS05.S3/S4 (waived), WS13.S6, WS14.S5, WS15.S7, WS16.S3, WS20.S6, WS21.S5, WS25.S2/S5, WS27.S9",
+      "wave": "W1"
+    },
+    "WS04": {
+      "depends_on_text": "WS01.S0 (S2+), WS01 NATS ACL (S1), WS03 loop-level cancel (S2), WS17 versions (S8)",
+      "blocks_text": "WS14.S2 (S4 grant), WS17.S8 (S6 client_message_id), WS16 liveness, WS05.S2 hydration, WS25.S8",
+      "wave": "W1"
+    },
+    "WS05": {
+      "depends_on_text": "WS01.S0 (S4); WS03.S6 waived signature before S3/S4; WS02 (merged_tool_defs); WS04 (hydration, later)",
+      "blocks_text": "WS13.S6/S7, WS20.S4, WS21.S3/S4, WS23.S3, WS24.S3/S6, WS25.S3/S9, WS26.S7, WS03.S5",
+      "wave": "W1"
+    },
+    "WS06": {
+      "depends_on_text": "WS01.S2 (replay first); Space F-t1-031 role gate on GET /v1/audit",
+      "blocks_text": "WS13.S3 (soft), WS05 emitter, WS19, WS26.S7",
+      "wave": "W1"
+    },
+    "WS07": {
+      "depends_on_text": "WS01.S0; WS26 screening hook (S4/S5)",
+      "blocks_text": "WS02.S6 (skip reason), WS17.S5, WS26.S4/S5, WS18 containment",
+      "wave": "W1"
+    },
+    "WS08": {
+      "depends_on_text": "WS01.S0; WS02.S6 (S6); WS11 tag 17; WS03 scrub",
+      "blocks_text": "WS19.S8 (ro_binds seam), WS22 reserved names, WS10/WS08 /v1/models",
+      "wave": "W1"
+    },
+    "WS09": {
+      "depends_on_text": "WS01.S0 (S8 and FE hunks); WS17 (S8 shared list_conversation)",
+      "blocks_text": "WS15.S5, WS14 tray, WS16.S2, WS17.S9",
+      "wave": "W1"
+    },
+    "WS10": {
+      "depends_on_text": "WS01.S0, S5, S6, S2; WS11 rung ids; WS12",
+      "blocks_text": "WS21.S3 (org-core wiring), WS25.S9, WS27.S11, WS11.S7",
+      "wave": "W1"
+    },
+    "WS11": {
+      "depends_on_text": "WS01.S0 (S5); WS10 (S7); WS02/WS03/WS05 (S8); WS12 (S6)",
+      "blocks_text": "WS10 clamp, WS27.S7 (RouteNote)",
+      "wave": "W1"
+    },
+    "WS12": {
+      "depends_on_text": "WS01.S0 (S3, S7, S8); DEC-39; WS09 (S12)",
+      "blocks_text": "enforcement for all; WS13.S2 (S3, S4)",
+      "wave": "W0 (S1) + W1"
+    },
+    "WS13": {
+      "depends_on_text": "WS01.S0; WS12.S3/S4; WS03.S2/S3 (S6 hard); WS05.S1/S5; WS06",
+      "blocks_text": "WS14 card, WS21.S5b cause, WS23, WS24 floor",
+      "wave": "W2 (S0-S4 early)"
+    },
+    "WS14": {
+      "depends_on_text": "WS01.S0; WS04.S4 (S2); WS03.S3 (S5); WS02.S6; WS05",
+      "blocks_text": "WS16, WS15.S6",
+      "wave": "W2 (S1-S3 early)"
+    },
+    "WS15": {
+      "depends_on_text": "WS01.S0; WS09.S2 (S5); WS03.S8 (S7); WS16 enum (S6); WS12.S4/S7",
+      "blocks_text": "WS22.S6 (lifecycle_notice.rs)",
+      "wave": "W2 (S1-S6 early)"
+    },
+    "WS16": {
+      "depends_on_text": "WS01.S0, S2; WS03.S8; WS13/WS14; WS12",
+      "blocks_text": "WS20.S7 (soft), WS15.S6",
+      "wave": "W2 (S1-S3 early)"
+    },
+    "WS17": {
+      "depends_on_text": "WS01.S0; WS09.S8 (shared fn); WS04; WS07.S1 (S5); WS26 (S5)",
+      "blocks_text": "WS22.S5 (delete hook), WS18.S4, WS04.S8",
+      "wave": "W2 (S1, S2, S6, S7 early)"
+    },
+    "WS18": {
+      "depends_on_text": "WS01.S0; WS02.S4-S6 (S1, S5); WS03, WS02.S7 (S5); WS12",
+      "blocks_text": "Space session",
+      "wave": "W2 (S0-S3 early)"
+    },
+    "WS19": {
+      "depends_on_text": "WS01.S0/S2; WS08.S5 (S8); WS05; WS06; WS07",
+      "blocks_text": "none",
+      "wave": "W2 (S0-S3 early)"
+    },
+    "WS20": {
+      "depends_on_text": "WS01.S0/S2; WS02.S4/S7; WS03.S6; WS05.S1/S3/S4; WS16.S3/S4 (soft); WS13 (soft)",
+      "blocks_text": "WS15 trigger chip (not scheduled)",
+      "wave": "W2 (S0-S3 early)"
+    },
+    "WS21": {
+      "depends_on_text": "WS01.S0; QRY Grant v2 note; WS03; WS05.S1/S3; WS10 org-core; WS13.S1; WS14",
+      "blocks_text": "WS22.S8",
+      "wave": "W2 (S0-S2 early)"
+    },
+    "WS22": {
+      "depends_on_text": "WS01.S0; WS15.S1 (S6); WS17 delete hook (S5); WS08; WS21 (S8)",
+      "blocks_text": "WS24 thread scope (later)",
+      "wave": "W2 (S0-S4 early)"
+    },
+    "WS23": {
+      "depends_on_text": "WS01.S0; WS05.S1; WS03 waived; WS02; WS13; WS26; WS08",
+      "blocks_text": "none",
+      "wave": "W2 (S0-S2 early)"
+    },
+    "WS24": {
+      "depends_on_text": "WS01.S0; WS03 waived; WS05.S1; WS13; WS12; WS08",
+      "blocks_text": "none",
+      "wave": "W2 (S0-S2 early)"
+    },
+    "WS25": {
+      "depends_on_text": "WS01.S0; WS03 waived; WS05.S1-S5; WS04; WS02; WS10; WS26 (S4)",
+      "blocks_text": "none",
+      "wave": "W2 (S0-S6 early)"
+    },
+    "WS26": {
+      "depends_on_text": "WS01.S0; WS07.S1/S7 (S4/S5); WS05 (S7); WS06",
+      "blocks_text": "WS25.S4, WS17.S5, WS07",
+      "wave": "W2 (S1, S3, S9 early)"
+    },
+    "WS27": {
+      "depends_on_text": "WS01.S0; WS02.S1/S3; WS03; WS11.S5; WS12.S7; WS09.S2; WS13/WS14 (S11); WS10",
+      "blocks_text": "none",
+      "wave": "W2 (S0-S4 early)"
+    }
+  },
+  "hot_files": [
+    {
+      "file": "MG sse.rs",
+      "workstreams": [
+        "WS01 (S0, S6)",
+        "WS02",
+        "WS03",
+        "WS04",
+        "WS11",
+        "WS14",
+        "WS15",
+        "WS18",
+        "WS23",
+        "WS25",
+        "WS26",
+        "WS27"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS01.S6",
+        "WS02 (new modules run_context.rs, cache_telemetry.rs)",
+        "WS04 (single-line call-ins)",
+        "WS03 (Option<AgentResume> params)",
+        "WS11.S5 (derivation sites)",
+        "then WS14, WS15, WS18, WS23, WS25, WS26, WS27 as call-ins into their own modules"
+      ],
+      "stated_order_text": "WS01.S0, WS01.S6, WS02 (new modules run_context.rs, cache_telemetry.rs), WS04 single-line call-ins, WS03 Option<AgentResume> params, WS11.S5 derivation sites, then the rest as call-ins into their own modules"
+    },
+    {
+      "file": "MG sse_events.rs",
+      "workstreams": [
+        "WS01",
+        "WS02",
+        "WS04",
+        "WS12",
+        "WS13",
+        "WS14",
+        "WS15",
+        "WS18",
+        "WS27"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS12.S7 (tests only)",
+        "WS02.S1 (Usage keys)",
+        "WS04 (queued_input.ids)",
+        "variants in arrival order per 4.3: WS02, WS04, WS13/WS14, WS15, WS27",
+        "WS27 in a fenced block"
+      ],
+      "stated_order_text": "WS01.S0, WS12.S7 (tests only), WS02.S1 (Usage keys), WS04 (queued_input.ids), variants in arrival order (4.3); WS27 in a fenced block"
+    },
+    {
+      "file": "MG http_routes.rs",
+      "workstreams": [
+        "WS03",
+        "WS04",
+        "WS08",
+        "WS09",
+        "WS10",
+        "WS11",
+        "WS13",
+        "WS14",
+        "WS15",
+        "WS16",
+        "WS17",
+        "WS25"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS03.S2 (continuation_delivery)",
+        "WS13 (cause, decision, scope)",
+        "then routes beside their siblings: WS04, WS08, WS09, WS10, WS11, WS14, WS15, WS16, WS17, WS25"
+      ],
+      "stated_order_text": "WS01.S0, WS03.S2 (continuation_delivery), WS13 (cause, decision, scope), then routes beside their siblings"
+    },
+    {
+      "file": "MG grpc.rs, state.rs, lib.rs, runtime_registries.rs",
+      "workstreams": [
+        "WS04",
+        "WS05",
+        "WS10",
+        "WS25",
+        "WS26"
+      ],
+      "ordered_edits": [
+        "WS04.S1 (one AppState field)",
+        "WS05 and WS25 on the committed ZDR helper",
+        "WS10, WS26 (no order stated)"
+      ],
+      "stated_order_text": "WS04.S1 (one AppState field), then WS05/WS25 on the committed ZDR helper"
+    },
+    {
+      "file": "EC agent.rs, runtime_loop/mod.rs",
+      "workstreams": [
+        "WS02",
+        "WS03",
+        "WS05",
+        "WS08",
+        "WS11",
+        "WS13",
+        "WS14 (new ask.rs)",
+        "WS15",
+        "WS21",
+        "WS22",
+        "WS23",
+        "WS24",
+        "WS25",
+        "WS26",
+        "WS27"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS02.S4 (literal update, about 17 sites, 2 exhaustive)",
+        "WS03.S6 (LoopState refactor plus waived, one early PR)",
+        "WS02.S7",
+        "WS05.S3",
+        "WS05.S4",
+        "then the rest: WS08, WS13, WS14, WS15, WS21, WS22, WS23, WS24, WS25, WS26, WS27 (WS03 owns checkpoint and resume sections)",
+        "WS11.S8 last"
+      ],
+      "stated_order_text": "WS01.S0; WS02.S4 literal update (about 17 sites, 2 exhaustive); WS03.S6 (LoopState refactor plus waived) as one early PR; WS02.S7; WS05.S3/S4; then the rest; WS03 owns checkpoint and resume sections, WS11.S8 last"
+    },
+    {
+      "file": "EC grpc.rs, permission/mod.rs, capability_policy.rs",
+      "workstreams": [
+        "WS02",
+        "WS03",
+        "WS05",
+        "WS13",
+        "WS14",
+        "WS23",
+        "WS24",
+        "WS25"
+      ],
+      "ordered_edits": [
+        "WS05.S1/S3 (class lookup is the seam)",
+        "others add floors or rows, not name lists: WS02, WS03, WS13, WS14, WS23, WS24, WS25"
+      ],
+      "stated_order_text": "WS05.S1/S3 class lookup is the seam; others add floors or rows, not name lists"
+    },
+    {
+      "file": "SC grpc.rs, orchestration_grpc.rs, terminalization.rs",
+      "workstreams": [
+        "WS02",
+        "WS03",
+        "WS04",
+        "WS07",
+        "WS09",
+        "WS13",
+        "WS14",
+        "WS15",
+        "WS16",
+        "WS17",
+        "WS20"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "append_message_in_tx owned by whoever first touches it (WS04.S6, WS17, Space F-t1-001)",
+        "WS03.S8 owns park-vs-terminalize",
+        "WS16 uses a post-step attention::enrich (no SQL edit)"
+      ],
+      "stated_order_text": "WS01.S0; whoever first touches append_message_in_tx owns it (WS04.S6, WS17, Space F-t1-001); WS03.S8 owns park-vs-terminalize; WS16 uses a post-step attention::enrich, no SQL edit"
+    },
+    {
+      "file": "sessions.proto, orchestration.proto, execution.proto, inference.proto",
+      "workstreams": [
+        "per 4.3 table"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "then the 4.3 reservation table",
+        "WS02.S4 edits execution.proto first"
+      ],
+      "stated_order_text": "WS01.S0 then the reservation table; WS02.S4 edits execution.proto first"
+    },
+    {
+      "file": "IC config.rs, grpc.rs, provider/*",
+      "workstreams": [
+        "WS01",
+        "WS02",
+        "WS10",
+        "WS11",
+        "WS23"
+      ],
+      "ordered_edits": [
+        "WS01.S5",
+        "WS11.S1 (struct field)",
+        "WS10",
+        "WS02"
+      ],
+      "stated_order_text": "WS01.S5, WS11.S1 (struct field), then WS10, WS02 (WS23 no order stated)"
+    },
+    {
+      "file": "FE ChatMessages.tsx",
+      "workstreams": [
+        "WS03 (continueRun)",
+        "WS09",
+        "WS12",
+        "WS13",
+        "WS14",
+        "WS15",
+        "WS16",
+        "WS17"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS12.S3 (six locale hunks)",
+        "WS09.S2",
+        "WS03",
+        "WS13",
+        "WS14",
+        "WS15/WS16/WS17"
+      ],
+      "stated_order_text": "WS01.S0, WS12.S3 (six locale hunks), WS09.S2, WS03, WS13, WS14, WS15/WS16/WS17"
+    },
+    {
+      "file": "FE use-chat-controller.ts, chat-client.ts, chat-normalizers.ts",
+      "workstreams": [
+        "WS02",
+        "WS04",
+        "WS08",
+        "WS09",
+        "WS11",
+        "WS14",
+        "WS15",
+        "WS16",
+        "WS17",
+        "WS27"
+      ],
+      "ordered_edits": [
+        "WS01.S0",
+        "WS09 (S3/S5/S6/S9)",
+        "then add-only hunks"
+      ],
+      "stated_order_text": "WS01.S0, WS09 (S3/S5/S6/S9), then add-only hunks"
+    },
+    {
+      "file": "FE action-registry.ts, BFF handlers.rs, dispatchers.rs",
+      "workstreams": [
+        "WS07",
+        "WS10",
+        "WS13",
+        "WS14",
+        "WS17",
+        "WS21",
+        "WS24",
+        "WS25"
+      ],
+      "ordered_edits": [
+        "additive blocks; registry entry and handler in one PR (no cross-workstream order stated)"
+      ],
+      "stated_order_text": "additive blocks; registry entry and handler in one PR"
+    },
+    {
+      "file": "CC server.go, engine.go",
+      "workstreams": [
+        "WS05",
+        "WS19",
+        "WS21",
+        "WS24",
+        "WS25"
+      ],
+      "ordered_edits": [
+        "WS05.S1",
+        "then the 4.4 capability-core migration order (derived): WS05.S5, WS24.S3, WS24.S4, WS25.S5, WS19.S6, WS24.S6, WS25.S7, WS25.S8, WS21.S4"
+      ],
+      "stated_order_text": "WS05.S1, then 4.4 order"
+    },
+    {
+      "file": "MP/deploy/docker-compose.yml, .env.example, nats.conf; CP/docker-compose.yml, scripts/run-control-plane.sh, CP/config/plane-service-principals.json",
+      "workstreams": [
+        "all"
+      ],
+      "ordered_edits": [
+        "WS01.S1 (alias)",
+        "WS01.S8 (release overlay)",
+        "then everyone else: one ${VAR:-default} line per flag; credentials JSON is one line (merge by hand); scopes added alphabetically"
+      ],
+      "stated_order_text": "WS01.S1 (alias) and S8 (release overlay) first; one ${VAR:-default} line per flag; credentials JSON is one line: merge by hand; scopes added alphabetically"
+    },
+    {
+      "file": "mp-contracts/src/lib.rs, build.rs",
+      "workstreams": [
+        "WS02",
+        "WS05",
+        "WS10",
+        "WS13",
+        "WS16",
+        "WS19",
+        "WS20",
+        "WS26"
+      ],
+      "ordered_edits": [
+        "one-line pub mod additions after the live wave (no cross-workstream order stated)"
+      ],
+      "stated_order_text": "one-line pub mod additions after the live wave"
+    },
+    {
+      "file": "Ledger, ZDR.md, MODEL_PLANE_STATUS.md, docs/compliance/evidence/*",
+      "workstreams": [
+        "all"
+      ],
+      "ordered_edits": [
+        "append-only rows, one owner per row",
+        "ZDR.md Step 1 only by WS01.S5"
+      ],
+      "stated_order_text": "append-only rows, one owner per row; ZDR.md Step 1 only by WS01.S5"
+    }
+  ],
+  "proto_tags": {
+    "by_slice": {
+      "WS02.S2": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "cost-core",
+            "number": "0011",
+            "name": "cache_miss_reason",
+            "notes": null
+          }
+        ]
+      },
+      "WS02.S3": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentResponse.usage (RunUsage 1-7)",
+            "proposed": "9",
+            "final": "9",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS02.S4": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.run_context (RunContext)",
+            "proposed": "18",
+            "final": "18",
+            "conflict": "WS03 also 18",
+            "notes": "WS18 consumes"
+          },
+          {
+            "file": "execution.proto",
+            "field": "RunContext 1 authored_instructions, 2 history, 3 memory_block, 4 status",
+            "proposed": "1-4",
+            "final": "1-4",
+            "conflict": "none",
+            "notes": "5 reserved WS08 fallback; 6 reserved WS20 run notes"
+          },
+          {
+            "file": "sessions.proto",
+            "field": "New RPC RecordRunContext",
+            "proposed": "new",
+            "final": "appended at end of SessionCore after CountWaivedRuns in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS02.S9": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "InferRequest.prompt_tiers (PromptTierPlan)",
+            "proposed": "18",
+            "final": "18",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS02.S10": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "InferRequest.cache_scope_key",
+            "proposed": "19",
+            "final": "19",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS03.S2": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "CreateApprovalRequest.continuation_mode; .cause",
+            "proposed": "12; 12 (13 after WS03)",
+            "final": "12; 13",
+            "conflict": "yes",
+            "notes": null
+          },
+          {
+            "file": "orchestration.proto",
+            "field": "Approval consumed_at, continuation_mode; cause; decision record",
+            "proposed": "14, 15; 14 (16 after WS03); 15",
+            "final": "14, 15; 16; 17",
+            "conflict": "yes",
+            "notes": null
+          },
+          {
+            "file": "orchestration.proto",
+            "field": "New RPC ConsumeApproval",
+            "proposed": "new",
+            "final": "n/a",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0046",
+            "name": "approval_consume_and_mode",
+            "notes": null
+          }
+        ]
+      },
+      "WS03.S3": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.resume (AgentResume)",
+            "proposed": "18 (WS08 assumes 19)",
+            "final": "19",
+            "conflict": "WS02",
+            "notes": null
+          },
+          {
+            "file": "execution.proto",
+            "field": "AgentResume 1 mode, 2 approval_id, 3 step_id, 4 tool_name, 5 action_fingerprint, 6 brief, 7 claim_token, 8 segment_no; question_id, answer_json",
+            "proposed": "1-8; WS14 next free",
+            "final": "1-8; 9, 10",
+            "conflict": "none",
+            "notes": "WS03.S3 owns 1-8; WS14.S5 owns question_id/answer_json at 9, 10"
+          }
+        ],
+        "migrations": []
+      },
+      "WS03.S4": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "New RPCs SaveLoopCheckpoint / ClaimLoopCheckpoint / CloseLoopCheckpoint",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0048",
+            "name": "run_loop_checkpoints",
+            "notes": null
+          }
+        ]
+      },
+      "WS03.S5": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ReserveToolActionRequest args_digest, effect_class; FinalizeToolActionRequest.receipt_id",
+            "proposed": "7, 8; 4",
+            "final": "7, 8; 4",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0049",
+            "name": "tool_action_effect_ledger",
+            "notes": null
+          }
+        ]
+      },
+      "WS03.S8": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "OrchestrationEvent RunParked, RunResumed",
+            "proposed": "24, 25",
+            "final": "24, 25",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "runs.proto",
+            "field": "RunDetail resumable, park_reason",
+            "proposed": "17, 18",
+            "final": "17, 18",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS04.S4": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "SetRunModeRequest.approved_plan_id; new service ThreadAutonomy.GetThreadGrant; BindGrantToRun",
+            "proposed": "6",
+            "final": "6",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0050",
+            "name": "thread_autonomy_grant",
+            "notes": null
+          }
+        ]
+      },
+      "WS04.S6": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "AppendMessageRequest.client_message_id; AppendMessageResponse message_id, deduplicated",
+            "proposed": "18; 2, 3",
+            "final": "18; 2, 3",
+            "conflict": "none",
+            "notes": "WS17.S8 shares message_id 2"
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0052",
+            "name": "message_client_id",
+            "notes": null
+          }
+        ]
+      },
+      "WS05.S1": {
+        "proto": [
+          {
+            "file": "capabilities (capability-core proto)",
+            "field": "CapabilityDetail side_effect_class, approval_floor",
+            "proposed": null,
+            "final": "18, 19",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0016",
+            "name": "capability_tool_classes",
+            "notes": null
+          }
+        ]
+      },
+      "WS05.S2": {
+        "proto": [
+          {
+            "file": "gateway.proto",
+            "field": "ListMcpToolsRequest.unstaged; ListMcpToolsResponse.meta (McpToolMeta); ProxyMcpToolRequest.expected_digest",
+            "proposed": null,
+            "final": "4; 3; 7",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS05.S3": {
+        "proto": [
+          {
+            "file": "capabilities (capability-core proto)",
+            "field": "EvaluatePolicyRequest user_id, tool_name; EvaluatePolicyResponse side_effect_class, approval_floor, policy_source, tool_digest; new RPC ResolveToolBindings (+ToolBinding 1-8)",
+            "proposed": null,
+            "final": "6, 7; 7-10",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS05.S5": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0017",
+            "name": "tool_policies",
+            "notes": null
+          }
+        ]
+      },
+      "WS06.S2": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "audit-core",
+            "number": "007",
+            "name": "audit_chain",
+            "notes": "add each file to the //go:embed list and migrations slice in internal/store/migrate.go:12-28, 36-43"
+          }
+        ]
+      },
+      "WS06.S3": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "audit-core",
+            "number": "008",
+            "name": "audit_chain_checkpoints",
+            "notes": null
+          }
+        ]
+      },
+      "WS06.S4": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "audit-core",
+            "number": "009",
+            "name": "audit_chain_verification_state",
+            "notes": null
+          }
+        ]
+      },
+      "WS06.S7": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "org-core",
+            "number": "022",
+            "name": "siem_destinations",
+            "notes": null
+          }
+        ]
+      },
+      "WS06.S8": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "audit-core",
+            "number": "010",
+            "name": "audit_export_cursors",
+            "notes": null
+          }
+        ]
+      },
+      "WS07.S1": {
+        "proto": [
+          {
+            "file": "memory.proto",
+            "field": "SearchMemoryResponse.skip_reason; ListMemoryResponse.hidden_reason",
+            "proposed": null,
+            "final": "4; 4",
+            "conflict": null,
+            "notes": "plan row reads \"7; 4, 4; new\" across WS26 S4 / WS07 S1 / WS07 S2"
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0051",
+            "name": "user_memory_state",
+            "notes": null
+          }
+        ]
+      },
+      "WS07.S2": {
+        "proto": [
+          {
+            "file": "memory.proto",
+            "field": "Get/SetMemoryControls, ResetMemory",
+            "proposed": "new",
+            "final": "new",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS07.S4": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0057",
+            "name": "org_learning_policy_mirror",
+            "notes": "renamed: not the capability-core org_agent_policy of WS25.S7"
+          }
+        ]
+      },
+      "WS07.S5": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "user-core",
+            "number": "030",
+            "name": "retire_ai_memory_enabled",
+            "notes": "up-only"
+          }
+        ]
+      },
+      "WS07.S6": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": null,
+            "name": "thread_memory_mode",
+            "notes": "optional; takes the next free number if scheduled"
+          }
+        ]
+      },
+      "WS07.S7": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "UpsertAgentSkillRequest scope .. proposal_reason; Response skip_reason, revision; ListAgentSkillsRequest.for_user_id; AgentSkill 13-18",
+            "proposed": "10-15; 4, 5; 3; 13-18",
+            "final": "as proposed",
+            "conflict": "none",
+            "notes": "WS26 shares skip_reason = 4 by name"
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0058",
+            "name": "agent_skills_proposals",
+            "notes": null
+          }
+        ]
+      },
+      "WS07.S8": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "New RPCs DecideSkillProposal / UndoLearningEntry / ListLearningLedger",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0064",
+            "name": "skill_revisions",
+            "notes": "trigger; plan follows the WS07 design (session-core), not 2.6 row 2 (capability-core)"
+          }
+        ]
+      },
+      "WS08.S3": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "InferRequest.image_parts (InferImagePart)",
+            "proposed": "20",
+            "final": "20",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS08.S5": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "ExecuteStepRequest.attachments",
+            "proposed": "12",
+            "final": "12",
+            "conflict": "WS22 12",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS08.S6": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.attachments (RunAttachment)",
+            "proposed": "20, fallback RunContext.attachments = 5",
+            "final": "20",
+            "conflict": "none after reservation",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS09.S8": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ListConversationRequest.limit, before_message_id; ListConversationResponse.has_more",
+            "proposed": "6, 7; 2",
+            "final": "6, 7; 2",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS10.S2": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "org-core",
+            "number": "021",
+            "name": "org_model_entitlements",
+            "notes": null
+          }
+        ]
+      },
+      "WS10.S3": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "ListModelsResponse.access (ModelAccessMeta)",
+            "proposed": "2",
+            "final": "2",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "inference.proto",
+            "field": "New RPC GetModelAccess + ModelPolicyDoc, SurfaceDefault, GetModelAccessRequest/Response, ModelAccessEntry; enum ReasoningEffort",
+            "proposed": "new",
+            "final": "new messages, no field collision",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS11.S5": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "InferRequest.reasoning_effort",
+            "proposed": "17",
+            "final": "17",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "inference.proto",
+            "field": "ModelInfo.effort_levels",
+            "proposed": "8",
+            "final": "8",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "inference.proto",
+            "field": "New RPC GetModelAccess + ModelPolicyDoc, SurfaceDefault, GetModelAccessRequest/Response, ModelAccessEntry; enum ReasoningEffort",
+            "proposed": "new",
+            "final": "new messages, no field collision",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS11.S8": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.reasoning_effort",
+            "proposed": "19 or later",
+            "final": "21",
+            "conflict": "WS03 19",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS13": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "ApprovalKind next value",
+            "proposed": "6",
+            "final": "6",
+            "conflict": "WS14 and WS16 text say WS14 supplies kind 6; DEC-05 says questions are a table, not a kind",
+            "notes": "6 = the one coordinated Space/WS13 kind (DEC-08); WS14 takes none"
+          }
+        ],
+        "migrations": []
+      },
+      "WS13.S1": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "CreateApprovalRequest.continuation_mode; .cause",
+            "proposed": "12; 12 (13 after WS03)",
+            "final": "12; 13",
+            "conflict": "yes",
+            "notes": null
+          },
+          {
+            "file": "orchestration.proto",
+            "field": "Approval consumed_at, continuation_mode; cause; decision record",
+            "proposed": "14, 15; 14 (16 after WS03); 15",
+            "final": "14, 15; 16; 17",
+            "conflict": "yes",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS13.S3": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "Approval consumed_at, continuation_mode; cause; decision record",
+            "proposed": "14, 15; 14 (16 after WS03); 15",
+            "final": "14, 15; 16; 17",
+            "conflict": "yes",
+            "notes": null
+          },
+          {
+            "file": "orchestration.proto",
+            "field": "DecideApprovalRequest decision_source, scope; ApprovalStateChanged cause_code .. step_up_verified",
+            "proposed": "6, 7; 6-10",
+            "final": "6, 7; 6-10",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS13.S6": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "New RPCs UseApprovalScopeGrant, ListApprovalScopeGrants, RevokeApprovalScopeGrant",
+            "proposed": "new",
+            "final": "n/a",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0062",
+            "name": "approval_scope_grants",
+            "notes": "WS13.S7 rule link folds in if planned with S6, else next free"
+          }
+        ]
+      },
+      "WS14.S2": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "SetRunModeRequest.approved_plan_id; new service ThreadAutonomy.GetThreadGrant; BindGrantToRun",
+            "proposed": "6",
+            "final": "6",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS14.S3": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "OrchestrationEvent QuestionAsked, QuestionAnswered",
+            "proposed": "26, 27",
+            "final": "27, 28",
+            "conflict": "WS15, WS27 27",
+            "notes": null
+          },
+          {
+            "file": "orchestration.proto",
+            "field": "New RPCs CreateRunQuestion, ListRunQuestions, AnswerRunQuestion",
+            "proposed": "new",
+            "final": "n/a",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0054",
+            "name": "run_questions",
+            "notes": null
+          }
+        ]
+      },
+      "WS14.S4": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.max_questions",
+            "proposed": "next free",
+            "final": "22",
+            "conflict": "unspecified",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS14.S5": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "AgentResume 1 mode, 2 approval_id, 3 step_id, 4 tool_name, 5 action_fingerprint, 6 brief, 7 claim_token, 8 segment_no; question_id, answer_json",
+            "proposed": "1-8; WS14 next free",
+            "final": "1-8; 9, 10",
+            "conflict": "none",
+            "notes": "WS03.S3 owns 1-8; WS14.S5 owns question_id/answer_json at 9, 10"
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0063",
+            "name": "run_question_consume",
+            "notes": null
+          }
+        ]
+      },
+      "WS15.S3": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "OrchestrationEvent ToolRetryScheduled",
+            "proposed": "26",
+            "final": "26",
+            "conflict": "WS14 26",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS15.S9": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0026",
+            "name": "mcp_server_incidents",
+            "notes": "optional; WS23 recommended owner"
+          }
+        ]
+      },
+      "WS16.S1": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ThreadSummary attention_state, attention_since, attention_unseen",
+            "proposed": "15, 16, 17",
+            "final": "16, 17, 18",
+            "conflict": "WS17 15-17",
+            "notes": null
+          },
+          {
+            "file": "attention.proto",
+            "field": "AttentionService (new file; add to mp-contracts build.rs list :37-58)",
+            "proposed": "new",
+            "final": "new service",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0053",
+            "name": "attention_state",
+            "notes": "drops attention_seen_at (derive unseen from last_read_at) per the 4.3 RECONCILE"
+          }
+        ]
+      },
+      "WS16.S4": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "notification-core",
+            "number": "015",
+            "name": "register_attention_notifications",
+            "notes": null
+          }
+        ]
+      },
+      "WS16.S6": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "notification-core",
+            "number": "016",
+            "name": "web_push_subscriptions",
+            "notes": null
+          }
+        ]
+      },
+      "WS17.S1": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ListThreadsRequest cursor, thread_id, archived; ListThreadsResponse.next_cursor",
+            "proposed": "8, 9, 10; 2",
+            "final": "8, 9, 10; 2",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "sessions.proto",
+            "field": "ThreadSummary.archived_at",
+            "proposed": "15",
+            "final": "15",
+            "conflict": "WS16 15",
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0047",
+            "name": "thread_activity_cursor",
+            "notes": null
+          }
+        ]
+      },
+      "WS17.S2": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "UpdateThreadPresentationRequest starred, unread, archived",
+            "proposed": "7, 8, 9",
+            "final": "7, 8, 9",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS17.S3": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "New RPC SearchMessages",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0055",
+            "name": "message_search_index",
+            "notes": "first line \"-- no-transaction\", CREATE INDEX CONCURRENTLY"
+          }
+        ]
+      },
+      "WS17.S6": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ThreadSummary forked_from_thread_id; starred, unread, last_read_at",
+            "proposed": "16; 17, 18, 19",
+            "final": "19; 20, 21, 22",
+            "conflict": "WS16",
+            "notes": null
+          },
+          {
+            "file": "sessions.proto",
+            "field": "New RPC ForkThread",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0059",
+            "name": "thread_fork_lineage",
+            "notes": null
+          }
+        ]
+      },
+      "WS17.S7": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ListThreadsRequest.starred_only",
+            "proposed": "11",
+            "final": "11",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "sessions.proto",
+            "field": "UpdateThreadPresentationRequest starred, unread, archived",
+            "proposed": "7, 8, 9",
+            "final": "7, 8, 9",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "sessions.proto",
+            "field": "ThreadSummary forked_from_thread_id; starred, unread, last_read_at",
+            "proposed": "16; 17, 18, 19",
+            "final": "19; 20, 21, 22",
+            "conflict": "WS16",
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0060",
+            "name": "thread_star_unread",
+            "notes": null
+          }
+        ]
+      },
+      "WS17.S8": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "ListConversationRequest.include_inactive; SessionMessage parent_message_id, sibling_ordinal, sibling_count, on_active_path",
+            "proposed": "8; 7-10",
+            "final": "8; 7-10",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "sessions.proto",
+            "field": "New RPC SetActiveLeaf",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0061",
+            "name": "message_versions",
+            "notes": null
+          }
+        ]
+      },
+      "WS19.S6": {
+        "proto": [
+          {
+            "file": "capabilities (capability-core proto)",
+            "field": "New skill-bundle RPCs ListSkillBundles, GetSkillBundleManifest, GetSkillBlob",
+            "proposed": "new",
+            "final": "new messages",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0021",
+            "name": "skill_bundles",
+            "notes": null
+          }
+        ]
+      },
+      "WS19.S8": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "ExecuteStepRequest.skill_mounts",
+            "proposed": "13",
+            "final": "14",
+            "conflict": "WS22",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS20.S1": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "New RPC RecordScheduledRunResult",
+            "proposed": "new",
+            "final": "appended in train order",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0056",
+            "name": "cron_fire_run_link",
+            "notes": null
+          }
+        ]
+      },
+      "WS20.S4": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0065",
+            "name": "cron_schedule_contract",
+            "notes": null
+          }
+        ]
+      },
+      "WS20.S5": {
+        "proto": [
+          {
+            "file": "sessions.proto",
+            "field": "StartScheduledRunRequest contract_json, contract_digest, contract_expires_at",
+            "proposed": "14, 15, 16",
+            "final": "14-16",
+            "conflict": "none",
+            "notes": null
+          },
+          {
+            "file": "runs.proto",
+            "field": "ScheduledStepContext contract_json, contract_digest, contract_expires_at, origin; ResolveScheduledStepAuthorityResponse contract_digest, contract_expires_at",
+            "proposed": "6-9; 15, 16",
+            "final": "6-9; 15, 16",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS20.S6": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "ExecuteScheduledStepResponse rounds_executed .. output_tokens",
+            "proposed": "7-11",
+            "final": "7-11",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS20.S7": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "notification-core",
+            "number": "017",
+            "name": "register_scheduled_run_outcome",
+            "notes": null
+          }
+        ]
+      },
+      "WS21.S3": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "org-core",
+            "number": "023",
+            "name": "org_browser_sites",
+            "notes": null
+          }
+        ]
+      },
+      "WS21.S4": {
+        "proto": [
+          {
+            "file": "browser.proto",
+            "field": "AcquireGrantRequest space_id, read_only, ttl_seconds; AcquireGrantResponse read_only, denied_domains; ValidateGrantResponse read_only",
+            "proposed": null,
+            "final": "10-12; 10, 11; 10",
+            "conflict": "[RECONCILE] QRY session Grant v2 note owns these tags (DEC-20, 2.6 row 15); take its numbers if they differ",
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0025",
+            "name": "browser_tool_capabilities",
+            "notes": null
+          }
+        ]
+      },
+      "WS21.S8": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "user-core",
+            "number": "032",
+            "name": "space_browser_entitlement",
+            "notes": null
+          }
+        ]
+      },
+      "WS22.S1": {
+        "proto": [
+          {
+            "file": "sandboxes.proto",
+            "field": "AcquireLeaseRequest.zdr",
+            "proposed": null,
+            "final": "8",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "sandbox-manager",
+            "number": "0005",
+            "name": "thread_workspace",
+            "notes": "not in the release snapshot"
+          },
+          {
+            "service": "sandbox-manager",
+            "number": "0006",
+            "name": "thread_lease_unique",
+            "notes": null
+          }
+        ]
+      },
+      "WS22.S2": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "ExecuteStepRequest.thread_id",
+            "proposed": "12",
+            "final": "13",
+            "conflict": "WS08 12",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS22.S5": {
+        "proto": [
+          {
+            "file": "sandboxes.proto",
+            "field": "Get/Apply/DeleteThreadWorkspace",
+            "proposed": "new",
+            "final": "new",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS22.S6": {
+        "proto": [
+          {
+            "file": "sandboxes.proto",
+            "field": "SandboxFailureCause, GetLeaseStatus",
+            "proposed": "new",
+            "final": "new",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "sandbox-manager",
+            "number": "0007",
+            "name": "lease_lifecycle",
+            "notes": null
+          }
+        ]
+      },
+      "WS23.S4": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.connector_scope (ConnectorScope)",
+            "proposed": "22",
+            "final": "23",
+            "conflict": "WS25 22, WS14",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS24.S3": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0018",
+            "name": "workspace_read_capability",
+            "notes": null
+          }
+        ]
+      },
+      "WS24.S4": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0019",
+            "name": "workspace_write_capability",
+            "notes": null
+          }
+        ]
+      },
+      "WS24.S6": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0022",
+            "name": "agent_action_admissions",
+            "notes": null
+          }
+        ]
+      },
+      "WS24.S7": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "user-core",
+            "number": "031",
+            "name": "space_effect_policy_read_actions",
+            "notes": "optional"
+          }
+        ]
+      },
+      "WS25.S2": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentResponse.failure_code",
+            "proposed": "tag not stated",
+            "final": "10",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS25.S5": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0020",
+            "name": "result_query_capability",
+            "notes": null
+          }
+        ]
+      },
+      "WS25.S7": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0023",
+            "name": "org_agent_policy",
+            "notes": null
+          }
+        ]
+      },
+      "WS25.S8": {
+        "proto": [
+          {
+            "file": "gateway.proto",
+            "field": "Hook priority, revision, created_by",
+            "proposed": null,
+            "final": "8, 9, 10",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": [
+          {
+            "service": "capability-core",
+            "number": "0024",
+            "name": "org_hook_rules",
+            "notes": null
+          }
+        ]
+      },
+      "WS25.S9": {
+        "proto": [
+          {
+            "file": "execution.proto",
+            "field": "RunAgentRequest.org_policy (OrgPolicyContext)",
+            "proposed": "22",
+            "final": "24",
+            "conflict": "WS23 22",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS25.S12": {
+        "proto": [],
+        "migrations": [
+          {
+            "service": "session-core",
+            "number": "0066",
+            "name": "drop_hook_configs",
+            "notes": "only after one release with HOOKS_DURABLE=on"
+          }
+        ]
+      },
+      "WS26.S4": {
+        "proto": [
+          {
+            "file": "memory.proto",
+            "field": "IndexMemoryRequest.origin",
+            "proposed": null,
+            "final": "7",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS26.S6": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "LanguageAnalysisResult.injection_json",
+            "proposed": "14",
+            "final": "14",
+            "conflict": "none",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS26.S7": {
+        "proto": [
+          {
+            "file": "gateway.proto",
+            "field": "ScreenContent RPC + messages (file end)",
+            "proposed": "new",
+            "final": "new messages",
+            "conflict": null,
+            "notes": null
+          }
+        ],
+        "migrations": []
+      },
+      "WS27.S7": {
+        "proto": [
+          {
+            "file": "inference.proto",
+            "field": "InferResponse.route_note / InferChunk.route_note (RouteNote)",
+            "proposed": "15 / 16",
+            "final": "15 / 16",
+            "conflict": "WS15 deferred retry_notice on InferChunk 16",
+            "notes": "WS11 shares the message; WS15 live retry withdrawn (2.6 row 1); if revived it takes 17"
+          }
+        ],
+        "migrations": []
+      },
+      "WS27.S9": {
+        "proto": [
+          {
+            "file": "orchestration.proto",
+            "field": "OrchestrationEvent RunUsageProgress",
+            "proposed": "27",
+            "final": "29",
+            "conflict": "WS14",
+            "notes": null
+          }
+        ],
+        "migrations": []
+      }
+    },
+    "proto_entries": [
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.run_context (RunContext)",
+        "slices": [
+          "WS02.S4"
+        ],
+        "proposed": "18",
+        "final": "18",
+        "conflict": "WS03 also 18",
+        "notes": "WS18 consumes"
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.resume (AgentResume)",
+        "slices": [
+          "WS03.S3"
+        ],
+        "proposed": "18 (WS08 assumes 19)",
+        "final": "19",
+        "conflict": "WS02",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.attachments (RunAttachment)",
+        "slices": [
+          "WS08.S6"
+        ],
+        "proposed": "20, fallback RunContext.attachments = 5",
+        "final": "20",
+        "conflict": "none after reservation",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.reasoning_effort",
+        "slices": [
+          "WS11.S8"
+        ],
+        "proposed": "19 or later",
+        "final": "21",
+        "conflict": "WS03 19",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.max_questions",
+        "slices": [
+          "WS14.S4"
+        ],
+        "proposed": "next free",
+        "final": "22",
+        "conflict": "unspecified",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.connector_scope (ConnectorScope)",
+        "slices": [
+          "WS23.S4"
+        ],
+        "proposed": "22",
+        "final": "23",
+        "conflict": "WS25 22, WS14",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentRequest.org_policy (OrgPolicyContext)",
+        "slices": [
+          "WS25.S9"
+        ],
+        "proposed": "22",
+        "final": "24",
+        "conflict": "WS23 22",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunContext 1 authored_instructions, 2 history, 3 memory_block, 4 status",
+        "slices": [
+          "WS02.S4"
+        ],
+        "proposed": "1-4",
+        "final": "1-4",
+        "conflict": "none",
+        "notes": "5 reserved WS08 fallback; 6 reserved WS20 run notes"
+      },
+      {
+        "file": "execution.proto",
+        "field": "AgentResume 1 mode, 2 approval_id, 3 step_id, 4 tool_name, 5 action_fingerprint, 6 brief, 7 claim_token, 8 segment_no; question_id, answer_json",
+        "slices": [
+          "WS03.S3",
+          "WS14.S5"
+        ],
+        "proposed": "1-8; WS14 next free",
+        "final": "1-8; 9, 10",
+        "conflict": "none",
+        "notes": "WS03.S3 owns 1-8; WS14.S5 owns question_id/answer_json at 9, 10"
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentResponse.usage (RunUsage 1-7)",
+        "slices": [
+          "WS02.S3"
+        ],
+        "proposed": "9",
+        "final": "9",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "RunAgentResponse.failure_code",
+        "slices": [
+          "WS25.S2"
+        ],
+        "proposed": "tag not stated",
+        "final": "10",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "ExecuteStepRequest.attachments",
+        "slices": [
+          "WS08.S5"
+        ],
+        "proposed": "12",
+        "final": "12",
+        "conflict": "WS22 12",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "ExecuteStepRequest.thread_id",
+        "slices": [
+          "WS22.S2"
+        ],
+        "proposed": "12",
+        "final": "13",
+        "conflict": "WS08 12",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "ExecuteStepRequest.skill_mounts",
+        "slices": [
+          "WS19.S8"
+        ],
+        "proposed": "13",
+        "final": "14",
+        "conflict": "WS22",
+        "notes": null
+      },
+      {
+        "file": "execution.proto",
+        "field": "ExecuteScheduledStepResponse rounds_executed .. output_tokens",
+        "slices": [
+          "WS20.S6"
+        ],
+        "proposed": "7-11",
+        "final": "7-11",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "InferRequest.reasoning_effort",
+        "slices": [
+          "WS11.S5"
+        ],
+        "proposed": "17",
+        "final": "17",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "InferRequest.prompt_tiers (PromptTierPlan)",
+        "slices": [
+          "WS02.S9"
+        ],
+        "proposed": "18",
+        "final": "18",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "InferRequest.cache_scope_key",
+        "slices": [
+          "WS02.S10"
+        ],
+        "proposed": "19",
+        "final": "19",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "InferRequest.image_parts (InferImagePart)",
+        "slices": [
+          "WS08.S3"
+        ],
+        "proposed": "20",
+        "final": "20",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "ModelInfo.effort_levels",
+        "slices": [
+          "WS11.S5"
+        ],
+        "proposed": "8",
+        "final": "8",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "ListModelsResponse.access (ModelAccessMeta)",
+        "slices": [
+          "WS10.S3"
+        ],
+        "proposed": "2",
+        "final": "2",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "InferResponse.route_note / InferChunk.route_note (RouteNote)",
+        "slices": [
+          "WS27.S7"
+        ],
+        "proposed": "15 / 16",
+        "final": "15 / 16",
+        "conflict": "WS15 deferred retry_notice on InferChunk 16",
+        "notes": "WS11 shares the message; WS15 live retry withdrawn (2.6 row 1); if revived it takes 17"
+      },
+      {
+        "file": "inference.proto",
+        "field": "LanguageAnalysisResult.injection_json",
+        "slices": [
+          "WS26.S6"
+        ],
+        "proposed": "14",
+        "final": "14",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "inference.proto",
+        "field": "New RPC GetModelAccess + ModelPolicyDoc, SurfaceDefault, GetModelAccessRequest/Response, ModelAccessEntry; enum ReasoningEffort",
+        "slices": [
+          "WS10.S3",
+          "WS11.S5"
+        ],
+        "proposed": "new",
+        "final": "new messages, no field collision",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ListConversationRequest.limit, before_message_id; ListConversationResponse.has_more",
+        "slices": [
+          "WS09.S8"
+        ],
+        "proposed": "6, 7; 2",
+        "final": "6, 7; 2",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ListConversationRequest.include_inactive; SessionMessage parent_message_id, sibling_ordinal, sibling_count, on_active_path",
+        "slices": [
+          "WS17.S8"
+        ],
+        "proposed": "8; 7-10",
+        "final": "8; 7-10",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ListThreadsRequest cursor, thread_id, archived; ListThreadsResponse.next_cursor",
+        "slices": [
+          "WS17.S1"
+        ],
+        "proposed": "8, 9, 10; 2",
+        "final": "8, 9, 10; 2",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ListThreadsRequest.starred_only",
+        "slices": [
+          "WS17.S7"
+        ],
+        "proposed": "11",
+        "final": "11",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "UpdateThreadPresentationRequest starred, unread, archived",
+        "slices": [
+          "WS17.S7",
+          "WS17.S2"
+        ],
+        "proposed": "7, 8, 9",
+        "final": "7, 8, 9",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ThreadSummary.archived_at",
+        "slices": [
+          "WS17.S1"
+        ],
+        "proposed": "15",
+        "final": "15",
+        "conflict": "WS16 15",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ThreadSummary attention_state, attention_since, attention_unseen",
+        "slices": [
+          "WS16.S1"
+        ],
+        "proposed": "15, 16, 17",
+        "final": "16, 17, 18",
+        "conflict": "WS17 15-17",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ThreadSummary forked_from_thread_id; starred, unread, last_read_at",
+        "slices": [
+          "WS17.S6",
+          "WS17.S7"
+        ],
+        "proposed": "16; 17, 18, 19",
+        "final": "19; 20, 21, 22",
+        "conflict": "WS16",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "AppendMessageRequest.client_message_id; AppendMessageResponse message_id, deduplicated",
+        "slices": [
+          "WS04.S6"
+        ],
+        "proposed": "18; 2, 3",
+        "final": "18; 2, 3",
+        "conflict": "none",
+        "notes": "WS17.S8 shares message_id 2"
+      },
+      {
+        "file": "sessions.proto",
+        "field": "SetRunModeRequest.approved_plan_id; new service ThreadAutonomy.GetThreadGrant; BindGrantToRun",
+        "slices": [
+          "WS04.S4",
+          "WS14.S2"
+        ],
+        "proposed": "6",
+        "final": "6",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "ReserveToolActionRequest args_digest, effect_class; FinalizeToolActionRequest.receipt_id",
+        "slices": [
+          "WS03.S5"
+        ],
+        "proposed": "7, 8; 4",
+        "final": "7, 8; 4",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "UpsertAgentSkillRequest scope .. proposal_reason; Response skip_reason, revision; ListAgentSkillsRequest.for_user_id; AgentSkill 13-18",
+        "slices": [
+          "WS07.S7"
+        ],
+        "proposed": "10-15; 4, 5; 3; 13-18",
+        "final": "as proposed",
+        "conflict": "none",
+        "notes": "WS26 shares skip_reason = 4 by name"
+      },
+      {
+        "file": "sessions.proto",
+        "field": "StartScheduledRunRequest contract_json, contract_digest, contract_expires_at",
+        "slices": [
+          "WS20.S5"
+        ],
+        "proposed": "14, 15, 16",
+        "final": "14-16",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPC RecordRunContext",
+        "slices": [
+          "WS02.S4"
+        ],
+        "proposed": "new",
+        "final": "appended at end of SessionCore after CountWaivedRuns in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPCs SaveLoopCheckpoint / ClaimLoopCheckpoint / CloseLoopCheckpoint",
+        "slices": [
+          "WS03.S4"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPC RecordScheduledRunResult",
+        "slices": [
+          "WS20.S1"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPC SearchMessages",
+        "slices": [
+          "WS17.S3"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPC ForkThread",
+        "slices": [
+          "WS17.S6"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPC SetActiveLeaf",
+        "slices": [
+          "WS17.S8"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sessions.proto",
+        "field": "New RPCs DecideSkillProposal / UndoLearningEntry / ListLearningLedger",
+        "slices": [
+          "WS07.S8"
+        ],
+        "proposed": "new",
+        "final": "appended in train order",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "attention.proto",
+        "field": "AttentionService (new file; add to mp-contracts build.rs list :37-58)",
+        "slices": [
+          "WS16.S1"
+        ],
+        "proposed": "new",
+        "final": "new service",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "CreateApprovalRequest.continuation_mode; .cause",
+        "slices": [
+          "WS03.S2",
+          "WS13.S1"
+        ],
+        "proposed": "12; 12 (13 after WS03)",
+        "final": "12; 13",
+        "conflict": "yes",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "Approval consumed_at, continuation_mode; cause; decision record",
+        "slices": [
+          "WS03.S2",
+          "WS13.S1",
+          "WS13.S3"
+        ],
+        "proposed": "14, 15; 14 (16 after WS03); 15",
+        "final": "14, 15; 16; 17",
+        "conflict": "yes",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "DecideApprovalRequest decision_source, scope; ApprovalStateChanged cause_code .. step_up_verified",
+        "slices": [
+          "WS13.S3"
+        ],
+        "proposed": "6, 7; 6-10",
+        "final": "6, 7; 6-10",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "ApprovalKind next value",
+        "slices": [
+          "WS13"
+        ],
+        "proposed": "6",
+        "final": "6",
+        "conflict": "WS14 and WS16 text say WS14 supplies kind 6; DEC-05 says questions are a table, not a kind",
+        "notes": "6 = the one coordinated Space/WS13 kind (DEC-08); WS14 takes none"
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "OrchestrationEvent RunParked, RunResumed",
+        "slices": [
+          "WS03.S8"
+        ],
+        "proposed": "24, 25",
+        "final": "24, 25",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "OrchestrationEvent ToolRetryScheduled",
+        "slices": [
+          "WS15.S3"
+        ],
+        "proposed": "26",
+        "final": "26",
+        "conflict": "WS14 26",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "OrchestrationEvent QuestionAsked, QuestionAnswered",
+        "slices": [
+          "WS14.S3"
+        ],
+        "proposed": "26, 27",
+        "final": "27, 28",
+        "conflict": "WS15, WS27 27",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "OrchestrationEvent RunUsageProgress",
+        "slices": [
+          "WS27.S9"
+        ],
+        "proposed": "27",
+        "final": "29",
+        "conflict": "WS14",
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "New RPC ConsumeApproval",
+        "slices": [
+          "WS03.S2"
+        ],
+        "proposed": "new",
+        "final": "n/a",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "New RPCs CreateRunQuestion, ListRunQuestions, AnswerRunQuestion",
+        "slices": [
+          "WS14.S3"
+        ],
+        "proposed": "new",
+        "final": "n/a",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "orchestration.proto",
+        "field": "New RPCs UseApprovalScopeGrant, ListApprovalScopeGrants, RevokeApprovalScopeGrant",
+        "slices": [
+          "WS13.S6"
+        ],
+        "proposed": "new",
+        "final": "n/a",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "runs.proto",
+        "field": "RunDetail resumable, park_reason",
+        "slices": [
+          "WS03.S8"
+        ],
+        "proposed": "17, 18",
+        "final": "17, 18",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "runs.proto",
+        "field": "ScheduledStepContext contract_json, contract_digest, contract_expires_at, origin; ResolveScheduledStepAuthorityResponse contract_digest, contract_expires_at",
+        "slices": [
+          "WS20.S5"
+        ],
+        "proposed": "6-9; 15, 16",
+        "final": "6-9; 15, 16",
+        "conflict": "none",
+        "notes": null
+      },
+      {
+        "file": "capabilities (capability-core proto)",
+        "field": "CapabilityDetail side_effect_class, approval_floor",
+        "slices": [
+          "WS05.S1"
+        ],
+        "proposed": null,
+        "final": "18, 19",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "capabilities (capability-core proto)",
+        "field": "EvaluatePolicyRequest user_id, tool_name; EvaluatePolicyResponse side_effect_class, approval_floor, policy_source, tool_digest; new RPC ResolveToolBindings (+ToolBinding 1-8)",
+        "slices": [
+          "WS05.S3"
+        ],
+        "proposed": null,
+        "final": "6, 7; 7-10",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "capabilities (capability-core proto)",
+        "field": "New skill-bundle RPCs ListSkillBundles, GetSkillBundleManifest, GetSkillBlob",
+        "slices": [
+          "WS19.S6"
+        ],
+        "proposed": "new",
+        "final": "new messages",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "gateway.proto",
+        "field": "ListMcpToolsRequest.unstaged; ListMcpToolsResponse.meta (McpToolMeta); ProxyMcpToolRequest.expected_digest",
+        "slices": [
+          "WS05.S2"
+        ],
+        "proposed": null,
+        "final": "4; 3; 7",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "gateway.proto",
+        "field": "Hook priority, revision, created_by",
+        "slices": [
+          "WS25.S8"
+        ],
+        "proposed": null,
+        "final": "8, 9, 10",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "gateway.proto",
+        "field": "ScreenContent RPC + messages (file end)",
+        "slices": [
+          "WS26.S7"
+        ],
+        "proposed": "new",
+        "final": "new messages",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "memory.proto",
+        "field": "IndexMemoryRequest.origin",
+        "slices": [
+          "WS26.S4"
+        ],
+        "proposed": null,
+        "final": "7",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "memory.proto",
+        "field": "SearchMemoryResponse.skip_reason; ListMemoryResponse.hidden_reason",
+        "slices": [
+          "WS07.S1"
+        ],
+        "proposed": null,
+        "final": "4; 4",
+        "conflict": null,
+        "notes": "plan row reads \"7; 4, 4; new\" across WS26 S4 / WS07 S1 / WS07 S2"
+      },
+      {
+        "file": "memory.proto",
+        "field": "Get/SetMemoryControls, ResetMemory",
+        "slices": [
+          "WS07.S2"
+        ],
+        "proposed": "new",
+        "final": "new",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sandboxes.proto",
+        "field": "AcquireLeaseRequest.zdr",
+        "slices": [
+          "WS22.S1"
+        ],
+        "proposed": null,
+        "final": "8",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sandboxes.proto",
+        "field": "Get/Apply/DeleteThreadWorkspace",
+        "slices": [
+          "WS22.S5"
+        ],
+        "proposed": "new",
+        "final": "new",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "sandboxes.proto",
+        "field": "SandboxFailureCause, GetLeaseStatus",
+        "slices": [
+          "WS22.S6"
+        ],
+        "proposed": "new",
+        "final": "new",
+        "conflict": null,
+        "notes": null
+      },
+      {
+        "file": "browser.proto",
+        "field": "AcquireGrantRequest space_id, read_only, ttl_seconds; AcquireGrantResponse read_only, denied_domains; ValidateGrantResponse read_only",
+        "slices": [
+          "WS21.S4"
+        ],
+        "proposed": null,
+        "final": "10-12; 10, 11; 10",
+        "conflict": "[RECONCILE] QRY session Grant v2 note owns these tags (DEC-20, 2.6 row 15); take its numbers if they differ",
+        "notes": null
+      }
+    ],
+    "migrations": [
+      {
+        "service": "session-core",
+        "number": "0046",
+        "slice": "WS03.S2",
+        "name": "approval_consume_and_mode",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0047",
+        "slice": "WS17.S1",
+        "name": "thread_activity_cursor",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0048",
+        "slice": "WS03.S4",
+        "name": "run_loop_checkpoints",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0049",
+        "slice": "WS03.S5",
+        "name": "tool_action_effect_ledger",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0050",
+        "slice": "WS04.S4",
+        "name": "thread_autonomy_grant",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0051",
+        "slice": "WS07.S1",
+        "name": "user_memory_state",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0052",
+        "slice": "WS04.S6",
+        "name": "message_client_id",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0053",
+        "slice": "WS16.S1",
+        "name": "attention_state",
+        "notes": "drops attention_seen_at (derive unseen from last_read_at) per the 4.3 RECONCILE"
+      },
+      {
+        "service": "session-core",
+        "number": "0054",
+        "slice": "WS14.S3",
+        "name": "run_questions",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0055",
+        "slice": "WS17.S3",
+        "name": "message_search_index",
+        "notes": "first line \"-- no-transaction\", CREATE INDEX CONCURRENTLY"
+      },
+      {
+        "service": "session-core",
+        "number": "0056",
+        "slice": "WS20.S1",
+        "name": "cron_fire_run_link",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0057",
+        "slice": "WS07.S4",
+        "name": "org_learning_policy_mirror",
+        "notes": "renamed: not the capability-core org_agent_policy of WS25.S7"
+      },
+      {
+        "service": "session-core",
+        "number": "0058",
+        "slice": "WS07.S7",
+        "name": "agent_skills_proposals",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0059",
+        "slice": "WS17.S6",
+        "name": "thread_fork_lineage",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0060",
+        "slice": "WS17.S7",
+        "name": "thread_star_unread",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0061",
+        "slice": "WS17.S8",
+        "name": "message_versions",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0062",
+        "slice": "WS13.S6",
+        "name": "approval_scope_grants",
+        "notes": "WS13.S7 rule link folds in if planned with S6, else next free"
+      },
+      {
+        "service": "session-core",
+        "number": "0063",
+        "slice": "WS14.S5",
+        "name": "run_question_consume",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0064",
+        "slice": "WS07.S8",
+        "name": "skill_revisions",
+        "notes": "trigger; plan follows the WS07 design (session-core), not 2.6 row 2 (capability-core)"
+      },
+      {
+        "service": "session-core",
+        "number": "0065",
+        "slice": "WS20.S4",
+        "name": "cron_schedule_contract",
+        "notes": null
+      },
+      {
+        "service": "session-core",
+        "number": "0066",
+        "slice": "WS25.S12",
+        "name": "drop_hook_configs",
+        "notes": "only after one release with HOOKS_DURABLE=on"
+      },
+      {
+        "service": "session-core",
+        "number": null,
+        "slice": "WS07.S6",
+        "name": "thread_memory_mode",
+        "notes": "optional; takes the next free number if scheduled"
+      },
+      {
+        "service": "capability-core",
+        "number": "0016",
+        "slice": "WS05.S1",
+        "name": "capability_tool_classes",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0017",
+        "slice": "WS05.S5",
+        "name": "tool_policies",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0018",
+        "slice": "WS24.S3",
+        "name": "workspace_read_capability",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0019",
+        "slice": "WS24.S4",
+        "name": "workspace_write_capability",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0020",
+        "slice": "WS25.S5",
+        "name": "result_query_capability",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0021",
+        "slice": "WS19.S6",
+        "name": "skill_bundles",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0022",
+        "slice": "WS24.S6",
+        "name": "agent_action_admissions",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0023",
+        "slice": "WS25.S7",
+        "name": "org_agent_policy",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0024",
+        "slice": "WS25.S8",
+        "name": "org_hook_rules",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0025",
+        "slice": "WS21.S4",
+        "name": "browser_tool_capabilities",
+        "notes": null
+      },
+      {
+        "service": "capability-core",
+        "number": "0026",
+        "slice": "WS15.S9",
+        "name": "mcp_server_incidents",
+        "notes": "optional; WS23 recommended owner"
+      },
+      {
+        "service": "org-core",
+        "number": "021",
+        "slice": "WS10.S2",
+        "name": "org_model_entitlements",
+        "notes": null
+      },
+      {
+        "service": "org-core",
+        "number": "022",
+        "slice": "WS06.S7",
+        "name": "siem_destinations",
+        "notes": null
+      },
+      {
+        "service": "org-core",
+        "number": "023",
+        "slice": "WS21.S3",
+        "name": "org_browser_sites",
+        "notes": null
+      },
+      {
+        "service": "audit-core",
+        "number": "007",
+        "slice": "WS06.S2",
+        "name": "audit_chain",
+        "notes": "add each file to the //go:embed list and migrations slice in internal/store/migrate.go:12-28, 36-43"
+      },
+      {
+        "service": "audit-core",
+        "number": "008",
+        "slice": "WS06.S3",
+        "name": "audit_chain_checkpoints",
+        "notes": null
+      },
+      {
+        "service": "audit-core",
+        "number": "009",
+        "slice": "WS06.S4",
+        "name": "audit_chain_verification_state",
+        "notes": null
+      },
+      {
+        "service": "audit-core",
+        "number": "010",
+        "slice": "WS06.S8",
+        "name": "audit_export_cursors",
+        "notes": null
+      },
+      {
+        "service": "user-core",
+        "number": "030",
+        "slice": "WS07.S5",
+        "name": "retire_ai_memory_enabled",
+        "notes": "up-only"
+      },
+      {
+        "service": "user-core",
+        "number": "031",
+        "slice": "WS24.S7",
+        "name": "space_effect_policy_read_actions",
+        "notes": "optional"
+      },
+      {
+        "service": "user-core",
+        "number": "032",
+        "slice": "WS21.S8",
+        "name": "space_browser_entitlement",
+        "notes": null
+      },
+      {
+        "service": "notification-core",
+        "number": "015",
+        "slice": "WS16.S4",
+        "name": "register_attention_notifications",
+        "notes": null
+      },
+      {
+        "service": "notification-core",
+        "number": "016",
+        "slice": "WS16.S6",
+        "name": "web_push_subscriptions",
+        "notes": null
+      },
+      {
+        "service": "notification-core",
+        "number": "017",
+        "slice": "WS20.S7",
+        "name": "register_scheduled_run_outcome",
+        "notes": null
+      },
+      {
+        "service": "cost-core",
+        "number": "0011",
+        "slice": "WS02.S2",
+        "name": "cache_miss_reason",
+        "notes": null
+      },
+      {
+        "service": "sandbox-manager",
+        "number": "0005",
+        "slice": "WS22.S1",
+        "name": "thread_workspace",
+        "notes": "not in the release snapshot"
+      },
+      {
+        "service": "sandbox-manager",
+        "number": "0006",
+        "slice": "WS22.S1",
+        "name": "thread_lease_unique",
+        "notes": null
+      },
+      {
+        "service": "sandbox-manager",
+        "number": "0007",
+        "slice": "WS22.S6",
+        "name": "lease_lifecycle",
+        "notes": null
+      }
+    ],
+    "migration_next_free_per_service": {
+      "session-core": "0044 at HEAD / 0046 live (never take 0044/0045)",
+      "capability-core": "0016",
+      "org-core": "021",
+      "audit-core": "007",
+      "user-core": "030",
+      "notification-core": "015",
+      "cost-core": "0011",
+      "sandbox-manager": "0005"
+    },
+    "migration_rules": [
+      "Provisional numbers; integrator may renumber before a PR enters its train and freezes the number then.",
+      "Never take session-core 0044/0045. Every session-core migration ships revert/NNNN_*.down.sql and is additive.",
+      "Most Go services (not audit-core) re-run every *.up.sql at every boot with no ledger: write idempotent SQL. No third duplicate prefix."
+    ],
+    "no_migration": [
+      "WS08",
+      "WS09",
+      "WS11",
+      "WS12",
+      "WS18",
+      "WS26",
+      "WS27",
+      "WS15 S1-S8",
+      "WS23 S3",
+      "WS13 cause (JSONB in approvals.metadata)",
+      "orchestrator-core",
+      "auth-core (WS01.S3)",
+      "Convex (WS10.S0 only comments schema.ts:21-22)"
+    ],
+    "proto_rules": "Add-only; never renumber a wire field; record the 4.3 table as one append-only entry in MP/docs/decisions/ledger.md at T0 with the owner tag in a doc comment at each claimed field. buf breaking is not a real gate until WS12.S2.",
+    "sse_chat_event_variants": [
+      {
+        "ws_slice": "WS15.S1",
+        "variants": [
+          "retry_scheduled",
+          "compaction",
+          "context_change"
+        ],
+        "note": "run_parked at WS15.S7"
+      },
+      {
+        "ws_slice": "WS14.S4",
+        "variants": [
+          "user_question"
+        ]
+      },
+      {
+        "ws_slice": "WS27.S3",
+        "variants": [
+          "usage_progress"
+        ]
+      },
+      {
+        "ws_slice": "WS02.S1",
+        "variants": [
+          "additive keys on usage"
+        ]
+      },
+      {
+        "ws_slice": "WS04",
+        "variants": [
+          "queued_input.ids"
+        ]
+      },
+      {
+        "arrival_order": "WS02, WS04, WS13/WS14, WS15, WS27"
+      }
+    ],
+    "reconcile": "WS16 attention_unseen (derived from last_read_at) and WS17 unread (last_read_at) both kept; WS16 drops attention_seen_at from migration 0053 (DEC-11: unread = last_assistant_at > last_read_at)."
+  },
+  "free_to_start": {
+    "ids": [
+      "WS01.S0",
+      "WS01.S1",
+      "WS01.S2",
+      "WS01.S3",
+      "WS01.S6",
+      "WS01.S7",
+      "WS01.S8",
+      "WS02.S1",
+      "WS02.S2",
+      "WS02.S3",
+      "WS02.S4",
+      "WS02.S5",
+      "WS02.S9",
+      "WS02.S11",
+      "WS03.S1",
+      "WS03.S4",
+      "WS03.S5",
+      "WS04.S1",
+      "WS04.S2",
+      "WS04.S3",
+      "WS04.S4",
+      "WS04.S5",
+      "WS04.S7",
+      "WS04.S9",
+      "WS05.S1",
+      "WS05.S2",
+      "WS05.S3",
+      "WS05.S4",
+      "WS06.S1",
+      "WS06.S2",
+      "WS07.S1",
+      "WS07.S2",
+      "WS07.S6",
+      "WS07.S7",
+      "WS07.S8",
+      "WS08.S1",
+      "WS08.S2",
+      "WS08.S3",
+      "WS09.S1",
+      "WS09.S2",
+      "WS09.S3",
+      "WS09.S5",
+      "WS10.S0",
+      "WS10.S1",
+      "WS10.S2",
+      "WS11.S1",
+      "WS11.S2",
+      "WS11.S3",
+      "WS11.S4",
+      "WS11.S5",
+      "WS11.S6",
+      "WS11.S9",
+      "WS12.S3",
+      "WS12.S5",
+      "WS12.S6",
+      "WS12.S7",
+      "WS12.S8",
+      "WS12.S9",
+      "WS12.S10",
+      "WS13.S0",
+      "WS13.S1",
+      "WS13.S2",
+      "WS13.S3",
+      "WS13.S4",
+      "WS13.S8",
+      "WS14.S1",
+      "WS14.S2",
+      "WS14.S3",
+      "WS15.S1",
+      "WS15.S2",
+      "WS15.S3",
+      "WS15.S4",
+      "WS15.S5",
+      "WS15.S6",
+      "WS16.S1",
+      "WS16.S2",
+      "WS16.S3",
+      "WS16.S5",
+      "WS17.S1",
+      "WS17.S2",
+      "WS17.S3",
+      "WS17.S6",
+      "WS17.S7",
+      "WS18.S1",
+      "WS18.S2",
+      "WS18.S3",
+      "WS18.S5",
+      "WS19.S0",
+      "WS19.S1",
+      "WS19.S2",
+      "WS19.S3",
+      "WS19.S7",
+      "WS19.S9",
+      "WS20.S0",
+      "WS20.S1",
+      "WS20.S2",
+      "WS20.S3",
+      "WS21.S0",
+      "WS21.S1",
+      "WS21.S2",
+      "WS21.S3",
+      "WS22.S0",
+      "WS22.S1",
+      "WS22.S2",
+      "WS22.S3",
+      "WS22.S4",
+      "WS22.S5",
+      "WS22.S6",
+      "WS23.S0",
+      "WS23.S1",
+      "WS23.S2",
+      "WS23.S3",
+      "WS23.S6",
+      "WS24.S2",
+      "WS24.S3",
+      "WS24.S4",
+      "WS24.S5",
+      "WS24.S8",
+      "WS25.S0",
+      "WS25.S1",
+      "WS25.S2",
+      "WS25.S3",
+      "WS25.S4",
+      "WS25.S5",
+      "WS25.S6",
+      "WS26.S1",
+      "WS26.S3",
+      "WS26.S9",
+      "WS27.S0",
+      "WS27.S1",
+      "WS27.S2",
+      "WS27.S3",
+      "WS27.S4",
+      "WS27.S6"
+    ],
+    "detail": {
+      "WS01.S0": {
+        "qualifier": null,
+        "train": "T0"
+      },
+      "WS01.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS01.S2": {
+        "qualifier": null,
+        "train": "unscheduled"
+      },
+      "WS01.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS01.S6": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS01.S7": {
+        "qualifier": null,
+        "train": "T8"
+      },
+      "WS01.S8": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS02.S1": {
+        "qualifier": "build only (S3 enablement waits on DEC-18)",
+        "train": "T1"
+      },
+      "WS02.S2": {
+        "qualifier": "build only (S3 enablement waits on DEC-18)",
+        "train": "T4"
+      },
+      "WS02.S3": {
+        "qualifier": "build only (S3 enablement waits on DEC-18)",
+        "train": "T2"
+      },
+      "WS02.S4": {
+        "qualifier": "build only (S3 enablement waits on DEC-18)",
+        "train": "T2"
+      },
+      "WS02.S5": {
+        "qualifier": "build only (S3 enablement waits on DEC-18)",
+        "train": "T2"
+      },
+      "WS02.S9": {
+        "qualifier": null,
+        "train": "unscheduled"
+      },
+      "WS02.S11": {
+        "qualifier": null,
+        "train": "unscheduled"
+      },
+      "WS03.S1": {
+        "qualifier": "draft only",
+        "train": "T2"
+      },
+      "WS03.S4": {
+        "qualifier": "dark behind flags",
+        "train": "T3"
+      },
+      "WS03.S5": {
+        "qualifier": "dark behind flags",
+        "train": "T3"
+      },
+      "WS04.S1": {
+        "qualifier": "needs ops ACL sign-off",
+        "train": "T1"
+      },
+      "WS04.S2": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS04.S3": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS04.S4": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS04.S5": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS04.S7": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS04.S9": {
+        "qualifier": null,
+        "train": "T8"
+      },
+      "WS05.S1": {
+        "qualifier": null,
+        "train": "T2"
+      },
+      "WS05.S2": {
+        "qualifier": "read-class MCP only",
+        "train": "T3"
+      },
+      "WS05.S3": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS05.S4": {
+        "qualifier": "read-class MCP only",
+        "train": "T3"
+      },
+      "WS06.S1": {
+        "qualifier": null,
+        "train": "not-named-in-4.6"
+      },
+      "WS06.S2": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS07.S1": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS07.S2": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS07.S6": {
+        "qualifier": null,
+        "train": "unscheduled"
+      },
+      "WS07.S7": {
+        "qualifier": "non-policy parts only",
+        "train": "T4"
+      },
+      "WS07.S8": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS08.S1": {
+        "qualifier": null,
+        "train": "not-named-in-4.6"
+      },
+      "WS08.S2": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS08.S3": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS09.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS09.S2": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS09.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS09.S5": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS10.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS10.S1": {
+        "qualifier": "once S0 records D1/D9/D13",
+        "train": "T1"
+      },
+      "WS10.S2": {
+        "qualifier": "once S0 records D1/D9/D13",
+        "train": "T4"
+      },
+      "WS11.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS11.S2": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS11.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS11.S4": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS11.S5": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS11.S6": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS11.S9": {
+        "qualifier": "design only",
+        "train": "unscheduled"
+      },
+      "WS12.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS12.S5": {
+        "qualifier": "code can be written; enforcement waits on DEC-39",
+        "train": "unscheduled"
+      },
+      "WS12.S6": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS12.S7": {
+        "qualifier": "code can be written; enforcement waits on DEC-39",
+        "train": "unscheduled"
+      },
+      "WS12.S8": {
+        "qualifier": "code can be written; enforcement waits on DEC-39",
+        "train": "unscheduled"
+      },
+      "WS12.S9": {
+        "qualifier": "code can be written; enforcement waits on DEC-39",
+        "train": "unscheduled"
+      },
+      "WS12.S10": {
+        "qualifier": "code can be written; enforcement waits on DEC-39",
+        "train": "unscheduled"
+      },
+      "WS13.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS13.S1": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS13.S2": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS13.S3": {
+        "qualifier": "labelling + audit only",
+        "train": "T4"
+      },
+      "WS13.S4": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS13.S8": {
+        "qualifier": "scaffolding only",
+        "train": "T8"
+      },
+      "WS14.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS14.S2": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS14.S3": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS15.S1": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS15.S2": {
+        "qualifier": "non-Do",
+        "train": "T4"
+      },
+      "WS15.S3": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS15.S4": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS15.S5": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS15.S6": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS16.S1": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS16.S2": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS16.S3": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS16.S5": {
+        "qualifier": null,
+        "train": "T7"
+      },
+      "WS17.S1": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS17.S2": {
+        "qualifier": null,
+        "train": "T3"
+      },
+      "WS17.S3": {
+        "qualifier": "UI-only first",
+        "train": "T4"
+      },
+      "WS17.S6": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS17.S7": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS18.S1": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS18.S2": {
+        "qualifier": "build only",
+        "train": "T5"
+      },
+      "WS18.S3": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS18.S5": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS19.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS19.S1": {
+        "qualifier": null,
+        "train": "unscheduled"
+      },
+      "WS19.S2": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS19.S3": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS19.S7": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS19.S9": {
+        "qualifier": "text only",
+        "train": "T6"
+      },
+      "WS20.S0": {
+        "qualifier": "writes the ADR",
+        "train": "T1"
+      },
+      "WS20.S1": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS20.S2": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS20.S3": {
+        "qualifier": null,
+        "train": "T4"
+      },
+      "WS21.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS21.S1": {
+        "qualifier": null,
+        "train": "not-named-in-4.6"
+      },
+      "WS21.S2": {
+        "qualifier": null,
+        "train": "T7"
+      },
+      "WS21.S3": {
+        "qualifier": "low risk",
+        "train": "T7"
+      },
+      "WS22.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS22.S1": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS22.S2": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS22.S3": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS22.S4": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS22.S5": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS22.S6": {
+        "qualifier": null,
+        "train": "T7"
+      },
+      "WS23.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS23.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS23.S2": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS23.S3": {
+        "qualifier": "build only",
+        "train": "T5"
+      },
+      "WS23.S6": {
+        "qualifier": "chips only",
+        "train": "T5"
+      },
+      "WS24.S2": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS24.S3": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS24.S4": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS24.S5": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS24.S8": {
+        "qualifier": "only part (a)",
+        "train": "T6"
+      },
+      "WS25.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS25.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS25.S2": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS25.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS25.S4": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS25.S5": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS25.S6": {
+        "qualifier": null,
+        "train": "T6"
+      },
+      "WS26.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS26.S3": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS26.S9": {
+        "qualifier": null,
+        "train": "not-named-in-4.6"
+      },
+      "WS27.S0": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS27.S1": {
+        "qualifier": null,
+        "train": "T1"
+      },
+      "WS27.S2": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS27.S3": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS27.S4": {
+        "qualifier": null,
+        "train": "T5"
+      },
+      "WS27.S6": {
+        "qualifier": "warn-only",
+        "train": "T5"
+      }
+    },
+    "fully_free": [
+      "WS01.S0",
+      "WS01.S1",
+      "WS01.S2",
+      "WS01.S3",
+      "WS01.S6",
+      "WS01.S7",
+      "WS01.S8",
+      "WS02.S9",
+      "WS02.S11",
+      "WS04.S2",
+      "WS04.S3",
+      "WS04.S4",
+      "WS04.S5",
+      "WS04.S7",
+      "WS04.S9",
+      "WS05.S1",
+      "WS05.S3",
+      "WS06.S1",
+      "WS06.S2",
+      "WS07.S1",
+      "WS07.S2",
+      "WS07.S6",
+      "WS07.S8",
+      "WS08.S1",
+      "WS08.S2",
+      "WS08.S3",
+      "WS09.S1",
+      "WS09.S2",
+      "WS09.S3",
+      "WS09.S5",
+      "WS10.S0",
+      "WS11.S1",
+      "WS11.S2",
+      "WS11.S3",
+      "WS11.S4",
+      "WS11.S5",
+      "WS11.S6",
+      "WS12.S3",
+      "WS12.S6",
+      "WS13.S0",
+      "WS13.S1",
+      "WS13.S2",
+      "WS13.S4",
+      "WS14.S1",
+      "WS14.S2",
+      "WS14.S3",
+      "WS15.S1",
+      "WS15.S3",
+      "WS15.S4",
+      "WS15.S5",
+      "WS15.S6",
+      "WS16.S1",
+      "WS16.S2",
+      "WS16.S3",
+      "WS16.S5",
+      "WS17.S1",
+      "WS17.S2",
+      "WS17.S6",
+      "WS17.S7",
+      "WS18.S1",
+      "WS18.S3",
+      "WS18.S5",
+      "WS19.S0",
+      "WS19.S1",
+      "WS19.S2",
+      "WS19.S3",
+      "WS19.S7",
+      "WS20.S1",
+      "WS20.S2",
+      "WS20.S3",
+      "WS21.S0",
+      "WS21.S1",
+      "WS21.S2",
+      "WS22.S0",
+      "WS22.S1",
+      "WS22.S2",
+      "WS22.S3",
+      "WS22.S4",
+      "WS22.S5",
+      "WS22.S6",
+      "WS23.S0",
+      "WS23.S1",
+      "WS23.S2",
+      "WS24.S2",
+      "WS24.S3",
+      "WS24.S4",
+      "WS24.S5",
+      "WS25.S0",
+      "WS25.S1",
+      "WS25.S2",
+      "WS25.S3",
+      "WS25.S4",
+      "WS25.S5",
+      "WS25.S6",
+      "WS26.S1",
+      "WS26.S3",
+      "WS26.S9",
+      "WS27.S0",
+      "WS27.S1",
+      "WS27.S2",
+      "WS27.S3",
+      "WS27.S4"
+    ],
+    "qualified": [
+      "WS02.S1",
+      "WS02.S2",
+      "WS02.S3",
+      "WS02.S4",
+      "WS02.S5",
+      "WS03.S1",
+      "WS03.S4",
+      "WS03.S5",
+      "WS04.S1",
+      "WS05.S2",
+      "WS05.S4",
+      "WS07.S7",
+      "WS10.S1",
+      "WS10.S2",
+      "WS11.S9",
+      "WS12.S5",
+      "WS12.S7",
+      "WS12.S8",
+      "WS12.S9",
+      "WS12.S10",
+      "WS13.S3",
+      "WS13.S8",
+      "WS15.S2",
+      "WS17.S3",
+      "WS18.S2",
+      "WS19.S9",
+      "WS20.S0",
+      "WS21.S3",
+      "WS23.S3",
+      "WS23.S6",
+      "WS24.S8",
+      "WS27.S6"
+    ],
+    "free_but_unscheduled_in_4_6": [
+      "WS01.S2",
+      "WS02.S9",
+      "WS02.S11",
+      "WS07.S6",
+      "WS11.S9",
+      "WS12.S5",
+      "WS12.S7",
+      "WS12.S8",
+      "WS12.S9",
+      "WS12.S10",
+      "WS19.S1"
+    ],
+    "free_but_not_named_in_4_6": [
+      "WS06.S1",
+      "WS08.S1",
+      "WS21.S1",
+      "WS26.S9"
+    ],
+    "global_constraints": [
+      "\"free\" = no DEC in 2.1 blocks starting or merging it; a flag flip or enablement may still wait.",
+      "Ordering constraints of 2.6 row 20 still apply.",
+      "Every slice that edits a proto or adds a migration also waits for DEC-39 numbers.",
+      "Gated: WS20 S4-S8 (DEC-16), WS21 S4-S5 (DEC-19/20), WS22 S7/S8 (DEC-22), WS06 S3-S8 (DEC-35), WS10 S3-S7 (DEC-13), WS25 S7-S12 (DEC-14), WS01 S4/S5/S9-S14 (DEC-33/34)."
+    ]
+  }
+}

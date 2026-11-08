@@ -1,0 +1,43 @@
+[
+ {
+  "key": "orgcore-least-privilege-021-023",
+  "rows": [],
+  "title": "orgcore-least-privilege-021-023",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/org-core/migrations/024_org_core_app_least_privilege.up.sql",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/org-core/migrations/024_org_core_app_least_privilege.down.sql",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/org-core/internal/org/table_privileges_postgres_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go build ./... (apps/Control Plane/org-core)",
+    "outcome": "exit 0, no errors",
+    "passed": true
+   },
+   {
+    "command": "go vet ./...",
+    "outcome": "no output, clean",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./...",
+    "outcome": "all packages with tests ok (browsersites, config, database, grpc, http, metrics, modelentitlement, nats, org, rbac, testfixture); the rest have no test files; no failures",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Not executed against Postgres. TestControlLifecycleOrgCoreAppTablePrivilegesMatchTheirCode (internal/org/table_privileges_postgres_test.go) and the two RLS tests (internal/modelentitlement/repository_postgres_test.go, internal/browsersites/repository_postgres_test.go) must be run by the lead through the DB harness, with CONTROL_LIFECYCLE_TEST_DATABASE_URL set. The new test should fail before 024, because 009's default privileges give all four privileges, and pass after it.",
+   "024 also takes privileges away that 021 and 023 stated but the code never uses: UPDATE on org_model_policies and UPDATE on org_browser_site_rules. I grepped the code and both tables are only ever deleted and re-inserted, so the change is correct. A future repository change that UPDATEs either table will fail at runtime with permission denied. The new test checks the grants, not the SQL the code runs, so it will not catch that drift.",
+   "The organization_siem_audit_outbox UPDATEs (claim, mark published, mark failed, at siem_destinations.go:799-880) run on r.pool, not under WithOrgScope / SET LOCAL ROLE org_core_app. Granting only SELECT and INSERT is therefore correct only while the pool's login role is not org_core_app. If a deployment configures the pool DSN as org_core_app, the outbox publisher would break.",
+   "Sequence privileges (USAGE on any serial/identity sequences of the history tables) and 009's default privileges are left as they were. Any table a later migration creates still gets all four privileges unless that migration narrows them.",
+   "No test or contract counts the migration files (I grepped for this). RunMigrations sorts *.up.sql names, so 024 runs after 023. All three new files are CRLF, matching 023."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Lead to run against a real Postgres through the harness, with CONTROL_LIFECYCLE_TEST_DATABASE_URL set: TestControlLifecycleOrgCoreAppTablePrivilegesMatchTheirCode (internal/org), TestControlLifecycleModelEntitlementRepositoryUnderRLS (apps/Control Plane/org-core/internal/modelentitlement/repository_postgres_test.go) and TestControlLifecycleBrowserSitesRepositoryUnderRLS (apps/Control Plane/org-core/internal/browsersites/repository_postgres_test.go). The two RLS tests are the behavioural checks for 024 and skip here. Migration 024 has not been applied to a database in this pass.",
+  "summary": "Migration 024 revokes ALL from org_core_app on the nine tables migrations 021-023 create and grants exactly what the code runs as org_core_app inside WithOrgScope: the two history tables SELECT, INSERT (append-only); org_model_policies and org_browser_site_rules lose UPDATE (a PUT deletes and re-inserts; no ON CONFLICT or FOR UPDATE on them); the revision and policy rows lose DELETE; organization_siem_audit_outbox keeps SELECT, INSERT because its claim and mark statements run on the owner pool, not as org_core_app. The down migration restores the all-four state. New DB test TestControlLifecycleOrgCoreAppTablePrivilegesMatchTheirCode reads has_table_privilege for every table.\n\nLead proof on a throwaway postgres:15.18 (org_lifecycle with the fixture marker): with 024 moved aside the new test and both RLS tests FAIL; with 024 the whole org-core suite (-p 1) passes 352 tests, including the new test, both RLS tests and the seven SIEM tests. The one remaining failure is the pre-existing D1-752 (interactive-retention outbox test, an owner decision)."
+ }
+]

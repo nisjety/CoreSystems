@@ -1,0 +1,921 @@
+{
+ "batchId": "W3-18",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-5-S5",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-1",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.css",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/DeckPresentMode.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.present-gate.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "EP-5-S5 built in wave mode: code and unit tests only, nothing run. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-5-S5.patch (37,320 bytes, 7 sections, staged, not committed). Worktree was detached at model-plane f36127b0b (the one allowed checkout). What it does: DeckPresentMode is a Portal dialog (role dialog, aria-modal, Tab trap, focus restored to the opener on close, Esc, arrows/PageUp/PageDown/Home/End, counter, N for notes, prefers-reduced-motion). It draws the rendered PDF page only when the page count equals the slide count, and otherwise 16:9 manifest cards labelled as a draft. ArtifactDeckView has a Presenter row between the strip and the slide detail: disabled with a reason when a slide has an error or was never built (D7), warnings shown as a count and never blocking, and a zero-slide deck also disabled. chat.present_deck is registered as a low-risk, model-inaccessible contract (inputs strict, artifactId only). No proto, migration, switch, prompt or tool definition changed. The gate's Norwegian copy is inside i18n.tr calls and no raw colours are used, to pass the UI copy gate.",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after line 344 (`  'chat.open_deck_slide': exempt('ui_state_only', 'read'),`) insert `  'chat.present_deck': exempt('ui_state_only', 'read'),`. The map is exhaustive by type, so typecheck and action-registry.test.ts need this row.",
+    "regenerate (guard, after the model-access row): `cd \"apps/Frontend Plane/verevonv3\" && VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts` rewrites src/shared/api/contracts/agent-action-admission.json; then re-vendor the copies that zdr-contract-sync.test.sh pins and refresh the apps/Model Plane/api/contracts/agent-action-admission.json.sha256 pin. chat.present_deck is exempt from model access, so no prompt or tool definition changes and the prompt-tool manifest is untouched.",
+    "action-registry.test.ts asserts 296 (295 plus chat.present_deck). Other slices in W3-18 that add registry ids (EP-9-C1, EP-11-S1) change the same assertion; set it to the merged total when merging.",
+    "DeckPresentMode.css is a new stylesheet not listed in new_files. It is in the patch and imported by DeckPresentMode.tsx, so add it to new_files; no global.css edit is needed."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Present a built deck in Chrome and Firefox with the render layer on and confirm `#page=N` moves the PDF frame for each slide; nothing at runtime detects a viewer that ignores the fragment, so every slide would silently show page 1 (design S5 proof; register D2-953)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs (run by pnpm test) requires the quoted ids in apps/gateway/src/domains/actions/handlers.rs to equal the registry ids; a read-only grep count puts 70 registry ids absent before this slice (chat.present_deck is the 71st), so it already fails at HEAD and the test itself was not run. Owner decision: exempt ui_state_only chat contracts or add dispatch arms."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The PDF frame has no sandbox attribute, the same as ArtifactOfficePreview, while the design text says 'sandboxed frame'; the owner should decide whether to add one and check in the live proof that PDF viewers still render under it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Presenting opens on the strip's picked slide (startIndex), which the design does not state; the owner should confirm it or drop the prop without touching the gate."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "There is no body scroll lock, so wheel or touch over the fixed overlay can scroll the page behind it; check in a browser."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The focus-return and Tab-trap tests depend on Solid 2 effect timing (createEffect(() => undefined, ...)) and flush(); the guard's vitest run is the first run of ArtifactDeckView.present-gate.test.tsx and DeckPresentMode.test.tsx."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Safari focus restore depends on the Presenter button being focused in its click handler before the overlay mounts; only jsdom covers the restore path, and jsdom does not reproduce Safari's click focus behaviour."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Controls beyond the design's key list were added (prev/next buttons, a notes toggle, an aria-live counter, a hint line); the owner may trim them without touching the gate."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The S4 design says chat.open_deck_slide is ownerPlane frontend, but action-registry.ts registers it as model; S5 follows the code, so the design or the registry should be reconciled."
+    }
+   ],
+   "deviations": [
+    "The 'Esc restores focus to the button' case is in ArtifactDeckView.present-gate.test.tsx, not DeckPresentMode.test.tsx, because it needs the Presenter button.",
+    "A zero-slide deck keeps Presenter off too (the design lists only error and draft slides), with its own reason text.",
+    "The styles are a new DeckPresentMode.css beside the component, not rules in global.css.",
+    "The frame is used only for a data:application/pdf; URL, a small guard beyond the design.",
+    "The warning copy is singular for one slide: '1 lysbilde har advarsler' / '1 slide has warnings'."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S9",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/office_verify/check.py",
+    "apps/Model Plane/rust/services/execution-core/src/office_verify.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx"
+   ],
+   "notes": "Built EP-5 S9 behind OFFICE_PREVIEW_PAGES (default 3, so output is unchanged). check.py takes the page count as a third argument and draws decks at 48 dpi only above the default; the verifier resolves the count for decks only and keeps an aligned thumbnail prefix under a 3 MiB total; the gateway caps deck thumbnails at 40; the execution client decode limit is 40 MiB; the strip draws a picture per card only when the render covers every slide. Unit tests are written and nothing was run (no build, test, docker or live proof). No migration or proto number is needed. Patch staged in the lead's tree at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-5-S9.patch (6 files, 29935 bytes, staged not committed).",
+   "deviations": [
+    "Thumbnails are an aligned prefix from page 1: a page over the per-thumbnail cap ends the set, where the design keeps a per-part filter that shifts later pictures onto earlier pages; the old test that expected a later thumbnail to survive was rewritten to match.",
+    "The strip draws card pictures only when preview.pages equals the slide count and thumbs cover every slide (thumbs.length >= slides), a refinement of the design's pages-equals-slides rule so a default-capped render never draws a partial strip.",
+    "The 48 dpi for decks applies only when more than the default pages are asked for, so the default output is unchanged; the design wording could be read as always 48 dpi.",
+    "The 40 MiB decode limit is set with no switch on both execution-client constructors (the from_env one and new()), so a flag-off result over 4 MiB now decodes; flagged for the lead's sign-off against the byte-identical-when-off rule.",
+    "The new tests are plain file and parser tests and are not Linux-gated, so they run on any host that builds execution-core; the LibreOffice-dependent tests keep their existing gates."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: after line 28467 (the closing brace of `.verevon-deck__card[aria-current='true']`), insert a blank line and then /* A card with its slide's picture (EP-5 S9): the picture sets the height and the bullet lines give way to it. */ followed by the blocks `.verevon-deck__card--picture { aspect-ratio: auto; }`, `.verevon-deck__card--picture .verevon-deck__line { display: none; }` and `.verevon-deck__thumb { display: block; width: 100%; height: auto; border-radius: 4px; }`, each on its own lines. Without this a card picture draws at its intrinsic size.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core service's environment block, insert after line 1538 (`      CODE_INTERPRETER_ENFORCEMENT_REPORT: ${CODE_INTERPRETER_ENFORCEMENT_REPORT:-false}`) the line `      OFFICE_PREVIEW_PAGES: ${OFFICE_PREVIEW_PAGES:-3}` with six spaces of indent; the default 3 changes nothing.",
+    "No regeneration is needed: no .proto, migration, generated code, golden, platform prompt or tool definition changed, so there is no buf step, no MP_UPDATE_PROMPT_MANIFEST run and no scenario-touch case.",
+    "Guard checks to run: cargo test -q -p execution-core --lib pptx_preview_pages_follow_the_env_cap ; cargo test -q -p execution-core --lib thumb_bytes_over_cap_drop_the_thumbs_not_the_pdf ; cargo test -q -p model-gateway --lib deck_thumbs_cap ; pnpm exec vitest run src/features/chat/components/ArtifactDeckView.test.tsx ; pnpm lint ; node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit ; cargo fmt --check for the execution-core and model-gateway packages.",
+    "Owner only, not touched by this batch: add OFFICE_PREVIEW_PAGES=3 to apps/Model Plane/deploy/.env.example when the owner next edits that file."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The F5 proof (12-slide deck, OFFICE_PREVIEW_PAGES=12, CODE_INTERPRETER_OFFICE_VERIFY=render) is unrun, so 40 pdftoppm pages must finish inside POPPLER_TIMEOUT_SECS=20 and the whole render inside RENDER_BUDGET_SECS=50; a timeout only drops the pictures with a warning."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The attachment SSE event can now carry about 6.7 MB of preview (a 2 MiB PDF and 3 MiB of thumbnails, both base64), so the BFF and the SPA stream reader need a live check at that size before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The deck tool envelope carries the whole build output (deck_tool.rs without_stdout), so a live check must show the thumbnails never reach the thread, the tool ledger or message metadata, the same claim the 2 MiB PDF already depends on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The 40 MiB decode limit applies to every ExecuteStep response with no switch, so with every switch off a code_interpreter result over 4 MiB that used to fail with a decode error now succeeds; the lead should confirm this against the byte-identical-when-off rule."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A page over the 150 KiB per-thumbnail cap now ends the thumbnail set, which changes the default three-page path only in that edge case, where the old code shifted later pictures onto earlier pages."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "One slide over 150 KiB at 48 dpi, such as a photo-heavy slide, removes the pictures of the whole deck, so the owner may want a larger per-thumbnail cap for decks; the 3 MiB total still bounds the frame."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "LibreOffice's PDF export omits hidden slides by default (not verified here), so such a deck's page count differs from its slide count and its strip draws no pictures."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Blank-page warnings now cover up to 40 pages of a deck, so image-only slides can add advisory 'check that it is not blank' warnings."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Nothing in deploy/docker-compose.yml sets CODE_INTERPRETER_OFFICE_VERIFY, so OFFICE_PREVIEW_PAGES does nothing until render is on; the S10 flip must set both, and the WS19-S0 spike's D5 decision still gates the render-based claim (D10)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test runs check.py with a pptx and a page argument, so the page-count argument, the 48 dpi switch and the numeric page order are checked by reading only and need a rust:1 run with soffice and python-pptx."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A deck of three slides or fewer gets card pictures at the default flag once render is on, because the strip rule is data-driven, while larger decks get none until the flag is raised."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "PREVIEW_MAX_DECK_THUMBS (gateway) and MAX_PREVIEW_PAGES (verifier) are both 40 and must move together with the EP-5 D11 slide cap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A 40 MiB decode limit lets one code_interpreter response allocate up to about 38 MB, and concurrent calls multiply that cost."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The tonic 0.12 server encode-limit default, which the decode-limit comment assumes is unlimited, was not checked against the crate source because no cargo registry is readable here."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-7-S6",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0094_cron_schedule_goal_link.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0094_cron_schedule_goal_link.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/goal_unattended.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/goal_judge_turn_test.go",
+    "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg.go",
+    "apps/Model Plane/go/services/orchestrator-core/internal/orchestration/workflowreg_goal_test.go",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx"
+   ],
+   "notes": "I wrote the code and tests for S6a in full and for the workflow half of S6b. Nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-7-S6.patch (87 KB). Every switch is off by default and reads only the literal \"true\".\n\nBuilt:\n(1) Migration 0094 plus its revert file.\n- It adds `cron_schedules.goal_id` (ON DELETE SET NULL), `cron_schedules.goal_paused_reason`, a unique index allowing one live schedule per goal, and `thread_goal_turns.unattended` / `scheduled_thread_id`.\n- Three triggers:\n  - Bind at insert: the template's `goal_id` is bound only if the Control-verified `creator_subject_id` owns the goal, the goal is active, the thread is personal (not a Space) and holds no waived run. Otherwise the insert is refused with `thread_goal_schedule_binding_refused`.\n  - Guard: the link cannot be re-pointed. A deleted goal disables its schedule (`goal_deleted`). A schedule can be re-enabled only while its goal is active, and never after `goal_runs_reached` or `goal_deleted`.\n  - Pause: when a goal leaves `active`, its schedules are disabled in the same transaction (`goal_paused` or `goal_closed`). This covers every path that changes a goal's status without editing thread_goals.rs.\n\n(2) session-core grpc.rs\n- `RecordScheduledRunResult` now writes a settled, counted unattended goal turn in the same transaction. It records the step's input/output tokens and the scheduled thread, and is idempotent on run_id. It does this only when `SESSION_CORE_THREAD_GOALS_ENABLED` is on; with it off, no goal is read.\n- The same write applies the stop rules (budget before turns), which closes the goal and so pauses the schedule. It also pauses the schedule with `goal_runs_reached` once the template's `goal_max_runs` is used (at most 20).\n- Unit tests plus 3 `#[ignore]` database tests with the names the slice asks for.\n\n(3) model-gateway\n- `goal_unattended.rs` admits a `POST /v1/cron` whose template names `goal_id`. The checks:\n  - both switches are on (else 404 `goal_unattended_disabled`);\n  - the token is not ZDR or waived (412 durable-mutation refusal);\n  - the judge is on (409 `goal_unattended_needs_judge`);\n  - the template is valid (else 422 `invalid_goal_schedule` with `details.field`): `purpose=goal`, `goal_max_runs` from 1 to 20, the default workflow only, at most one fire per 30 minutes, and a contract whose tools are all read-class.\n- `http_routes.rs` calls this admission in `create_cron_proxy`.\n- Tests include `unattended_refuses_without_judge` and `unattended_contract_read_class_only`.\n\n(4) orchestrator-core\n- `ScheduledRunInput.GoalID` is taken from the digest-verified template, and only while `ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED` is on.\n- After `CompleteRunActivity`, the workflow runs `JudgeGoalTurnActivity` behind GetVersion `goal-judge-turn`. Its input carries ids only. A judge failure never fails the run.\n- Tests: `TestScheduledRunSupervisionJudgesGoalTurnBehindVersion` (including the pre-change history and no-goal cases) and `TestJudgeGoalTurnActivityCarriesIdsOnly`, plus builder tests.\n\n(5) GoalBar.tsx\n- A \"Keep working while away\" form (read-only tools, max runs, interval, days) with the plain \"read only, as the service, changes held as drafts\" copy, and an \"N runs while you were away\" list with links to each scheduled thread.\n- Pure helpers `goalScheduleTemplate`, `goalAwayCron` and `goalAwayRuns`, with tests.\n\nNot built (why the status is partial):\n- The body of `JudgeGoalTurnActivity`.\n- The gateway route `POST /internal/v1/goals/:goal_id/judge-turn`. It needs orchestrator-to-gateway service auth, which does not exist yet, plus a session-core verdict write RPC and the S3 verdict store (0093), which are also not built.\n- `gdpr.rs` needed no change: the purge deletes `thread_goals` before `cron_schedules`, so the SET NULL path disables the schedule before it is deleted.",
+   "deviations": [
+    "No separate POST /v1/threads/:thread_id/goal/unattended route. The goal-bound create goes through the existing POST /v1/cron create path, and the gateway runs the admission inside it. Reason: the BFF has Control sign the create decision over the exact template digest (inject_personal_schedule_create_context), so the gateway cannot build the contract or template after that. Binding the schedule to the goal happens in session-core (0094 trigger), not in the gateway.",
+    "With MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED off, a POST /v1/cron whose template carries a `goal_id` key is now refused (404 goal_unattended_disabled). Before, it was forwarded. This is needed because migration 0094 binds such templates at insert. Every create without that key is byte-identical.",
+    "The every_minutes body field is replaced by checking schedule_expr itself: one fixed minute, */30, or two minutes exactly 30 apart. The SPA builds the expression from its interval options.",
+    "Pausing a schedule when its goal closes is done by a database trigger on thread_goals.status, not by code in the transition paths. thread_goals.rs is not mine, and the trigger covers every path in the same transaction.",
+    "max_runs comes from the template field goal_max_runs, which the Control digest covers. No extra column was added.",
+    "The goal stop rule is duplicated in grpc.rs (unattended_stop_state) because thread_goals::stop_state and GoalRow are private."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: after the line `pub mod goal_judge;` add `pub mod goal_unattended;`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/thread_goal_routes.rs: in goal_body(), in the json! `data` object after `\"autoContinueAvailable\": crate::goal_auto::available()` add `, \"unattendedAvailable\": crate::goal_unattended::available()` so the SPA can show the away form",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs create_cron: before inject_personal_schedule_create_context, refuse (422 typed `goal_schedule_personal_only`) when body.task_template has a `goal_id` key and cron_create_names_explicit_space(&body) is true. A goal-bound schedule must run in the personal Space, never in a room thread.",
+    "Not built in this slice; needs a new slice or files outside mine: (a) orchestrator-core cmd/activities JudgeGoalTurnActivity plus `w.RegisterActivity(a.JudgeGoalTurnActivity)` in cmd/main.go; (b) a model-gateway internal judge route with orchestrator service-principal auth (plane-service-principals.json); (c) a session-core verdict write that closes a goal as met/blocked (S3 0093). Until all three exist, keep ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED off.",
+    "SPA wiring (files not mine): thread-goal-client reads `unattendedAvailable`. The chat controller builds a GoalAwayView: onStart calls createCronSchedule with schedule_expr from goalAwayCron(form.everyMinutes) and task_template from goalScheduleTemplate; `scheduled`/`runs` come from listCronSchedules filtered on task_template.goal_id, then listScheduleFires and goalAwayRuns. ComposerTrays passes `away` to GoalBar. The tools come from the delegable list, which is still empty (D2-273/275).",
+    "No proto, golden or generated-code changes. The guard compiles: cargo test -p session-core --lib, cargo test -p model-gateway --lib unattended, GOWORK=off go test ./... in orchestrator-core, and vitest GoalBar.test.tsx. The session-core DB tests run through scripts/tests/session-core-db-tests.sh.",
+    "No compose or env change. MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED and ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED default off. When the owner adds them to .env.example, model-gateway and orchestrator-core need them passed through docker-compose.yml."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_goal_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/main.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities (new goal_judge.go)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF injects space_ref before the gateway sees the body, so the gateway cannot tell a room from a personal Space. Until the BFF refuses an explicit space_ref on a goal-bound create, an admin could run a goal's runs into a room thread that members can read."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "JudgeGoalTurnActivity, the gateway internal judge route (with orchestrator service auth) and the session-core verdict write are not built. ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED must stay off until they exist, and until then an unattended goal stops only on a cap, max runs, contract expiry or the owner."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A fire that fails before RecordScheduledRunResult (FailRunActivity path) writes no goal turn, so it does not count toward goal_max_runs or max_turns. A schedule that keeps failing is bounded only by its contract expiry and WS20's own failure handling."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The 0094 bind trigger assumes cron_schedules.creator_subject_id equals thread_goals.user_id for a personal schedule. This needs a live check against the Control binding's SubjectID format before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "capability-core's cron create returns a raw 500 carrying the trigger's message when the 0094 bind refuses (SQLSTATE 23514). It should map 23514 to a typed 422."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Run now (EP-6-S2) is not yet refused for goal-bound schedules (design: one driver per goal). run_cron_now_proxy or capability-core needs a goal_id check."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The unattended turn counts the scheduled step's input and output tokens as metered, with cost_basis empty and cost NULL. A subscription-routed scheduled run would be over-counted until cost-core reconciliation exists."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "unattended_stop_state in grpc.rs duplicates thread_goals::stop_state. Expose one pub(crate) stop rule from thread_goals.rs and call it from both."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Flow E is not run: three read-only fires, three Control fire decisions, the unattended goal turns, the schedule paused on goal close or goal_runs_reached, and no write. It is gated on DEC-16 (b) and WS20-S4..S6 being live-proven."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "docs/ZDR.md and the zdr_features table do not yet list the goal-bound cron create as a refusal point; it reuses the durable-mutation refusal. Leave this to S8."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-W1",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-4",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/search_provenance.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/quarry.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/SourceScopeNotice.test.tsx"
+   ],
+   "notes": "EP-9-W1 code and unit tests are written in the owned files; nothing was built, run or committed. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-9-W1.patch (10 files, 47,382 bytes, staged in the worktree). Rust: SearchReply carries the envelope provider; a per-turn SearchProvenanceTurn (route from effective_zdr and paid_providers_allowed, closed provider table, unknown ids as other) records every answered web_search batch; the forced pre-loop search and the tool loop share it through the RichEventSink; one search_provenance frame (citations family) is sent after the tool phase only when a record is attached, with the cursor sync guarded so switch-off changes nothing. Frontend: type, parser and dispatch case in chat-client.ts; SearchProvenanceNotice in ChatMessages.tsx (nb and en inline); tests in chat-client.test.ts and SourceScopeNotice.test.tsx. The line stays inert until the lead applies the shared edits (lib.rs module line, four chat-node and controller edits) and regenerates the taxonomy doc and the SSE golden; the golden test and taxonomy --check fail until then, as expected.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: add `pub mod search_provenance;` between `pub mod schema_check;` and `pub mod security_events;` (the new module does not compile into the crate without it).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts: in the ConversationNode union, after the closing `    }` of the `kind: 'source-scope'` member and before the `/**` that opens the lifecycle-notices comment, add a one-line doc comment and `  | { kind: 'search-provenance'; provenance: import('@/shared/api/chat-client').ChatSearchProvenanceEvent }`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts: in deriveConversationNodes, between the `if (!waiting) { ... kind: 'source-scope' ... }` block and the `// Shown while the turn waits too:` comment, add `if (!waiting && turn.searchProvenance) { nodes.push({ kind: 'search-provenance', provenance: turn.searchProvenance }) }` with a short comment.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/lib/settled-fold.ts: in FOLDED_KINDS add `  'search-provenance': false,` directly after `  'source-scope': false,` (the record is exhaustive, so the build fails without it).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: after the `onSourceScopeApplied` handler and before `onGrounding:`, add `onSearchProvenance: (event: Parameters<NonNullable<ChatStreamHandlers['onSearchProvenance']>>[0]) => { setState((s) => { const turn = s.turns.find((t) => t.id === assistantId); if (turn) turn.searchProvenance = event }) },` in the same multi-line style as its neighbour. Without it the frame is parsed and dropped.",
+    "optional shared-edit (test lists): add 'search-provenance' to ALL_KINDS in apps/Frontend Plane/verevonv3/src/shared/chat-nodes/registry.test.ts, registry.live.test.ts and apps/Frontend Plane/verevonv3/src/features/chat/lib/settled-fold.test.ts; add a derive.test.ts case that the node appears only when not waiting.",
+    "regenerate the taxonomy: `python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\"` (rewrites apps/Model Plane/docs/sse-event-taxonomy.md with a search_provenance row, family citations); then `python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check` must pass. The case in chat-client.ts is already present.",
+    "regenerate the SSE payload golden: `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden` (writes apps/Model Plane/api/contracts/sse-event-payloads.json, LF); refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256; copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json and refresh that file's .sha256; run `node scripts/gen-chat-event-types.mjs` in apps/Frontend Plane/verevonv3 (regenerates shared/api/chat-event-payloads.generated.ts); update the pinned digest in apps/Model Plane/scripts/tests/zdr-contract-sync.test.sh if it pins this golden, as the golden test message says.",
+    "guard test filters: `cargo test -q -p model-gateway --lib search_provenance`, `--lib a_search_records_each_hits_provider_on_the_turn_record`, `--lib the_reply_carries_the_envelope_provider`, `--lib sse_events`; frontend `pnpm exec vitest run src/shared/api/chat-client.test.ts src/features/chat/components/SourceScopeNotice.test.tsx` and `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit` (with pnpm_config_verify_deps_before_run=false).",
+    "No platform prompt or tool definition changed: no prompt-tool-manifest regeneration and no eval case or replay cassette is required by this slice; the lead decides whether the scenario-touch gate counts the new chat frame.",
+    "Flags: register MODEL_GATEWAY_SEARCH_PROVENANCE (default off, literal true, vocabulary C) where flags are listed (.plan-work/common/flags-and-config.md) if a gate reads it. The owner adds the .env.example line; I did not edit .env.example. Optional: a passthrough with default false in apps/Model Plane/deploy/docker-compose.yml if model-gateway lists its env explicitly.",
+    "No ledger entry is needed for W1 (no decision taken)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/settled-fold.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Model Plane/docs/sse-event-taxonomy.md",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+    "apps/Model Plane/scripts/tests/zdr-contract-sync.test.sh"
+   ],
+   "deviations": [
+    "SourceScopeNotice.tsx does not exist in the tree; the line is SearchProvenanceNotice in ChatMessages.tsx beside SourceScopeNotice, which is the file the slice list names.",
+    "The wire parser and type live in chat-client.ts, not chat-normalizers.ts: normalizers handle persisted history and W1 stores nothing, so chat-normalizers.ts and its test are unchanged.",
+    "i18n en.ts and no.ts are unchanged: the strings are inline i18n.tr, as SourceScopeNotice does in the chat components.",
+    "The per-turn record rides RichEventSink and is passed as an Option parameter through dispatch_audited_tool and dispatch_tool_with_cost (the turn_refs and connector pattern), because ToolOutcome has 79 literal constructions and a new field there was not viable.",
+    "The frame is emitted in sse.rs after the tool phase rather than inside tool_loop.rs, so the forced pre-loop search and the loop share one record and one frame. sse.rs was edited with CRLF preserved.",
+    "The route is computed where the sink is built, from effective_zdr and paid_providers_allowed(model_clone), the same inputs the loop uses.",
+    "The frame carries English labels on the wire; the SPA words the line by closed id and does not read them."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not run: a Norwegian time-sensitive turn with MODEL_GATEWAY_SEARCH_PROVENANCE on a second dev server, capturing the search_provenance SSE frame and a screenshot, plus one forced-search turn and one model-chosen turn (design proof plan, EV/live-proof-ep9-w1-searched-via-<date>.txt)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the four shared FE edits land, the frame is parsed and dropped silently: onSearchProvenance is optional and the controller does not store it, so flipping the switch alone shows no line."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The composite mapping (hybrid, reranked, fallback and smart_router to Verevon search) is inferred from Quarry's source list, not from a live /v1/search envelope; the live proof must confirm the real envelope provider values."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Searches outside the chat tool phase are not on the line. Deep research (dispatch_web_tool_audited in deep_research.rs) records nothing, so a deep-research turn shows no line; the post-answer verification search (sse.rs run_forced_web_search) records after the frame was sent. Wiring deep research needs deep_research.rs, which this slice does not own."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The route reason reflects only the tier grant (paid_providers_allowed). W2's org web.paid_providers switch will narrow paid search, so the route text must then name the org switch; revisit at W2 integration."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The frame is citations-family, and the SPA's default features include citations. A client that opts out of citations will not see the line, which matches source-scope. Owner to accept."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the forced pre-loop search's recording or the sse.rs sink wiring; the live proof must include a forced-search turn."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The derive.ts search-provenance node has no test in this slice because derive.ts is not owned; add the test with the shared edit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The line is live-only with no store, as the design says, so a reloaded turn has no line. Owner to accept."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "T1's catalogue check should list the Quarry providers in the label table, so a provider Quarry adds is noticed before it shows as other provider (design risk 1)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-normalizers.ts and i18n en.ts/no.ts are untouched, although the design's file list names them: the parser sits in chat-client.ts beside the source-scope parser, and the strings are inline i18n.tr."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-W2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-5",
+   "files_changed": [
+    "apps/Model Plane/api/contracts/org-agent-policy-schema.json",
+    "apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256",
+    "apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.test.tsx"
+   ],
+   "notes": "Built EP-9-W2 and staged it (19 files, 1054 insertions, 29 deletions). Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-9-W2.patch (77 KB, 19 file diffs). Nothing was compiled or run, per the code-first rule; no docker, no build output, no migration. web.mode (off, cached_only reserved, live) and web.paid_providers (off, on) are keys of the org agent policy, enforced through ORG_AGENT_POLICY_MODE with no new env var. With that switch off, the gateway and execution-core behave as before. The Customize section appears whenever the policy API is on. The patch does not compile or pass until lead_todo items 1 to 4 land (the runtime_registries.rs literal, the model-access entry, the ZDR sync digest, and the AgentModesSection save fix). Rust bindings regenerate in build.rs; the Go gen needs buf generate.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs: in fn do_run_org_policy (about line 3413) add the line `        web: None,` after `        policy_digest: String::new(),` inside the mp_contracts::model_plane::v1::OrgPolicyContext literal; it has no ..Default::default(), so the new field OrgPolicyContext.web breaks it (compile blocker).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `  'org.set_agent_policy': exempt('human_identity_or_security', 'external_write'),` add `  'org.set_web_policy': exempt('human_identity_or_security', 'external_write'),` (MODEL_ACCESS is Record<ActionId, ...>, so typecheck and the registry tests need it).",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: line 122, change the org-agent-policy-schema.json digest from 631e4457738183453b33dbcc98348a639dbbf463fb346785244cf2b4f0973fbe to e0c445e1d27045782e6f72ce456fb9c7bf60476c5f7c87f57f3a90febd085719 (the .sha256 beside the schema is already refreshed in this patch).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx (needed before the web switch is used): in function saveOrgAgentPolicy (about line 238) change the parameter type `settings: OrgAgentPolicySettings` to `settings: Record<string, unknown>`; in save() (about line 391) change `await saveOrgAgentPolicy(doc.revision, settings)` to `await saveOrgAgentPolicy(doc.revision, { ...doc.settings, ...settings })`. AgentModesSection.test.tsx still matches because its STORED.settings holds the same five keys.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx (optional, cosmetic): in settingLabel add cases 'web.mode' returning i18n.tr('Nettilgang for agentene', 'Web access for agents') and 'web.paid_providers' returning i18n.tr('Betalte søketjenester', 'Paid search services') before the default branch, so the effective table shows labels rather than raw keys.",
+    "Regenerate Go bindings for the execution.proto change: from apps/Model Plane/proto run buf generate with buf.gen.go-only.yaml (out ../go/gen) so go/gen/model_plane/v1 gets WebPolicyContext and OrgPolicyContext.Web. Do not hand-edit the generated Go. Rust bindings regenerate in mp-contracts build.rs.",
+    "Proto gates from the repo root: buf lint through scripts/gates/buf-lint-ratchet.py (every new message and field is commented), and buf breaking 'apps/Model Plane/proto' --against 'apps/Model Plane/proto/baseline.binpb' (additive, expect pass).",
+    "Regenerate the agent-action-admission golden for the new registry row org.set_web_policy: canonical apps/Model Plane/api/contracts/agent-action-admission.json and its vendored copies apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json, apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json and apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json. Verify with apps/Model Plane/scripts/tests/agent-action-admission-proof.sh.",
+    "Prompt-tool manifest: not regenerated, because no tool definition or prompt text changed. The withholding is a runtime filter in offered_tools and run_rounds, and the inline filter in sse.rs.",
+    "Lead-owned records (not edited here): apps/Model Plane/docs/decisions/ledger.md entry for D-W1 and D-W2 (org web switches are agent-policy keys; host lists stay in the site policy). Also record that reserved_values is a new per-value schema field, that the Do-loop refusal sits in run_rounds' purpose lock, that deep research is refused with org_web_off when web.mode is off, and that org_web_off joins the typed refusal codes (no error-catalogue file lists refusal codes; org_policy_unavailable appears only in code, docs and the ledger).",
+    "Schema version is left at 1. Round B C-B11 asks for one schema-status bump shared with EP-11 S9 (ext.skills); the lead sets version once both slices have landed.",
+    "Guard test commands: cargo test -q -p mp-contracts --lib org_agent_policy; cargo test -q -p mp-contracts --test org_agent_policy_golden; go test ./internal/api/... in apps/Model Plane/go/services/capability-core; cargo test -q -p model-gateway --lib org_agent_policy; cargo test -q -p model-gateway --test org_policy_enforcement_test; cargo test -q -p model-gateway --lib sse_events; cargo test -q -p execution-core --lib org_web_off; pnpm exec vitest run src/shared/actions/action-registry.test.ts src/features/customize (from apps/Frontend Plane/verevonv3); pnpm lint; pnpm exec tsc -p tsconfig.app.json --noEmit."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The ExecuteStep path bypasses the org web switch: orchestrator-core's ExecuteStepActivity calls execution-core's ExecuteStep RPC, whose execute_step_inner takes hook_context but no web switch, so web_search and web_fetch steps there still run under web.mode=off."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Browser tools sit outside web.mode: browser.observe, browser.act and browser_agent reach public sites through the broker and are not withheld, so the owner must rule whether off covers them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Saving the agent-mode section sends five keys and the server replaces the whole document, so it resets web.mode to live and research.max_fan_out_items to 8 until the AgentModesSection shared-edit in lead_todo lands."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Round B C-B1 has no owner ruling in the record: if the w23 organization_web_policy store is ruled the single org web-policy store, the capability-core web.* keys and the gateway reader built here must be dropped and re-pointed through Control."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A deep-research turn with web.mode off is refused with org_web_off before any plan or search, which the design does not name, so the owner should confirm refusal rather than a run without web."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "get_weather, shipping_get_quotes and the news and traffic lookups are outbound calls outside WEB_CLASS_TOOLS, so web.mode off leaves them offered; decide whether they count as public web."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Not verified: whether an approval continuation dispatches a released web call without run_rounds' purpose lock, which would let a web call parked before the switch flipped run after it; check the release.covers dispatch paths (agent.rs around lines 4436 to 5025) on the proof stack."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end test exists: nothing shows an off SSE turn making no web call with the notice, or a Do run's offered set without web tools; coverage is the pure helpers, the cache and stamp functions, the mp-contracts and Go tables, and source guards."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On an Ask turn a forged web call is refused by the offered-set check with the text 'Tool is not available for this turn's source scope.', so the org_web_off code appears only on Do runs and on the deep-research refusal."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "cached_only is refused on write and reads as off; when Quarry ships cache-only search, execution-core and the inline loop need a real cache-only mode rather than withholding."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The schema gained a per-value field, reserved_values, which the design did not name; the ledger must record it, and the schema version stays 1 until the shared schema-status bump with EP-11 S9."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The effective table in AgentModesSection shows raw keys for web.mode and web.paid_providers because settingLabel has no case for them (optional shared-edit in lead_todo)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "No live proof was run (wave mode): the design's proof needs ORG_AGENT_POLICY_MODE=enforce with BFF PUT and GET JSON, both SSE transcripts, the execution-core offered-set log and a capability-core row."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "WebPolicyContext.paid_providers is carried for attribution only, since execution-core's web search never names a paid provider, so the Do loop does not enforce it."
+    }
+   ],
+   "deviations": [
+    "The per-value refusal is a new schema field, reserved_values, on web.mode (cached_only); the key's status stays enforced, as the design asks.",
+    "The Do-loop withholding and refusal sit in execution-core runtime_loop/agent.rs (offered_tools and run_rounds' purpose lock), not in mod.rs:1337, because execute_step_inner has no org input.",
+    "Withholding covers more than web_search and fetch_url: inline it is the existing WEB_CLASS_TOOLS set (adds read_page, find_in_page, extract_structured); on Do runs it adds knowledge.crawl_site, knowledge.map and knowledge.batch.",
+    "A deep-research turn is refused with org_web_off when web.mode is off, which the design does not name.",
+    "The inline filter is a post-filter over the final tool list rather than a change inside web_search_available; the effect is the same for web_search, the forced search, the verification escalation and client-declared web tools.",
+    "SourceScopeApplied gained an optional reason field, serialised only when set, so existing frames stay byte-identical.",
+    "The Customize section writes the whole stored document with its two keys changed; the action contract org.set_web_policy takes webMode and paidProviders in camelCase, and the section is its wiring."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs (shared-edit: add web: None to the OrgPolicyContext literal)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (shared-edit: org.set_web_policy exempt entry)",
+    "scripts/tests/zdr-contract-sync.test.sh (shared-edit: line 122 digest)",
+    "apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx (shared-edit: save the whole document; optional labels)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json and its four vendored copies (regenerate with org.set_web_policy)",
+    "apps/Model Plane/go/gen/model_plane/v1 (buf generate, go-only template)",
+    "apps/Model Plane/docs/decisions/ledger.md and apps/Model Plane/MODEL_PLANE_STATUS.md (lead-owned records)"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-E4",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-6",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/shell_rule.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx"
+   ],
+   "notes": "The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-9-E4.patch (28 KB, LF kept). I wrote the code and tests but ran nothing, as ordered.\n\nBuilt:\n- New `mp-contracts::shell_rule`. A conservative tokenizer that handles plain words plus single and double quotes with no expansion. It refuses pipes, `;`, `&`, redirects, `$`, backticks, globs, `~`, `\\`, `#`, brackets, braces, line breaks, an unterminated quote, an env assignment in front, a quoted or path-qualified program, an option before the subcommand, and more than 2000 chars or 64 words.\n- Programs and subcommands come only from closed tables. Examples: git status/commit/..., cargo test/..., ls, cat. Interpreters, wrappers, rm, `git config` and `npm run` are left out. The rule holds only the tables' own `&'static str`, so it can never contain an argument token.\n- `rule_for_shell_input` reads the `command` field of the JSON input. `ShellRule::text()` gives \"git status\" and `action_key()` gives \"shell:git status\".\n- Switch `APPROVAL_SHELL_RULE_PROPOSALS_ENABLED`, default off, read with the strict `switch_from`. `shell_rule_proposals_from` returns `Err(ShellRuleSwitchRefused)` when it is on and `APPROVAL_RULE_PROPOSALS_ENABLED` is not. `shell_rule_proposals_enabled()` reads that case as off.\n- Tests: a table of 58 cases with Norwegian characters, an argument-token test, a compound-command test, an input-shape test, an overlong-input test and a switch test.\n- In execution-core `pause_for_approval`, after the request is built, `propose_shell_rule` rewrites the stored cause's `action_key` from `shell` to `shell:<rule>`. It only does so when the tool is shell, the run is not ZDR and the switch is on. Scope options and the call digest are unchanged. With the switch off the bytes sent are identical. The text `cause: Some(approval_cause_for_pause(` is kept for `approval_gate_contract.rs`. Five tests are in the `shell_rule_proposals` module.\n- FE: the card names a proposal by `ruleText` when it has one, through the new exported `proposalLabel` and the `RuleProposalCard` type, and falls back to `toolName`. One test was added.\n\nWhy partial: there is no end-to-end chain yet. Shell is still excluded from standing scopes in `approval_cause.rs` (`is_standing_excluded`, `rule_offered`), so \"Always\" is never offered for a shell pause. The proposal list, confirm and dismiss path is WS13-S7's open row D2-1127. The proposal row and the BFF list do not carry a rule text. None of those files are mine.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/main.rs: right after `info!(\"execution-core starting\");` insert `\\n    // EP-9 E4: shell-rule proposals narrow WS13-S7's proposals, so they refuse to start without them.\\n    mp_contracts::shell_rule::shell_rule_proposals_checked()?;` (ShellRuleSwitchRefused implements std::error::Error, so it works with anyhow `?`).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core service environment add `APPROVAL_SHELL_RULE_PROPOSALS_ENABLED: ${APPROVAL_SHELL_RULE_PROPOSALS_ENABLED:-false}` and `APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}`. Execution-core now reads the parent switch for the startup check; today only model-gateway has it.",
+    "Owner: add both switches to deploy/.env.example (default false). I did not edit it.",
+    "Guard: run `cargo fmt` on mp-contracts/src/shell_rule.rs and agent.rs (formatted by hand, not checked), then the slice's three test commands."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs: let `rule_offered` and `eligible_scopes` offer the rule (Always only, never thread or run grants) for a `shell` cause whose action_key is a valid `shell:<table rule>`, under the switch. This needs a validating `shell_rule::rule_from_action_key` so a forged key cannot name an argument.",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs `checked_rule_proposal`: accept the shell cause above.",
+    "apps/Model Plane/rust/services/session-core (orchestration_store.rs, plus a migration from the 0090+ range): store the rule key on approval_rule_proposals, which is keyed on tool_digest and has none for shell, and return it as ruleText.",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts: add `ruleText?: string` to ApprovalRuleProposal. RuleProposalCard can then become an alias."
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No shell 'Always' can be offered, stored, confirmed or matched yet: approval_cause.rs excludes shell from standing scopes and rules, and WS13-S7 rows D2-1122 and D2-1127 are still open, so the switch must stay off until that chain lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A shell rule covers every argument after the subcommand (for example `git diff --output=f`, or `cargo test` running project code), so per-program argument refusals or a narrower table are needed before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "propose_shell_rule skips ZDR runs but not waived runs: pause_for_approval has no route, so `ctx.route.is_waived()` must be passed in before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When a confirmed shell rule is matched later, it must re-derive the rule with shell_rule::rule_for_shell_input, not approval_cause::action_key, which still returns plain `shell` for every shell call."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Design live proof not done: one Do run approves `git status`, accepts Always, and a second run runs it without a card."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The program and subcommand tables (git, cargo, go, npm, pnpm, pip, plus read-only bare programs) are an engineering default that the owner should review; pip install and npm run are deliberately excluded."
+    }
+   ],
+   "deviations": [
+    "Execution-core's startup refusal is a shared-edit of main.rs (not my file). The function exists in mp-contracts, and the runtime read is off without the parent switch.",
+    "The proposal's rule travels in the cause's existing `action_key` (shell:<rule>), with no proto change, rather than in a new field.",
+    "The FE type was widened locally (`RuleProposalCard`) because orchestration-client.ts is not mine."
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-9-C1",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-7",
+   "files_changed": [
+    "apps/Control Plane/org-core/migrations/031_org_retention_policies.up.sql",
+    "apps/Control Plane/org-core/migrations/031_org_retention_policies.down.sql",
+    "apps/Control Plane/org-core/internal/retention/types.go",
+    "apps/Control Plane/org-core/internal/retention/validate.go",
+    "apps/Control Plane/org-core/internal/retention/validate_test.go",
+    "apps/Control Plane/org-core/internal/retention/service.go",
+    "apps/Control Plane/org-core/internal/retention/service_test.go",
+    "apps/Control Plane/org-core/internal/retention/repository.go",
+    "apps/Control Plane/org-core/internal/retention/repository_postgres_test.go",
+    "apps/Control Plane/org-core/internal/http/retention_handlers.go",
+    "apps/Control Plane/org-core/internal/http/retention_handlers_test.go",
+    "apps/Control Plane/org-core/internal/http/server.go",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/retention.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgRetentionSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Model Plane/api/contracts/zdr-refusals.json"
+   ],
+   "deviations": [
+    "The migration is 031_org_retention_policies, not 030: 030 is already org_key_encryption_keys on model-plane. No other branch has an org-core 031 (checked with git log --all).",
+    "plane-service-principals.json was left unchanged. That file is the user-core/audience registry and holds no org-core scopes. org-core's grant lives in ORG_CORE_SERVICE_CREDENTIALS, which is built in docker-compose.yml, and the scope mapping lives in service_auth.go. Both are in lead_todo.",
+    "The design's ZDR check had to change. org-core cannot see a thread's retention receipt and must not read session-core's database. So the service takes an optional ThreadRetention reader. It refuses with legal_hold_nothing_retained only when that reader says nothing was retained. With no reader, or when the reader fails, the hold is placed, because an extra hold deletes nothing. No reader is wired yet.",
+    "The audit events use a new pinned outbox, org_retention_audit_outbox, with subject verevon.audit.v2.control.org-core.org_retention_changed. Each existing org-core outbox pins its own subject, so the SIEM table cannot be reused.",
+    "The gateway (BFF) has no switch of its own. When org-core's switch is off its route is unmounted and the gateway gets a 404 with no envelope, which it answers as a typed 404 not_found. This avoids a new AppState field in config.rs.",
+    "Roles: the window is set by owner or admin. Holds are placed and released by owner or compliance, and read by owner, admin or compliance. The role name 'compliance' is the design's [INF] and is unconfirmed."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/org-core/internal/http/service_auth.go: (1) in the first const block after `quarryEdgePrincipal       = \"quarry-edge\"` add `sessionCorePrincipal      = \"session-core\"`; (2) in orgServiceScopeAllowlist after the \"org:web-policy:read:any\" entry add `// Read-only access to one org's retention window and active legal holds, through POST /internal/orgs/:orgId/retention/check and nothing else (EP-9 C1). Held by session-core alone, whose sweeper drops every held thread.` + `\"org:retention-policy:read:any\": {},`; (3) in validateServiceCredential after the org:web-policy:read:any pin add `// The check decides which threads the retention sweeper may delete, so it is pinned to the sweeper's principal (EP-9 C1).` `if scope == \"org:retention-policy:read:any\" && credential.Principal != sessionCorePrincipal { return fmt.Errorf(\"scope %s is not valid for principal %s\", scope, credential.Principal) }`; (4) in organizationAPIScopes before `default:` add: `// Retention window and legal holds (EP-9 C1), on behalf of a signed user only.` `case len(rest) == 2 && method == http.MethodGet && (rest[1] == \"retention\" || rest[1] == \"legal-holds\"): return []string{\"org:read:self\"}` / `case len(rest) == 2 && method == http.MethodPut && rest[1] == \"retention\": return []string{\"org:settings:write:self\"}` / `case len(rest) == 2 && method == http.MethodPost && rest[1] == \"legal-holds\": return []string{\"org:settings:write:self\"}` / `case len(rest) == 4 && method == http.MethodPost && rest[1] == \"legal-holds\" && rest[3] == \"release\": return []string{\"org:settings:write:self\"}`; (5) in internalOrganizationScopes after the web-policy case add `case len(rest) == 3 && rest[1] == \"retention\" && rest[2] == \"check\" && method == http.MethodPost: return []string{\"org:retention-policy:read:any\"}`. retention_handlers_test.go depends on all five.",
+    "shared-edit apps/Control Plane/docker-compose.yml (ORG_CORE_SERVICE_CREDENTIALS, ~line 620): add \"org:retention-policy:read:any\" to the session-core principal's scopes array, after \"org:agent-policy:read:any\". Apply only together with the service_auth.go allowlist edit, otherwise org-core refuses to boot.",
+    "shared-edit apps/Control Plane/org-core/cmd/server/main.go: import internal/retention. After server.SetBrowserSites(...) add `// Retention policy and legal holds (EP-9 C1); read by session-core's sweeper. No thread retention reader yet: thread holds are placed without the ZDR receipt check.` `var retentionPublisher retention.AuditPublisher; if natsClient != nil { retentionPublisher = natsClient }` `retentionService := retention.NewService(retention.NewRepository(db), nil, retentionPublisher)` `server.SetRetention(retentionService)` `if natsClient != nil { go runRetentionAuditOutbox(ctx, retentionService, 5*time.Second) }`. Add func runRetentionAuditOutbox, a copy of runSIEMAuditOutbox's shape that calls service.FlushAuditOutbox(ctx, 100) with 'retention audit outbox' log text. The typed-nil guard matters because a nil *nats.Client inside the interface is non-nil.",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs FEATURES: after the thread_goal Feature add `// EP-9 C1: org-core refuses a thread legal hold on a ZDR or waived thread with legal_hold_nothing_retained: nothing is retained, so there is nothing to hold.` `Feature { key: \"legal_hold\", label: \"a legal hold on a thread\", },`. Then regenerate the golden (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal) and its .sha256, refresh the vendored copies (FE src/shared/api/contracts/zdr-refusals.json + sha, go/pkg/zdrrefusal/zdr-refusals.json, the Quarry fixture) and the GOLDENS pin in scripts/tests/zdr-contract-sync.test.sh. My hand edit of api/contracts/zdr-refusals.json must equal the regenerated output.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts after the 'org.set_model_entitlement' line: `'org.set_retention': exempt('human_identity_or_security', 'external_write'),` `'org.place_legal_hold': exempt('human_identity_or_security', 'external_write'),` `'org.release_legal_hold': exempt('human_identity_or_security', 'external_write'),`. MODEL_ACCESS is a Record<ActionId>, so typecheck fails without these. Then the guard regenerates the agent-action-admission golden and every copy of it.",
+    "shared-edit docs/ZDR.md (LF) feature table: add a row `| **Legal holds (EP-9 C1)** | Thread hold on a ZDR or waived thread refused | org-core answers 422 legal_hold_nothing_retained (details.feature legal_hold) once a thread retention reader is wired; until then a thread hold is placed. Org holds on a ZDR org are allowed. Records hold ids, numbers and a hold reference only. Built dark behind ORG_RETENTION_POLICY_ENABLED (off). |`. Add no zdr-posture-matrix row.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: the design's entry 'Retention is Control policy, session-core sweeps, holds never deleted automatically' (D-C2 last-activity clock, 30..3650 bounds, unset = keep; D-C4 org_compliance.data_retention_days ignored). Also record migration 031 instead of 030, and holds placed by owner or compliance only.",
+    "Mount the FE section (needs_other_files): src/features/settings/lib/settings-sections.ts add a 'retention' section; CoreSidebarSettingsPanels.tsx add entry { id: 'retention', label: 'Oppbevaring', href: '/settings/retention' }; WorkspaceSettingsPage.tsx import OrgRetentionSection, add `'retention': []` to the section map and `<Match when={props.section === 'retention'}><OrgRetentionSection /></Match>`.",
+    "Guard: run gofmt -l and cargo fmt --check on the new files. They were written by hand to gofmt and rustfmt style but never formatted by the tools."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/org-core/internal/http/service_auth.go",
+    "apps/Control Plane/org-core/cmd/server/main.go",
+    "apps/Control Plane/docker-compose.yml",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx",
+    "docs/ZDR.md",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No ThreadRetention reader is wired, so a thread hold on a ZDR or waived thread is placed instead of refused with legal_hold_nothing_retained; session-core needs a narrow thread-receipt read and org-core needs a client for it before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The role 'compliance' gates hold placement and release in org-core and the BFF, but nothing confirms that auth-core memberships can carry that role; until it can, only owners can place or release holds."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Never run: TestControlLifecycleRetentionRepositoryUnderRLS and TestControlLifecycleRetentionGrantsAreLeastPrivilege on the throwaway lifecycle Postgres (column-level UPDATE grants, FOR UPDATE under a column grant, ON CONFLICT on the partial index), and the admin flow through the BFF with the audit event arriving in audit-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "audit-core's handling of the new subject verevon.audit.v2.control.org-core.org_retention_changed is unchecked (the design's [INF]); if its stream or event registry rejects it, rows will dead-letter after 8 attempts."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A failed thread-retention lookup places the hold (fail toward holding), and the check route answers 404 for a missing or soft-deleted org; C2 must treat 404 and every 5xx as 'sweep nothing'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Once the service_auth.go scope mapping lands, requests to the retention paths pass auth and get gin's 404 even with the switch off (before, they got 403), so off-state behaviour is identical in effect but not byte for byte on those paths."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "OrgRetentionSection.tsx has no component test (the slice named none), and the FE writes call the BFF directly rather than through the three new action contracts, like OrgQuotasSection does."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Per D-C4, org_compliance.data_retention_days (migration 002) is still in the schema and unread; a later cleanup should drop it once C1 is live."
+    }
+   ],
+   "notes": "The slice's code and tests are written in my worktree and staged; nothing was run, as ordered (no test, build or lint). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-9-C1.patch (153801 bytes, 18 files).\n\nWhat is in it:\n- **org-core:** migration 031 with RLS, least-privilege grants including column-level UPDATE, a partial unique index so a target has at most one active hold, an append-only history table and a pinned audit outbox with no hold reference in its payload. A revert file ships with it.\n- **retention package:** types, validate, service and repository, plus unit tests and two Postgres lifecycle tests.\n- **Routes:** retention_handlers.go has the admin routes and the internal POST /internal/orgs/:orgId/retention/check (up to 500 ids, no-store, typed envelope errors). server.go mounts them only when ORG_RETENTION_POLICY_ENABLED is the literal \"true\".\n- **Gateway (BFF):** the proxy in orgs/retention.rs with wiremock tests.\n- **Frontend:** the OrgRetentionSection.tsx section and three high-risk action contracts with tests.\n- **ZDR:** the legal_hold feature added to zdr-refusals.json.\n\nThe handler tests need the service_auth.go shared edit in lead_todo. Typecheck needs the model-access.ts entries. The zdr-refusals golden must be regenerated from mp-contracts after the zdr_refusal.rs edit.",
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S1",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.save-as-skill.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx"
+   ],
+   "notes": "Built EP-11-S1 in the isolated worktree, detached at model-plane 8139949c (the branch tip moved from f36127b0 during the run; HEAD synced). Nothing run: no test, build, lint or typecheck. BFF agent_actions.rs: a member creates only scope=user with an allow-listed body and no promoted_from; a member updates or deletes only a private skill they own (owner read through a model-gateway GET); GET /api/v1/skills/authoring exists only while SKILL_MEMBER_AUTHORING=true; admin paths unchanged. FE: skills.save_from_message contract (count 295 to 296, one new test), memberSkillAuthoring probe, SaveAsSkillDialog (new), Save-as-skill action in AssistantMessage (the probe runs only for a signed-in member on a saved, non-temporary answer, so the existing render-time fetch assertions in the remember and read-aloud tests stay green), SkillsSection 'My skills' grouping and editor guidance. No proto, migration, prompt, tool or ZDR row. Repo files are LF in index and worktree; new files are LF. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-18/EP-11-S1.patch (61,054 bytes, 9 files, staged, not committed; base is model-plane 8139949c).",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `  'learning.undo': exempt('agent_cannot_self_govern', 'destructive'),` insert `  'skills.save_from_message': exempt('agent_cannot_self_govern', 'context_write'),`. MODEL_ACCESS is typed over ActionId, so typecheck and action-registry.test fail without it.",
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: in the gateway service environment block, after the line `      SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}`, insert `      # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.` and `      SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}`. The BFF flag belongs to this FE stack compose: apps/Model Plane/deploy/docker-compose.yml has no BFF service, so the batch's listed file is not where it goes.",
+    "Regenerate the agent-action-admission golden after the model-access row lands (guard): FE src/shared/api/contracts/agent-action-admission.json and the MP copies (apps/Model Plane/api/contracts/agent-action-admission.json; go/services/capability-core/internal/api/testdata; rust/services/execution-core/tests/fixtures; rust/services/model-gateway/tests/fixtures), via the generator in apps/Model Plane/scripts/tests/agent-action-admission-proof.sh. No prompt or tool definition changed, so the prompt-tool manifest needs no regeneration. The P-SPA1 count test is main's pre-existing failure; the 295 to 296 change follows its comment pattern.",
+    "Guard compile and test targets (none run here): BFF `cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" agent_actions` with CARGO_TARGET_DIR=C:/dev/mp-target-w2 (includes skill_authoring_answers_only_with_the_switch_on, which also checks route precedence). FE, with pnpm_config_verify_deps_before_run=false: `pnpm exec vitest run src/features/skills/components/SaveAsSkillDialog.test.tsx src/features/chat/components/ChatMessages.save-as-skill.test.tsx src/features/chat/components/ChatMessages.remember.test.tsx src/features/chat/components/ChatMessages.read-aloud.test.tsx src/shared/actions/action-registry.test.ts`, then `pnpm lint` and `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit`.",
+    "ChatMessages.save-as-skill.test.tsx is a new test beside ChatMessages.tsx (the design's ChatMessages test); it is not in the batch's new_files list. No live stack, no docker, no deploy: live proofs stay in the depth phase."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/docker-compose.yml",
+    "apps/Model Plane/api/contracts/agent-action-admission.json"
+   ],
+   "deviations": [
+    "The design says capability-core enforces owner-or-admin on PATCH and DELETE; for org-scoped skills it does not (registry_apis.go:231), so the BFF now checks ownership for members (member_owns_skill).",
+    "A member's create is rebuilt from an allow-list (name, description, content, trigger_keywords, trigger_file_patterns, tool_restrictions, enabled, scope user) and refuses promoted_from; the design forwarded the body.",
+    "A new BFF route GET /api/v1/skills/authoring reports the switch; the design named no route. It exists only while the switch is on, so with it off the path answers 405 as before.",
+    "The admin Save-as-skill button and the editor guidance are not behind the switch (design 'admins ship first'); see depth finding 3.",
+    "The D4 org-policy clause (ext.skills) is not in S1: the key is reserved and enforced by S9 (depth finding 2).",
+    "createSkill's scope type is widened to 'org' | 'user'; the admin create form still sends no scope.",
+    "threadId and messageId are validated against the contract but not sent: this is the design's contract input, and S1 has no provenance column."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "capability-core ensureSkillCallerMayChange (registry_apis.go:231) returns nil for scope=org for any caller, so the design's owner-or-admin claim is false for org skills. The BFF now owner-checks members, but a member bearer reaching capability-core or model-gateway directly could still PATCH or DELETE an org skill. Fix to `if isAdmin || isOwner` after checking service callers; [verify] ingress exposes model-gateway /v1/skills only through the BFF."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ext.skills is reserved and unenforced, so an org cannot stop member authoring until S9 enforces it. Do not turn SKILL_MEMBER_AUTHORING on before S9 or an owner ruling on D4."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "With SKILL_MEMBER_AUTHORING off, admins see Save as skill and the editor guidance (the design's 'admins ship first'), which departs from the batch rule that every switch off is byte-identical. Owner to confirm, or gate the admin button behind the same switch."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "[verify live] Member A's skill injects for A and not for B; a member PATCH of an org skill returns 403 from the BFF; the session user id equals capability-core's owner id, which the BFF owner check and SkillsSection.canPromote both assume."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ZDR: the server never sees the source thread (threadId is validated, not sent), so the temporary-chat gate is SPA state only. A person can copy the text by hand, so this adds no new capability, but the ZDR clause rests on the UI."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing has been run. Route precedence (static /api/v1/skills/authoring beside /api/v1/skills/{skill_id}) is proven only by skill_authoring_answers_only_with_the_switch_on; the same shape already exists at /api/v1/agents/runs/system beside /api/v1/agents/runs/{run_id} in agents_runs.rs."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "With the switch off, GET /api/v1/skills/authoring answers 405, not 404, so the 404-means-off convention in EP-11 S2 does not hold here. The SPA treats any failure as off; a signed-in member makes one cached request per page load, and admins make none."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A skill keeps no record of the answer it came from (threadId and messageId are validated, not stored); add a source column with the S2 version work if the Skills page should link back."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "SaveAsSkillDialog reuses the verevon-schedule-dialog classes in src/styles/global.css because this slice owns no stylesheet; a shared modal class would be cleaner."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A platform admin with no owner or admin org role sees Save as skill and the admin form (hasWorkspaceAdminAccess counts user.role); the BFF refuses the create and the dialog shows the refusal."
+    }
+   ],
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_83b83b05-a5e-8",
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way (EP-5-S5, EP-5-S9, EP-7-S6, EP-9-W2 ok; EP-9-W1, EP-9-E4 ok); EP-9-C1 and EP-11-S1 via --reject plus an LF-normalised re-apply",
+    "outcome": "All 8 patches are in. ArtifactDeckView.tsx (S5/S9) and action-registry.test.ts (S5/W2) had conflicts; I kept both sides of each. The C1 and S1 rejects came from CRLF working copies of server.go, orgs.rs and agent_actions.rs. I converted those files to LF, re-applied, and they applied cleanly. The S1 test-count hunk I merged by hand. No .rej files remain. git reset -q ran once; git diff --stat shows every slice's files.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml; copy the differing files; bash go-gen-drift.sh",
+    "outcome": "Only execution.pb.go differed and was copied. go-gen-drift: 50 generated Go files match.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml; compare after normalising",
+    "outcome": "execution_pb2.py differed and was copied (same protobuf 7.36.2 header). The space_*_pb2.py files are absent from the tree before this batch; I did not add them.",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed; golden rewritten (+78 lines). Copied byte-identical to the MP contract and the capability-core, execution-core and model-gateway copies. The .sha256 and the zdr-contract-sync pin are now 4b44b1a3...061c.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden",
+    "outcome": "1 passed; golden +26 lines. The .sha256 and pin are now 07670b8f...eb59. Golden and sha are copied to the SPA and gen-chat-event-types.mjs was run.",
+    "clean": true
+   },
+   {
+    "command": "python gen-sse-event-taxonomy.py ; --check",
+    "outcome": "Wrote 34 events (+1 row); the check says up to date.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p mp-contracts --lib zdr_refusal",
+    "outcome": "15 passed. The regenerated golden equals C1's hand edit. The .sha256 is now 5fdefa29...4eb4, copied to the FE, go/pkg/zdrrefusal and the Quarry fixture; GOLDENS pin updated.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust)",
+    "outcome": "Finished with no errors. Only existing unused-Json warnings, none in this batch's files.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished with no errors. Only existing warnings (marketing tests, browser.rs).",
+    "clean": true
+   },
+   {
+    "command": "GOWORK=off go build ./... && go vet ./... (Control Plane org-core)",
+    "outcome": "Clean. gofmt -w on the new validate_test.go.",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (MP capability-core, orchestrator-core, pkg/zdrrefusal, gen)",
+    "outcome": "Clean; gofmt -l on the batch's Go files is clean.",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "0 errors after one fix. The baseline schedule-contract.test.ts error no longer appears.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx",
+    "slice": "EP-5-S5 + EP-5-S9",
+    "what": "Conflict resolved by keeping both: S5's gate, blockReason and warningLine, and S9's pictures and cardClass memos."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-5-S5/EP-9-W2/EP-9-C1/EP-11-S1",
+    "what": "Merged the count comments of all four slices and set the total to 301 (295 + 1 + 1 + 3 + 1)."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgRetentionSection.tsx",
+    "slice": "EP-9-C1",
+    "what": "TS2322: changed the VerevonInput prop maxLength to maxlength (line 347)."
+   },
+   {
+    "file": "apps/Control Plane/org-core/internal/retention/validate_test.go",
+    "slice": "EP-9-C1",
+    "what": "gofmt alignment of intPtr/revPtr."
+   },
+   {
+    "file": "apps/Model Plane/rust/crates/mp-contracts/src/shell_rule.rs, model-gateway/src/goal_unattended.rs, model-gateway/src/search_provenance.rs, verevonv3 gateway domains/orgs/retention.rs",
+    "slice": "EP-9-E4, EP-7-S6, EP-9-W1, EP-9-C1",
+    "what": "rustfmt on the new files only. Existing files like agent.rs are not rustfmt-clean at HEAD, so I did not reformat them."
+   }
+  ],
+  "still_broken": [],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (buf, execution.proto from EP-9-W2)",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/execution_pb2.py",
+   "agent-action-admission.json (FE src/shared/api/contracts + MP api/contracts + capability-core testdata + execution-core fixtures + model-gateway fixtures) + api/contracts/agent-action-admission.json.sha256 + scripts/tests/zdr-contract-sync.test.sh pin",
+   "apps/Model Plane/api/contracts/sse-event-payloads.json + .sha256, the SPA copy + .sha256, src/shared/api/chat-event-payloads.generated.ts, zdr-contract-sync pin",
+   "apps/Model Plane/docs/sse-event-taxonomy.md",
+   "apps/Model Plane/api/contracts/zdr-refusals.json + .sha256 and copies in FE src/shared/api/contracts, go/pkg/zdrrefusal, the Quarry-v2 quarry-runtime fixture, zdr-contract-sync GOLDENS pin"
+  ],
+  "shared_edits_applied": [
+   "model-access.ts: chat.present_deck (S5), org.set_web_policy (W2), org.set_retention/place_legal_hold/release_legal_hold (C1), skills.save_from_message (S1)",
+   "verevonv3 src/styles/global.css: .verevon-deck__card--picture, the --picture .verevon-deck__line rule and .verevon-deck__thumb (S9)",
+   "apps/Model Plane/deploy/docker-compose.yml execution-core: OFFICE_PREVIEW_PAGES default 3 (S9); APPROVAL_SHELL_RULE_PROPOSALS_ENABLED and APPROVAL_RULE_PROPOSALS_ENABLED default false (E4)",
+   "model-gateway lib.rs: pub mod goal_unattended (S6) and pub mod search_provenance (W1)",
+   "model-gateway thread_goal_routes.rs goal_body: unattendedAvailable (S6)",
+   "verevonv3 gateway agent_actions.rs create_cron: 422 goal_schedule_personal_only when task_template has goal_id and space_ref is explicit (S6)",
+   "chat-nodes/types.ts search-provenance member; derive.ts node when not waiting; settled-fold.ts FOLDED_KINDS; use-chat-controller.ts onSearchProvenance; 'search-provenance' added to ALL_KINDS in registry.test.ts, registry.live.test.ts and settled-fold.test.ts (W1)",
+   "model-gateway runtime_registries.rs do_run_org_policy: web: None (W2)",
+   "scripts/tests/zdr-contract-sync.test.sh line 122 org-agent-policy-schema digest set to e0c445e1...5719 (W2), verified against the file",
+   "AgentModesSection.tsx: saveOrgAgentPolicy takes Record<string, unknown>, save sends {...doc.settings, ...settings}, labels added for web.mode and web.paid_providers (W2)",
+   "execution-core main.rs: mp_contracts::shell_rule::shell_rule_proposals_checked()? after the start log (E4)",
+   "org-core service_auth.go: all five C1 edits (sessionCorePrincipal, allowlist scope, principal pin, organizationAPIScopes cases, internalOrganizationScopes check case)",
+   "Control Plane docker-compose.yml: org:retention-policy:read:any added to the session-core principal (C1)",
+   "org-core cmd/server/main.go: retention import, service wiring with the typed-nil publisher guard, SetRetention, runRetentionAuditOutbox (C1)",
+   "mp-contracts zdr_refusal.rs FEATURES: legal_hold (C1)",
+   "apps/Model Plane/docs/ZDR.md (the repo has no docs/ZDR.md at its root): Legal holds (EP-9 C1) row after the thread goals row; no posture-matrix row",
+   "verevonv3 docker-compose.yml gateway: SKILL_MEMBER_AUTHORING default false (S1)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (W2 D-W1/D-W2, C1 retention design): the lead books these",
+   "any .env.example lines (OFFICE_PREVIEW_PAGES, APPROVAL_*_ENABLED, MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED, ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED, MODEL_GATEWAY_SEARCH_PROVENANCE): the owner adds these",
+   "C1 FE section mount (settings-sections.ts, CoreSidebarSettingsPanels.tsx, WorkspaceSettingsPage.tsx): not marked shared-edit and needs section/route typing. OrgRetentionSection compiles but is not mounted yet",
+   "W1 optional derive.test.ts case: not added",
+   "W1 flag registration in .plan-work/common/flags-and-config.md and the optional compose passthrough for MODEL_GATEWAY_SEARCH_PROVENANCE: left for the lead",
+   "S6 non-shared follow-ups: JudgeGoalTurnActivity and its registration, the internal judge route, the session-core verdict write, and the SPA wiring for thread-goal-client and ComposerTrays. EP-7-S6 stays partial; ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED must stay off",
+   "E4 needs_other_files: approval_cause.rs, http_routes checked_rule_proposal, the session-core rule key migration, and orchestration-client ruleText. EP-9-E4 stays partial",
+   "W2 lead-run proto gates (buf-lint-ratchet.py, buf breaking against baseline.binpb): not run, since they are outside the guard steps"
+  ],
+  "notes": "The batch compiles: the Rust workspace, the verevonv3 gateway, Go (org-core, capability-core, orchestrator-core, zdrrefusal, gen) and the frontend tsc6 (0 errors) all pass. No tests were run apart from the generation steps.\n\nLine endings: much of the worktree is CRLF on disk while the HEAD blobs are LF. git apply --3way writes LF, and git diff showed full-file rewrites for CRLF copies of LF blobs. So every modified tracked file whose HEAD blob is LF is now LF. In practice that means the 3 hand-merged reject files plus the 9 CRLF files I edited by script or with Edit: org-core main.go, service_auth.go, global.css, ZDR.md, zdr_refusal.rs, execution-core main.rs, model-gateway lib.rs, runtime_registries.rs, thread_goal_routes.rs. Per-slice diffs are now small (global.css +16, ZDR.md +1, runtime_registries.rs +1).\n\nPartial slices: EP-7-S6 and EP-9-E4 keep their switches off.\n\naction-registry.test.ts now expects 301.\n\nThe C1 retention settings section is built but not mounted in the settings navigation.\n\nThe zdr-posture-matrix is unchanged, so step 4b did not apply. No prompt-tool manifest regeneration was needed: no builder changed a prompt or tool definition."
+ }
+}

@@ -1,0 +1,428 @@
+{
+ "batchId": "W3-22",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-11-S5",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_cabf50e2-8e4-1",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.drafts.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_drafts_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server_skill_bundle_pin_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store_retention_test.go",
+    "apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.up.sql",
+    "apps/Model Plane/go/services/capability-core/migrations/0037_skill_bundle_retention.down.sql",
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+    "apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0110_agent_skill_drafts.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0110_agent_skill_drafts.down.sql",
+    "apps/Model Plane/rust/services/session-core/tests/skill_drafts.rs"
+   ],
+   "notes": "Code and tests are written, but none were run. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-22/EP-11-S5.patch (156788 bytes).\n\nSwitches: SKILL_DRAFT_PUBLISH and SKILL_BUNDLE_RETENTION, both on capability-core, both read strictly (only the literal \"true\" turns them on), both default off. With both off, every statement, route and body is as before. One exception: the bundle reads now also filter on `state`. That changes nothing while every row is live, which is always the case with retention off.\n\nWhat was built:\n- **Session-core migration 0110** adds `draft` (JSONB, NULL or an object), `draft_updated_at` and `draft_by` to `agent_skills`. It replaces 0109's revision snapshot with the same keys plus a `has_draft` boolean (never the draft text). Ships a revert file.\n- **Capability-core migration 0037** adds `skill_bundles.state` (live, draft, superseded). The old unique index on (org, skill) is swapped for a partial one on live rows under the SAME name. This matters because 0021 re-runs at every boot with CREATE UNIQUE INDEX IF NOT EXISTS: if the old full index came back while superseded rows exist, boot would fail. Also adds a one-draft-per-skill index and a unique (org, skill, manifest) index. Carries a contract marker and a down file.\n- **Drafts in `registry_apis.go`** (switch on):\n  - A PATCH of an accepted skill's text writes the draft. The draft starts from the live fields (session-core's version body function).\n  - New routes: POST `.../publish`, DELETE `.../draft`, POST `.../versions/{v}/restore`. All are owner-or-admin and answer with the typed error envelope.\n  - Publish lints the draft, then makes it live in one statement that clears it, so the trigger cuts the version. A name clash returns 409.\n  - Restore writes the old version's body into the draft only. The old bundle comes back only with retention on and only while the skill still holds it.\n  - Reads carry `draft`, `draft_updated_at` and `draft_by`; the list response carries `drafts_enabled: true`.\n  - With retention on, a skill delete removes all of its bundles (D2-382).\n- **Retention in `store.go`**:\n  - Put and Delete mark the old live bundle superseded instead of deleting it. Re-uploading bytes the skill already holds reuses that row.\n  - With drafts also on, an upload to an accepted skill becomes the draft's bundle.\n  - Garbage collection keeps superseded bundles named by a version or by the skill's draft.\n  - New helpers: `ManifestAt`, `PublishDraftBundle`, `DiscardDraftBundle`, `DeleteSkillBundles`, `HeldManifest`.\n- **Pinned bundle reads**:\n  - `server.go` honours the new `manifest_sha256` request field only while retention is on, and refuses a value that is not a hex digest.\n  - `capabilities.proto`: `GetSkillBundleManifestRequest` gains `manifest_sha256 = 2` (additive, commented).\n  - execution-core asks for the exact bundle the gateway named.\n  - In the gateway, `skill_file` reads the pinned version's bundle when the skill changed since the run pinned it (only while MODEL_GATEWAY_SKILL_PINS is on). If that bundle is no longer kept, the tool says so rather than returning the live files.\n- **BFF**: three pass-through routes with `update_skill`'s authority.\n- **Frontend**: four new action contracts (`skills.draft.save`, `skills.publish`, `skills.draft.discard`, `skills.version.restore`); a Draft badge with Publish and Discard draft; \"Restore as draft\" in the history drawer, shown only when the listing says drafts are on.\n\nTests written:\n- Go: `TestPatchWritesDraftWhenOn`, `TestPublishCutsOneVersion`, `TestRestoreWritesDraftNotLive`, `TestPublishRequiresOwnerOrAdmin`, `TestBundleSupersededNotDeleted`, `TestSkillDeleteRemovesBundles`, `TestRetainedGCKeepsBundlesNamedByVersions`, plus tests that the routes are absent with the switch off and a server test for the pinned read.\n- Session-core: two source tests, plus the ignored DB tests `draft_edit_cuts_no_version` and `publish_from_capability_core_sql_cuts_version_with_actor`.\n- Gateway: `skill_file_reads_pinned_bundle`. Execution-core: a test that the named bundle is the one requested. BFF: three tests. Frontend: a new drafts test file, and the action count moved 310 to 314.\n\nMigration numbers differ from the reservations. Session-core uses 0110, not round B's 0097: 0097 would sort before 0108/0109, and 0109 would then put back its own snapshot function. Capability-core uses 0037, not 0034: 0034 is already `browser_console_tool`, 0035 is EP-5's reservation and 0036 is taken.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: after `.route(\"/v1/skills/:id/versions\", get(list_skill_versions_proxy))` add `.route(\"/v1/skills/:id/publish\", post(publish_skill_proxy))`, `.route(\"/v1/skills/:id/draft\", delete(discard_skill_draft_proxy))` and `.route(\"/v1/skills/:id/versions/:version/restore\", post(restore_skill_version_proxy))` (use the routing fn names already imported in that file). After `delete_skill_proxy` add three handlers in its shape (State, Extension<Claims>, VerifiedCapabilityBearer, Path): `publish_skill_proxy` -> `proxy_to_capability_core(&s, &c, &bearer, &format!(\"skills/{id}/publish\"), \"POST\", None)`; `discard_skill_draft_proxy` -> `&format!(\"skills/{id}/draft\")`, \"DELETE\", None; `restore_skill_version_proxy` with `Path((id, version)): Path<(String, u32)>` -> `&format!(\"skills/{id}/versions/{version}/restore\")`, \"POST\", None. Doc comment: EP-11 S5, capability-core answers 404 while SKILL_DRAFT_PUBLISH is off.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs (~line 283): in the `GetSkillBundleManifestRequest { skill_id: skill_id.to_owned(), }` literal add `manifest_sha256: String::new(),` after `skill_id`. Without it the crate does not compile once the proto is regenerated.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go (~line 501-502): after `WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv))` add `.WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))`. This is the gRPC server wiring; the HTTP handlers read the switch themselves.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after line `'skills.versions.list': exempt('no_owner_executor', 'read'),` add `'skills.draft.save': exempt('agent_cannot_self_govern', 'context_write'),`, `'skills.publish': exempt('agent_cannot_self_govern', 'context_write'),`, `'skills.draft.discard': exempt('agent_cannot_self_govern', 'context_write'),` and `'skills.version.restore': exempt('agent_cannot_self_govern', 'context_write'),`. MODEL_ACCESS is a Record<ActionId,...>, so typecheck fails without them.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml capability-core environment (beside `AUTHORED_KINDS_ENABLED: ${AUTHORED_KINDS_ENABLED:-false}`, ~line 2194): add a comment `# EP-11 S5: edits of accepted skills go through a draft (publish/discard/restore routes). Needs session-core 0110. Only the literal true enables.` with `SKILL_DRAFT_PUBLISH: ${SKILL_DRAFT_PUBLISH:-false}`, and a comment `# EP-11 S5: keep replaced skill bundles per version. Keep off until D2-379/D2-383 (bundle read authz) are fixed. Needs session-core 0108+0110 and capability-core 0037.` with `SKILL_BUNDLE_RETENTION: ${SKILL_BUNDLE_RETENTION:-false}`.",
+    "regenerate: buf generate (capabilities.proto GetSkillBundleManifestRequest.manifest_sha256 = 2; server.go reads req.ManifestSha256), buf lint, buf breaking; the agent-action-admission golden (4 new actions); the prompt-tool manifest if it lists actions.",
+    "renumbering: session-core migration 0110_agent_skill_drafts (round B reserved 0097) and capability-core 0037_skill_bundle_retention (round B reserved 0034, now taken by browser_console_tool; 0035 is EP-5, 0036 is taken). EP-11-S9 in this same batch (reserved 0099) must take 0111 or later, not 0110. Update round B's table and EP-11 design section S5 to match.",
+    "action-registry.test.ts count: set to 310 + 4 = 314 here; merge with any other batch-W3-22 count bump (add the deltas)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SKILL_BUNDLE_RETENTION keeps superseded bundles readable through GetSkillBlob/ManifestAt, which any org member can reach today (D2-379/D2-383), so it must stay off until those are fixed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Retention garbage collection keeps a superseded bundle only when some agent_skill_versions.bundle_sha256 names it, and that column is stamped only while SKILL_VERSIONS_API is on, so turning on SKILL_BUNDLE_RETENTION without SKILL_VERSIONS_API retains nothing."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Draft bundles need both SKILL_BUNDLE_RETENTION and SKILL_DRAFT_PUBLISH; with drafts on and retention off, a bundle upload still goes live at once and publish ignores the draft's bundle_sha256."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "PATCH under drafts lints the live row with the patch laid over it, not the existing draft; publish re-lints the draft, so enforce still holds, but a report-mode finding on PATCH can describe the wrong base text."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "skill_file compares the run's pin digest with the gateway skill cache (TTL up to 60 s), so for up to one TTL after a publish a pinned run can read the new live bundle before the cache shows the change."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The gateway's /skills mounts (skill_mounts_for_turn) still name the live bundle from ListSkillBundles at turn start, not the pinned version's bundle_sha256; this is correct within one turn, but a resumed Do run would mount the current bundle."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not run: edit a live skill under SKILL_DRAFT_PUBLISH (turns keep v2), publish (v3 pinned next turn), restore v1 as draft and publish (v4 with v1's body digest), re-upload a bundle with retention on and read the old file through skill_file from a run pinned before; plus apply-and-revert of session-core 0110 and capability-core 0037 on PG16 and a boot re-run of 0021 after 0037 with superseded rows present."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There are no capability-core integration tests (testcontainers) for putRetained, PublishDraftBundle or the GC against a real agent_skill_versions table (TestGCKeepsBlobsOfPinnedVersions in the design); the unit tests check statements only."
+    }
+   ],
+   "deviations": [
+    "Migration numbers: session-core 0110 instead of 0097 (0097 would apply before 0108/0109, which replace the same functions); capability-core 0037 instead of 0034 (0034 is taken in the tree, 0035 is reserved for EP-5, 0036 is taken).",
+    "The design's 'drop skill_bundles_org_skill_uq' became a same-name swap to the partial index, because capability-core re-runs 0021 at every boot and would otherwise rebuild the full unique index and fail on retained rows.",
+    "Added DELETE /api/v1/skills/{id}/draft (Discard draft) and a drafts_enabled flag on the skills list, so the frontend shows draft controls only while the server has drafts on; the design named the button but no route.",
+    "skill_file returns status not_available (instead of the live files) when the pinned version's bundle is not kept, including when capability-core answers with a different live manifest."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S9",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_cabf50e2-8e4-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0111_agent_skills_space_scope.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0111_agent_skills_space_scope.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope_test.go",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.test.tsx"
+   ],
+   "notes": "I wrote the code and unit tests for the slice. Per the code-first rule, nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-22/EP-11-S9.patch (79 KB). With D7 at its default, the org half works behind its switch, and the Space half is built but refuses every Space write.\n\n- **Migration 0111** (renumbered from 0099, reason under deviations): extends `agent_skills_scope_chk` to org/user/space, adds CHECK `(scope='space') = (scope_id<>'')`, adds CHECK that a Space row has no owner (`owner_user_id=''`), and adds a partial index. Revert file included.\n- **sessions.proto**: `ListAgentSkillsRequest.thread_id=5` and `ListAgentSkillsResponse.space_id=2`, both commented.\n- **session-core list_agent_skills**: while `SKILL_SPACE_SCOPE` is on (strict parse via `loop_fold::switch_from`), session-core looks up the Space of the caller's own thread (same org, caller owns it, `space_id` set). It returns that Space's rows plus the resolved `space_id`. Space rows are explicitly excluded from the owner branch, because a service caller with an empty user would otherwise match a Space row's empty owner.\n- **model-gateway skills.rs**:\n  - `SKILL_EXT_POLICY_ENFORCED` (only `true` enables) applies `ext.skills` inside `skill_usable`. It covers list, get, match, picks, `skill_file` and `usable_skill_named`, and permits everything when off.\n  - `none` leaves first-party skills only, `approved_only` keeps org and first-party skills, `any` is today's behaviour.\n  - When no policy is held for the org, it fails closed to `none`.\n  - Space skills sit on a separate shelf keyed (org, space), never in `inner` or the ownership store. A thread reaches that shelf only after session-core has resolved the thread to that Space.\n- **sse.rs fetch_skill_context**: takes `thread_id`. Only when the gateway's `SKILL_SPACE_SCOPE` is on does it send the thread and merge Space picks and matches; org and Space matches compete on one score, capped at `MAX_INJECTED_SKILLS`.\n- **capability-core**: with the scope on, a POST of `scope=space` returns 403 `space_skill_decision_required` (typed envelope). Off, it stays 422 \"invalid skill scope\". PATCH/DELETE of a Space row is refused under the row lock even for an admin, because no Control decision kind exists.\n- **FE**: new `SkillLibrary` component with Mine / Shared with me / Space / Organisation / Verevon tabs and an admin \"Publish to organisation\" button that uses the existing promotion copy. It is not mounted yet (see lead_todo).\n- **Tests written**:\n  - session-core: `space_skill_needs_scope_id`, `space_skill_not_listed_outside_its_space`, `space_skill_not_listed_for_non_member_thread` (PG, ignored), plus two source/switch tests.\n  - model-gateway: `ext_skills_approved_only_skips_user_skills`, `ext_skills_policy_unreadable_fails_closed`, `space_bucket_never_leaks_into_org_bucket`, plus switch-off and `none` tests.\n  - capability-core: `TestSpaceSkillWriteNeedsDecision` and a strict-switch test.\n  - FE: `SkillLibrary.test.tsx`.",
+   "deviations": [
+    "The migration is numbered 0111, not 0099. 0099 would run before 0109, which adds `scope_id`, so a fresh database would fail; 0110 is left free for EP-11 S5's 0097, which has the same problem.",
+    "Field 5 of `ListAgentSkillsRequest` is named `thread_id` instead of the reserved name `space_id`. That way the Space is always resolved on the server and never taken from the request. I also added `ListAgentSkillsResponse.space_id = 2` (not reserved; next free) so the gateway can key the Space shelf by a Space id it did not get from the client.",
+    "I did not flip the `ext.skills` schema row to `enforced` in `org-agent-policy-schema.json`. Flipping it would let capability-core store `none` or `approved_only` while the gateway switch is off, and that value would be stored but silently ignored. The flip belongs with S10's switch-on, together with mp-contracts `SETTINGS`, capability-core's table, the `.sha256` file and the FE.",
+    "The Space half is built but cannot be used. Every Space write is refused with `space_skill_decision_required` until Control defines a 'Space skill write' decision kind (D7 default).",
+    "I did not mount `SkillLibrary` in `CustomizeHub` because that file is not mine; the mount is in lead_todo."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs: in struct OrgPolicy, after `pub web: WebCaps,` add `    /// The org's `ext.skills` token (EP-11 S9): `none`, `approved_only` or `any`, or the schema's fail-closed `none` for a value this build cannot read. Read by `skills::held_ext_skills` only while SKILL_EXT_POLICY_ENFORCED is on.\\n    pub ext_skills: String,`; in OrgPolicy::from_settings, after the `web: WebCaps { ... },` initializer add `            ext_skills: token(\"ext.skills\"),` (skills.rs does not compile without this).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs (~line 2072, ListAgentSkillsRequest literal): after `kinds: Vec::new(),` add `thread_id: String::new(),`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (~line 4710, ListAgentSkillsRequest literal): after `kinds: Vec::new(),` add `thread_id: String::new(),`",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (~line 2485, ListAgentSkillsRequest literal): after `kinds: Vec::new(),` add `thread_id: String::new(),`; and (~line 12908, test mock ListAgentSkillsResponse literal) after `skills: self.rec.lock().unwrap().agent_skills.clone(),` add `space_id: String::new(),`",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (~line 3792, ListAgentSkillsRequest literal): after `kinds: Vec::new(),` add `thread_id: String::new(),`",
+    "Run grep once more for every `ListAgentSkillsRequest {` and `ListAgentSkillsResponse {` literal across apps/Model Plane after the merge; other slices may have added new ones.",
+    "Regenerate proto bindings for sessions.proto (buf generate; Go gen under go/gen), then run buf lint and buf breaking.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `      SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}` to session-core (beside SKILL_VERSIONS_API ~line 1218), to capability-core (beside AUTHORED_KINDS_ENABLED ~line 2194) and to model-gateway (beside MODEL_GATEWAY_SKILL_PINS ~line 358); and add `      SKILL_EXT_POLICY_ENFORCED: ${SKILL_EXT_POLICY_ENFORCED:-false}` to model-gateway, each with a comment line: '# EP-11 S9: only the literal `true` turns it on; SKILL_EXT_POLICY_ENFORCED needs ORG_AGENT_POLICY_MODE=enforce or every authored skill is withheld (fail closed).'",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx: import `{ SkillLibrary } from '@/features/skills/components/SkillLibrary'` and `Show` from solid-js; add `const skillLibraryEnabled = () => import.meta.env.VITE_SKILL_LIBRARY === 'true'`; render `<Show when={skillLibraryEnabled()}><SkillLibrary /></Show>` right after `<SkillsSection />` (the owner adds VITE_SKILL_LIBRARY to env examples).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): 'EP-11 S9: Space skills are one scope of agent_skills (scope_id names the Space, no owner); listed only for the caller's own thread resolved server-side; writes need a Control-signed Space skill-write decision (D7), refused until Control defines one; ext.skills enforced at the gateway behind SKILL_EXT_POLICY_ENFORCED, fail closed to none.'",
+    "S10: flip ext.skills to enforced together in api/contracts/org-agent-policy-schema.json, rust/crates/mp-contracts/src/org_agent_policy.rs SETTINGS (Status::Enforced), capability-core internal/api/org_agent_policy.go, the regenerated .sha256 and any FE copy, at the same time as SKILL_EXT_POLICY_ENFORCED is switched on.",
+    "DB proof: apply and revert 0111 once on PG16 and run the three ignored space_skill_* tests through session-core-db-tests.sh."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx",
+    "apps/Model Plane/rust/services/session-core/src/skill_versions.rs"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core skill_versions.rs VISIBLE_SKILL_SQL matches `owner_user_id = $3`, so a service reader with an empty user id would see a Space row's history (Space rows have owner ''); it needs `scope <> 'space'` in its owner branch before SKILL_SPACE_SCOPE is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ext.skills is enforced only at the gateway; execution-core's Do-loop skill read (runtime_loop/agent.rs ListAgentSkills) and its skill status read (runtime_loop/mod.rs) ignore it, so an org set to approved_only still gets a member's private skills in Do runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SKILL_EXT_POLICY_ENFORCED reads the org policy cache that admit_turn fills only when ORG_AGENT_POLICY_MODE=enforce; with the policy mode off or shadow, turning it on withholds every authored skill (fail closed by design), so the two switches must be turned on together."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Space skills are listed only for a thread the caller owns; a Space member speaking in another member's Space thread gets no Space skills, and membership revocation is not re-checked per turn (only the thread's Control-signed creation decision stands), until Control supplies a per-turn Space read decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The Space write half needs a Control decision kind 'Space skill write' plus a capability-core verifier; until then every Space POST/PATCH/DELETE answers 403 space_skill_decision_required and no Space row can exist outside a hand-written DB row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "reattach_skill and skill_file (usable_skill_named) resolve only the org catalogue, so a matched Space skill cannot be recovered or have its bundle read mid-run; chat_turn_registry ratings never credit Space skills."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Operator-pushed (gRPC UpsertSkill) and disk-loaded skills count as first-party and are never narrowed by ext.skills, because ext_skills_permits keys on the session-core source prefix."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "SkillStore.thread_spaces grows one entry per (org, caller, thread) with no eviction, like the existing `loaded` map; it needs a sweep before Space threads are heavy."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof outstanding: two Spaces with one Space skill each (seeded by SQL, since writes are refused), a turn in Space A injects only A's, a personal thread injects neither, and ext.skills approved_only removes a member's private skill from injection (after the S10 schema flip)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S9",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_cabf50e2-8e4-3",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Code and tests are written. Nothing was run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-22/EP-4-S9.patch (60306 bytes). All files are LF.\n\n- **mcp-app-bridge.ts:** pure host for the MCP Apps 2026-01-26 extension. Method names were checked against the spec and kept in one table, `MCP_APP_METHODS`. It reuses widget-bridge's source/origin check, 8 KiB cap, height clamp, size budget and answer budget.\n  - `ui/initialize` answers with hostInfo, `hostCapabilities {openLinks}` only, and hostContext (theme, locale, inline).\n  - tool-input and tool-result are sent once, and only after `ui/notifications/initialized`.\n  - `ui/open-link` goes through `isSafeLinkHref`. `ui/message` becomes a staged chip: 1 at a time, the answer's 5/min budget, 500 chars.\n  - `tools/call` gets -32601 `app_call_requires_chat`. Any other request gets -32601 `method_not_found`. Notifications are never answered.\n  - Also adds `parseMcpToolName`, which mirrors execution-core's parse.\n- **McpAppFrame.tsx:**\n  - `McpAppFrame` reads through `getMcpAppResource`, or an injected loader. It labels the frame \"App fra <server>\", shows the needs_network notice, and uses `sandboxWidgetDocument` with `WIDGET_SANDBOX`. A null or failed read draws nothing.\n  - `McpAppsForAnswer` acts only on the live InlineWidgetSurface. It skips temporary chats, streaming turns and calls that are unsettled, errored or have no output. It looks up at most 4 distinct tools per answer, reading each once (the lookup and the frame share the read). The first 2 apps open on their own; later ones wait behind \"Vis app\".\n- **Switch:** `mcpAppsEnabled` needs `VITE_MCP_APPS`, `VITE_CHAT_INLINE_WIDGETS` and `VITE_CHAT_WIDGET_BRIDGE`, each the literal 'true'.\n- **ChatMessages.tsx:** one import and one `<Show>` inside InlineWidgetSurface, after the answer. With the switch off nothing mounts, so the render is unchanged.\n- **chat-client.ts:** `getMcpAppResource`. A 404 or 403 reads as null, and a document that is not `ui://` is ignored.\n- **action-registry.ts:** `chat.open_mcp_app` and `chat.stage_mcp_app_message`, both risk low, ownerPlane model (the widget-bridge precedent), not model-executable. The registry count goes from 310 to 312.\n\nRisk check from the slice row: in code, the stream (`applyToolResult`) and the reload merge (`metadataArray(serverTurn.toolCalls, cached)`) keep `name` and `output`, and settled status is 'done'. Whether a Do run's MCP calls come back with the namespaced name after reload is only provable live.",
+   "deviations": [
+    "The frame gets no BRIDGE_SHIM (the design said 'sandboxWidgetDocument with the shim'). An MCP App brings its own client that posts JSON-RPC to parent; the widget shim's `{v:1}` envelope would be dead code there.",
+    "The design's `ui/size` is `ui/notifications/size-changed` in the 2026-01-26 spec; the spec name is used.",
+    "The apps of one answer share their own 5-per-minute message budget, separate from the budget that answer's inline widgets share.",
+    "Each answer keeps a promise map so one read per tool serves both the lookup and the frame. The HTML still lives only as long as the answer's components, and nothing is persisted."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: directly after the line `  'chat.open_widget_link': exempt('ui_state_only', 'read'),` add `  'chat.open_mcp_app': exempt('ui_state_only', 'read'),` and `  'chat.stage_mcp_app_message': exempt('ui_state_only', 'read'),`",
+    "Guard: regenerate the agent-action-admission golden (src/shared/api/contracts/agent-action-admission.json) for the two new action ids",
+    "Guard: run vitest on mcp-app-bridge.test.ts, McpAppFrame.test.tsx, ChatMessages.mcp-app.test.tsx, chat-client.test.ts and action-registry.test.ts, plus pnpm lint and tsc6 -p tsconfig.app.json"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not yet shown live: Do-run MCP calls on a reloaded thread reach ChatToolCall with name mcp__<server>__<tool>, a string output and status 'done'; an app draws only then."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The frame label shows the server id (a ULID), not the server's display name: the resource route returns no label, so 'App fra <server>' is not readable to a person."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An app's tool-result is the transcript's output string (a JSON CallToolResult is passed through, anything else becomes one text block), so structuredContent reaches the app only if the stored output keeps it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "app_call_requires_chat uses JSON-RPC code -32601, as the design says, with data.reason; S10 may want a server-error code (-32000 range) once calls can be allowed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The app's theme is read once from the computed color-scheme, and host-context-changed is never sent, so a theme switch shows only after a redraw."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_cabf50e2-8e4-4",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/auth.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs"
+   ],
+   "notes": "The slice is built behind SESSION_CORE_API_KEY_PRINCIPAL. The switch is off by default and read with mp_contracts::loop_fold::switch_from. Nothing was compiled or run (code-first). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-22/EP-12-S4.patch (46,513 bytes). All three files are LF, not CRLF as the notes said, and they stay LF.\n\nWhat changed in auth.rs:\n- New PrincipalKind::ApiKey. validate_identity(claims, accept_api_key) gets an \"api_key\" arm that uses the gateway's and inference-core's exact shape rules. It also refuses three things: a persistent key token of a ZDR org, a waiver on a key token, and a key_id on any other token type while the switch is on. key_id and acting_user_id are decoded as raw serde Values, so with the switch off every token decodes exactly as before.\n- The identity of a key has user_id None, principal_id apikey:<key_id> and acting_user_id kept for attribution only. New accessors: is_api_key, api_key_id, acting_user_id, and owner_id (the person for a user, the key principal for a key, None for a service).\n- authorize_user now compares against owner_id, which is byte-identical for users and services. authorize_owner_row refuses a key on any row it does not own, including the org-wide read of system-owned rows.\n- Enforcement happens in JwtVerifier::intercept. tonic does not give interceptors the call's URI, so a new RpcPathStamp<S> wrapper puts the gRPC path into the request extensions. Only SessionCore and RunService are wrapped. On any unwrapped service the path is absent and a key is refused.\n- The closed list API_KEY_METHODS: SessionCore CreateThread, AppendMessage, StartRun and ListConversation; RunService GetRun, ListRuns and CancelRun.\n- Every other method answers permission_denied, and so does a key token without the agent:runs scope. A ZDR key gets zdr_feature_not_supported with feature agent_api (FailedPrecondition) on the four write methods.\n- No terminal RPC is listed: model-gateway terminalizes runs with its own service token (session_flow.rs service_request), not the caller's bearer.\n- A key can neither give nor be a Data Plane delegation.\n\nWhat changed in grpc.rs:\n- create_thread and start_run use caller.owner_id(), so a key owns its own threads and runs.\n- start_run calls the new start_run_inner_stamped(..., ApiKeyStamp::of(&caller)). start_run_inner keeps its signature and passes None, so retention_receipt.rs is not touched.\n- Appending to a key-owned thread extracts no memory candidates.\n- The serve() builder wraps the SessionCore and RunService servers in RpcPathStamp.\n\nWhat changed in run_origin_stamp.rs: origin_at_birth(user_id, inherited, api_key). A key's run is stamped origin \"api\" plus api_key_id and api_key_owner. An inherited token still wins as the origin, and a key's run keeps the attribution fields either way.\n\nTests written but not run:\n- auth.rs: api_key_shape_is_exact, api_key_refused_when_switch_off, api_key_principal_parser_takes_only_literal_true, api_key_method_allow_list_is_closed (reads every .proto under apps/Model Plane/proto at test time), api_key_never_carries_a_waiver, zdr_api_key_write_is_refused, api_key_owns_only_its_own_rows, rpc_path_stamp_hands_the_path_to_the_interceptor.\n- run_origin_stamp.rs: api_key_run_is_stamped_api_with_attribution.\n\nI added no posture-matrix row: an api_key ZDR row would have the same resolver inputs as e_zdr_default_route and fail \"rows must differ\".",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block, directly after the line `      SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}`, insert `      # EP-12 S4: admit the api_key principal on its closed method list. Only the literal true.` and `      SESSION_CORE_API_KEY_PRINCIPAL: ${SESSION_CORE_API_KEY_PRINCIPAL:-false}`",
+    "shared-edit apps/Model Plane/docs/ZDR.md: add one refusal row: \"EP-12 S4 session-core api_key principal: a ZDR api_key token is refused on CreateThread, AppendMessage, StartRun and CancelRun with zdr_feature_not_supported (feature agent_api), before any handler runs; reads are served (nothing is stored for a ZDR key); a key never carries a waiver; key-owned threads/runs live in the existing threads/runs tables (user_id = apikey:<key_id>) and are erased by the org purge (gdpr.rs).\"",
+    "Do NOT add e_zdr_api_key_token_session_write_refused to zdr-posture-matrix.json: its resolver inputs (zdr true, org_zdr true, default route) duplicate e_zdr_default_route and would fail zdr-contract-schema 'rows must differ'; the refusal is pinned by auth::tests::zdr_api_key_write_is_refused instead.",
+    "Guard: run `cargo fmt -p session-core` if `cargo fmt --all -- --check` flags the new blocks in auth.rs/grpc.rs/run_origin_stamp.rs (hand-formatted, not run), then `cargo test -q -p session-core auth::tests` and `cargo test -q -p session-core run_origin_stamp` (session-core is a bin crate; there is no lib.rs, so `--lib` may not apply)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Background dreaming (dreaming::load_pending_messages) is not taught about key-owned threads; the append path now extracts no candidates for a thread whose user_id starts with apikey:, but the background extractor must be checked to skip those threads before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run's RunDetail park reason is hidden from a key (run_service_grpc.rs may_read_park_reason compares viewer.user_id(), which is None for a key); harmless (it fails closed) but S5 should switch it to owner_id if the Agent API needs it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The allow-list omits ResolveRunOwner, StartManagedRun and every terminal RPC (gateway terminalizes with its own service token); S5/S7 must add any further RPC they call with the key bearer to API_KEY_METHODS explicitly."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The DB tests api_key_owner_reads_only_its_own_thread and person_cannot_read_a_key_thread were not written; ownership is covered by unit tests on authorize_owner_row, and a DB-harness test through CreateThread/StartRun/GetRun with a key identity is still owed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "With SESSION_CORE_API_KEY_PRINCIPAL=true, prove a key token creates a thread, starts a run stamped {origin:api, api_key_id, api_key_owner}, reads it back, and is refused PermissionDenied on ListThreads, memory, approval and Space RPCs (RpcPathStamp only wraps SessionCore and RunService)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "A key's user turns are stored with an empty author_subject_id (append_message passes caller.user_id(), which is None for a key); acceptable since a key is not a human author, but it could carry the key principal if attribution on messages is wanted."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn (EP-11-S5, EP-11-S9, EP-4-S9, EP-12-S4)",
+    "outcome": "all four applied; one conflict in action-registry.test.ts (count bump), resolved to 316 keeping both comments; git reset -q done; nothing staged, no unmerged entries",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml + copy + go-gen-drift.sh",
+    "outcome": "capabilities.pb.go and sessions.pb.go copied; go-gen-drift: 54 generated Go files match",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml",
+    "outcome": "capabilities_pb2.py and sessions_pb2.py bodies updated in mp-events-py, keeping the tree's version header and line endings",
+    "clean": true
+   },
+   {
+    "command": "buf lint --error-format json",
+    "outcome": "1632 lines, the same as the W3-21 baseline, so no new findings (written to .plan-work/buf-lint-w322.json)",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against .git#subdir=apps/Model Plane/proto",
+    "outcome": "no breaking changes reported",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run admission-contract.test.ts",
+    "outcome": "5 passed; golden regenerated (+78 lines, 6 new actions); copied to the 4 vendored copies; sha256 and zdr-contract-sync pin updated to 12f0cb85...",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (Model Plane rust)",
+    "outcome": "Finished, 0 errors; 18 warnings, all in files this batch did not touch",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished, 0 errors; warnings only in files this batch did not touch",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (capability-core)",
+    "outcome": "the first build failed (store.go:568 appendAudit takes pgx.Tx); vet then found typedErrorCode declared twice; both fixed, now clean",
+    "clean": true
+   },
+   {
+    "command": "tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "2 batch errors fixed (SkillLibrary.tsx:159 aria-selected, mcp-app-bridge.test.ts:59 cast); now 0 errors",
+    "clean": true
+   },
+   {
+    "command": "rustfmt --check on the shared-edit Rust files",
+    "outcome": "one long line in my discard_skill_draft_proxy reformatted by hand; the file's other rustfmt drift was already there",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-11-S5 + EP-4-S9",
+    "what": "Merge conflict: one count of 316 (310+4+2) with both slices' comment lines"
+   },
+   {
+    "file": "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go",
+    "slice": "EP-11-S5",
+    "what": "appendAudit's tx parameter changed from pgx.Tx to Execer. It only calls Exec, pgx.Tx still satisfies Execer, and PublishDraftBundle passes an Execer"
+   },
+   {
+    "file": "apps/Model Plane/go/services/capability-core/internal/api/skills_drafts_test.go",
+    "slice": "EP-11-S5",
+    "what": "Removed the duplicate typedErrorCode helper; the identical one in skills_kinds_test.go is used instead"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.tsx",
+    "slice": "EP-11-S9",
+    "what": "aria-selected now takes the string 'true'/'false', the repo idiom; this fixes TS2322"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+    "slice": "EP-4-S9",
+    "what": "The cast goes through unknown (TS2352)"
+   }
+  ],
+  "still_broken": [],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/capabilities_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (+ copies in apps/Model Plane/api/contracts, capability-core internal/api/testdata, execution-core tests/fixtures, model-gateway tests/fixtures)",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256 (12f0cb850297c69d30b1ceed0302dc183335e3c450a966b3191ab3066125d158)",
+   "scripts/tests/zdr-contract-sync.test.sh (agent-action-admission digest pin)"
+  ],
+  "shared_edits_applied": [
+   "model-gateway/src/http_routes.rs: publish, draft (DELETE) and versions/:version/restore routes plus 3 proxy handlers (EP-11-S5)",
+   "model-gateway/src/deck_templates.rs: manifest_sha256: String::new() in GetSkillBundleManifestRequest (CRLF kept) (EP-11-S5)",
+   "capability-core/cmd/main.go: .WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv)) (EP-11-S5)",
+   "verevonv3 src/shared/actions/model-access.ts: 4 skills.* entries (EP-11-S5) and chat.open_mcp_app + chat.stage_mcp_app_message (EP-4-S9)",
+   "deploy/docker-compose.yml: SKILL_DRAFT_PUBLISH and SKILL_BUNDLE_RETENTION on capability-core (EP-11-S5); SKILL_SPACE_SCOPE on session-core, capability-core and model-gateway, plus SKILL_EXT_POLICY_ENFORCED on model-gateway (EP-11-S9); SESSION_CORE_API_KEY_PRINCIPAL on session-core (EP-12-S4); all default false, each with a comment",
+   "model-gateway/src/org_agent_policy.rs: OrgPolicy.ext_skills field and its initializer token(\"ext.skills\") (EP-11-S9)",
+   "thread_id: String::new() added to the ListAgentSkillsRequest literals in model-gateway grpc.rs, tool_loop.rs, execution-core runtime_loop/agent.rs and mod.rs; space_id: String::new() added to the agent.rs test mock ListAgentSkillsResponse (EP-11-S9). The workspace cargo check found no other literals",
+   "verevonv3 src/features/customize/CustomizeHub.tsx: SkillLibrary behind VITE_SKILL_LIBRARY === 'true', rendered after SkillsSection (EP-11-S9)",
+   "apps/Model Plane/docs/ZDR.md: EP-12 S4 api_key principal refusal row, placed after the /learn row (EP-12-S4)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md EP-11 S9 entry (the lead books it)",
+   "EP-11-S5 renumbering bookkeeping: round B table and EP-11 design section S5 docs (the lead books these; files are already 0110/0037, and S9 took 0111)",
+   "EP-11-S9 S10 flip of ext.skills to enforced (a future step, not this batch)",
+   "DB proof of 0111 apply/revert and the ignored space_skill_* tests (no docker or tests in the guard)",
+   "EP-12-S4: no zdr-posture-matrix row added, as the builder instructed",
+   "Prompt-tool manifest and SSE golden were not regenerated: no tool definition or SSE event payload changed"
+  ],
+  "notes": "The batch compiles. The Model Plane Rust workspace, the verevonv3 gateway, capability-core (go build and go vet) and tsc6 tsconfig.app.json are all clean. tsc reported 0 errors; the expected 1 pre-existing schedule-contract error did not appear, which suggests it was fixed earlier. Vendored proto and golden copies are regenerated. No tests were run, per the guard rules. Builders' test files were not executed, including vitest on the EP-4-S9 files, cargo test session-core auth and run_origin_stamp, and the Go draft and retention tests. The lead should run these."
+ }
+}

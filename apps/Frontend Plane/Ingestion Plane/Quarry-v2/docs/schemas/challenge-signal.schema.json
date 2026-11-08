@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ChallengeSignal",
+  "type": "object",
+  "properties": {
+    "block_reason": {
+      "description": "Set on a strong signal only.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BlockReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "format": "float"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "kind": {
+      "$ref": "#/$defs/ChallengeKind"
+    },
+    "recovery": {
+      "$ref": "#/$defs/ChallengeRecovery",
+      "default": "not_applicable"
+    },
+    "requires_escalation": {
+      "description": "Explicitly tells the planner that automatic bypass is forbidden. False\nfor `Weak` and `NonSignal`: a login page, a cookie banner or a rate\nlimit is not a reason to hand the run to a person.",
+      "type": "boolean",
+      "default": true
+    },
+    "strength": {
+      "$ref": "#/$defs/ChallengeStrength",
+      "default": "strong"
+    }
+  },
+  "required": [
+    "kind",
+    "confidence"
+  ],
+  "$defs": {
+    "BlockReason": {
+      "description": "Why a strong signal is strong. A closed set: a new marker family is a new\nvariant, never a free-text reason.",
+      "oneOf": [
+        {
+          "description": "A CAPTCHA or proof-of-humanity widget gates the page.",
+          "type": "string",
+          "const": "captcha_widget"
+        },
+        {
+          "description": "A WAF or CDN interstitial stands in place of the page.",
+          "type": "string",
+          "const": "waf_interstitial"
+        },
+        {
+          "description": "The same host showed a strong signal again after the one allowed\nrecovery (a wait or a reload) was spent.",
+          "type": "string",
+          "const": "challenge_loop"
+        },
+        {
+          "description": "Two independent markers say the host took the client for a bot.",
+          "type": "string",
+          "const": "unexpected_bot_error"
+        }
+      ]
+    },
+    "ChallengeKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "captcha",
+            "waf",
+            "login",
+            "consent",
+            "rate_limit",
+            "access_denied",
+            "unknown"
+          ]
+        },
+        {
+          "description": "A paywall or subscription gate. Informational: it is not a bot verdict.",
+          "type": "string",
+          "const": "paywall"
+        },
+        {
+          "description": "A regional or legal restriction (HTTP 451, \"not available in your\ncountry\"). Informational: it is not a bot verdict.",
+          "type": "string",
+          "const": "geo_blocked"
+        }
+      ]
+    },
+    "ChallengeRecovery": {
+      "description": "Whether the single recovery the planner gets is still there.",
+      "oneOf": [
+        {
+          "description": "One wait or one reload of the same URL is still allowed on this host.",
+          "type": "string",
+          "const": "available"
+        },
+        {
+          "description": "The recovery was spent and the host still challenges. Quarry refuses\nfurther navigation and interaction on it.",
+          "type": "string",
+          "const": "exhausted"
+        },
+        {
+          "description": "Not a strong signal, so there is nothing to recover from.",
+          "type": "string",
+          "const": "not_applicable"
+        }
+      ]
+    },
+    "ChallengeStrength": {
+      "description": "How much weight a challenge signal carries. Only `Strong` is a verdict\nthat a bot wall stands in front of the page; `Weak` is a hint worth a look\nat the screenshot, and `NonSignal` names an ordinary access state (a login\nform, a cookie banner, a paywall, a rate limit, a bare status) so a planner\ndoes not mistake it for one.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "weak",
+            "non_signal"
+          ]
+        },
+        {
+          "description": "A signal from before the taxonomy existed has no strength field, and it\nasked for escalation, so it reads as strong.",
+          "type": "string",
+          "const": "strong"
+        }
+      ]
+    }
+  }
+}

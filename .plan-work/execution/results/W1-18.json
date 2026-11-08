@@ -1,0 +1,927 @@
+{
+ "batchId": "W1-18",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS03-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core loop_checkpoint",
+     "outcome": "31 passed, 32 ignored (DB), 0 failed; includes the new pure tests for the crash-park refusal table, the budget mirror, the park fold shape, the thread stamp and the two-switch rule"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "586 passed, 208 ignored (DB), 0 failed"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core recover_parks",
+     "outcome": "compiles; 5 DB tests, all ignored (need DATABASE_URL, lead runs the harness); NOT run, so the SQL in park_crashed, the claim re-check and the heartbeat push is unproven against Postgres"
+    },
+    {
+     "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+     "outcome": "sse taxonomy up to date (27 events)"
+    },
+    {
+     "command": "cd 'apps/Model Plane' && buf breaking proto --against proto/baseline.binpb",
+     "outcome": "exit 0 (no proto change made)"
+    }
+   ],
+   "db_tests_written": [
+    "recover_parks_a_crashed_run_is_parked_not_ended_and_a_continuation_claims_it",
+    "recover_parks_crash_park_off_is_the_committed_worker",
+    "recover_parks_a_fold_no_continuation_could_resume_is_not_parked",
+    "recover_parks_a_thread_held_by_a_writer_leaves_the_run_alone",
+    "recover_parks_a_crash_park_is_not_claimed_once_its_thread_moved"
+   ],
+   "lead_todo": [
+    "Run the session-core DB harness (scripts/tests/session-core-db-tests.sh) including the five `recover_parks_*` tests above and the existing park/loop_checkpoint DB tests; first read the clean case. Two assumptions in the tests are unproven: a zero-retention and a waived managed run each end with exactly one RUN_TERMINAL receipt, and the planted-fold insert satisfies the table's CHECKs.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block add `SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}` next to SESSION_CORE_PARK_RECOVERY_ENABLED.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add a 2026-10-24 entry 'S8-B: the session-core half of crash-park is built behind SESSION_CORE_CRASH_PARK_ENABLED (default off)'. State: needs park recovery and the fold store on; re-seal rule list; grace 900 s pushed by heartbeat; claim re-check keyed on the stamp; watermark in fold extensions (no migration); executor markers and zombie stop NOT built so the worker parks nothing yet; flip (4) last and owner-gated, kill order: crash park off first (existing crash parks stay claimable once due and stay thread-checked), then executor parking off, then park recovery off.",
+    "Land the executor half in a session that owns park.rs, fold.rs and durable_loop_contract.rs (see needs_other_files), then rebuild session-core and execution-core and run the plan's live proof (kill execution-core past the deadline, observe parked crash_interrupted, park_not_due, resume by continue). Do not flip the switch before that.",
+    "Commit session-core as one commit; the two edited files are loop_checkpoint.rs (LF) and terminalization.rs (CRLF, preserved)."
+   ],
+   "deviations": [
+    "Crash-park watermark stored in the fold extensions (`thread_watermark`, stamped by save()) rather than a new run_loop_checkpoints column: the v4 design reserved migration 0049, which is now taken and not reserved for S8 in section 4.4, and S8 is `migration: false`. Consequence: fold_digest stays the digest of the executor's bytes, not of the stamped plaintext.",
+    "No new file: the worker logic lives in terminalization.rs and the store logic in loop_checkpoint.rs (the v4 design's park_recovery.rs is not in new_files).",
+    "Round budget defaults (12, ceiling 32) are mirrored in session-core with a keep-in-sync comment instead of imported, because execution-core owns them and mp-contracts is not owned.",
+    "The executor half (round-fold markers, zombie stop) is not built; see notes."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (a function that writes EXT_PARKS, EXT_ROUTE_MODEL, EXT_ROUTE_CONNECTION, EXT_CHILD_CEILING onto a run_parkable round fold)",
+    "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (the guard that says the four park keys are written only by park_fold must be amended with mutation rows; agent.rs would call the new park.rs function at the round-fold save site near agent.rs:4187, which IS owned)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (an accessor that tells a stale save from other failures, for the zombie stop)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs (a THREAD_WATERMARK key constant, crash-park grace and the round-budget defaults, so session-core and execution-core share them)",
+    "apps/Model Plane/deploy/docker-compose.yml (SESSION_CORE_CRASH_PARK_ENABLED=${SESSION_CORE_CRASH_PARK_ENABLED:-false} in the session-core block)",
+    "apps/Model Plane/docs/decisions/ledger.md (S8-B session-core half entry, flip order and kill order)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the session-core DB harness (scripts/tests/session-core-db-tests.sh) with the five recover_parks_* crash-park tests plus the existing park and loop_checkpoint DB tests; clean case first. The SQL in park_crashed, the claim re-check, the SKIP LOCKED thread lock and the heartbeat push have never run against Postgres.",
+     "The executor half of S8-B is not built (round-fold markers for parks/route model/connection id/child ceiling, zombie stop): needs park.rs, fold.rs, durable_loop_contract.rs and mp-contracts loop_fold.rs, none owned here. Until it lands the worker refuses every fold as route_unrecorded and parks nothing.",
+     "Live proof (kill execution-core past the deadline, observe parked crash_interrupted, park_not_due, resume by continue, TTL expiry) cannot run before the executor half lands.",
+     "Shared edits for the lead: deploy/docker-compose.yml needs SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false} in the session-core block; docs/decisions/ledger.md needs the S8-B session-core-half entry with flip order and kill order.",
+     "S8-B go-ahead and flip (4) remain owner decisions per the 2026-10-20 ledger entry; the switch must stay off."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Nothing writes the executor markers on round folds yet, so with SESSION_CORE_CRASH_PARK_ENABLED on the worker refuses every fold as route_unrecorded; the executor must write parks-so-far (a resumed run's count too, or the park cap is bypassed), route model, connection id and child ceiling on round folds of run_parkable loops only, and never on an approval continuation or client/MCP-tool run, or crash-park holds runs nothing can resume for the 24 h TTL."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Zombie loop: a loop silent for more than the 15 min deadline plus the 15 min grace is crash parked and can then be continued while still alive; its later fold save goes stale and the writer fails but the loop keeps going (read-only calls, final answer), so two loops can answer one run; the thread watermark only catches an answer already appended, so the executor must stop a run_parkable loop at its first stale/closed save before any further inference, append or receipt."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No UI or button resumes a park, so with crash park on a dead run is now held up to SESSION_CORE_PARK_TTL_SECONDS (default 86400) with no thread explanation instead of ending outcome_unknown at about 15 min; the owner has to decide the TTL (or a fixed notice) before flip (4)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8-B go-ahead and design are open owner decisions in the ledger (three design reviews found critical defects in the earlier designs); this half follows the v4 invariants that fit the owned files (marker-gated, grace plus heartbeat push, thread lock, watermark re-check at claim) but has not had its own independent review."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The park_crashed SQL, the claim re-check, the SKIP LOCKED thread lock and the heartbeat push are source-verified only; none ran against Postgres (five ignored DB tests written), and the live proof (docker kill execution-core past the deadline, park_not_due, resume by continue, TTL expiry) needs the executor half first."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "THREAD_WATERMARK_KEY, the 900 s grace and the round-budget defaults (12, 32) are session-core-local copies; move them to mp-contracts::loop_fold so execution-core, session-core and the tests share one definition and a source guard can pin them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No mutation campaign was run on the new refusal rules; the DB tests cover each unsafe-fact case once but not a concurrent append racing park_crashed, nor a crash park claimed by two continuations (the existing claim lease covers it by construction)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A crash park writes CHECKPOINT_SAVED but emits no RunParked event or run_parked frame (nobody is alive to emit it); RunDetail.park_reason will read crash_interrupted, so decide whether the run console should show a crash park and whether the gateway's park form wording fits a park the user never saw start."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "save() re-serializes the round fold through serde_json::Value to stamp it while crash parking is on, which reorders keys and drops nothing today; fold_digest remains the digest of the executor's bytes, not the sealed plaintext, so any future consumer of fold_digest must not assume they match."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Lock order: the answer-append path locks threads before runs while the worker and claim hold runs first; both new thread reads use FOR UPDATE SKIP LOCKED so they never wait, but a busy thread makes a claim retry (loop_checkpoint_claim_held) and the worker retry in 60 s, which a hot thread could prolong."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The thread_watermark stamp lives in fold extensions and is carried forward by any resume that clones the fold, so a later executor-written park fold (credential window, provider exhausted) on a crash-resumed run keeps the old stamp; claim() keys its thread re-check on the stamp alone, so it would close that legitimate park when the thread has moved since, ending the run outcome_unknown. Strip the key when the executor writes a park fold, or key the claim re-check on park_reason crash_interrupted, before the switch is flipped."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Executor markers are not written on round folds, so with SESSION_CORE_CRASH_PARK_ENABLED on every fold is refused route_unrecorded; the executor must write the four park keys (including a resumed run's park count) on run_parkable round folds only, never on approval continuations or client/MCP-tool runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Zombie loop: a loop silent past the 15 min deadline plus the 15 min grace can be crash parked and continued while still alive, so two loops could answer one run; the executor must stop at its first stale or closed fold save before any further inference, append or receipt."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "With crash park on, a dead run is held up to SESSION_CORE_PARK_TTL_SECONDS (default 86400) with no thread explanation and no UI to resume it, instead of ending outcome_unknown after about 15 min; owner must pick the TTL or a fixed notice before flip (4)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "park_crashed, the claim re-check, the thread lock with SKIP LOCKED and push_crash_park are source-verified only. The tests' assumptions (one RUN_TERMINAL receipt for zero-retention and waived runs, the planted-fold insert satisfying the table CHECKs) are unproven."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The 900 s grace, the round-budget defaults (12 and 32) and the thread_watermark key are session-core-local copies of values execution-core owns; drift can only make an unresumable park, but they should move to mp-contracts::loop_fold with a source guard."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers an answer append racing park_crashed or a crash park claimed by two continuations, and the new refusal rules had no mutation campaign; the stamp read in save() is unlocked, so a concurrent append only makes the later comparison refuse."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A crash park writes CHECKPOINT_SAVED but emits no RunParked event or run_parked frame; decide how RunDetail.park_reason crash_interrupted and the gateway's park wording should read for a park the user never saw start."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "save() re-serializes the round fold through serde_json::Value to stamp it, so fold_digest is the digest of the executor's bytes, not the sealed plaintext; any future consumer of fold_digest must not assume they match."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Lock order: the answer-append path locks threads before runs while the worker and claim hold runs first; SKIP LOCKED avoids deadlock but a busy thread makes claims retry (loop_checkpoint_claim_held) and the worker retry in 60 s, which a hot thread could prolong."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Ownership and line endings check out: only loop_checkpoint.rs (LF) and terminalization.rs (CRLF preserved, +567 lines only) changed for this slice, with no proto, migration, secret or cross-plane DB access. The unowned modified files in git status (dreaming.rs, grpc.rs, memory_*.rs and others) belong to other slices and were not judged."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss",
+    "audit"
+   ],
+   "notes": "S8-A (executor park, resume, run_parked frame, RunParked 24 / RunResumed 25, chat-client minimal handling, TTL expiry, parked/resuming spare) was already built and live-proven. This pass built the SESSION-CORE HALF of S8-B (crash-park) behind SESSION_CORE_CRASH_PARK_ENABLED (default off, strict parser, also needs the fold store and SESSION_CORE_PARK_RECOVERY_ENABLED). With it off, behaviour is the committed one: save() adds no stamp, the worker takes no new branch and the heartbeat pushes nothing.\n\nWhat was built. loop_checkpoint.rs: (1) save() stamps a round fold with `thread_watermark` (the thread's highest message sequence) only while crash parking is on; (2) `park_crashed` runs inside the worker's transaction and re-seals an ACTIVE round fold as a `crash_interrupted` park at seq+1 with park_until = now()+900 s, only when persistent, no open approval, no open ledger reservation and no ledger row newer than the fold, the thread unmoved since the stamp (read under the thread lock, SKIP LOCKED so it never deadlocks with the answer-append path, which locks threads before runs), and the fold passes the same structural rules the executor's check_park_fold applies on resume (system message first, ledger flag, authority digest, no open round, no pending pause, no Space, park cap, round budget left, route keys and non-zero child ceiling); (3) claim() of a crash park re-checks the thread under its lock and closes the fold when it moved (keyed on the stamp, so it holds after the switch is turned off); (4) `push_crash_park` for the heartbeat. terminalization.rs: the switch and its test override, `try_crash_park` in recover_claimed_terminalization (parked runs go back to their obligation like any park; a busy thread releases the run for 60 s; anything refused takes the committed outcome_unknown path), and the heartbeat push of a crash park's park_until (never moves updated_at, the TTL anchor).\n\nWHY PARTIAL. The executor half cannot be built from the owned files and the design still has open points: (a) the executor must write the four park keys (parks so far, route model, connection id, child ceiling) on its ROUND folds when run_parkable, and today durable_loop_contract.rs and park.rs pin those keys to park_fold only, so that needs park.rs and an amended guard (neither owned); until it lands every fold is refused `route_unrecorded` and the worker never parks anything (inert, byte-identical); (b) the zombie stop needs a FoldWriter accessor (fold.rs) and agent.rs; (c) the 2026-10-20 ledger entry says crash-park was split off after three design reviews and the S8-B go-ahead and design are OWNER decisions, and flip (4) is owner-gated. Plan section 4.4 reserves no migration for S8 (0049 is taken by thread_activity_cursor), so I used no migration: the watermark rides in the encrypted fold's extensions instead of a column."
+  },
+  {
+   "id": "WS07-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/memory.proto",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core reset_requires_confirm (CARGO_INCREMENTAL=0, re-run this round)",
+     "outcome": "1 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core memory (previous round)",
+     "outcome": "88 passed, 0 failed, 18 ignored"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core dreaming (previous round)",
+     "outcome": "17 passed, 9 ignored"
+    }
+   ],
+   "db_tests_written": [
+    "reset_erases_user_rows_not_org_rows_and_blocks_remining",
+    "reset_is_tenant_scoped",
+    "reset_allowed_for_zdr_caller"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs (mod tests, MockMemoryService, after set_memory_controls which ends at line 3829, before the closing brace at line 3830, 8-space indent inside the impl): async fn reset_memory(&self, _: Request<mp_contracts::model_plane::v1::ResetMemoryRequest>) -> Result<Response<mp_contracts::model_plane::v1::ResetMemoryResponse>, Status> { Err(Status::unimplemented(\"reset_memory not needed in test\")) } (rustfmt layout like set_memory_controls above it).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (MockMemory, after set_memory_controls which ends at line 11993, before the closing brace at line 11994, 4-space indent): async fn reset_memory(&self, _: TReq<mpv1::ResetMemoryRequest>) -> Result<Response<mpv1::ResetMemoryResponse>, Status> { Err(Status::unimplemented(\"reset_memory not needed in test\")) } (same layout as set_memory_controls). Both files must keep their existing line endings (measure CRLF vs LF first). Then verify with cargo test -q -p model-gateway --lib --no-run.",
+    "Run the ignored PG tests through the DB harness against a disposable DATABASE_URL: reset_erases_user_rows_not_org_rows_and_blocks_remining, reset_is_tenant_scoped, reset_allowed_for_zdr_caller (and bump the harness test count by 3).",
+    "Regenerate Go and Python bindings for memory.proto (buf generate) and attach the additive tag diff against git show HEAD:'apps/Model Plane/proto/model_plane/v1/memory.proto' per Appendix B N2.",
+    "Live evidence per the plan row: seed 3 memories (inferred, stated, org), call ResetMemory via grpcurl with a user bearer, ListMemory empty, org row intact, letta-bridge list count for the mirror, memory_control_events 'reset' row with detail durable_deleted. Needs a session-core rebuild."
+   ],
+   "deviations": [
+    "Did not edit apps/Model Plane/api/contracts/zdr-posture-matrix.json or its .sha256: it holds only org/decision/enforcement rows and its loaders reject unknown fields, so a per-RPC reset row would break zdr_retention_matrix and the sync scripts.",
+    "Service callers are refused (permission_denied) on ResetMemory, matching set_memory_controls; delete_memory still allows services with memory:write.",
+    "Semantic unconfirmed count is not stored on the reset event (it commits before the Letta calls); the event carries durable_deleted only."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the three ignored PG reset tests through the DB harness against a disposable DATABASE_URL, and bump the harness test count by 3.",
+     "Apply the two model-gateway mock stubs the implementer handed back (shared-edit model-gateway/src/grpc.rs MockMemoryService and tests/e2e_invoke_chain_test.rs MockMemory, each gets a reset_memory returning Status::unimplemented). grep confirms neither has reset_memory today, so model-gateway lib and e2e tests fail to compile (E0046) until then. Verify with cargo test -q -p model-gateway --lib --no-run.",
+     "Regenerate Go and Python bindings for memory.proto (buf generate) and attach the additive tag diff against HEAD per Appendix B N2. The proto diff is append-only (rpc ResetMemory, ResetMemoryRequest 1-3, ResetMemoryResponse 1-4 at the plan tags).",
+     "Live evidence per the plan row: seed 3 memories (inferred, stated, org), call ResetMemory via grpcurl with a user bearer, ListMemory empty, org row intact, letta-bridge mirror count, memory_control_events reset row with durable_deleted detail. Needs a session-core rebuild.",
+     "zdr-posture-matrix.json and its .sha256 are in the owned list but untouched. The implementer's reason holds: the matrix is authored org/decision/enforcement rows and its loaders reject unknown fields, so a per-RPC reset row does not fit. The lead should record this as a decision."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Reset only reaches semantic copies whose ids exist in agent_memory; Letta-only memories that ListMemory still shows survive a Reset, so S3's 'Reset all memory' button should list the semantic tier and delete those ids or say so."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The model-gateway route for ResetMemory (POST /v1/memories/reset) and the gateway action memory.reset are S3 work; no caller reaches this RPC until then. Any new MemoryService mock added before then needs the reset_memory stub too."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers erase_semantic_copies against a mocked letta-bridge on the reset path (confirmed vs unconfirmed counts); only the not-configured case is asserted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that a reset racing an in-flight extraction cannot persist a row afterwards (both take the user's control-row lock; not exercised with two transactions)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Unbounded: a very large memory corpus puts every id into one forgotten_memory_ids insert and one transaction; semantic erase caps at 2000 per pass and reports the remainder as DEGRADED_SEMANTIC_ERASURE_TRUNCATED, with no retry queue."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Reset is not gated by MEMORY_CONTROLS_ENABLED by design (erasure stays open); the ZDR inventory test and a zdr-posture row for ResetMemory (refusal inventory: allowed) are still to be added when the live ZDR inventory lands."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Owner may want service callers (e.g. an admin DSAR tool) to reset a user's memory; today that path is gdpr.rs only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Reset only reaches semantic copies whose ids exist in agent_memory; Letta-only memories that ListMemory still shows survive a Reset. S3's button must list the semantic tier and delete those ids too, or say so. Needed before the behaviour is exposed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No caller reaches ResetMemory until S3 adds POST /v1/memories/reset and the gateway memory.reset action. Any new MemoryService mock added before then needs the reset_memory stub."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers erase_semantic_copies against a mocked letta-bridge on the reset path (confirmed vs unconfirmed counts); only the Letta-not-configured case is asserted, in reset_allowed_for_zdr_caller."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows a reset racing an in-flight extraction cannot persist a row afterwards; both take lock_user, but two concurrent transactions are not exercised."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A very large corpus puts every id into one forgotten_memory_ids insert and one transaction, and the semantic erase caps at 2000 per pass with DEGRADED_SEMANTIC_ERASURE_TRUNCATED and no retry queue. Reads stay suppressed through forgotten_memory_ids, so this is a data-remanence risk only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Reset is deliberately not gated by MEMORY_CONTROLS_ENABLED. A ResetMemory row for the ZDR inventory (refusal inventory: allowed) is still to be added when the live ZDR inventory lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "reset_requires_confirm covers the confirm, wrong-user, wrong-org and service-caller refusals. The org_id and user_id empty-argument refusals have no assertion."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Service callers are refused on ResetMemory, matching set_memory_controls. An admin DSAR tool that needs to reset a user's memory today goes through gdpr.rs only; the owner may want a service path later."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The working tree also holds memory_control.rs, migration 0067 and other changes. They belong to another slice (S6 thread memory mode) and are not part of the S2 diff. The lead must stage them separately from S2."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "authority",
+    "zdr"
+   ],
+   "notes": "This round's two fixes are both in files outside my owned set, so I did not edit them and hand the exact stubs back as shared-edit. No other change was made this round. Both mocks still lack reset_memory (grep finds no match in model-gateway), so the E0046 trait-completeness break remains until the lead applies them. I did not run `cargo test -p model-gateway --lib --no-run`, so the compile fix is unverified. Slice content is unchanged from the previous report: ResetMemory rpc plus ResetMemoryRequest/Response appended additively at the plan's tags in memory.proto; dreaming::reset_user_memory deletes the caller's rows in one transaction under lock_user (no is_latest or review_state filter), records the ids in forgotten_memory_ids, bumps extract_after and writes a content-free 'reset' event; memory_grpc::reset_memory authorizes, refuses service callers, requires confirm=true, has no ZDR refusal (erasure only) and runs erase_semantic_copies after commit. All touched files remain CRLF."
+  },
+  {
+   "id": "WS07-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/user-core/internal/http/handlers.go",
+    "apps/Control Plane/user-core/internal/http/ai_settings_test.go",
+    "apps/Control Plane/user-core/migrations/030_retire_ai_memory_enabled.up.sql",
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/auth-core/src/auth/plane-token-scopes.spec.ts",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/memory_gate_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/memory_auth_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/mcp_auth_test.go",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Control Plane/user-core' && go test ./...",
+     "outcome": "all packages ok, including 3 new tests (AISettingsPatchStoresNoMemoryKey, AISettingsPatchToleratesAndDropsLegacyMemoryEnabled, RetireAIMemoryEnabledMigrationTargetsOnlyTheAICategory)"
+    },
+    {
+     "command": "cd 'apps/Control Plane/auth-core' && pnpm test -- plane-token-scopes plane-service-principals-policy",
+     "outcome": "2 suites, 69 tests passed (plane-token-scopes: 15, incl. the new principals pin and the service-only scope row)"
+    },
+    {
+     "command": "cd capability-core && go vet ./... and go test ./... with -overlay replacing go/gen memory.pb.go and memory_grpc.pb.go by a scratch buf-generated copy (committed gen lacks GetMemoryControls)",
+     "outcome": "vet clean; all packages ok incl. internal/api (new memory_gate_test.go, existing memory_auth_test.go and mcp_auth_test.go) and cmd. The first run failed TestZDRDurableMutationsAreDeniedBeforeCapabilityCoreHandlers because that test's handler had no decision source and failed closed; fixed in that test file and re-run green."
+    },
+    {
+     "command": "plain `go build ./...` / `go test ./...` in capability-core WITHOUT the overlay",
+     "outcome": "NOT run after my edit; it will not compile until go/gen is regenerated (see lead_todo 1)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "FIRST: regenerate Go bindings (buf generate with the Go-only template, buf.gen.go-only.yaml; buf, protoc-gen-go and protoc-gen-go-grpc are installed natively) so go/gen contains GetMemoryControls; until then `go build ./...` in capability-core fails. Then re-run `go test ./... && go vet ./...` in apps/Model Plane/go/services/capability-core without any overlay.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/memory_grpc.rs: in get_memory_controls (about line 807) the service-caller scope passed to authorize_user_memory_preflight is MEMORY_READ_SCOPE ('memory:read'). capability-core now presents only 'session:memory-controls:read'. Change that call's service scope to \"session:memory-controls:read\" (a new const), keeping user callers on authorize_user, or the proxy's lookup is refused and every proxy verb returns 503. Add a unit test for it.",
+    "shared-edit apps/Model Plane/deploy/.env.example (comment block near lines 222-226): extend the capability-core line to `capability-core -> aud=session-core: session:read, session:skills:write, session:schedule-prepare, session:memory-controls:read`.",
+    "shared-edit apps/Control Plane/docker-compose.yml and the generated principal registry: the principals JSON file is updated, but the registry credentials that auth-core actually loads (PLANE_SERVICE_PRINCIPALS_JSON from the launcher; the compose line near 540 is one line, merge by hand) must be refreshed with scripts/run-control-plane.sh BEFORE capability-core is rebuilt, or minting the session-core token with the new scope will be refused and the learning review loses its session-core credential too.",
+    "Rebuild order for the live proof: (1) run-control-plane.sh to reload the principals and rebuild user-core (migration 030 runs at boot), (2) session-core with the memory_grpc.rs change, (3) capability-core. Then proof per the row: curl POST /v1/memory (model-gateway proxy) as a paused user returns 403 memory_not_enabled; user-core GET /api/v1/settings/ai has no memoryEnabled; check a user_settings row of category 'ai' no longer has the key.",
+    "Ledger and depth-register lines for the build ledger: WS07-S5 code done (user-core, capability-core gate, scope pin), live proof and gen regeneration pending."
+   ],
+   "deviations": [
+    "DELETE /api/v1/memory/{id} is NOT gated and does not call Session Core. The plan says every verb resolves the decision, but erasure must stay allowed (the plan's own ZDR clause and session-core's DeleteMemory never block delete), and a Session Core outage must not stop a user deleting their rows. A test pins that delete never asks for the decision.",
+    "Lookup failure returns 503 (not 403), following this handler's existing resourceAuthUnavailable convention that an outage is not reported as a permission error. It is still fail-closed.",
+    "Migration 030 is up-only with no revert file, per the plan row and section 4.4 ('030 ... up-only'); the removed key carried no meaning so there is nothing to restore.",
+    "Edited memory_auth_test.go and mcp_auth_test.go (one line each: give the handler an allow-all fake decision source) because they build MemoryHandler and now fail closed without one. They sit beside the code I changed; they are not in the slice's file list.",
+    "The new scope is also added to the Go sessionCoreScopes list in main.go, which mints one session-core token for ALL of capability-core's session-core calls; see risk finding about rollout order."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/gen/model_plane/v1/memory.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/memory_grpc.pb.go",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/deploy/.env.example",
+    "apps/Control Plane/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "go/gen regeneration (lead): buf generate with the Go-only template so model_plane/v1/memory.pb.go and memory_grpc.pb.go contain GetMemoryControls; until then plain `go build ./... && go test ./... && go vet ./...` in apps/Model Plane/go/services/capability-core does not compile. Re-run all three without an overlay after regenerating (they pass with an equivalent overlay).",
+     "Shared edit (lead): apps/Model Plane/rust/services/session-core/src/memory_grpc.rs get_memory_controls (about line 806) calls authorize_user_memory_preflight(..., MEMORY_READ_SCOPE); a service caller must hold memory:read, capability-core presents only session:memory-controls:read, so every gated proxy verb returns 503 until session-core accepts the new scope for service callers (plus a unit test). Also add the scope to the capability-core comment block in apps/Model Plane/deploy/.env.example.",
+     "Registry refresh (lead): the principals JSON is updated, but the registry auth-core actually loads (PLANE_SERVICE_PRINCIPALS_JSON from scripts/run-control-plane.sh) must be reloaded BEFORE capability-core is rebuilt, or the session-core token mint with the new scope is refused for all session-core calls.",
+     "Live proof (lead, docker): run-control-plane.sh then session-core then capability-core rebuild; curl POST /v1/memory through the proxy as a paused user returns 403 memory_not_enabled; user-core GET /api/v1/settings/ai has no memoryEnabled; a user_settings row of category 'ai' lost the key; migration 030 runs twice at boot without error.",
+     "Ledger and depth-register entries for WS07-S5 (code done, gen regeneration and live proof pending)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability-core now mints its session-core token with session:memory-controls:read; if Auth Core's loaded principal registry does not yet grant it, minting fails for ALL session-core calls (learning review transcript read and skill upsert, schedule-prepare), so the principals reload must precede the capability-core rebuild."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core get_memory_controls still requires memory:read from service callers, so the proxy gate fails closed (503) on every verb until that call accepts session:memory-controls:read; the proxy has no known callers, but the gate cannot be switched on live before this."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof done: paused user POST /v1/memory through model-gateway returns 403, org_disabled read returns 403, user-core GET /api/v1/settings/ai has no memoryEnabled, and migration 030 runs idempotently twice at boot."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner call needed: should the proxy's 403 for a paused user on reads also hide org/global rows (today they stay readable when paused or off, hidden only for org_disabled/zdr), and should DELETE stay ungated (built ungated)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The user-core tests exercise bindSettingsPatch and the migration text, not the full PUT/GET handler or a real Postgres run of migration 030, because Server holds a concrete *users.Service with no fake."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The /api/v1/memory proxy has no confirmed caller (plan: retire once callers are confirmed none); once confirmed, delete the handler and this gate instead of maintaining both."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "dialBackendsWithMemory exists beside dialBackends only to keep replay_learning.go and servicetoken_wiring_test.go compiling; fold them into one 4-value function when those files are next touched."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability-core mints ONE session-core token carrying session:memory-controls:read (main.go sessionCoreScopes); if Auth Core's loaded principal registry does not yet grant it, minting fails for the learning review transcript read, skill upsert and schedule-prepare as well, so the principals reload must precede the capability-core rebuild."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until session-core get_memory_controls accepts session:memory-controls:read from service callers (it still demands memory:read), the proxy fails closed with 503 on every gated verb, including reads that worked before; do not roll capability-core out ahead of the session-core change."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof yet: paused-user POST /v1/memory returns 403, org_disabled read returns 403, user-core settings response has no memoryEnabled, and migration 030 is idempotent on a real Postgres across two boots."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The decision is asked with the service principal's token, so session-core evaluates it with caller.zdr() false; ZDR for a user is therefore not reflected in the verdict and the proxy still relies on the earlier HTTP-layer ZDR denial (TestZDRDurableMutationsAreDeniedBeforeCapabilityCoreHandlers) for the zdr case."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner call: when a user is paused or off the proxy still serves org and global rows (user-scoped reads 403), and DELETE stays ungated and never asks session-core; both deviate from 'every verb resolves the decision' but match the ZDR clause (erasure always allowed) and DEC-30 (paused = org rows visible)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "A lookup failure returns 503 memory policy unavailable rather than 403; still fail-closed and never reaches the DB (pinned by TestMemoryGateFailsClosedWhenDecisionUnavailable), but the plan row says 403 for refusals, so confirm 503 is the wanted wire code for an outage."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "user-core tests cover bindSettingsPatch and the migration SQL text only; no test drives the real PUT/GET handler or runs migration 030 against Postgres, so the GET default omission of memoryEnabled is unasserted."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "dialBackendsWithMemory exists only so replay_learning.go and servicetoken_wiring_test.go keep the 3-value dialBackends signature; fold into one 4-value function when those files are next touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The /api/v1/memory proxy has no confirmed caller; once confirmed none, delete the handler and this gate instead of maintaining both (plan: retire later)."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "authority"
+   ],
+   "notes": "The code and tests for the row are done. The Go gen bindings are stale: they do not yet contain MemoryService.GetMemoryControls, which WS07-S1 added to memory.proto. So capability-core does not compile on the plain tree until the lead runs the buf regeneration. I verified compile, vet and tests with go -overlay against a scratch generation in the scratchpad dir. Nothing was written to go/gen.\n\nuser-core: removed MemoryEnabled from AISettings and from the GET defaults. gin ShouldBindJSON tolerates unknown fields, so an old client PUT carrying memoryEnabled succeeds and the value is dropped, and is no longer stored. Migration 030 strips the key from category='ai' rows. It is up-only, as the plan and section 4.4 say, and idempotent (jsonb_exists guard) because user-core re-runs every up.sql at boot.\n\ncapability-core MemoryHandler: new decision source (memoryControlsReader) backed by Session Core GetMemoryControls (3 s timeout), wired in main.go via dialBackendsWithMemory (dialBackends keeps its 3-value signature for replay_learning.go and servicetoken_wiring_test.go). POST and PATCH need generation_allowed, else 403 {error: memory_not_enabled, reason}. GET list, get-by-id and resolve need use_allowed. When the reason is user_paused or user_off, reads narrow to scope IN ('org','global') (SQL ANDed onto the existing visibility predicate; byte-identical when allowed), and an explicit private scope returns 403. For org_disabled, zdr, policy_unavailable or any unknown reason, every read is 403. A lookup error, a nil client or a response without controls gives 503 and never reaches the DB (fail closed). The scope session:memory-controls:read is added to capability-core's session-core audience in plane-service-principals.json (alphabetical) and to sessionCoreScopes in main.go. auth-core's plane-token-scopes.spec.ts now pins it: service-only for every role and audience, and held by capability-core for session-core only."
+  },
+  {
+   "id": "WS07-S6",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/session-core/migrations/0067_thread_memory_mode.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0067_thread_memory_mode.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/memory_control.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core memory_control (CARGO_INCREMENTAL=0)",
+     "outcome": "13 passed, 0 failed, 7 ignored. This includes the new unit tests a_thread_set_off_narrows_every_user_state_and_never_widens_one, a_thread_mode_value_is_one_of_two_spellings and the_thread_migration_defaults_to_inherit_and_has_a_revert, plus the updated reasons_are_the_closed_wire_tokens and every_agent_memory_writer_calls_the_gate. The first two runs failed to compile because another agent's edits to terminalization.rs and loop_checkpoint.rs were half-done (not my files). The third run compiled and passed."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in the UpdateThreadPresentationRequest literal (around line 9323), add `memory_mode: None,` after `archived: body.archived,`. Without it model-gateway fails to compile (E0063 missing field). The gateway route and body field that actually pass the mode are not part of this slice.",
+    "Regenerate protobuf output: Go (go/gen/model_plane/v1/sessions.pb.go) via buf generate, and Python stubs if present. Rust regenerates in build.rs. The new field is additive, so buf breaking should be green.",
+    "Run the ignored Postgres test through the DB harness: scripts/tests/session-core-db-tests.sh, filter thread_off_blocks_read_and_write_for_that_thread_only. Add 1 to the harness's test count.",
+    "Confirm no other slice in W1-18 also took migration 0067.",
+    "Rebuild session-core and model-gateway (docker) to prove it live. Then check that PUT memory_mode=off on one thread leaves a seeded fact unrecalled there and still recalled in another thread, and that no new agent_memory row appears from the off thread."
+   ],
+   "deviations": [
+    "The plan says to fold the mode into memory_control::resolve(.. thread_id). I added thread-aware sibling functions instead of changing resolve's signature. resolve has six callers in memory_grpc.rs, learning_events.rs and dreaming.rs, which I may not edit, and user-level callers have no thread.",
+    "The ignored Postgres test lives in grpc.rs (persona_db_tests), not memory_control.rs, because SessionService has private fields that only grpc.rs tests can construct."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (the UpdateThreadPresentationRequest literal near line 9323 lists every field, so model-gateway will not compile until a line is added; see lead_todo)",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs (the call to memory_control::resolve near line 334 should become resolve_for_thread so a run on a thread set off is never announced to the learning loop)",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs (search_memory near line 381 takes a thread_id in its request and should use resolve_for_thread so skip_reason says thread_off)",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs (optional: load_pending_messages and load_preceding_context could skip threads where memory_mode = 'off' to save work; persistence is already refused through permits_extraction)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The ignored Postgres test thread_off_blocks_read_and_write_for_that_thread_only has not been run. The lead runs it through scripts/tests/session-core-db-tests.sh and adds 1 to the harness test count.",
+     "The shared edit in model-gateway http_routes.rs is still open. The UpdateThreadPresentationRequest literal needs `memory_mode: None,` after `archived: body.archived,`. The diff of http_routes.rs has no memory_mode line, so model-gateway will not compile until it is added. I did not build model-gateway.",
+     "Go and Python protobuf stubs are not regenerated (buf generate). The proto change is additive, so buf breaking should be green. The lead runs both.",
+     "Live proof is open and needs docker. Rebuild session-core, PUT memory_mode=off on one thread, and check that a seeded fact is not recalled there but is recalled in another thread, and that no new agent_memory row comes from the off thread. This needs the gateway route, which is not built.",
+     "The lead confirms that no other W1-18 slice takes migration 0067. I checked the batch file: only WS07-S5 adds a migration, and it is user-core 030, so there is no clash inside W1-18. Section 4.4 of the plan reserves numbers up to 0066 and says S6 takes the next free number, which is 0067."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Switching a thread from off back to inherit does not move any watermark. Dreaming only filters on user_memory_controls.extract_after, so messages written while the thread was off can be mined after it resumes. This differs from the user-level resume, which bumps extract_after. A per-thread resume timestamp (for example threads.memory_mode_changed_at) is needed before the toggle is switched on for users."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "ThreadSummary and the context-assembly response do not expose memory_mode. Without it the chat header toggle cannot show the current state; it needs tags that WS17 does not hold (ThreadSummary 16-19 are reserved) and an integrator decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gateway HTTP body (http_routes.rs), the Frontend gateway route, the action contract and the chat-header toggle beside the persona toggle are not built. They are outside the owned files and are needed before users can set the mode."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "learning_events.rs enqueue and memory_grpc.rs search_memory and IndexMemory still use user-level resolve. A run on a thread set off can still be announced to the skill-learning loop, and SearchMemory still returns user rows for it. Both must move to resolve_for_thread; IndexMemory also needs to resolve the thread."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The model-gateway prefetch labels (MEMORY_PREFETCH_OUTCOMES) and the recall_memory tool reason do not know the wire token thread_off yet, so the memory_prefetch source-scan test and the metrics labels need a skipped_thread_off entry when the gateway starts reading it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers memory_mode being changed while a user-lock-holding extraction is in flight, and no test runs with MEMORY_CONTROLS_ENABLED=false against a thread set off. permits_extraction binds controls_enabled() into its SQL for that case."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The migration is not covered by the revert-then-reapply idempotency check that other migrations use. Only a string test on the SQL files exists."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Owner decision: whether a ZDR owner may set memory_mode. I refuse it with DURABLE_MUTATION_FORBIDDEN, because memory is already off for ZDR and the column is not written under that posture. Persona and pin are allowed under every posture by owner decision 17, so the owner may prefer to allow it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Going from off back to inherit moves no watermark. Dreaming filters only on user_memory_controls.extract_after, so messages written while the thread was off can be mined after it resumes. A per-thread resume timestamp (for example threads.memory_mode_changed_at) is needed before users can switch the mode on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "memory_grpc.rs search_memory (line ~381) and IndexMemory (lines ~501 and ~522) and learning_events.rs (line ~334) still call the user-level memory_control::resolve. A thread set off therefore still gets user rows from SearchMemory and can still be announced to the learning loop. They must move to resolve_for_thread before the toggle goes live. These files are outside this slice's ownership."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gateway HTTP body in http_routes.rs, the Frontend gateway route and action contract, the chat-header toggle, and exposing memory_mode on ThreadSummary or the context response are all unbuilt. Users cannot set or see the mode until they exist."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The model-gateway prefetch outcome labels (MEMORY_PREFETCH_OUTCOMES) and the recall_memory reason do not yet know the wire token thread_off. They need a skipped_thread_off entry when the gateway starts reading it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new thread-aware gate has no test that a thread set off blocks the extraction path through permits_extraction. Nothing tests MEMORY_CONTROLS_ENABLED=false against a thread set off, or an extraction in flight while the mode changes. The SQL branch `(t.memory_mode = 'inherit' OR NOT $4)` is only covered by the ignored DB test, through append_message_in_tx."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The migration is covered only by a string test on the SQL files. It is not covered by the revert-then-reapply check."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Owner decision: whether a ZDR owner may set memory_mode. It is refused today with DURABLE_MUTATION_FORBIDDEN, while persona and pin are allowed under every posture (owner decision 17)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "resolve_for_thread and resolve_in_tx_for_thread make one extra query per read or write to fetch the thread's mode. This is fine now, but a caller that already holds the thread row could pass the mode in."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority"
+   ],
+   "notes": "The slice's code is built, with the new behaviour reachable only when a thread is explicitly set to off. No new env switch was added: the row has no flag, and every thread defaults to 'inherit'. MEMORY_CONTROLS_ENABLED=false also disables the thread check.\n\nWhat changed:\n- Migration 0067_thread_memory_mode.sql adds threads.memory_mode TEXT NOT NULL DEFAULT 'inherit' with a CHECK on ('inherit','off'), added NOT VALID then validated. The revert file is revert/0067_thread_memory_mode.down.sql. Number 0067 is the next free after the plan's section 4.4 reservations, which run to 0066. The plan only says \"next free if scheduled\".\n- sessions.proto: `optional string memory_mode = 10` on UpdateThreadPresentationRequest. Tags 7, 8 and 9 are already taken (WS17 S7 and archived), so 10 is the next free tag on that message. The change is additive only.\n- memory_control.rs adds ThreadMemoryMode (inherit|off, with a strict from_wire), MemoryReason::ThreadOff (wire token \"thread_off\"), and apply_thread_mode. apply_thread_mode makes a thread set off deny everything, org rows included. A denial that already leaves nothing readable (ZDR, org policy) keeps its own reason. It also adds resolve_for_thread (reader, takes the pool) and resolve_in_tx_for_thread (writer, taken under the user row lock). permits_extraction now also refuses messages of a thread set off, so the Dreaming persist paths are covered without editing dreaming.rs.\n- grpc.rs: append_message_in_tx and load_context_memory_rows now use the thread-aware gate. update_thread_presentation accepts memory_mode. It rejects any value except \"inherit\" or \"off\", and refuses a ZDR caller with DURABLE_MUTATION_FORBIDDEN. It also takes the user's memory row lock before commit so an extraction in flight is ordered against the change. The THREAD_PRESENTATION_UPDATED event payload records the mode.\n- The ignored Postgres test thread_off_blocks_read_and_write_for_that_thread_only is in grpc.rs's persona_db_tests module. It compiled but has not been run."
+  },
+  {
+   "id": "WS08-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/pending-chat-launch.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/pending-chat-launch.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.test.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Ingestion Plane/imports-core/app/chat_extract.py",
+    "apps/Ingestion Plane/imports-core/tests/test_chat_extract.py"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm vitest run src/features/chat/lib/pending-chat-launch.test.ts src/features/chat/lib/prepare-chat-attachments.test.ts src/features/dashboard/home",
+     "outcome": "45 files, 588 tests passed"
+    },
+    {
+     "command": "pnpm exec eslint on the four changed FE files",
+     "outcome": "clean"
+    },
+    {
+     "command": "pnpm exec tsc --noEmit, filtered to the changed files",
+     "outcome": "no errors in them (whole-project result not read)"
+    },
+    {
+     "command": "cargo test -q --manifest-path apps/gateway/Cargo.toml --bin verevon-gateway-rs domains::chat::streams",
+     "outcome": "5 passed (2 existing, 3 new)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib decoding_limit",
+     "outcome": "2 passed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib decoding_limit",
+     "outcome": "2 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib stream_body_limit",
+     "outcome": "NOT RUN: lib test target fails to compile in files I did not touch (http_routes.rs:9321 UpdateThreadPresentationRequest missing memory_mode, and grpc.rs:3772 MockMemoryService missing reset_memory), from another slice's memory.proto and sessions.proto edits. cargo check of the non-test lib shows only the memory_mode error."
+    },
+    {
+     "command": "pytest tests/test_chat_extract.py in imports-core",
+     "outcome": "NOT RUN: no pytest, fastapi or python-docx in the local Python 3.14 and I did not install packages. py_compile passes on both changed files."
+    },
+    {
+     "command": "pnpm test:e2e -- tests/e2e/product-office-outputs.spec.ts",
+     "outcome": "NOT RUN: needs a dev server stack"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: in the launch-consume block (about line 2049, inside the async function) change `const pending = consumePendingChatLaunch()` to `const pending = await consumePendingChatLaunchAsync()` and update the import. Without it a reloaded launch that carries attachments is never consumed (the sync consume leaves it in place).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: pass CHAT_ATTACHMENT_MAX_TOTAL_BYTES to the inference-core and execution-core service blocks (they read it for their tonic decode limit; unset means the 16 MiB floor). model-gateway should also carry CHAT_STREAM_BODY_LIMIT_BYTES (S2 may already have added it). Add CHAT_EXTRACT_MAX_BYTES to the imports-core service in the Ingestion Plane compose, and CHAT_ATTACHMENT_MAX_TOTAL_BYTES and CHAT_STREAM_BODY_LIMIT_BYTES to the Frontend Plane gateway (BFF) service.",
+    "Re-run once the memory.proto and sessions.proto slice compiles again: cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib stream_body_limit (3 new tests in http_routes.rs).",
+    "Run pytest tests/test_chat_extract.py for imports-core in its python container or venv (this Windows host has no pytest, fastapi or python-docx). Verify the new tests, especially the importlib.reload fixture and the zip-bomb peak-memory assertion.",
+    "Playwright product-office-outputs.spec.ts (tests/e2e) and the four-hop evidence (Home-launched send with two 3 MB files) need the live stack and a raised cap env. Not attempted."
+   ],
+   "deviations": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs is unchanged: the route builder streams::stream_route() already carries the limit, so the derivation lives in streams.rs.",
+    "Added consumePendingChatLaunchAsync() beside the sync consume instead of making consume async, because its only caller (use-chat-controller.ts) is not owned by this slice.",
+    "Edited prepare-chat-attachments.test.ts, a test file beside the change: its chat-client mock now includes getAttachmentPolicy, plus one new test for the per-file limit.",
+    "The execution-core decode limit is added now, although the plan assigns that field to S5/S6, because grpc.rs is listed as owned for S7."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: line 2049 must become `const pending = await consumePendingChatLaunchAsync()` with the import updated. Until then a page reload after a launch that carries attachments leaves the launch unconsumed in sessionStorage. That is a regression from today, when the data URLs sat in sessionStorage and a reload still worked.",
+     "shared-edit compose files: pass CHAT_ATTACHMENT_MAX_TOTAL_BYTES to inference-core, execution-core and the BFF gateway, CHAT_STREAM_BODY_LIMIT_BYTES to the BFF and model-gateway, and CHAT_EXTRACT_MAX_BYTES to imports-core. Defaults are unchanged without them.",
+     "Re-run `CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib stream_body_limit` once the memory and sessions proto slice compiles again.",
+     "Run pytest tests/test_chat_extract.py for imports-core in its container. Check the importlib.reload fixture and the zip-bomb peak-memory assertion.",
+     "Live proof: Home-launched send of two 3 MB files through the BFF, model-gateway and inference-core hops with a raised cap env, plus the Playwright product-office-outputs spec. This was not attempted."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before the cap is raised above today's 1 MB and 3 MiB total, the client composer (attachment-policy.ts constants) and the model-gateway declared policy must both move to the raised numbers; the handoff and body hops now follow max_total_bytes, but evaluateAttachment still hard-codes its own limits when no policy is loaded."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The controller should surface a null from consumePendingChatLaunchAsync when the stored attachment bytes were lost after a reload. Today the user sees nothing happen after the draft was already cleared."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The IndexedDB tests use a hand-written in-memory stub; there is no fake-indexeddb dependency. Real browser behaviour (private-window blocking, Safari transaction timing, quota errors) is untested, and a Playwright case with IndexedDB blocked is missing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Raising CHAT_ATTACHMENT_MAX_TOTAL_BYTES raises worst-case memory per request in the BFF and model-gateway (the body is buffered) and in the tonic servers (decode limit up to total+8 MiB); there is no concurrency bound, so a load test is needed before the OD18 numbers are applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "CHAT_EXTRACT_MAX_BYTES is read once at import, so a config flip needs an imports-core restart, and it must be kept equal to CHAT_ATTACHMENT_MAX_FILE_BYTES by hand (two env names for one number)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The same body-limit derivation is written three times (BFF, model-gateway, tonic helpers in inference-core and execution-core); a shared mp-contracts helper would remove the duplication but mp-contracts is not owned by this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Stored-launch envelope from older versions (with real data: URLs in sessionStorage) still reads through the sync consume path unchanged; there is no explicit test for that upgrade case."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until use-chat-controller.ts switches to consumePendingChatLaunchAsync, reloading after a launch with attachments loses the launch (the draft is already cleared). Apply the controller edit before this lands in a shared build."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before the cap is raised above 1 MB and 3 MiB, the client composer constants in attachment-policy.ts and the model-gateway declared policy must move to the same numbers. The handoff, body and decode hops now follow max_total_bytes, but evaluateAttachment still hard-codes its own limits when no policy is loaded."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The controller should surface a null from consumePendingChatLaunchAsync (attachment bytes lost after a reload). Today nothing visible happens after the draft was cleared."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "IndexedDB behaviour is tested only against a hand-written in-memory stub. Private-window blocking, quota errors and Safari transaction timing are untested, and there is no Playwright case with IndexedDB blocked."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no explicit test that a stored envelope from an older version (real data: URLs in sessionStorage) still reads through the sync consume path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A raised CHAT_ATTACHMENT_MAX_TOTAL_BYTES raises worst-case buffered memory per request in the BFF, model-gateway and the tonic servers (decode limit up to total plus 8 MiB). There is no concurrency bound, so load-test before applying the OD18 numbers."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "CHAT_EXTRACT_MAX_BYTES is read once at import, so a config flip needs an imports-core restart. It is a second env name for the same number as CHAT_ATTACHMENT_MAX_FILE_BYTES and must be kept equal by hand."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Execution-core now sets a tonic decode limit (16 MiB floor) where it had the 4 MiB default. At defaults this widens what execution-core accepts from 4 to 16 MiB, ahead of the S5/S6 field that needs it. Harmless today, but it is a behaviour change with the switches unset."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The body and decode-limit derivation is written four times (BFF, model-gateway, inference-core, execution-core). A shared mp-contracts helper would remove it but is outside this slice's ownership."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat_extract.py has three consecutive blank lines before _max_attachment_bytes (PEP8 E303); drop two."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "The cap numbers stay at today's 1 MB, so every default is byte-identical, and the OD18 ruling is a config flip (DEC-37).\n\nFE handoff: pending-chat-launch.ts no longer puts attachment data URLs in sessionStorage. The sessionStorage envelope (text and metadata) keeps the 2,000,000-char cap, with each attachment's url replaced by an idb:<id> reference. The bytes go to IndexedDB (non-ZDR only) and the full launch stays in memory for same-tab navigation. ZDR launches are memory-only and never open IndexedDB. If IndexedDB is blocked the write rejects with PendingChatLaunchError('storage') and nothing is truncated. consumePendingChatLaunch() stays synchronous, so it serves memory launches and launches without attachments. A reloaded launch whose bytes sit in IndexedDB is left in place until the new consumePendingChatLaunchAsync() restores it. That function returns null, not a launch missing a file, if the bytes are gone.\n\nprepare-chat-attachments.ts now reads the per-file limit from getAttachmentPolicy()?.maxFileBytes, falling back to ATTACHMENT_MAX_FILE_BYTES, and names the limit in the Norwegian refusal text.\n\nBody limits: BFF streams.rs and model-gateway http_routes.rs each derive the stream body limit as max(explicit limit, base64(CHAT_ATTACHMENT_MAX_TOTAL_BYTES) + 4 MiB). The 12 MiB default is unchanged. Both read the same two env names.\n\nTonic limits: inference-core's 16 MiB decode limit and a new execution-core decode limit are now max(16 MiB, CHAT_ATTACHMENT_MAX_TOTAL_BYTES + 8 MiB). Execution-core had no decode limit before; the field it will carry arrives with S5/S6.\n\nimports-core: chat_extract.py reads CHAT_EXTRACT_MAX_BYTES (strict positive integer, default 1,000,000). It derives the base64 field cap as bytes*7//5 (1,400,000 at the default) and puts the limit in the 413 message. The 60,000-char limit and the zip guard are untouched. The new pytest cases reload the module with a 4 MB cap and cover default unchanged, bad values keep the default, the 60k text limit holds under the raised cap, a file over the cap is refused, and the zip bomb is still refused under the raised cap.\n\nchat.rs needed no edit."
+  },
+  {
+   "id": "WS10-S7.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/model-entitlement-live-proof.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/model-entitlement-live-proof-test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/runbooks/model-entitlement-shadow-to-enforce.md"
+   ],
+   "tests_run": [
+    {
+     "command": "bash \"apps/Model Plane/scripts/tests/model-entitlement-live-proof-test.sh\" (stub docker and curl, no daemon)",
+     "outcome": "passed: 'model-entitlement-live-proof contract test: ok', exit 0, run after the last edit to the test file. The proof script was not edited after that run."
+    },
+    {
+     "command": "bash -n on model-entitlement-live-proof.sh",
+     "outcome": "syntax ok"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md (append-only, dated, after the live flip, not before): 'WS10-S7 model entitlement flip: preflight/before/after evidence in docs/compliance/evidence/live-reads-model-entitlement-<date>.txt; stages run: <off|shadow|enforce|admin>; shadow soak hours: <n>; would_refuse=<n> service_exempt=<n>; refused-turn row delta 0 on <orgs>; stale-bound and 503 run: <result>.' Code half status: proof script, contract test and runbook landed.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: leave the ADR-0005 / DEC-13 entry 'proposed' now; after runbook step 4 passes on the non-ZDR org and ZDR-TEST and the owner ratifies DEC-13 (a), change its state to 'implemented' and add the evidence file name and the line 'an unknown MODEL_ENTITLEMENT_MODE value enforces, owner confirmed'.",
+    "Run the contract test once more through the repo's usual runner: bash \"apps/Model Plane/scripts/tests/model-entitlement-live-proof-test.sh\" (about 4 to 5 minutes on Windows), then commit the three new files together (LF).",
+    "Live, lead only, in the runbook's order with the owner's written approval for each flip: (1) land org-core, inference-core, model-gateway, execution-core, gateway and SPA images with every switch off and run --phase preflight --expect-mode off; (2) set MODEL_ENTITLEMENT_MODE=shadow (and confirm ORG_CORE_URL and the credential are present on inference-core), run the dry run on a non-ZDR staging org, soak at least one working day, then --phase preflight --expect-mode shadow and read would_refuse and service_exempt; (3) MODEL_ENTITLEMENT_ADMIN_ENABLED=true on the staging gateway, ZDR-TEST 409 leg; (4) enforce, flow steps a to i with before/after per step; (5) production admin flag.",
+    "The README or script index that lists scripts/tests/*-proof*.sh and the runbooks (if one exists) may want a row for the new proof and runbook; not owned, not edited."
+   ],
+   "deviations": [
+    "The slice lists no owned files, no new files and no test commands. I created three new files (the proof script, its contract test, the runbook) because the remaining-work text names a proof script and proof-stack switch defaults, and nothing else could deliver the row. They are all new files that nothing else owns. If the lead reads the rule strictly, treat them as needs_other_files and decide whether to keep them.",
+    "No edit to any switch default: the compose and .env.example defaults for MODEL_ENTITLEMENT_MODE (off) and MODEL_ENTITLEMENT_ADMIN_ENABLED (false) are already present from S3 and S5, and those files are shared anyway."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not done (docker, lead only, needs the owner's written approval per flip): preflight off, shadow dry run on a non-ZDR org, soak of at least one working day, admin on staging and ZDR-TEST (409 model_policy_leaves_no_zdr_model leg), enforce flow steps a to i, stop-org-core stale-bound then 503 run, Playwright spec, production admin flag.",
+     "Shared-file edits left for the lead: MODEL_PLANE_STATUS.md append after the live flip, and ledger.md ADR-0005 / DEC-13 moved from proposed to implemented only after step 4 passes on both orgs and the owner ratifies DEC-13 (a), including that an unknown MODEL_ENTITLEMENT_MODE value enforces.",
+     "The three new files are untracked: the lead commits them together (LF, ASCII)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The proof has never run against a real stack: org-core container name org-core-service, database org_core and role coresystem, the controlplane-postgres container, the verevon-gateway-rs container and inference-core /metrics on 127.0.0.1:18082 are dev-stack defaults taken from compose files and the older smoke script, so the first lead run may need CP_*/MP_* overrides; the metrics parser also assumes the Prometheus exposition has no timestamps and that model_entitlement_total is exposed at that endpoint."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The shadow soak (one working day), the stop-org-core stale-bound run (900 s restrictive / 120 s unrestricted, then 503 model_entitlement_unavailable), the ZDR-TEST 409 model_policy_leaves_no_zdr_model leg, the Playwright spec and the enforce flip each need the owner's written approval and the lead's docker; the runbook lists them in order and nothing in the code half flips a switch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under --expect refused the proof asserts zero rows in session-core, but the gateway admission (WS10-S4) fails open on a non-typed GetModelAccess error (D1-498), so a refused member turn may legitimately leave thread/message/run rows until S4 is hardened; the proof will fail honestly in that case and the failure is the finding."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The proof's policy counts need a database role that bypasses RLS (the Postgres superuser or the owner); the preflight checks this, but the default CP_POSTGRES_USER=coresystem is taken from the org-core .env.example DATABASE_URL and may differ on the real stack."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The contract test was run only against the unmutated proof; the mutation check (break one check, expect the test to fail) was abandoned because each full run takes about 4 to 5 minutes on Windows, so which checks the test truly pins is unverified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The test suite is slow because each proof invocation re-execs bash through tee; consider a no-tee env switch if this test is wired into CI."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Neither the proof nor the runbook is registered in any CI workflow or script index; the lead may want to list model-entitlement-live-proof-test.sh beside zdr-live-proof-test.sh wherever that one is registered."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Ledger: moving the ADR-0005 entry from proposed to implemented must wait for step 4 passing on both orgs and the owner's ratification of DEC-13 (a), including that an unknown MODEL_ENTITLEMENT_MODE value enforces (D1-077)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The proof has never run against a live stack. The defaults for container names, databases and ports match the compose files and the sibling proof scripts: org-core-service, controlplane-postgres, database org_core, role coresystem, model-plane-postgres-1, session_core, verevon-gateway-rs, inference-core on 127.0.0.1:18082. The metrics parser assumes no Prometheus timestamps. The first live run may still need CP_* or MP_* overrides."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under --expect refused the proof requires zero new thread, message and run rows. The runbook admits that model-gateway admission fails open on a non-typed GetModelAccess error (D1-498), so a refused member turn can leave rows and the proof will fail. That failure is a real finding about S4, not a defect in the proof."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The slice row lists no owned or new files. The three new files (proof script, contract test, runbook) are an inference from the 'proof script' remainder and follow the WS01-S7.code and zdr-live-proof precedent. They touch no shared or existing file, so I did not treat this as a blocking ownership breach. The lead should confirm they are kept."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No mutation check was run on the contract test, so it is unverified which proof checks it pins. It does name each check's FAIL line (order, revision, migration, RLS bypass, mode, credential, admin, soak, answered, unavailable, never-refuses, per-counter unchanged, monotonic, restart, history) and asserts read-only psql, no mutating docker calls and no credential in the output."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The contract test takes about 7 minutes on Windows because every proof invocation re-execs bash through tee. Add an env switch that skips the re-exec if it is wired into CI, and register it beside zdr-live-proof-test.sh wherever that one is indexed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The 'served' expectation does not assert the mode and does not check the 'stale' counter. A stale answer served during the org-core stop leg (runbook step g) is therefore not distinguished from a fresh one in the proof, only by manual reading of the printed counters."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Under the 'refused' and 'unavailable' expectations, the cache_keys counter reads ERR when MODEL_DRAGONFLY_PASSWORD is unset. The after phase then fails closed (unchanged-cache_keys FAIL) and the before phase prints an INFO line for it, so the operator only learns of the missing password at the first after run. The runbook precondition does say to load it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Static checks passed: switches are asserted not edited (MODEL_ENTITLEMENT_MODE defaults off in deploy/docker-compose.yml; MODEL_ENTITLEMENT_ADMIN_ENABLED defaults false in the verevonv3 compose; the gateway accepts only the literal true). The mode spelling mirrors Mode::parse (trim, case-insensitive, other values enforce). The metric names and decision values match inference-core/src/entitlement.rs. Migration 021_org_model_entitlements exists in org-core with a down file. Nothing was added to a shared file, no proto or migration was touched, and the new files are LF and ASCII with no credential."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "audit",
+    "zdr"
+   ],
+   "notes": "The slice row has no owned or named files and no test commands, so I read the 'Proof script and proof-stack switch defaults' remainder as three new files beside the WS01-S7.code precedent. This is a deviation, noted below. All three are LF.\n\n1. `scripts/tests/model-entitlement-live-proof.sh`: a read-only, three-phase proof.\n - `preflight --expect-mode off|shadow|enforce [--expect-admin true|false]` checks that:\n   - org-core, inference-core, model-gateway and execution-core started in that order, and the three Model Plane services come from a revision containing the wave commit;\n   - org-core migration `021_org_model_entitlements` is applied, and the proof's database role bypasses RLS (otherwise policy counts would silently read 0);\n   - `MODEL_ENTITLEMENT_MODE` on inference-core equals the expected word (mirrors `Mode::parse`: trimmed, case-insensitive, any other value counts as enforce and fails);\n   - the org-core credential is present (presence only, never the value) when the mode is not off;\n   - the gateway `MODEL_ENTITLEMENT_ADMIN_ENABLED` is the literal `true` only when `--expect-admin true`;\n   - mode off counted no decisions;\n   - shadow soaked (`SHADOW_MIN_SECONDS`, default 28800), org-core answered, nothing was unavailable, and shadow never refused. `would_refuse` and `service_exempt` are printed without a verdict.\n - `before` records session-core row counts, ZDR outbox rows, the cache key count, org-core policy, revision and history rows, and the `model_entitlement_total` sums.\n - `after --expect refused|unavailable|shadow-served|served` compares against that state. It always checks that inference-core was not restarted, no counter went backwards, and history only grew. `refused` and `unavailable` additionally require that no thread, message, run, feedback, audit envelope or cache key was written.\n2. `scripts/tests/model-entitlement-live-proof-test.sh`: a contract test with stub docker and curl. It covers each check above passing and failing, the mode-spelling and admin-literal cases, argument errors, read-only SELECTs and no mutating docker calls, and the credential staying off command lines and out of the evidence.\n3. `docs/runbooks/model-entitlement-shadow-to-enforce.md`: the staged flip with the plan's flow steps a to i mapped to proof steps. Every step is dry-run on a non-ZDR staging org before the ZDR-TEST org. Rollback is one restart with the mode off.\n\nSwitch defaults: no edit was needed. `MODEL_ENTITLEMENT_MODE` already defaults to `off` in `apps/Model Plane/deploy/docker-compose.yml` and `.env.example`. `MODEL_ENTITLEMENT_ADMIN_ENABLED` already defaults to `false` in the verevonv3 `docker-compose.yml`. The proof only asserts them.\n\nNot done: I did not run a mutation check on the proof script. I started one, but the test run takes about 4 to 5 minutes on Windows and the check was abandoned. In the same interrupted command I briefly overwrote the proof script with a mutated copy, then restored it byte-identical and confirmed with cmp. The final script is the original.\n\nNot run: nothing was run against a live stack, no docker, no org-core stop, no Playwright. Every `git status` entry outside these three files belongs to other work in the worktree."
+  }
+ ]
+}

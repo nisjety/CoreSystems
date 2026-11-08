@@ -1,0 +1,1108 @@
+package oauth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/triodelab/integration-corev2/internal/config"
+	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/providers"
+	"github.com/triodelab/integration-corev2/internal/store"
+)
+
+type Service struct {
+	cfg       config.Config
+	repo      store.Repository
+	vault     *secretcrypto.Vault
+	microsoft *MicrosoftClient
+	clients   map[string]ProviderOAuthClient
+	publisher events.Publisher
+	now       func() time.Time
+	refreshMu sync.Mutex
+	refreshes map[string]*refreshCall
+	// controlPlane re-mints Control Plane-owned sign-in tokens; nil disables
+	// the fallback (see delegated.go).
+	controlPlane ControlPlaneTokenSource
+}
+
+type refreshCall struct {
+	done        chan struct{}
+	connection  store.Connection
+	accessToken string
+	err         error
+}
+
+type CreateSessionInput struct {
+	ProviderKey     string
+	OrganizationID  string
+	WorkspaceID     string
+	UserID          string
+	UserEmail       string
+	SelectedSources []string
+	Capabilities    []string
+	Bundles         []string
+	ReturnURL       string
+	ProviderContext map[string]string
+	// ReplaceCapabilities opts out of the additive default for personal
+	// providers (Microsoft, Google): the session requests, and on completion
+	// records, exactly the requested capabilities instead of the union with
+	// what the user's connection already holds.
+	ReplaceCapabilities bool
+}
+
+type CreateSessionResult struct {
+	SessionToken      string    `json:"sessionToken"`
+	ConnectURL        string    `json:"connectUrl"`
+	AuthorizationURL  string    `json:"authorizationUrl"`
+	AuthMode          string    `json:"authMode"`
+	ExpiresAt         time.Time `json:"expiresAt"`
+	ProviderConfigKey string    `json:"providerConfigKey"`
+	Provider          struct {
+		Key       string `json:"key"`
+		Label     string `json:"label"`
+		ConfigKey string `json:"configKey"`
+	} `json:"provider"`
+	Capabilities []string `json:"capabilities"`
+	Scopes       []string `json:"scopes"`
+}
+
+type CallbackResult struct {
+	SessionID    string
+	ConnectionID string
+	ProviderKey  string
+	Success      bool
+	ErrorCode    string
+	Message      string
+	ReturnURL    string
+	ReturnOrigin string
+	// ReturnURLRejected indicates that the session's previously stored browser
+	// destination no longer satisfies the current deployment allowlist. It is
+	// intentionally a boolean so telemetry and UI never need to expose it.
+	ReturnURLRejected bool
+}
+
+var ErrInvalidReturnURL = errors.New("invalid return URL")
+
+type AccessTokenResult struct {
+	ConnectionID string    `json:"connectionId"`
+	ProviderKey  string    `json:"providerKey"`
+	AccessToken  string    `json:"accessToken"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	Scopes       []string  `json:"scopes"`
+	Capabilities []string  `json:"capabilities"`
+}
+
+func NewService(cfg config.Config, repo store.Repository, vault *secretcrypto.Vault, microsoft *MicrosoftClient) *Service {
+	clients := NewProviderClients(cfg, microsoft, nil)
+	return &Service{
+		cfg:       cfg,
+		repo:      repo,
+		vault:     vault,
+		microsoft: microsoft,
+		clients:   clients,
+		publisher: events.NoopPublisher{},
+		now:       func() time.Time { return time.Now().UTC() },
+		refreshes: map[string]*refreshCall{},
+	}
+}
+
+func (s *Service) SetEventPublisher(publisher events.Publisher) {
+	if publisher == nil {
+		s.publisher = events.NoopPublisher{}
+		return
+	}
+	s.publisher = publisher
+}
+
+func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (CreateSessionResult, error) {
+	provider, ok := providers.FindOAuth(input.ProviderKey)
+	if !ok {
+		return CreateSessionResult{}, fmt.Errorf("unsupported provider: %s", input.ProviderKey)
+	}
+	if err := s.cfg.ValidateProvider(provider.Key); err != nil {
+		return CreateSessionResult{}, err
+	}
+	client, ok := s.clients[provider.Key]
+	if !provider.DirectOAuthReady || !ok {
+		return CreateSessionResult{}, fmt.Errorf("provider %s is registered in the catalog but direct OAuth is not implemented yet", provider.Key)
+	}
+	if strings.TrimSpace(input.OrganizationID) == "" {
+		return CreateSessionResult{}, fmt.Errorf("organizationId is required")
+	}
+	if strings.TrimSpace(input.UserID) == "" {
+		return CreateSessionResult{}, fmt.Errorf("userId is required")
+	}
+	returnURL, _, err := s.cfg.NormalizeOAuthReturnURL(input.ReturnURL)
+	if err != nil {
+		return CreateSessionResult{}, ErrInvalidReturnURL
+	}
+	workspaceID := strings.TrimSpace(input.WorkspaceID)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(input.OrganizationID)
+	}
+	providerContext, err := NormalizeProviderContext(provider.Key, input.ProviderContext)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	if provider.Key == "algolia" {
+		r, err := s.cfg.AlgoliaRegistration()
+		if err != nil {
+			return CreateSessionResult{}, err
+		}
+		providerContext = map[string]string{"algolia_client_id": r.ClientID, "algolia_resource": r.Resource}
+	}
+	// Meta bakes permissions into a Facebook Login for Business configuration
+	// rather than a per-request scope param (see MetaOAuthClient), so a
+	// bundle needing a different permission set than the default connection
+	// flow needs its own named configuration selected up front — callers
+	// selecting the "conversions" bundle shouldn't need to know that OAuth
+	// plumbing detail themselves.
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "conversions") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "conversions"
+		}
+	}
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "messenger") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "support_messaging"
+		}
+	}
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "ads") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "studio_ads"
+		}
+	}
+
+	sessionID := "cs_" + uuid.NewString()
+	state, err := RandomURLToken(32)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	verifier, err := RandomURLToken(64)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	redirectURI := s.callbackURL(provider.Key)
+	capabilities := providers.ResolveCapabilities(provider, input.Capabilities, input.Bundles)
+	// A personal connection only ever widens: asking for a new bundle must
+	// request what the user already granted too, so the new token still carries
+	// those scopes and the reconnect cannot silently drop them. Callers that
+	// really want a narrower connection say so with ReplaceCapabilities.
+	delete(providerContext, replaceCapabilitiesContextKey) // server-set only, never caller-supplied
+	sessionContext := providerContext
+	if providers.IsPersonalProvider(provider.Key) {
+		if input.ReplaceCapabilities {
+			sessionContext = contextWithReplaceMarker(providerContext)
+		} else {
+			granted, err := s.grantedCapabilitiesOnSoleConnection(ctx, provider, input.OrganizationID, input.UserID)
+			if err != nil {
+				return CreateSessionResult{}, err
+			}
+			capabilities = unionSorted(capabilities, granted)
+		}
+	}
+	scopes := providers.ResolveScopes(provider, capabilities)
+	if provider.Key == "algolia" {
+		for _, capability := range input.Capabilities {
+			if capability != "search.analytics.read" {
+				return CreateSessionResult{}, errAlgoliaOAuth
+			}
+		}
+		capabilities = []string{"search.analytics.read"}
+		scopes = []string{"public"}
+	}
+	verifierCiphertext, err := s.vault.Encrypt(verifier, []byte(sessionID))
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	session := store.ConnectSession{
+		ID:                     sessionID,
+		ProviderKey:            provider.Key,
+		ConnectorType:          provider.ConnectorType,
+		OrganizationID:         strings.TrimSpace(input.OrganizationID),
+		WorkspaceID:            workspaceID,
+		UserID:                 strings.TrimSpace(input.UserID),
+		UserEmail:              strings.TrimSpace(input.UserEmail),
+		StateHash:              HashState(state),
+		CodeVerifierCiphertext: verifierCiphertext,
+		RedirectURI:            redirectURI,
+		ReturnURL:              returnURL,
+		ProviderContext:        sessionContext,
+		Capabilities:           capabilities,
+		Scopes:                 scopes,
+		ExpiresAt:              s.now().Add(s.cfg.SessionTTL),
+		CreatedAt:              s.now(),
+	}
+	authURL, err := client.AuthorizationURL(state, redirectURI, verifier, scopes, providerContext)
+	if err != nil {
+		return CreateSessionResult{}, err
+	}
+	if err := s.repo.CreateConnectSession(ctx, session); err != nil {
+		return CreateSessionResult{}, err
+	}
+	result := CreateSessionResult{
+		SessionToken:      sessionID,
+		ConnectURL:        authURL,
+		AuthorizationURL:  authURL,
+		AuthMode:          "direct-oauth",
+		ExpiresAt:         session.ExpiresAt,
+		ProviderConfigKey: provider.ConnectorType,
+		Capabilities:      capabilities,
+		Scopes:            scopes,
+	}
+	result.Provider.Key = provider.Key
+	result.Provider.Label = provider.Label
+	result.Provider.ConfigKey = provider.ConnectorType
+	return result, nil
+}
+
+func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code, errorCode, errorDescription string) (CallbackResult, error) {
+	stateHash := HashState(state)
+	session, err := s.repo.GetConnectSessionByStateHash(ctx, stateHash)
+	if err != nil {
+		return CallbackResult{Success: false, ErrorCode: "invalid_state", Message: "OAuth state was not recognized."}, err
+	}
+	returnURL, returnOrigin, returnURLErr := s.cfg.NormalizeOAuthReturnURL(session.ReturnURL)
+	returnURLRejected := returnURLErr != nil && strings.TrimSpace(session.ReturnURL) != ""
+	if returnURLErr != nil {
+		returnURL = ""
+		returnOrigin = ""
+	}
+	result := CallbackResult{
+		SessionID:         session.ID,
+		ProviderKey:       session.ProviderKey,
+		ReturnURL:         returnURL,
+		ReturnOrigin:      returnOrigin,
+		ReturnURLRejected: returnURLRejected,
+	}
+	if session.ConsumedAt != nil {
+		result.ErrorCode = "session_consumed"
+		result.Message = "Connect session was already used."
+		return result, fmt.Errorf("connect session already consumed")
+	}
+	if s.now().After(session.ExpiresAt) {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "session_expired", "Connect session expired.")
+		result.ErrorCode = "session_expired"
+		result.Message = "Connect session expired."
+		return result, fmt.Errorf("connect session expired")
+	}
+	if providers.NormalizeKey(providerKey) != session.ProviderKey {
+		result.ErrorCode = "provider_mismatch"
+		result.Message = "OAuth callback provider did not match the session."
+		return result, fmt.Errorf("provider mismatch")
+	}
+	if errorCode != "" {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, errorCode, errorDescription)
+		result.ErrorCode = errorCode
+		result.Message = errorDescription
+		return result, fmt.Errorf("provider returned OAuth error: %s", errorCode)
+	}
+	if strings.TrimSpace(code) == "" {
+		result.ErrorCode = "missing_code"
+		result.Message = "OAuth provider did not return a code."
+		return result, fmt.Errorf("missing oauth code")
+	}
+
+	verifier, err := s.vault.Decrypt(session.CodeVerifierCiphertext, []byte(session.ID))
+	if err != nil {
+		result.ErrorCode = "invalid_verifier"
+		result.Message = "OAuth session verifier could not be read."
+		return result, err
+	}
+	token, err := s.exchangeCode(ctx, session, code, verifier)
+	if err != nil {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "token_exchange_failed", err.Error())
+		result.ErrorCode = "token_exchange_failed"
+		result.Message = err.Error()
+		return result, err
+	}
+	connection, err := s.persistConnection(ctx, session, token)
+	if err != nil {
+		_ = s.repo.MarkConnectSessionConsumed(ctx, session.ID, "connection_store_failed", err.Error())
+		result.ErrorCode = "connection_store_failed"
+		result.Message = err.Error()
+		return result, err
+	}
+	result.Success = true
+	result.ConnectionID = connection.ID
+	result.Message = "Connection completed."
+	if result.ReturnURLRejected {
+		// The connection is safe and authoritative in the status endpoint, but
+		// an in-flight browser must remain open because the old destination may
+		// no longer receive a redirect or postMessage.
+		result.Message = "Connection completed. The return destination is no longer approved; return to the application and refresh integrations."
+	}
+	// Meta inbox completion is finalized by the API only after provider asset
+	// subscriptions and their durable sync state succeed. This keeps the
+	// connect-session status endpoint and integration.connected event truthful.
+	if isMetaFamilyProvider(connection.ProviderKey) {
+		return result, nil
+	}
+	if err := s.FinalizeConnectedCallback(ctx, result, connection); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *Service) FinalizeConnectedCallback(ctx context.Context, result CallbackResult, connection store.Connection) error {
+	if err := s.repo.MarkConnectSessionConsumed(ctx, result.SessionID, "", ""); err != nil {
+		return err
+	}
+	_ = s.publisher.Publish(ctx, events.Event{
+		Type:           "integration.connected",
+		OrganizationID: connection.OrganizationID,
+		WorkspaceID:    connection.WorkspaceID,
+		UserID:         connection.UserID,
+		ConnectionID:   connection.ID,
+		ProviderKey:    connection.ProviderKey,
+		Data: map[string]any{
+			"connectorType":     connection.ConnectorType,
+			"displayName":       connection.DisplayName,
+			"capabilities":      connection.Capabilities,
+			"scopes":            redactScopes(connection.Scopes),
+			"status":            connection.Status,
+			"returnURLRejected": result.ReturnURLRejected,
+		},
+		CreatedAt: s.now(),
+	})
+	return nil
+}
+
+func (s *Service) FailCallback(ctx context.Context, sessionID, errorCode, description string) error {
+	return s.repo.MarkConnectSessionConsumed(ctx, sessionID, errorCode, description)
+}
+
+func (s *Service) AccessToken(ctx context.Context, organizationID, connectorType string) (AccessTokenResult, error) {
+	connection, err := s.repo.FindActiveConnection(ctx, organizationID, connectorType)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	if connection.ProviderKey == "algolia" {
+		return AccessTokenResult{}, ErrResourceBoundToken
+	}
+	return s.accessTokenForConnection(ctx, connection)
+}
+
+func (s *Service) AccessTokenForConnection(ctx context.Context, connectionID string) (AccessTokenResult, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	if connection.ProviderKey == "algolia" {
+		return AccessTokenResult{}, ErrResourceBoundToken
+	}
+	if connection.DeletedAt != nil || connection.Status != "active" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
+	return s.accessTokenForConnection(ctx, connection)
+}
+
+func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason string) (store.Connection, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return store.Connection{}, err
+	}
+	if connection.DeletedAt != nil || connection.Status == "deleted" {
+		return connection, nil
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "user_requested"
+	}
+
+	// Provider revocation is an external side effect and cannot participate in
+	// the database transaction. Persist a resumable saga stage first so a crash
+	// or database failure never produces an untracked revocation attempt.
+	pending := connection
+	pending.Status = "disconnecting"
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var stageErr error
+		pending, stageErr = tx.UpsertConnection(ctx, pending)
+		if stageErr != nil {
+			return stageErr
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-delete-requested:" + pending.ID,
+			OrganizationID: pending.OrganizationID,
+			UserID:         pending.UserID,
+			ConnectionID:   pending.ID,
+			EventType:      "connection.delete.requested",
+			ProviderKey:    pending.ProviderKey,
+			Metadata:       map[string]any{"reason": reason},
+			CreatedAt:      s.now(),
+		})
+	})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	connection = pending
+
+	revokeStatus := "not_required"
+	var revokeErr error
+	if connection.DeletedAt == nil && connection.EncryptedAccessToken != "" {
+		if client, ok := s.clients[connection.ProviderKey]; ok {
+			accessToken, decryptErr := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+			if decryptErr != nil {
+				revokeStatus = "token_decrypt_failed"
+				revokeErr = fmt.Errorf("decrypt provider credential for revocation: %w", decryptErr)
+			} else if err := client.Revoke(ctx, accessToken, connection.ProviderContext); errors.Is(err, ErrRevocationUnsupported) {
+				revokeStatus = "unsupported_provider_policy"
+			} else if err != nil {
+				revokeStatus = "revocation_failed"
+				revokeErr = fmt.Errorf("revoke provider credential: %w", err)
+			} else {
+				revokeStatus = "completed"
+			}
+		} else {
+			revokeStatus = "provider_client_unavailable"
+			revokeErr = fmt.Errorf("provider client %q is unavailable for revocation", connection.ProviderKey)
+		}
+	}
+	if revokeErr != nil {
+		failed := connection
+		failed.Status = "revocation_failed"
+		if err := s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+			var persistErr error
+			failed, persistErr = tx.UpsertConnection(ctx, failed)
+			if persistErr != nil {
+				return persistErr
+			}
+			return tx.InsertAuditEvent(ctx, store.AuditEvent{
+				ID:             "audit:integration:connection-revocation-failed:" + failed.ID,
+				OrganizationID: failed.OrganizationID,
+				UserID:         failed.UserID,
+				ConnectionID:   failed.ID,
+				EventType:      "connection.revocation.failed",
+				ProviderKey:    failed.ProviderKey,
+				Metadata: map[string]any{
+					"reason":        reason,
+					"revoke_status": revokeStatus,
+				},
+				CreatedAt: s.now(),
+			})
+		}); err != nil {
+			return store.Connection{}, errors.Join(revokeErr, err)
+		}
+		return failed, revokeErr
+	}
+	var deleted store.Connection
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var deleteErr error
+		deleted, deleteErr = tx.MarkConnectionDeleted(ctx, connection.ID)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		// A removed model connection keeps no live ZDR acknowledgement (audited, same transaction).
+		if _, err := store.RevokeAcknowledgementsOnRemoval(ctx, tx, deleted.ID, s.now()); err != nil {
+			return err
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-deleted:" + deleted.ID,
+			OrganizationID: deleted.OrganizationID,
+			UserID:         deleted.UserID,
+			ConnectionID:   deleted.ID,
+			EventType:      "connection.deleted",
+			ProviderKey:    deleted.ProviderKey,
+			Metadata: map[string]any{
+				"reason":        reason,
+				"revoke_status": revokeStatus,
+			},
+			CreatedAt: s.now(),
+		})
+	})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	_ = s.publisher.Publish(ctx, events.Event{
+		Type:           "integration.disconnected",
+		OrganizationID: deleted.OrganizationID,
+		WorkspaceID:    deleted.WorkspaceID,
+		UserID:         deleted.UserID,
+		ConnectionID:   deleted.ID,
+		ProviderKey:    deleted.ProviderKey,
+		Data: map[string]any{
+			"connectorType": deleted.ConnectorType,
+			"reason":        reason,
+			"revokeStatus":  revokeStatus,
+			"status":        deleted.Status,
+		},
+		CreatedAt: s.now(),
+	})
+	return deleted, nil
+}
+
+func (s *Service) accessTokenForConnection(ctx context.Context, connection store.Connection) (AccessTokenResult, error) {
+	if connection.DeletedAt != nil || connection.Status != "active" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
+	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+	if err == nil && s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
+		return AccessTokenResult{
+			ConnectionID: connection.ID,
+			ProviderKey:  connection.ProviderKey,
+			AccessToken:  accessToken,
+			ExpiresAt:    connection.AccessTokenExpiresAt,
+			Scopes:       connection.Scopes,
+			Capabilities: connection.Capabilities,
+		}, nil
+	}
+	// An unreadable ciphertext can happen after a local credential-key rollout.
+	// A Microsoft connection adopted from Control Plane already carries the
+	// Better Auth account reference needed to re-mint the token, so let the
+	// coordinated refresh path repair and re-encrypt it instead of turning a
+	// service configuration problem into a user-facing reconnect loop.
+	refreshed, accessToken, err := s.refreshCoordinated(ctx, connection)
+	if err != nil {
+		return AccessTokenResult{}, err
+	}
+	if refreshed.Status != "active" || refreshed.DeletedAt != nil || accessToken == "" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
+	return AccessTokenResult{
+		ConnectionID: refreshed.ID,
+		ProviderKey:  refreshed.ProviderKey,
+		AccessToken:  accessToken,
+		ExpiresAt:    refreshed.AccessTokenExpiresAt,
+		Scopes:       refreshed.Scopes,
+		Capabilities: refreshed.Capabilities,
+	}, nil
+}
+
+func (s *Service) callbackURL(providerKey string) string {
+	normalizedProviderKey := providers.NormalizeKey(providerKey)
+	if normalizedProviderKey == "algolia" {
+		return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/api/v1/providers/algolia/callback"
+	}
+	if normalizedProviderKey == "snapchat" && strings.TrimSpace(s.cfg.SnapchatRedirectBaseURL) != "" {
+		return strings.TrimRight(s.cfg.SnapchatRedirectBaseURL, "/") + "/oauth/callback/snapchat"
+	}
+	return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/oauth/callback/" + normalizedProviderKey
+}
+
+func (s *Service) exchangeCode(ctx context.Context, session store.ConnectSession, code, verifier string) (TokenResult, error) {
+	client, ok := s.clients[session.ProviderKey]
+	if !ok {
+		return TokenResult{}, fmt.Errorf("provider %s does not support token exchange yet", session.ProviderKey)
+	}
+	return client.ExchangeCode(ctx, code, session.RedirectURI, verifier, session.Scopes, session.ProviderContext)
+}
+
+func (s *Service) persistConnection(ctx context.Context, session store.ConnectSession, token TokenResult) (store.Connection, error) {
+	profile := ProviderProfile{}
+	if client, ok := s.clients[session.ProviderKey]; ok {
+		// Profile lookup is best-effort. Providers without a profile endpoint
+		// retain the legacy connector-level reconnect behavior below.
+		profile, _ = client.Profile(ctx, token.AccessToken, session.ProviderContext)
+	}
+	providerAccountID := providerAccountIdentity(session.ProviderKey, profile, token)
+	// A failed Google userinfo lookup must never fall back to the most recent
+	// connector and overwrite a different account's existing website grant.
+	if providers.NormalizeKey(session.ProviderKey) == "google" && providerAccountID == "" {
+		return store.Connection{}, fmt.Errorf("Google provider identity could not be verified")
+	}
+	connectionID := "conn_" + uuid.NewString()
+	createdAt := s.now()
+	reconnecting := false
+	existing := store.Connection{}
+	var err error
+	if session.ProviderKey == "algolia" {
+		// No provider identity endpoint is advertised for this MCP grant. Every
+		// approved session remains independent; never replace another account.
+		err = store.ErrNotFound
+	} else if providerAccountID != "" {
+		existing, err = s.repo.FindActiveConnectionByProviderAccount(ctx, session.OrganizationID, session.ConnectorType, providerAccountID)
+	} else {
+		existing, err = s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
+	}
+	if err == nil {
+		connectionID = existing.ID
+		createdAt = existing.CreatedAt
+		reconnecting = true
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Connection{}, err
+	}
+	googleGrant := providers.NormalizeKey(session.ProviderKey) == "google" && (token.ScopesVerified || len(token.Scope) > 0)
+	if providers.NormalizeKey(session.ProviderKey) == "google" && reconnecting && !googleGrant && session.ProviderContext[replaceCapabilitiesContextKey] == "" {
+		for _, capability := range existing.Capabilities {
+			if !slices.Contains(session.Capabilities, capability) {
+				return store.Connection{}, fmt.Errorf("Google reconnect did not confirm existing grants")
+			}
+		}
+	}
+	accessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connectionID))
+	if err != nil {
+		return store.Connection{}, err
+	}
+	refreshToken := existing.EncryptedRefreshToken
+	if token.RefreshToken != "" {
+		refreshToken, err = s.vault.Encrypt(token.RefreshToken, []byte(connectionID))
+		if err != nil {
+			return store.Connection{}, err
+		}
+	}
+	displayName := profile.DisplayName
+	if session.ProviderKey == "algolia" {
+		displayName = "Algolia MCP grant"
+	}
+	if displayName == "" {
+		displayName = session.UserEmail
+	}
+	if displayName == "" {
+		displayName = session.ProviderKey + " connection"
+	}
+	providerContext := reconnectProviderContext(existing.ProviderContext, session.ProviderContext)
+	replaceCapabilities := providerContext[replaceCapabilitiesContextKey] != ""
+	delete(providerContext, replaceCapabilitiesContextKey)
+	if providers.NormalizeKey(session.ProviderKey) == "notion" {
+		if workspaceID := strings.TrimSpace(stringValue(token.Raw["workspace_id"])); workspaceID != "" {
+			providerContext["notion_workspace_id"] = workspaceID
+		}
+		if workspaceName := strings.TrimSpace(stringValue(token.Raw["workspace_name"])); workspaceName != "" {
+			providerContext["notion_workspace_name"] = workspaceName
+		}
+	}
+	if providerEmail := strings.TrimSpace(profile.Email); providerEmail != "" {
+		// This is the provider-confirmed identity of the connected mailbox, not
+		// the Verevon user's login email. It is safe to expose as connection
+		// metadata for operator navigation, while OAuth tokens remain private.
+		providerContext["mailbox_address"] = providerEmail
+	}
+	connectionScopes := append([]string{}, session.Scopes...)
+	connectionCapabilities := append([]string{}, session.Capabilities...)
+	connectionStatus := "active"
+	if token.ScopesVerified && verifiesGrantedScopes(session.ProviderKey) {
+		connectionScopes = normalizeGrantedScopes(session.ProviderKey, token.Scope)
+		if provider, ok := providers.FindOAuth(session.ProviderKey); ok {
+			connectionCapabilities = capabilitiesAllowedByScopes(provider, session.Capabilities, connectionScopes)
+		}
+		if len(connectionCapabilities) != len(session.Capabilities) {
+			connectionStatus = "needs_refresh"
+		}
+	}
+	if googleGrant {
+		// Google reports the scopes the account actually granted, including the
+		// ones it granted earlier (include_granted_scopes), and the user may
+		// decline individual scopes on the consent screen. The recorded
+		// capabilities are therefore derived from that snapshot: a capability
+		// is kept only when the token confirms every scope it needs, whether
+		// this authorization asked for it or the same user's connection already
+		// held it. Old metadata is never unioned in blindly.
+		connectionScopes = normalizeGrantedScopes(session.ProviderKey, token.Scope)
+		candidates := append([]string{}, session.Capabilities...)
+		if reconnecting && !replaceCapabilities && (existing.UserID == "" || existing.UserID == session.UserID) {
+			candidates = append(candidates, existing.Capabilities...)
+		}
+		if provider, ok := providers.FindOAuth("google"); ok {
+			connectionCapabilities = capabilitiesAllowedByScopes(provider, normalizedStrings(candidates), connectionScopes)
+		}
+	}
+	// Reconnecting a personal connection must not forget what it already held.
+	// Everything this authorization asked about was decided above (by the
+	// token, where the provider reports grants); what it did not ask about is
+	// carried over from the same user's connection.
+	if reconnecting && !googleGrant && !replaceCapabilities && providers.IsPersonalProvider(session.ProviderKey) && existing.UserID == session.UserID {
+		connectionCapabilities, connectionScopes = carryUnrequestedGrants(existing, session, connectionCapabilities, connectionScopes)
+	}
+	connection := store.Connection{
+		ID:                    connectionID,
+		ProviderKey:           session.ProviderKey,
+		ConnectorType:         session.ConnectorType,
+		OrganizationID:        session.OrganizationID,
+		WorkspaceID:           session.WorkspaceID,
+		UserID:                session.UserID,
+		UserEmail:             session.UserEmail,
+		Status:                connectionStatus,
+		DisplayName:           displayName,
+		ProviderAccountID:     providerAccountID,
+		TenantID:              profile.TenantID,
+		ProviderContext:       providerContext,
+		Capabilities:          connectionCapabilities,
+		Scopes:                connectionScopes,
+		EncryptedAccessToken:  accessToken,
+		EncryptedRefreshToken: refreshToken,
+		AccessTokenExpiresAt:  token.ExpiresAt,
+		LastRefreshedAt:       s.now(),
+		LastSyncStatus:        "pending",
+		CreatedAt:             createdAt,
+		UpdatedAt:             s.now(),
+	}
+	var saved store.Connection
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var saveErr error
+		if reconnecting {
+			saved, saveErr = tx.ReconnectConnection(ctx, connection)
+		} else {
+			saved, saveErr = tx.UpsertConnection(ctx, connection)
+		}
+		if saveErr != nil {
+			return saveErr
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-created:" + saved.ID + ":" + session.ID,
+			OrganizationID: session.OrganizationID,
+			UserID:         session.UserID,
+			ConnectionID:   saved.ID,
+			EventType:      "connection.created",
+			ProviderKey:    session.ProviderKey,
+			Metadata: map[string]any{
+				"requestedCapabilities": append([]string(nil), session.Capabilities...),
+				"requestedScopes":       redactScopes(session.Scopes),
+				"capabilities":          append([]string(nil), saved.Capabilities...),
+				"scopes":                redactScopes(saved.Scopes),
+			},
+			CreatedAt: s.now(),
+		})
+	})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	return saved, nil
+}
+
+func providerAccountIdentity(providerKey string, profile ProviderProfile, token TokenResult) string {
+	if providers.NormalizeKey(providerKey) == "notion" {
+		if workspaceID := strings.TrimSpace(stringValue(token.Raw["workspace_id"])); workspaceID != "" {
+			return workspaceID
+		}
+	}
+	return strings.TrimSpace(profile.ID)
+}
+
+func (s *Service) refresh(ctx context.Context, connection store.Connection, refreshToken string) (store.Connection, string, error) {
+	client, ok := s.clients[connection.ProviderKey]
+	if !ok {
+		return store.Connection{}, "", fmt.Errorf("provider %s does not support refresh yet", connection.ProviderKey)
+	}
+	token, err := client.Refresh(ctx, refreshToken, connection.Scopes, connection.ProviderContext)
+	if err != nil {
+		if IsAuthorizationRefreshRequired(err) {
+			connection.Status = "needs_refresh"
+			if _, persistErr := s.repo.UpdateConnectionCredentials(ctx, connection); persistErr != nil {
+				return store.Connection{}, "", fmt.Errorf("mark connection needs refresh: %w", errors.Join(err, persistErr))
+			}
+		}
+		return store.Connection{}, "", err
+	}
+	encryptedAccessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connection.ID))
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	connection.EncryptedAccessToken = encryptedAccessToken
+	if token.RefreshToken != "" {
+		encryptedRefreshToken, err := s.vault.Encrypt(token.RefreshToken, []byte(connection.ID))
+		if err != nil {
+			return store.Connection{}, "", err
+		}
+		connection.EncryptedRefreshToken = encryptedRefreshToken
+	}
+	connection.AccessTokenExpiresAt = token.ExpiresAt
+	connection.LastRefreshedAt = s.now()
+	connection.Status = "active"
+	if providers.NormalizeKey(connection.ProviderKey) == "google" && (token.ScopesVerified || len(token.Scope) > 0) {
+		connection.Scopes = normalizedStrings(token.Scope)
+		if provider, ok := providers.FindOAuth("google"); ok {
+			connection.Capabilities = capabilitiesAllowedByScopes(provider, connection.Capabilities, connection.Scopes)
+		}
+	}
+	if isMetaFamilyProvider(connection.ProviderKey) && token.ScopesVerified {
+		connection.Scopes = normalizedStrings(token.Scope)
+		if provider, ok := providers.FindOAuth(connection.ProviderKey); ok {
+			grantedCapabilities := capabilitiesAllowedByScopes(provider, connection.Capabilities, connection.Scopes)
+			if len(grantedCapabilities) != len(connection.Capabilities) {
+				connection.Status = "needs_refresh"
+			}
+			connection.Capabilities = grantedCapabilities
+		}
+	}
+	saved, err := s.repo.UpdateConnectionCredentials(ctx, connection)
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	return saved, token.AccessToken, nil
+}
+
+func (s *Service) refreshCoordinated(ctx context.Context, connection store.Connection) (store.Connection, string, error) {
+	return s.refreshSingleflight(ctx, connection.ID, func(ctx context.Context) (store.Connection, string, error) {
+		if locker, ok := s.repo.(store.ConnectionRefreshLocker); ok {
+			var refreshed store.Connection
+			var accessToken string
+			err := locker.WithConnectionRefreshLock(ctx, connection.ID, func(lockCtx context.Context) error {
+				var refreshErr error
+				refreshed, accessToken, refreshErr = s.refreshIfStillExpired(lockCtx, connection.ID)
+				return refreshErr
+			})
+			return refreshed, accessToken, err
+		}
+		return s.refreshIfStillExpired(ctx, connection.ID)
+	})
+}
+
+func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string) (store.Connection, string, error) {
+	connection, err := s.repo.GetConnection(ctx, connectionID)
+	if err != nil {
+		return store.Connection{}, "", err
+	}
+	if connection.DeletedAt != nil || connection.Status != "active" {
+		return store.Connection{}, "", store.ErrNotFound
+	}
+	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
+	if err != nil {
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
+		return store.Connection{}, "", err
+	}
+	if s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
+		return connection, accessToken, nil
+	}
+	if connection.EncryptedRefreshToken == "" {
+		// A connection adopted from a Control Plane sign-in has no refresh
+		// token of its own (it belongs to auth-core's Azure app); ask
+		// auth-core to re-mint instead.
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
+		return store.Connection{}, "", fmt.Errorf("connection has no refresh token")
+	}
+	refreshToken, err := s.vault.Decrypt(connection.EncryptedRefreshToken, []byte(connection.ID))
+	if err != nil {
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
+		return store.Connection{}, "", err
+	}
+	refreshed, token, err := s.refresh(ctx, connection, refreshToken)
+	if err != nil {
+		// Our own refresh token can die while the user keeps signing in
+		// (public-client refresh tokens expire after 24 idle hours —
+		// AADSTS70008). If Control Plane holds a live credential for this
+		// account, recover with it rather than parking the connection in
+		// needs_refresh until someone clicks reconnect.
+		if cpRefreshed, cpToken, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies && cpErr == nil {
+			return cpRefreshed, cpToken, nil
+		}
+		return store.Connection{}, "", err
+	}
+	return refreshed, token, nil
+}
+
+func reconnectProviderContext(existing, session map[string]string) map[string]string {
+	merged := make(map[string]string, len(session)+1)
+	for key, value := range session {
+		merged[key] = value
+	}
+	// guild_id is a verified tenant binding. A generic reconnect may replace
+	// ordinary provider-derived context (including webhook account IDs), but
+	// changing the guild requires a dedicated authorized rebind flow.
+	if guildID := strings.TrimSpace(existing["guild_id"]); guildID != "" {
+		merged["guild_id"] = guildID
+	}
+	// Keep the last verified webhook binding through reconnect. Successful Meta
+	// provisioning replaces it atomically; dropping it in the OAuth callback
+	// creates a window where already-subscribed provider events cannot resolve.
+	if accountIDs := strings.TrimSpace(existing["webhook_account_ids"]); accountIDs != "" && strings.TrimSpace(merged["webhook_account_ids"]) == "" {
+		merged["webhook_account_ids"] = accountIDs
+	}
+	return merged
+}
+
+type refreshWork func(context.Context) (store.Connection, string, error)
+
+func (s *Service) refreshSingleflight(ctx context.Context, connectionID string, work refreshWork) (store.Connection, string, error) {
+	s.refreshMu.Lock()
+	if call, ok := s.refreshes[connectionID]; ok {
+		s.refreshMu.Unlock()
+		select {
+		case <-call.done:
+			return call.connection, call.accessToken, call.err
+		case <-ctx.Done():
+			return store.Connection{}, "", ctx.Err()
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	s.refreshes[connectionID] = call
+	s.refreshMu.Unlock()
+
+	call.connection, call.accessToken, call.err = work(ctx)
+	s.refreshMu.Lock()
+	delete(s.refreshes, connectionID)
+	// Remove the completed slot before waking joiners. An invalidation that
+	// joined a refresh must be able to re-evaluate the resulting credential.
+	close(call.done)
+	s.refreshMu.Unlock()
+
+	return call.connection, call.accessToken, call.err
+}
+
+func isMetaFamilyProvider(providerKey string) bool {
+	switch strings.TrimSpace(strings.ToLower(providerKey)) {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// replaceCapabilitiesContextKey marks a connect session that was created with
+// ReplaceCapabilities. It rides in the session's provider context (a session has
+// no other free-form field), is set only by CreateSession, and is stripped
+// before the connection is stored.
+const replaceCapabilitiesContextKey = "oauth_replace_capabilities"
+
+func contextWithReplaceMarker(providerContext map[string]string) map[string]string {
+	marked := make(map[string]string, len(providerContext)+1)
+	for key, value := range providerContext {
+		marked[key] = value
+	}
+	marked[replaceCapabilitiesContextKey] = "true"
+	return marked
+}
+
+// verifiesGrantedScopes reports providers whose token response is an
+// authoritative record of the scopes granted, so the capabilities recorded for a
+// connection can be derived from it instead of from what was asked for.
+func verifiesGrantedScopes(providerKey string) bool {
+	return isMetaFamilyProvider(providerKey) || providers.NormalizeKey(providerKey) == "microsoft"
+}
+
+// normalizeGrantedScopes puts a token response's scope list in the same form as
+// the catalog's scopes. Microsoft prefixes Graph scopes with the Graph URL in
+// some responses and never echoes the OIDC scopes the sign-in itself proves.
+func normalizeGrantedScopes(providerKey string, scopes []string) []string {
+	if providers.NormalizeKey(providerKey) == "microsoft" {
+		return grantedScopesForSignIn(scopes)
+	}
+	return normalizedStrings(scopes)
+}
+
+// grantedCapabilitiesOnSoleConnection returns the capabilities the user's one
+// active connection to a personal provider already holds. A user with several
+// accounts connected gets nothing back: which account the next authorization
+// will be for is only known at the callback, and no account's grants may be
+// requested on another's behalf. (persistConnection still carries the right
+// account's grants over once the callback names it.)
+func (s *Service) grantedCapabilitiesOnSoleConnection(ctx context.Context, provider providers.Provider, organizationID, userID string) ([]string, error) {
+	connections, err := s.repo.ListConnections(ctx, store.ConnectionFilter{
+		OrganizationID: strings.TrimSpace(organizationID),
+		ProviderKey:    provider.Key,
+		UserID:         strings.TrimSpace(userID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("look up existing %s connection: %w", provider.Key, err)
+	}
+	var active []store.Connection
+	for _, connection := range connections {
+		if connection.DeletedAt == nil && (connection.Status == "active" || connection.Status == "needs_refresh") {
+			active = append(active, connection)
+		}
+	}
+	if len(active) != 1 {
+		return nil, nil
+	}
+	known := allCapabilityKeys(provider)
+	granted := make([]string, 0, len(active[0].Capabilities))
+	for _, capability := range active[0].Capabilities {
+		if slices.Contains(known, capability) {
+			granted = append(granted, capability)
+		}
+	}
+	return granted, nil
+}
+
+// carryUnrequestedGrants keeps, on a reconnect, the capabilities and scopes the
+// existing connection holds that the new authorization did not ask about. What
+// it did ask about is not carried: the token (or the request) already decided it,
+// so a grant the provider no longer reports stays dropped.
+func carryUnrequestedGrants(existing store.Connection, session store.ConnectSession, capabilities, scopes []string) ([]string, []string) {
+	requestedCapabilities := map[string]struct{}{}
+	for _, capability := range session.Capabilities {
+		requestedCapabilities[capability] = struct{}{}
+	}
+	requestedScopes := map[string]struct{}{}
+	for _, scope := range session.Scopes {
+		requestedScopes[strings.TrimSpace(scope)] = struct{}{}
+	}
+	carriedCapabilities := append([]string{}, capabilities...)
+	for _, capability := range existing.Capabilities {
+		if _, asked := requestedCapabilities[capability]; !asked {
+			carriedCapabilities = append(carriedCapabilities, capability)
+		}
+	}
+	carriedScopes := append([]string{}, scopes...)
+	for _, scope := range existing.Scopes {
+		if _, asked := requestedScopes[strings.TrimSpace(scope)]; !asked {
+			carriedScopes = append(carriedScopes, scope)
+		}
+	}
+	return normalizedStrings(carriedCapabilities), normalizedStrings(carriedScopes)
+}
+
+func capabilitiesAllowedByScopes(provider providers.Provider, requested, grantedScopes []string) []string {
+	// Scope names are matched case-insensitively: Microsoft does not promise the
+	// casing of the scopes it echoes, and a missed match here would park a
+	// healthy connection in needs_refresh.
+	granted := map[string]struct{}{}
+	for _, scope := range grantedScopes {
+		granted[strings.ToLower(strings.TrimSpace(scope))] = struct{}{}
+		if provider.Key == "google" {
+			switch strings.ToLower(strings.TrimSpace(scope)) {
+			case "https://www.googleapis.com/auth/userinfo.email":
+				granted["email"] = struct{}{}
+			case "https://www.googleapis.com/auth/userinfo.profile":
+				granted["profile"] = struct{}{}
+			}
+		}
+	}
+	requestedSet := map[string]struct{}{}
+	for _, capability := range requested {
+		requestedSet[capability] = struct{}{}
+	}
+	allowed := make([]string, 0, len(requested))
+	for _, capability := range provider.Capabilities {
+		if _, wanted := requestedSet[capability.Key]; !wanted {
+			continue
+		}
+		allGranted := true
+		for _, required := range capability.Scopes {
+			if _, ok := granted[strings.ToLower(strings.TrimSpace(required))]; !ok {
+				allGranted = false
+				break
+			}
+		}
+		if allGranted {
+			allowed = append(allowed, capability.Key)
+		}
+	}
+	slices.Sort(allowed)
+	return allowed
+}
+
+func redactScopes(scopes []string) []string {
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		out = append(out, scope)
+	}
+	return out
+}

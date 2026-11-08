@@ -1,0 +1,677 @@
+{
+ "batchId": "W2-26",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS23-S6.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-connector-scope.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-connector-scope.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.connector-scope.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/integrations-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.connector-citation.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.connector-scope.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/connected-apps.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Frontend Plane/verevonv3 && pnpm typecheck",
+     "outcome": "Exit 1 with 23 error lines, the same as round 1. model-access.ts(90) TS2739 names exactly chat.set_connector_scope, integrations.browse_connection and integrations.fetch_connection_content (lead item 1; 190 registry ids vs 187 rows). The other 22 are pre-existing: 21 in quarry-client.ts (cannot find module @quarry/client) and 1 in schedule-contract.test.ts. No error in chat-types.ts or in any file this slice owns."
+    },
+    {
+     "command": "pnpm vitest run src/shared/actions src/shared/api/integrations-client.test.ts src/shared/api/chat-client.connector-scope.test.ts src/shared/api/chat-client.test.ts src/shared/api/chat-client.zdr-capability.test.ts src/features/dashboard/home/DashboardComposer src/features/chat/components/chat-normalizers src/features/chat/components/ChatPanels.test.tsx (VEREVON_UPDATE_GOLDEN unset)",
+     "outcome": "11 failed, 641 passed of 652; 43 of 45 files pass. The 11 failures are the round-1 set. admission-contract.test.ts fails 5 with TypeError reading 'access' at the missing model-access row. catalog-manifest.test.ts fails 6 with 'Action catalog has no model access row for: integrations.browse_connection' (fail-closed). Every connector suite in the set passes."
+    },
+    {
+     "command": "pnpm vitest run src/features/dashboard/home/DashboardComposer.connector-attach.test.tsx src/features/dashboard/home/DashboardComposer.connector-scope.test.tsx src/shared/api/integrations-client.test.ts src/features/chat/components/chat-normalizers.connector-attach.test.ts src/features/chat/components/chat-normalizers.connector-citation.test.ts (the plan's named command)",
+     "outcome": "5 files, 29 tests, all pass."
+    },
+    {
+     "command": "pnpm exec eslint src/features/chat/components/chat-types.ts",
+     "outcome": "Exit 0, no findings."
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh (read-only, run before any shared edit)",
+     "outcome": "87 passed, 22 failed. The admission lines are all ok: canonical golden digest, its .sha256 pin, the SPA copy, the three other copies and the four consumer rows. The 22 failures predate this slice: other planes' goldens and copies (Quarry retrieve-v1 and rerank-v1 copies, Model Plane zdr-posture-matrix pin copies, a usage-ledger pin file, the Quarry token-request golden)."
+    },
+    {
+     "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets browse (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "Not re-run this round: no Rust file changed. The round-1 result (84 passed, 0 failed) stands."
+    },
+    {
+     "command": "Not run",
+     "outcome": "The VEREVON_UPDATE_GOLDEN regeneration (it writes a shared file, so it is the lead's step); the suites after the shared edits (they need those edits first); the Playwright e2e spec (needs a second dev server); full pnpm lint."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after line 233 (the 'integrations.extend_inbox_history' row) add two rows at 2-space indent: 'integrations.browse_connection': exempt('no_owner_executor', 'read'), and 'integrations.fetch_connection_content': exempt('no_owner_executor', 'read'),. After line 260 (the 'chat.extract_document' row) add 'chat.set_connector_scope': exempt('agent_cannot_self_govern', 'context_write'),. Both reasons and both classes are valid union members, and the placement follows registry order.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: (a) after line 3006, the streamChat request inside sendContent, after 'retrievalScope: options.retrievalScope ?? retrievalScope(),', add 'connectorScope: options.connectorScope,' at 10-space indent. (b) after line 3363, inside handleComposerSubmit's sendContent options, after 'retrievalScope: payload.retrievalScope,', add 'connectorScope: payload.connectorScope,' at 6-space indent. Leave lines 2768 and 2798 unset: they are transcript records, not the wire. The SendOptions field already exists in chat-types.ts (done in this round).",
+    "Admission regeneration, after lead item 1: cd C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3 and run VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts. It writes src/shared/api/contracts/agent-action-admission.json (LF). Check the three new rows: registry true, eligible false, exemptReason set.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/agent-action-admission.json (canonical golden): copy the regenerated SPA file over it. The two are byte-identical today. Then rewrite C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/agent-action-admission.json.sha256 as '<new sha256> *agent-action-admission.json' (sha256sum -b, the existing 94-byte format).",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh line 157: replace digest 8eb89148f5bdfb9e914bc7d9ad7f307659b033009c94df617dae2123d277335f with the new digest. This is the only other tracked pin of the golden.",
+    "shared-edit the three vendored copies, each byte-identical to the golden today: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json and C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json. Copy the new golden over each.",
+    "Verify after lead items 1 to 6: pnpm vitest run src/shared/actions with VEREVON_UPDATE_GOLDEN unset must show 0 failures. pnpm typecheck must keep only the 22 pre-existing lines (21 in quarry-client.ts, 1 in schedule-contract.test.ts). bash scripts/tests/zdr-contract-sync.test.sh: every admission line stays ok, and the failed count stays at the baseline 22, all outside admission.",
+    "Still open from round 1, not in this round's fixes: in use-chat-controller.ts, in the controller's returned object after 'retrievalScope,' (line 4461), add 'spaceScoped: () => Boolean(scopedThreadRefs.get(state.threadId ?? '')),'. In C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx destructure spaceScoped after 'retrievalScope,' (line 132) and pass spaceScoped={spaceScoped()} after 'retrievalScope={retrievalScope()}' (line 239). The composer reads props.spaceScoped (DashboardComposer.tsx:906 and 1282). Until both land, Space-bound threads show the chip row, and the chat client's wire guard drops the picks because it withholds connector_scope whenever spaceRef is set.",
+    "Still open from round 1: the e2e spec C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/connected-apps.spec.ts is not run. It needs a second Vite server on this worktree (5173 is the main checkout) and the local auth project. Run pnpm exec playwright test tests/e2e/connected-apps.spec.ts after items 1 to 8.",
+    "Backend, outside this slice: the catalogue lists connector_scope in a chat model's features only while CONNECTOR_ASK_READS_ENABLED is on. Until then the chip row stays hidden, which is the intended dark default."
+   ],
+   "deviations": [
+    "SendOptions.connectorScope was added in chat-types.ts, the owned file where the type is defined, instead of in use-chat-controller.ts as the review row listed. The lead's controller edits are therefore two lines, not three.",
+    "The shared fixes (model-access.ts rows, the admission regeneration set, and the controller pass-through lines) are not applied in this round. They are handed back with exact anchors because the slice's ownership rules reserve those files for the lead."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (three MODEL_ACCESS rows, lead item 1)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (connectorScope in sendContent's streamChat request and in handleComposerSubmit's options, lead item 2; spaceScoped accessor, item 8)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (spaceScoped pass-through, item 8)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerated by its own test, never hand-edited, item 3)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256 pin (canonical golden, item 4)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (digest on line 157, item 5)",
+    "Vendored copies, item 6: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json, C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs or the model-gateway /v1/models handler (connector_scope catalogue feature; not started, outside this slice, item 10)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Lead shared edit, apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: add MODEL_ACCESS rows for the three new registry ids, 'integrations.browse_connection' and 'integrations.fetch_connection_content' as exempt('no_owner_executor', 'read') and 'chat.set_connector_scope' as exempt('agent_cannot_self_govern', 'context_write'). Why: pnpm typecheck fails with model-access.ts(90) TS2739, which names exactly these three ids, and src/shared/actions has 11 failing unit tests (5 in admission-contract.test.ts, 6 in catalog-manifest.test.ts, which fails closed on the missing rows). This slice's action-registry.ts additions cause both.",
+     "Lead shared edit, after the model-access rows: regenerate the admission golden with VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts. Then copy the result over the canonical apps/Model Plane/api/contracts/agent-action-admission.json, rewrite its .sha256 pin, update the digest on line 157 of scripts/tests/zdr-contract-sync.test.sh, and update the three vendored copies (capability-core testdata, execution-core and model-gateway test fixtures). Why: admission-contract.test.ts stays red until the golden carries the three new rows, and the sync rows fail if the copies do not move with it. Exit check: pnpm vitest run src/shared/actions shows 0 failures.",
+     "Lead shared edit, apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: in sendContent's streamChat request add 'connectorScope: options.connectorScope,', and in handleComposerSubmit's sendContent options add 'connectorScope: payload.connectorScope,'. Why: the controller does not pass connectorScope on today (grep finds no connectorScope in use-chat-controller.ts). The composer's picks therefore never reach buildChatWireBody, and the row's deliverable 'sends connector_scope only when non-empty' does not happen end to end, even though chat-client.ts maps it correctly."
+    ],
+    "dod_gaps": [
+     "Playwright tests/e2e/connected-apps.spec.ts is not run. It needs a second Vite dev server on this worktree (:5173 is the main checkout), and it can only pass after the controller pass-through edit.",
+     "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets browse does not compile now: 8 E0425 errors in apps/gateway/src/domains/chat/shared.rs, where the test module cannot find browser_do_enabled_from, browser_do_offered and browser_token. The slice owns no Rust file, so another slice's uncommitted gateway edits caused this. The lead must fix it before the plan's cargo command can count as green.",
+     "The composer never shows chips in a real deployment until some backend lists 'connector_scope' among a chat model's features (catalogue, gated by CONNECTOR_ASK_READS_ENABLED). Live proof belongs to WS23-S7."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The admission regeneration touches a canonical golden, its .sha256 pin, the sync-script digest and three Model Plane copies, not only the SPA file the review listed. Skipping any of them fails the admission sync rows, which are all ok today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Space-bound threads show the Connected apps chip row until spaceScoped is wired (lead item 8). The chat client's wire guard drops the picks on Space turns, so the chips do nothing there. The plan (DEC-06) says the row is omitted in Space rooms."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "When the Ask-loop connector read (WS23-S5, read_provider_action) lands, it needs a MODEL_READ_SURFACE row in model-access.ts, because the gateway test checks every Ask-loop read arm against the contract. The three exempt rows cover only the registry side."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Carried from round 1: normalizeCitation drops a connector citation with no link (url required), though the gateway can emit an empty url for items without a web link, such as drive.file.content. Those items never reach the sources panel."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Carried from round 1: no unit test renders SourcesPanel's Connected apps section or ConnectorSourceCard. Only the normalizers and the composer are covered."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Carried from round 1: the e2e spec (lead item 9) is not run. A reloaded thread should also be checked by eye, because citationFromUnknown now keeps origin for web and knowledge citations on the history path."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Carried from round 1: chat.set_connector_scope has no runtime caller, because the composer sends connector_scope through normalizeConnectorScope directly. Wire it or keep it as the documented shape."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Carried from round 1: nothing emits the connector_scope catalogue feature yet, so the chip row stays hidden by design (lead item 10)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Carried from round 1: the @ trigger (WS23 D6) is not built. It waits for the Space session to agree, because @ already names Space agents (DEC-26). The detectTrigger comment records this."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Regenerate and continue turns send no connector picks, so a regenerated answer does not reread connected apps. Owner to confirm this is intended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Not from this slice: 43 no-restricted-syntax lint errors in chat-normalizers.ts (Norwegian copy outside i18n.tr); 22 typecheck lines (21 in quarry-client.ts, 1 in schedule-contract.test.ts); 22 sync-script failures in other planes' goldens and copies."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "spaceScoped is not wired: the composer reads props.spaceScoped, but neither use-chat-controller.ts nor ChatPage.tsx supplies it. Space-bound threads therefore show selectable chips instead of the DEC-06 block, and the chat-client wire guard silently drops the picks because spaceRef is set."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The Home path (writePendingChatLaunch, then the pending launch read by use-chat-controller) was not verified to carry payload.connectorScope through pending-chat-launch.ts, so picks made on the dashboard composer may be lost even after the controller edit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "normalizeCitation and citationFromUnknown return null when url is empty. A connector citation for an item with no web link (for example drive.file.content) is dropped and never reaches the Connected apps section."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test renders SourcesPanel's Connected apps section, ConnectorSourceCard (safe-link fallback, grouping heading shown only with more than one group) or the exclusion of connector items from the read tally."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "citationFromUnknown now keeps origin on the history path for web and knowledge citations too, not only connector ones. A reloaded thread can therefore start showing the scope-mismatch flag or receipt badges that it did not show before, and nobody has checked this by eye."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat.set_connector_scope is registered but has no runtime caller: the composer sends picks through normalizeConnectorScope directly, not through the action contract."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Regenerate and continue turns carry no connector picks, so a regenerated answer does not reread connected apps. The owner should confirm this is intended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "These failures predate the slice and are not caused by it: 21 typecheck errors in quarry-client.ts and 1 in schedule-contract.test.ts, and 43 lint errors in chat-normalizers.ts. The slice-owned files lint with 0 errors and 2 warnings."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm vitest run --pool=threads (plan's 5 named files + chat-connector-scope.test.ts + chat-client.connector-scope.test.ts)",
+      "outcome": "7 files, 45 tests, all passed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck",
+      "outcome": "Exit 1, 23 errors. 21 are in quarry-client.ts and 1 in schedule-contract.test.ts, both pre-existing. 1 is model-access.ts(90) TS2739: MODEL_ACCESS lacks rows for chat.set_connector_scope, integrations.browse_connection and integrations.fetch_connection_content. Those are the slice's registry ids, so the shared edit is still outstanding (lead_todo). No error in the slice's own files.",
+      "passed": false
+     },
+     {
+      "command": "pnpm lint",
+      "outcome": "Exit 1, 247 problems (43 errors, 204 warnings). All 43 errors are in chat-normalizers.ts (no-restricted-syntax, Norwegian text outside i18n.tr). The same file at HEAD gives 43 errors, so they are pre-existing and not caused by the slice. The other slice files (ChatPanels, DashboardComposer, chat-connector-scope, chat-client, integrations-client, action-registry) have 0 errors.",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets browse (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "Compile failure, no tests run. 8 E0425 errors in src/domains/chat/shared.rs lines 1030-1137: cannot find function browser_do_enabled_from, browser_do_offered and browser_token in the test module scope. The functions exist at shared.rs lines 250-277, so this looks like a module or cfg scoping problem in uncommitted gateway edits. The slice owns no Rust file. The implementer's round-1 pass (84 passed) does not reproduce now.",
+      "passed": false
+     },
+     {
+      "command": "Playwright tests/e2e/connected-apps.spec.ts",
+      "outcome": "Not run: it needs a second dev server and the slice rules do not allow starting one.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Round 2 of the review fixes. Only one file changed this round: chat-types.ts, where SendOptions now has connectorScope?: string[]. The type is defined there, not in use-chat-controller.ts, so the controller needs two lines rather than three. The other two required fixes are shared lead edits, so they are handed back in lead_todo with exact anchors, not made. Confirmed the reviewer's cause: the admission test throws on the three missing MODEL_ACCESS rows (5 tests), and catalog-manifest fails closed on the same rows (6 tests). The reviewer's exempt(...) reasons and side-effect classes are valid union members. Their regeneration step is incomplete. The canonical golden apps/Model Plane/api/contracts/agent-action-admission.json, its .sha256 pin, the digest on line 157 of scripts/tests/zdr-contract-sync.test.sh and three vendored copies must all move with the regenerated SPA file. Otherwise the admission sync rows fail. Wire path verified: DashboardComposer.tsx:2751 sets payload.connectorScope; ChatInvokeRequest.connectorScope (chat-client.ts:81) maps to connector_scope (chat-client.ts:1377) inside buildChatWireBody, which streamChat serialises (chat-client.ts:2172). Nothing committed, staged or pushed. The controller and admission suites stay red until the lead applies lead_todo items 1 to 6."
+  },
+  {
+   "id": "WS19-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/skill_mounts.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tools.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/lib.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q --manifest-path \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/Cargo.toml\" -p execution-core --lib (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "1501 passed, 0 failed, exit 0 (includes skill_mounts 8, code_interpreter 45, live_grpc_listener 1)"
+    },
+    {
+     "command": "cargo test -q --manifest-path \"C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/Cargo.toml\" -p model-gateway --lib (same env)",
+     "outcome": "2499 passed, 0 failed, 4 ignored, exit 0"
+    },
+    {
+     "command": "built execution-core test binary, filter skill_mounts",
+     "outcome": "8 passed, 0 failed"
+    },
+    {
+     "command": "built execution-core test binary, filter code_interpreter",
+     "outcome": "45 passed, 0 failed. a_skill_bundle_is_readable_at_skills_and_not_writable returns early on this host (no /skills mount), so it passed by skip"
+    },
+    {
+     "command": "built execution-core test binary, filter live_grpc_listener_is_ready_and_rejects_unsigned_execution",
+     "outcome": "1 passed, 0 failed"
+    },
+    {
+     "command": "built model-gateway test binary, filter skill_mount_tests",
+     "outcome": "4 passed, 0 failed"
+    },
+    {
+     "command": "built model-gateway test binary, filter staged_attachments",
+     "outcome": "3 passed, 0 failed"
+    },
+    {
+     "command": "first attempt: cargo test -q -p execution-core --lib skill_mounts",
+     "outcome": "compiled, then failed at link (LNK1104): a plain cargo test -q -p execution-core --lib run I did not start held execution_core-0a3e3d6dbe8804a3.exe (PID 11280). Not a code failure. I waited for that process to exit and reran."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 (read-only) on skill_mounts.rs",
+     "outcome": "clean"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 (read-only) on grpc.rs and runtime_loop/mod.rs",
+     "outcome": "no hunk touches the new lines after the two wraps; pre-existing hunks left alone"
+    },
+    {
+     "command": "git diff --check on the four shared-edit files; CRLF check with eol_check.py",
+     "outcome": "clean; no LF-only lines"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, beside SKILL_FILE_TOOL_ENABLED, add SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false}. Not applied here because it was not in the fix list. An unset value already means off.",
+    "Go bindings: regenerate apps/Model Plane/go/gen/model_plane/v1/execution.pb.go with buf (targeted) when the batch regeneration runs. The proto change is additive: tag 14, 23 insertions and 0 deletions.",
+    "Live proof, owed per the plan DoD: rebuild model-gateway and execution-core. Flag off gives a byte-identical ExecuteStep. Flag on with a sample bundle on an Ask turn shows the bwrap argv --ro-bind to /skills, python /skills/<name>/scripts/x.py runs, a write under /skills fails with EROFS, there is no network, the temp tree is gone afterwards, and apps/Model Plane/scripts/verify-sandbox-isolation.sh is green. Run the Linux tests in a rust:1 container with bwrap and /skills present.",
+    "Merge: grpc.rs, runtime_loop/agent.rs, auth.rs and sse.rs carry WS21-S2's uncommitted hunks. When committing grpc.rs and runtime_loop/mod.rs, split out this slice's hunks (see notes) or commit with the WS21-S2 owner, and do not overwrite the WS21-S2 work.",
+    "Owner decision to record in apps/Model Plane/docs/decisions/ledger.md if wanted: the mount design (per-run guarded registry in execution-core, capability:read bundle reads, bounded (org, sha256) blob cache, gateway-derived list from chat_turn_registry)."
+   ],
+   "deviations": [
+    "serve() builds the source with a match that calls warn! on error, the idiom serve() already uses for optional components, instead of a bare .ok(). Still fails closed: a step that names mounts returns skill_mounts_unavailable.",
+    "Added a trailing None argument to the test call of serve_with_listener in grpc.rs (live_grpc_listener_is_ready_and_rejects_unsigned_execution). It is not in the fix list but is required to compile.",
+    "execute_code_interpreter takes skills: Option<&Path> (Path is already in scope) instead of std::path::Path.",
+    "Added a one-line comment above skill_mounts: Vec::new() in browser_run.rs, mirroring the attachments line above it.",
+    "Two rustfmt-driven wraps: the serve() match block and the skill_tree chain in the code_interpreter arm. The new lines pass rustfmt --check; pre-existing rustfmt hunks in those files were left alone."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml (SKILL_BUNDLE_MOUNT_ENABLED default, see lead_todo)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (buf regeneration)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof per the row's DoD: rebuild model-gateway and execution-core with SKILL_BUNDLE_MOUNT_ENABLED=true and a sample bundle on an Ask turn. Show the bwrap argv --ro-bind <tree> /skills, `python /skills/<name>/scripts/x.py` running, a write under /skills failing with EROFS, no network, no verevon-skills-* temp dir left afterwards, and apps/Model Plane/scripts/verify-sandbox-isolation.sh green.",
+     "The Linux-gated tests (code_interpreter::a_skill_bundle_is_readable_at_skills_and_not_writable and the cfg(unix) mode assertions in skill_mounts::a_skill_tree_is_read_only_and_names_its_scripts) only skip or pass trivially on this Windows host. Run them in a rust:1 container with bwrap and a /skills mount point.",
+     "The /skills mount point must already exist in the execution-core image (WS19-S4 Dockerfile). Until it does, an enabled mount has nowhere to bind on the read-only root.",
+     "Shared edit to apps/Model Plane/deploy/docker-compose.yml: add SKILL_BUNDLE_MOUNT_ENABLED: ${SKILL_BUNDLE_MOUNT_ENABLED:-false} beside SKILL_FILE_TOOL_ENABLED (line 320). Unset already means off.",
+     "Regenerate the Go bindings (go/gen/model_plane/v1/execution.pb.go) with buf for the additive SkillMount message and ExecuteStepRequest.skill_mounts = 14.",
+     "Commit hygiene: grpc.rs and runtime_loop/mod.rs also carry WS21-S2's uncommitted browser-bearer hunks, for example the scheduled-run `None` browser bearer argument. Split hunks when committing."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Still unproven: the bwrap --ro-bind of /skills, EROFS on write, no network, temp tree removed after the call, and apps/Model Plane/scripts/verify-sandbox-isolation.sh. These need the compose switch and rebuilt model-gateway and execution-core images, so the lead runs them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The model is never told the mount path: neither the bundle footer nor the code_interpreter tool text names /skills/<name>. Keep SKILL_BUNDLE_MOUNT_ENABLED off until one of them does."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "execution-core reads bundles with a capability:read token minted for the org. The owner must confirm that scope and that capability-core refuses a skill the request did not name."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "On this Windows host a_skill_bundle_is_readable_at_skills_and_not_writable returns early (no /skills mount), and the cfg(unix) mode assertions in a_skill_tree_is_read_only_and_names_its_scripts did not run. A rust:1 container with bwrap and /skills is needed for those."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves a mount reaches ExecuteStepRequest from handle_code_interpreter end to end, or the gateway's zero-retention refusal on a live path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "serve() now builds GrpcSkillBundleSource at startup even with the switch off, so there is a second ServiceTokenProvider and token cache. No request-path change. Sharing the capability policy's provider is a P3 cleanup."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two cargo test -p execution-core --lib runs in one batch target dir collide at link time (LNK1104) because a running test exe is locked. Serialise test runs within the batch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-run registry is keyed by (org, run). A sibling code_interpreter call of the same run without mounts sees the tree while it is held. Parallel calls with different mount lists fail closed with aborted skill_mounts_in_use."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A bundle re-uploaded between the gateway's ListSkillBundles and execution-core's manifest read fails the call with skill_mounts_manifest_mismatch instead of mounting the newest version."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "A crash between materialise and the tree's drop leaves a verevon-skills-* temp directory, and there is no startup sweep."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two skills whose names slug to the same directory: the second is dropped silently, with no notice to the model."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Mounts are derived only on the inline Ask loop. Do runs and agentic runs get none."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "With the switch on, every turn with injected skills makes one ListSkillBundles call and one GetSkill per injected skill, even when no code_interpreter call follows."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "mount_name_for turns non-ASCII letters into separators (Okonomi with a slash becomes konomi), which is surprising for Norwegian skill names."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The model is never told where the bundles are: neither the skill bundle footer nor the code_interpreter tool description names /skills/<name>. Keep SKILL_BUNDLE_MOUNT_ENABLED off until one of them does."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "skill_mounts::GrpcSkillBundleSource reads bundles with an org-wide capability:read service token minted for req.org_id. execution-core itself does not check that the user may see the skill; it trusts the gateway's handle_get_skill ownership filter. The owner should confirm this scope and that capability-core scopes GetSkillBundleManifest/GetSkillBlob to the token's org."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan-named tests are missing: sandbox.rs `skill_mount_follows_the_writable_root_in_argv` (sandbox.rs is not owned) and the extension of tests/cross_service_loop_contract.rs. The gateway RESERVED_MOUNT_NAMES and execution-core RESERVED_NAMES / name rules are a cross-service coupling with no runtime contract test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows a mount reaching ExecuteStepRequest end to end from run_tool_rounds_for_model_with_attachments, or covers skill_mounts_for_turn's zero-retention, missing-bearer and org/user-mismatch early returns. Only the pure helpers are unit-tested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "TreeRegistry is keyed by (org, run), and the code_interpreter arm reads global().get(org, run) whatever its own step's mounts are. A concurrent call of the same run whose step named no mounts can see the tree another call holds. A parallel call with a different list fails with aborted skill_mounts_in_use."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A bundle re-uploaded between the gateway's ListSkillBundles (read once per turn) and execution-core's manifest read fails every code_interpreter call for the rest of the turn with data_loss skill_mounts_manifest_mismatch, instead of mounting the newer version."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "With the switch on, skill_mounts_for_turn runs on every Ask turn: one GetSkill per injected skill plus one ListSkillBundles RPC, even when no code_interpreter call follows. Deriving the mounts lazily on the first code_interpreter dispatch would avoid that."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Mounts are derived only in the inline Ask loop (run_tool_rounds_for_model_with_attachments). Do runs and agentic runs get none, which matches S10 being deferred."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "A process crash between materialise and SkillTree's drop leaves a verevon-skills-* directory in the temp dir. There is no startup sweep."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In the gateway, two matched skills whose names slug to the same mount name: the second is dropped silently. mount_name_for also turns non-ASCII letters into separators (Norwegian letters such as æ, ø, å are lost), which surprises users with no notice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "serve() now builds GrpcSkillBundleSource, a second ServiceTokenProvider, at startup even with the switch off. This makes no network call and does not change the request path, but it could share the capability policy's provider."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new skill_mounts.rs is LF while the neighbouring execution-core sources are CRLF in this worktree. There is no flip of an existing file: git diff --stat shows only small additive hunks."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "lib.rs, grpc.rs, runtime_loop/mod.rs (execution-core) and browser_run.rs (model-gateway) are outside the slice's owned list. The implementer reports them as lead-directed shared edits, and they are needed to compile and wire the feature. The lead should confirm they were sanctioned before committing."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --lib (CARGO_INCREMENTAL=0, target C:/dev/mp-target-w2)",
+      "outcome": "1501 passed, 0 failed, 0 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (same env)",
+      "outcome": "2499 passed, 0 failed, 4 ignored; compiles clean",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib skill_mounts",
+      "outcome": "8 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib skill_mount",
+      "outcome": "4 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "plan test_commands for WS19-S8",
+      "outcome": "list is empty in W2-26.json; nothing further to run",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "zdr"
+   ],
+   "notes": "All three required fixes are applied as lead-directed shared edits, in CRLF files with line endings verified after the edit. (1) browser_run.rs: the ExecuteStepRequest literal gets skill_mounts: Vec::new(). (2) execution-core lib.rs: pub mod skill_mounts after shipping_tools. (3) grpc.rs: ExecutionService.skill_bundles; a skill_bundles parameter on new_with_scheduled_step_runtime and serve_with_listener; serve() builds the source from capability_channel before the policy consumes that channel; execute_step holds _skill_mounts from stage_for_step right after register_step_attachments. runtime_loop/mod.rs: the code_interpreter arm reads skill_mounts::global().get(org, run) only when read_run_inputs is true, passes SkillTree::path into execute_code_interpreter, which now calls code_interpreter::run_with_skills. With the gateway switch off no mounts are sent, stage_for_step returns Ok(None) before any read, and run_with_skills(None) takes run_staged's path; the only startup difference is that serve() now constructs the source (no network call). The model-gateway lib compiles again (E0063 gone). skill_mounts.rs is new (LF, as written). grpc.rs and runtime_loop/mod.rs also carry WS21-S2's uncommitted browser-bearer hunks, which I did not modify. Nothing is committed, staged or pushed."
+  },
+  {
+   "id": "WS21-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/auth.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/tests/sse_relay_no_allowlist.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path <gateway>/Cargo.toml --all-targets --no-fail-fast (from the gateway dir)",
+     "outcome": "exit 0. Unit tests of verevon-gateway-rs: 759 passed, 0 failed, 1 ignored. Other targets: 7 passed; 3 passed (sse_relay_no_allowlist); 1 passed. The E0425 compile failure is gone. Before the sse_relay re-point the same fail-fast run exited 101 with 2 failures in tests/sse_relay_no_allowlist.rs."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path <gateway>/Cargo.toml --bin verevon-gateway-rs chat::shared::tests",
+     "outcome": "exit 0. 24 passed, 0 failed, including the five slice tests: the_browser_switch_is_on_only_for_the_exact_word_true, a_browser_token_is_offered_only_for_a_personal_agentic_turn_without_zdr, browser_token_costs_no_auth_core_call_while_the_switch_is_off, browser_token_is_minted_for_a_personal_agentic_turn_when_the_switch_is_on, sse_proxy_forwards_the_browser_credential_in_its_own_header_and_never_under_zdr."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib (in apps/Model Plane/rust)",
+     "outcome": "exit 0. 2499 passed, 0 failed, 4 ignored. sse::tests::execution_dispatch_forwards_the_browser_bearer_only_when_present_and_not_zdr passes by name."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib --no-fail-fast",
+     "outcome": "exit 0. 1501 passed, 0 failed, 0 ignored (302 s, including the two long tests)."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --no-fail-fast --test autonomy_ladder_contract --test zdr_mcp_golden --test prompt_tier_contract --test durable_loop_contract",
+     "outcome": "exit 0. autonomy_ladder_contract 11 passed; zdr_mcp_golden 3 passed; prompt_tier_contract 6 passed; durable_loop_contract 31 passed; 0 failed."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on shared.rs (read-only, no write)",
+     "outcome": "exit 1 with four hunks. The edited import block is clean. Two hunks are slice code and are left for a follow-up (see depth_findings). Two (about lines 1366 and 1466) are unchanged from HEAD."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Live proof for the S2 DoD, not run here: rebuild gateway, model-gateway and execution-core; with both flags on, one personal agentic turn should log 'browser bearer present' without any token value; a ZDR turn must carry no x-browser-authorization header; with the flags off there must be zero browser-broker token mints.",
+    "Deploy: add BROWSER_DO_ENABLED (default off) to the Verevon gateway service environment. I could not find its compose file: no yml or yaml under apps/Frontend Plane/verevonv3 declares BROWSER_DO_ENABLED, EXECUTION_DO_BROWSER_ENABLED or GATEWAY_SPACE_APPEND_RETRIEVAL.",
+    "Confirm the ownership call on tests/sse_relay_no_allowlist.rs (see deviations). Then commit the nine files in files_changed; I did not stage or commit anything."
+   ],
+   "deviations": [
+    "tests/sse_relay_no_allowlist.rs is not in the slice's file list. I edited it as a test file beside upstream.rs, which it pins, because the restructure broke its scan. Only the RELAY constant and the header comment changed, and its assertions are unchanged. The lead should confirm this reading of the ownership rule.",
+    "json_handlers.rs was not edited: the JSON /v1/invoke route never starts an agentic run, so the BFF mints no bearer there. The plan row listed it.",
+    "proxy_sse_stream_with_data_plane keeps its 17-parameter signature as an adapter over proxy_sse_stream_with_browser, so orchestration.rs needed no edit.",
+    "offered_tools takes a bool for the held browser bearer; its existing test call sites pass false.",
+    "Space-scoped turns never receive a browser bearer until WS21-S8 provides Space browser_entitled (default deny)."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof of the S2 definition of done has not been run. Rebuild the Verevon gateway, model-gateway and execution-core, then turn on BROWSER_DO_ENABLED=true and EXECUTION_DO_BROWSER_ENABLED=1. One personal agentic turn should log 'browser bearer present' with no token value, and a ZDR turn must carry no x-browser-authorization header. With both flags off, auth-core must record zero /api/browser-broker/token mints.",
+     "Deploy wiring is missing. No compose file declares BROWSER_DO_ENABLED for the Verevon gateway, and no compose line declares EXECUTION_DO_BROWSER_ENABLED (the S1 compose line) for execution-core. Both default off, so nothing breaks, but the flags cannot be turned on until the lead adds these lines.",
+     "Lead to confirm that editing gateway/tests/sse_relay_no_allowlist.rs counts as a test file beside upstream.rs. Only the RELAY constant and the header comment changed, and the assertions are unchanged. Then commit the nine files; nothing is staged."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt --check flags two hunks this slice added in shared.rs: the is_agentic_turn is_some_and closure (about line 265) and the browser_header closure in the new SSE test (about line 1218). Not fixed here because they are outside the required fixes; format them in a follow-up."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The no-allowlist scan in tests/sse_relay_no_allowlist.rs now reads the body of proxy_sse_stream_with_browser rather than the adapter, so it checks the real streaming loop. Both its byte-verbatim and no-event-name assertions pass on that body. If the relay is restructured again, re-point it the same way."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end test drives grpc run_agent with a real x-browser-authorization header through the do_browser_enabled branch; the pieces are unit-tested only (carried over)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With BROWSER_DO_ENABLED and EXECUTION_DO_BROWSER_ENABLED both on, Do runs are offered browser.observe and browser.act, but their dispatch still refuses until WS21-S5a. Do not enable the pair before S5a (carried over)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF mint does not consult site policy (K3-24) until WS21-S3 and S4 land, so a personal agentic turn gets a browser bearer whenever the switch is on (carried over)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The browser bearer (about 300 s, DEC-02) is not in RunDeadline and has no expiry margin. WS21-S5a must add the margin check and the typed browser_credential_expired path (carried over)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An approval continuation whose retained snapshot includes browser tool definitions dispatches them without a bearer (continue_run passes None), which fails closed. The WS03 continue path must carry or revalidate the bearer before S5a turns browser tools on across pauses (carried over)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A ZDR caller presenting a browser bearer is refused by the existing enforce_persistence_free_execution gate after verification, not by a typed browser refusal. S5a and S10 add the browser feature key and matrix row (carried over)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "S2 offers browser.observe and browser.act whenever a verified bearer is held and EXECUTION_DO_BROWSER_ENABLED=1 (agent.rs offered_tools, held = browser_bearer.is_some()). Their dispatch still fails closed until WS21-S5a, so the two flags must not be turned on together before S5a."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF browser_token() decides the mint from the switch, an agentic non-ZDR turn and a non-Space scope only. K3-24's 'site policy not all-deny' cannot be checked until WS21-S3/S4, so with the switch on every personal agentic turn costs one browser-broker mint from auth-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "continue_run and resume_parked_run pass None for the browser bearer. An approval continuation whose snapshot holds browser tool definitions would dispatch them with no bearer, which fails closed. WS03 or S5a must carry or re-mint the bearer before browser tools are offered across pauses."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The roughly 300 s browser bearer has no expiry margin check, and RunDeadline does not cover it. WS21-S5a must add the margin check and the typed browser_credential_expired path (DEC-02)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "BROWSER_DO_ENABLED is read with std::env::var on every turn in shared.rs browser_do_enabled(), which the gateway's AppState-not-env convention warns races under parallel tests. The new tests mutate process env under TEST_ENV_LOCK, but stream-handler tests that run without that lock can see the switch flipped. Consider moving the switch onto AppState."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the grpc run_agent handler end to end with a real x-browser-authorization header through the do_browser_enabled() branch. The flag-gated verify-then-forward wiring is covered only by unit tests of authenticate_run_browser, offered_tools and the model-gateway request builder."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The new execution-core test run_browser_credential_is_optional_and_otherwise_verified_like_the_delegated_one covers absent, valid and wrong-audience bearers. It does not cover the tenant-mismatch and ZDR-posture-mismatch cases the plan row names, which are inherited from authenticate_delegated_browser."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Under ZDR the browser bearer is never minted (BFF) and never forwarded (BFF upstream filter, model-gateway builder). execution-core refuses every ZDR agent_run through enforce_persistence_free_execution, but it has no typed browser refusal yet. The browser_tool ZDR feature key and matrix row are S5a/S10 work."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "json_handlers.rs was correctly left unedited. The JSON /v1/invoke path in http_routes.rs never builds a RunAgentRequest, so no browser bearer is needed there. proxy_sse_stream_with_data_plane stays as an adapter that passes None."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt --check reports two hunks in slice code in shared.rs: the is_some_and closure in is_agentic_turn and the browser_header closure in the new SSE test."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q --all-targets --no-fail-fast (verevonv3/apps/gateway, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "exit 0. lib/bin 759 passed, 0 failed, 1 ignored; other targets 7, 3 (sse_relay_no_allowlist) and 1 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (apps/Model Plane/rust)",
+      "outcome": "exit 0. 2499 passed, 0 failed, 4 ignored.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib (apps/Model Plane/rust)",
+      "outcome": "exit 0. 1501 passed, 0 failed, 0 ignored (302 s).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "auth",
+    "zdr"
+   ],
+   "notes": "Required fix applied: the test module's use super::{...} in shared.rs now also imports browser_do_enabled_from, browser_do_offered and browser_token. They are private fns in the parent module, so the child module can import them. shared.rs stays fully CRLF (1788 CRLF / 1788 LF before and after the edit). After that the BFF target compiles. The first full run then exited 101 in tests/sse_relay_no_allowlist.rs (2 of 3 failing). That source scan pins the body of proxy_sse_stream_with_data_plane, which this slice turned into an adapter over proxy_sse_stream_with_browser. I re-pointed its RELAY constant to proxy_sse_stream_with_browser and updated the header comment, as the test's own comment instructs. Its assertions are unchanged and all three pass. browser_run.rs now sets skill_mounts (sibling fix), so the model-gateway lib compiles and passes; I did not edit it. Nothing committed or pushed; no Docker; no secrets read. This round's cargo runs all used C:/dev/mp-target-w2 and created no target directory. The gateway/target (dated 2026-10-23) and Model Plane rust/target (dated 2026-10-29 03:17) directories predate this round and were not touched. Status is partial only because the live proof and the deploy env entry remain for the lead."
+  }
+ ]
+}

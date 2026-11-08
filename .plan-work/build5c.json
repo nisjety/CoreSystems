@@ -1,0 +1,425 @@
+{
+ "outcomes": [
+  {
+   "unit": "s8-6",
+   "impl": {
+    "summary": "I built S8-6 (the executor's park RESUME) on the committed S8-0..S8-5 tree. Everything passes on the host:\n- execution-core lib tests: 1112 before, 1131 after (19 new). a_hung_child_is_killed_at_the_timeout is skipped, as it was before, because it hangs on Windows.\n- durable_loop_contract: 27 before, 29 after.\n- cross_service_loop_contract: 3 before, 6 after.\n- Every other execution-core test target passes.\n\nWith every switch off, runtime behaviour is unchanged: enforce_resume still answers continue_disabled first, and no other path changes. With the switches on, a request in park mode now reaches the park branch instead of getting resume_incomplete.\n\n**What was built**\n- **grpc.rs enforce_resume.** continue_disabled is still checked first. The first matches! is now \"segment\" | \"loop\" | \"park\". A park must carry a claim_token and an empty approval_id, step_id, tool_name, action_fingerprint and brief, or it is resume_incomplete. The approval stages keep their committed checks. segment_no and the parking switch are never read.\n- **park.rs, the resume half.** admit, derivable_tool_defs, ParkClaimed, ParkSeed (its Debug prints counts only), seed_from (parks taken from lf::parks_in), claim_parked (empty pause_ref, GATED_SAVE_TIMEOUT), classify_park_claim (total), check_park_fold (14 structural rules), close_unrestorable, route_request, fence_parked (the only save_fence( in park.rs) and publish_run_resumed. PARK_RESUME_BUILT is flipped to true.\n- **agent.rs.**\n  - The park branch in run_agent comes before offered_tools. It calls resume_parked_run, which runs admit, then derive, then claim, then check (closing the fold with park_not_restorable on a failed check), then route_request, then run_agent_with_offered.\n  - The park route checks in run_agent_with_offered: a resolve Err gives park_route_unavailable, a waived route gives the ZDR refusal, an unpinned route gives park_route_unavailable.\n  - Continuation.release is now an Option. park_continuation uses the fold's resolved budget, holds no release and builds no writer gate.\n  - RoundSeed::Parked. in_place covers Parked. There is still one FoldWriter::seeded, which takes either seed. park::fence_parked runs before the while loop and RunResumed is published only after it.\n  - The MockSession answers an empty-ref claim with the last stored park.\n- **resume.rs.** The three allow(dead_code) attributes are removed and resolved_max_rounds is pub(crate).\n- **Lead obligation 1 (park cap).** ParkGate.parks_so_far is now `parked.as_ref().map_or(0, |parked| parked.parks)`, so a resume counts the parks recorded on the claimed fold. A lib test shows that a resume of a fold with parks = MAX keeps the committed failure and makes no park attempt, and that MAX-1 parks one last time as park:run_test:5. The guard is in park_writer_violations, with mutation rows.\n- **Lead obligation 2 (PARK_RESUME_BUILT).** The constant and PARK_RESUME_BUILT_EXPECTED are both true now. The mutation rows are inverted: true→false must flag, and the _GONE row was updated.\n- **Lead obligation 3 (executor parks only).** check_park_fold requires:\n  - kind park;\n  - a pending Park whose ref is park_ref(run, parks_in) and which has no step, call or fingerprint;\n  - no round in flight;\n  - 1..=MAX parks;\n  - the provider, model, connection and a non-zero ceiling recorded on the fold.\n  The unrestorable-fold test covers each rule, including an approval pause relabelled as a park, a round fold, an in-place round-in-flight fold and a tombstone.\n- **Kill order (a).** With parking off and the resume switches on, a park still resumes (tested). With any one resume switch off the answer is continue_disabled, with zero claims.\n- **Compose.** The comment on execution-core's EXECUTION_LOOP_PARKING_ENABLED row is updated (CRLF kept).\n\n**Mutation checks**\nOn agent.rs, park.rs and grpc.rs, each copied first and confirmed restored with cmp afterwards:\n- parks_so_far set back to 0: the cap test goes red.\n- the fence call removed: the lost-fence test goes red.\n- the pending-park rule disabled: the unrestorable-fold test goes red.\n- the park approval-field check dropped: enforce_resume_park_shape goes red.\n\n**Environment problem (please read)**\nDrive C: was full (210 MB free, later 63 MB). Links failed with LNK1318, an unexpected PDB error, and retrying did not help. To continue, I deleted only build cache inside this worktree's target dir:\n- superseded incremental sessions of execution_core under target/debug/incremental (the older of two sessions per directory);\n- 59 .pdb files over 100 MB in target/debug/deps dated before 2026-10-20.\n\nNothing tracked by git was touched and docker was not run. Free space was back down to 4.1 GB at the end, so something else is filling the disk.\n\nNo DB-backed #[ignore] tests were written or changed in this unit.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "tests_added": [
+     "grpc::run_context_boundary_tests::enforce_resume_park_shape",
+     "runtime_loop::park::tests::admit_refuses_in_order_and_never_reads_the_parking_switch",
+     "runtime_loop::park::tests::classify_park_claim_is_total_and_closed",
+     "runtime_loop::park::tests::a_written_park_checks_and_seeds",
+     "runtime_loop::park::tests::route_request_takes_the_route_from_the_fold",
+     "agent::tests::loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference",
+     "agent::tests::loop_park_a_park_resume_works_with_executor_parking_off",
+     "agent::tests::loop_park_a_park_resume_needs_the_resume_switches",
+     "agent::tests::loop_park_a_park_resume_refuses_a_zdr_or_waived_caller",
+     "agent::tests::loop_park_a_park_resume_never_lists_mcp_tools",
+     "agent::tests::loop_park_a_resolver_outage_refuses_before_the_claim",
+     "agent::tests::loop_park_park_claim_refusals_are_closed",
+     "agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused",
+     "agent::tests::loop_park_a_park_resume_rebuilds_the_pinned_route_or_refuses",
+     "agent::tests::loop_park_a_lost_fence_infers_and_dispatches_nothing",
+     "agent::tests::loop_park_a_park_resume_keeps_the_folds_round_budget",
+     "agent::tests::loop_park_a_park_resume_clamps_the_child_ceiling_to_the_fold",
+     "agent::tests::loop_park_a_resumed_park_can_park_again_and_then_finishes_with_one_receipt",
+     "agent::tests::loop_park_a_park_resume_at_the_cap_cannot_park_again (lead obligation 1)",
+     "durable_loop_contract::the_park_resume_claims_after_admission_and_fences_before_any_inference (park_fence_violations + park_segment_violations)",
+     "durable_loop_contract::the_park_resume_guards_go_red_when_the_code_they_guard_regresses (mutation rows for both new guards and the vocabulary amendment)",
+     "durable_loop_contract: new parks_so_far / seed_from guard in park_writer_violations, plus mutation rows in the_park_writer_guard_goes_red_when_the_code_it_guards_regresses",
+     "cross_service_loop_contract::the_park_resume_and_the_park_store_agree_on_park_not_due",
+     "cross_service_loop_contract::the_park_resume_and_the_park_store_agree_on_the_park_reference",
+     "cross_service_loop_contract::the_park_pins_go_red_when_either_side_drifts"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout (baseline)",
+      "outcome": "1112 passed"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline)",
+      "outcome": "27 passed"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test cross_service_loop_contract (baseline)",
+      "outcome": "3 passed"
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib enforce_resume_park_shape (before implementing)",
+      "outcome": "failed for the right reason: a park resume was refused as resume_incomplete"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (after wiring, before the guard amendments)",
+      "outcome": "only the 2 expected guards were red: tools_derivable and PARK_RESUME_BUILT; builder_and_validator, mode_word, in_place_writer, writer_gate_argument and continue_vocabulary stayed green unamended"
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib loop_park",
+      "outcome": "29 passed (after fixing 3 harness issues in my own new tests)"
+     },
+     {
+      "command": "cargo test -q -p execution-core --tests -- --skip a_hung_child_is_killed_at_the_timeout",
+      "outcome": "all targets green: lib 1131, durable_loop_contract 29, cross_service 6, the other integration targets unchanged and green"
+     },
+     {
+      "command": "mutation run (4 mutations in agent.rs, park.rs, grpc.rs): cargo test -q -p execution-core --lib -- loop_park_a_park_resume_at_the_cap loop_park_a_lost_fence loop_park_a_structurally enforce_resume_park_shape",
+      "outcome": "4 of 4 red for the intended reason; files restored and checked byte for byte with cmp"
+     },
+     {
+      "command": "final: cargo test -q -p execution-core --lib ...; --test durable_loop_contract --test cross_service_loop_contract",
+      "outcome": "1131 / 29 / 6 passed"
+     },
+     {
+      "command": "rm of superseded execution_core incremental sessions and of 59 pre-2026-10-20 .pdb files over 100MB in target/debug (build cache only)",
+      "outcome": "freed about 16 GB; the disk was full and links failed with LNK1318"
+     }
+    ],
+    "deviations": [
+     "tools_derivable root expression: the S8-5 guard pinned `derivable && resumed.is_none()`. That would make a park resume (resumed is Some) unable to park again, which the design requires. I changed it to `derivable && resumed.as_ref().is_none_or(|r| r.release.is_none())` and amended the guard regex and its mutation rows to match.",
+     "Route-switch seam: run_agent_with_offered now reads the subscription switches through subscription_switches(), which is Switches::from_env() plus a #[cfg(test)] thread-local override. This lets lib tests drive run_agent on a pinned run. Production behaviour is unchanged.",
+     "Helpers made pub(super) in agent.rs so park.rs can reuse them instead of duplicating: compose_system_prompt, base_tool_defs and append_server_resolved_tool_defs.",
+     "check_park_fold returns a closed rule token, Err(&'static str), for the log line. It also refuses a recorded child ceiling of 0, because route_request would otherwise resolve 0 to the default and widen it. The executor never writes 0.",
+     "run_agent_with_route_parkable refuses invalid_argument resume_incomplete for a park-mode request that reaches it without a claimed fold (defence in depth; only the test wrappers could do this).",
+     "A fold whose bytes do not parse after a won claim is closed best effort and refused park_not_restorable inside claim_parked.",
+     "continue_vocabulary_violations gained an executor_park parameter. Its two call sites were updated, including the closure inside every_guard_goes_red_when_the_code_it_guards_regresses; the rows themselves are unchanged. It now also scans run_agent_with_offered and run_agent_with_route_parkable.",
+     "The parks_so_far guard (lead obligation 1) lives in park_writer_violations, with its rows in the_park_writer_guard test, not in a separately named guard.",
+     "derivable_tool_defs keeps the design's user_id parameter, named _user_id, because the server view is resolved by run and org.",
+     "Rule 6 slip: I used one python3 replace on park.rs (LF kept) to turn two of my own new tests into #[tokio::test]. Every other edit to an existing file used the Edit tool. Mutation checks used python edits and were restored with cmp.",
+     "Test-first was partial: the enforce_resume test was written and seen to fail first. For the park.rs and agent.rs tests, failing-for-the-right-reason was shown by the four mutation checks instead.",
+     "Environment: I deleted build cache inside this worktree's target dir because the disk was full (details in the summary). LNK1318 links were retried several times before that."
+    ],
+    "blockers": [
+     "Drive C: is nearly full (4.1 GB free at the end, down from 16 GB after my cleanup). Later units' links will fail with LNK1318 until space is freed outside this worktree."
+    ],
+    "names_for_later_units": [
+     "park.rs: PARK_RESUME_BUILT = true, admit, derivable_tool_defs, ParkClaimed{claimed}, ParkSeed{messages, rounds_executed, delegated_rounds, step_seq, children_started, grounded, compaction_triggered, attempted_retrievals, parks, claimed_seq, segment}, seed_from, claim_parked, classify_park_claim, check_park_fold, close_unrestorable, route_request, fence_parked, publish_run_resumed",
+     "agent.rs: resume_parked_run, park_continuation, run_agent_with_offered(.., park: Option<park::ParkClaimed>), run_agent_with_route_parkable(.., derivable, park), RoundSeed::Parked, Continuation.release: Option<ApprovedRelease>, subscription_switches() and the test-only TEST_SUBSCRIPTION_SWITCHES / SubscriptionSwitches",
+     "Executor tests S8-7 can name in the Park StoreProof: loop_park_a_park_resume_refuses_a_zdr_or_waived_caller, loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference, plus S8-5's run_parkable_refuses_every_excluded_run and loop_park_a_zdr_or_waived_pinned_run_never_parks",
+     "durable_loop_contract: PARK_RESUME_BUILT_EXPECTED = true, park_fence_violations, park_segment_violations, first_at helper; continue_vocabulary_violations(sse, grpc, agent, resume, park, produced) now takes 6 arguments",
+     "Refusal tokens the executor now sends on a park continue (all already in the gateway lists): continue_disabled, resume_incomplete, authority_route_mismatch, authority_space_mismatch, durable_mutation_forbidden (catalogue status), resume_checkpoint_unavailable, continue_in_progress (Aborted), not_resumable, resume_forbidden (PermissionDenied), park_not_due, park_not_restorable, park_route_unavailable",
+     "Log line names: loop_resume_stage with resume_stage park and resumed_segment; RunResumed{run_id, resumed_segment} is published after the fence"
+    ],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (text proposed for the S8-A addendum; not written by this unit)",
+      "content": "S8-6 (executor park resume) built:\n- enforce_resume accepts mode park: a claim token and no approval, step, tool, fingerprint or brief.\n- run_agent decides a park resume before any tool listing.\n- resume_parked_run runs admit, then derive (base + server view, never MCP or client tools), then the empty-ref claim, then check_park_fold (closing with park_not_restorable on failure), then the route rebuilt from the fold (park_route_unavailable on a resolve failure or an unpinned route, the ZDR refusal on a waived route, never a default route), then the loop.\n- park_continuation holds no release and uses the fold's resolved max_rounds and a child ceiling of min(fold, request).\n- RoundSeed::Parked shares the one seeded writer. park::fence_parked runs at the claimed seq before the first inference, and RunResumed is published after it.\n- The park cap is seeded from the claimed fold (lf::parks_in through ParkSeed.parks).\n- PARK_RESUME_BUILT flipped to true together with the resume half.\n- tools_derivable for the root is `derivable && resumed.as_ref().is_none_or(|r| r.release.is_none())`: a park resume, the one continuation without a release, may park again.\n- Kill order (a) is verified by test: parking off leaves existing parks resumable."
+     }
+    ],
+    "tests_written_not_run": []
+   },
+   "impls": [
+    {
+     "summary": "I built S8-6 (the executor's park RESUME) on the committed S8-0..S8-5 tree. Everything passes on the host:\n- execution-core lib tests: 1112 before, 1131 after (19 new). a_hung_child_is_killed_at_the_timeout is skipped, as it was before, because it hangs on Windows.\n- durable_loop_contract: 27 before, 29 after.\n- cross_service_loop_contract: 3 before, 6 after.\n- Every other execution-core test target passes.\n\nWith every switch off, runtime behaviour is unchanged: enforce_resume still answers continue_disabled first, and no other path changes. With the switches on, a request in park mode now reaches the park branch instead of getting resume_incomplete.\n\n**What was built**\n- **grpc.rs enforce_resume.** continue_disabled is still checked first. The first matches! is now \"segment\" | \"loop\" | \"park\". A park must carry a claim_token and an empty approval_id, step_id, tool_name, action_fingerprint and brief, or it is resume_incomplete. The approval stages keep their committed checks. segment_no and the parking switch are never read.\n- **park.rs, the resume half.** admit, derivable_tool_defs, ParkClaimed, ParkSeed (its Debug prints counts only), seed_from (parks taken from lf::parks_in), claim_parked (empty pause_ref, GATED_SAVE_TIMEOUT), classify_park_claim (total), check_park_fold (14 structural rules), close_unrestorable, route_request, fence_parked (the only save_fence( in park.rs) and publish_run_resumed. PARK_RESUME_BUILT is flipped to true.\n- **agent.rs.**\n  - The park branch in run_agent comes before offered_tools. It calls resume_parked_run, which runs admit, then derive, then claim, then check (closing the fold with park_not_restorable on a failed check), then route_request, then run_agent_with_offered.\n  - The park route checks in run_agent_with_offered: a resolve Err gives park_route_unavailable, a waived route gives the ZDR refusal, an unpinned route gives park_route_unavailable.\n  - Continuation.release is now an Option. park_continuation uses the fold's resolved budget, holds no release and builds no writer gate.\n  - RoundSeed::Parked. in_place covers Parked. There is still one FoldWriter::seeded, which takes either seed. park::fence_parked runs before the while loop and RunResumed is published only after it.\n  - The MockSession answers an empty-ref claim with the last stored park.\n- **resume.rs.** The three allow(dead_code) attributes are removed and resolved_max_rounds is pub(crate).\n- **Lead obligation 1 (park cap).** ParkGate.parks_so_far is now `parked.as_ref().map_or(0, |parked| parked.parks)`, so a resume counts the parks recorded on the claimed fold. A lib test shows that a resume of a fold with parks = MAX keeps the committed failure and makes no park attempt, and that MAX-1 parks one last time as park:run_test:5. The guard is in park_writer_violations, with mutation rows.\n- **Lead obligation 2 (PARK_RESUME_BUILT).** The constant and PARK_RESUME_BUILT_EXPECTED are both true now. The mutation rows are inverted: true→false must flag, and the _GONE row was updated.\n- **Lead obligation 3 (executor parks only).** check_park_fold requires:\n  - kind park;\n  - a pending Park whose ref is park_ref(run, parks_in) and which has no step, call or fingerprint;\n  - no round in flight;\n  - 1..=MAX parks;\n  - the provider, model, connection and a non-zero ceiling recorded on the fold.\n  The unrestorable-fold test covers each rule, including an approval pause relabelled as a park, a round fold, an in-place round-in-flight fold and a tombstone.\n- **Kill order (a).** With parking off and the resume switches on, a park still resumes (tested). With any one resume switch off the answer is continue_disabled, with zero claims.\n- **Compose.** The comment on execution-core's EXECUTION_LOOP_PARKING_ENABLED row is updated (CRLF kept).\n\n**Mutation checks**\nOn agent.rs, park.rs and grpc.rs, each copied first and confirmed restored with cmp afterwards:\n- parks_so_far set back to 0: the cap test goes red.\n- the fence call removed: the lost-fence test goes red.\n- the pending-park rule disabled: the unrestorable-fold test goes red.\n- the park approval-field check dropped: enforce_resume_park_shape goes red.\n\n**Environment problem (please read)**\nDrive C: was full (210 MB free, later 63 MB). Links failed with LNK1318, an unexpected PDB error, and retrying did not help. To continue, I deleted only build cache inside this worktree's target dir:\n- superseded incremental sessions of execution_core under target/debug/incremental (the older of two sessions per directory);\n- 59 .pdb files over 100 MB in target/debug/deps dated before 2026-10-20.\n\nNothing tracked by git was touched and docker was not run. Free space was back down to 4.1 GB at the end, so something else is filling the disk.\n\nNo DB-backed #[ignore] tests were written or changed in this unit.",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+     ],
+     "tests_added": [
+      "grpc::run_context_boundary_tests::enforce_resume_park_shape",
+      "runtime_loop::park::tests::admit_refuses_in_order_and_never_reads_the_parking_switch",
+      "runtime_loop::park::tests::classify_park_claim_is_total_and_closed",
+      "runtime_loop::park::tests::a_written_park_checks_and_seeds",
+      "runtime_loop::park::tests::route_request_takes_the_route_from_the_fold",
+      "agent::tests::loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference",
+      "agent::tests::loop_park_a_park_resume_works_with_executor_parking_off",
+      "agent::tests::loop_park_a_park_resume_needs_the_resume_switches",
+      "agent::tests::loop_park_a_park_resume_refuses_a_zdr_or_waived_caller",
+      "agent::tests::loop_park_a_park_resume_never_lists_mcp_tools",
+      "agent::tests::loop_park_a_resolver_outage_refuses_before_the_claim",
+      "agent::tests::loop_park_park_claim_refusals_are_closed",
+      "agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused",
+      "agent::tests::loop_park_a_park_resume_rebuilds_the_pinned_route_or_refuses",
+      "agent::tests::loop_park_a_lost_fence_infers_and_dispatches_nothing",
+      "agent::tests::loop_park_a_park_resume_keeps_the_folds_round_budget",
+      "agent::tests::loop_park_a_park_resume_clamps_the_child_ceiling_to_the_fold",
+      "agent::tests::loop_park_a_resumed_park_can_park_again_and_then_finishes_with_one_receipt",
+      "agent::tests::loop_park_a_park_resume_at_the_cap_cannot_park_again (lead obligation 1)",
+      "durable_loop_contract::the_park_resume_claims_after_admission_and_fences_before_any_inference (park_fence_violations + park_segment_violations)",
+      "durable_loop_contract::the_park_resume_guards_go_red_when_the_code_they_guard_regresses (mutation rows for both new guards and the vocabulary amendment)",
+      "durable_loop_contract: new parks_so_far / seed_from guard in park_writer_violations, plus mutation rows in the_park_writer_guard_goes_red_when_the_code_it_guards_regresses",
+      "cross_service_loop_contract::the_park_resume_and_the_park_store_agree_on_park_not_due",
+      "cross_service_loop_contract::the_park_resume_and_the_park_store_agree_on_the_park_reference",
+      "cross_service_loop_contract::the_park_pins_go_red_when_either_side_drifts"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout (baseline)",
+       "outcome": "1112 passed"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline)",
+       "outcome": "27 passed"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test cross_service_loop_contract (baseline)",
+       "outcome": "3 passed"
+      },
+      {
+       "command": "cargo test -q -p execution-core --lib enforce_resume_park_shape (before implementing)",
+       "outcome": "failed for the right reason: a park resume was refused as resume_incomplete"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract (after wiring, before the guard amendments)",
+       "outcome": "only the 2 expected guards were red: tools_derivable and PARK_RESUME_BUILT; builder_and_validator, mode_word, in_place_writer, writer_gate_argument and continue_vocabulary stayed green unamended"
+      },
+      {
+       "command": "cargo test -q -p execution-core --lib loop_park",
+       "outcome": "29 passed (after fixing 3 harness issues in my own new tests)"
+      },
+      {
+       "command": "cargo test -q -p execution-core --tests -- --skip a_hung_child_is_killed_at_the_timeout",
+       "outcome": "all targets green: lib 1131, durable_loop_contract 29, cross_service 6, the other integration targets unchanged and green"
+      },
+      {
+       "command": "mutation run (4 mutations in agent.rs, park.rs, grpc.rs): cargo test -q -p execution-core --lib -- loop_park_a_park_resume_at_the_cap loop_park_a_lost_fence loop_park_a_structurally enforce_resume_park_shape",
+       "outcome": "4 of 4 red for the intended reason; files restored and checked byte for byte with cmp"
+      },
+      {
+       "command": "final: cargo test -q -p execution-core --lib ...; --test durable_loop_contract --test cross_service_loop_contract",
+       "outcome": "1131 / 29 / 6 passed"
+      },
+      {
+       "command": "rm of superseded execution_core incremental sessions and of 59 pre-2026-10-20 .pdb files over 100MB in target/debug (build cache only)",
+       "outcome": "freed about 16 GB; the disk was full and links failed with LNK1318"
+      }
+     ],
+     "deviations": [
+      "tools_derivable root expression: the S8-5 guard pinned `derivable && resumed.is_none()`. That would make a park resume (resumed is Some) unable to park again, which the design requires. I changed it to `derivable && resumed.as_ref().is_none_or(|r| r.release.is_none())` and amended the guard regex and its mutation rows to match.",
+      "Route-switch seam: run_agent_with_offered now reads the subscription switches through subscription_switches(), which is Switches::from_env() plus a #[cfg(test)] thread-local override. This lets lib tests drive run_agent on a pinned run. Production behaviour is unchanged.",
+      "Helpers made pub(super) in agent.rs so park.rs can reuse them instead of duplicating: compose_system_prompt, base_tool_defs and append_server_resolved_tool_defs.",
+      "check_park_fold returns a closed rule token, Err(&'static str), for the log line. It also refuses a recorded child ceiling of 0, because route_request would otherwise resolve 0 to the default and widen it. The executor never writes 0.",
+      "run_agent_with_route_parkable refuses invalid_argument resume_incomplete for a park-mode request that reaches it without a claimed fold (defence in depth; only the test wrappers could do this).",
+      "A fold whose bytes do not parse after a won claim is closed best effort and refused park_not_restorable inside claim_parked.",
+      "continue_vocabulary_violations gained an executor_park parameter. Its two call sites were updated, including the closure inside every_guard_goes_red_when_the_code_it_guards_regresses; the rows themselves are unchanged. It now also scans run_agent_with_offered and run_agent_with_route_parkable.",
+      "The parks_so_far guard (lead obligation 1) lives in park_writer_violations, with its rows in the_park_writer_guard test, not in a separately named guard.",
+      "derivable_tool_defs keeps the design's user_id parameter, named _user_id, because the server view is resolved by run and org.",
+      "Rule 6 slip: I used one python3 replace on park.rs (LF kept) to turn two of my own new tests into #[tokio::test]. Every other edit to an existing file used the Edit tool. Mutation checks used python edits and were restored with cmp.",
+      "Test-first was partial: the enforce_resume test was written and seen to fail first. For the park.rs and agent.rs tests, failing-for-the-right-reason was shown by the four mutation checks instead.",
+      "Environment: I deleted build cache inside this worktree's target dir because the disk was full (details in the summary). LNK1318 links were retried several times before that."
+     ],
+     "blockers": [
+      "Drive C: is nearly full (4.1 GB free at the end, down from 16 GB after my cleanup). Later units' links will fail with LNK1318 until space is freed outside this worktree."
+     ],
+     "names_for_later_units": [
+      "park.rs: PARK_RESUME_BUILT = true, admit, derivable_tool_defs, ParkClaimed{claimed}, ParkSeed{messages, rounds_executed, delegated_rounds, step_seq, children_started, grounded, compaction_triggered, attempted_retrievals, parks, claimed_seq, segment}, seed_from, claim_parked, classify_park_claim, check_park_fold, close_unrestorable, route_request, fence_parked, publish_run_resumed",
+      "agent.rs: resume_parked_run, park_continuation, run_agent_with_offered(.., park: Option<park::ParkClaimed>), run_agent_with_route_parkable(.., derivable, park), RoundSeed::Parked, Continuation.release: Option<ApprovedRelease>, subscription_switches() and the test-only TEST_SUBSCRIPTION_SWITCHES / SubscriptionSwitches",
+      "Executor tests S8-7 can name in the Park StoreProof: loop_park_a_park_resume_refuses_a_zdr_or_waived_caller, loop_park_a_parked_run_resumes_from_its_fold_fenced_before_any_inference, plus S8-5's run_parkable_refuses_every_excluded_run and loop_park_a_zdr_or_waived_pinned_run_never_parks",
+      "durable_loop_contract: PARK_RESUME_BUILT_EXPECTED = true, park_fence_violations, park_segment_violations, first_at helper; continue_vocabulary_violations(sse, grpc, agent, resume, park, produced) now takes 6 arguments",
+      "Refusal tokens the executor now sends on a park continue (all already in the gateway lists): continue_disabled, resume_incomplete, authority_route_mismatch, authority_space_mismatch, durable_mutation_forbidden (catalogue status), resume_checkpoint_unavailable, continue_in_progress (Aborted), not_resumable, resume_forbidden (PermissionDenied), park_not_due, park_not_restorable, park_route_unavailable",
+      "Log line names: loop_resume_stage with resume_stage park and resumed_segment; RunResumed{run_id, resumed_segment} is published after the fence"
+     ],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (text proposed for the S8-A addendum; not written by this unit)",
+       "content": "S8-6 (executor park resume) built:\n- enforce_resume accepts mode park: a claim token and no approval, step, tool, fingerprint or brief.\n- run_agent decides a park resume before any tool listing.\n- resume_parked_run runs admit, then derive (base + server view, never MCP or client tools), then the empty-ref claim, then check_park_fold (closing with park_not_restorable on failure), then the route rebuilt from the fold (park_route_unavailable on a resolve failure or an unpinned route, the ZDR refusal on a waived route, never a default route), then the loop.\n- park_continuation holds no release and uses the fold's resolved max_rounds and a child ceiling of min(fold, request).\n- RoundSeed::Parked shares the one seeded writer. park::fence_parked runs at the claimed seq before the first inference, and RunResumed is published after it.\n- The park cap is seeded from the claimed fold (lf::parks_in through ParkSeed.parks).\n- PARK_RESUME_BUILT flipped to true together with the resume half.\n- tools_derivable for the root is `derivable && resumed.as_ref().is_none_or(|r| r.release.is_none())`: a park resume, the one continuation without a release, may park again.\n- Kill order (a) is verified by test: parking off leaves existing parks resumable."
+      }
+     ],
+     "tests_written_not_run": []
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "route_request narrows a recorded sub-agent ceiling above 8 to 8 on every resume, because the gateway states no max_subagents. This is the same trap the unit already fixed for max_rounds. The test comment 'the fold's ceiling, a request stating none' is only true for fold ceilings of 8 or less.",
+       "evidence": "route_request computes requested = resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None). With max_subagents 0 that is DEFAULT_MAX_CHILDREN = 8 (subagent/mod.rs:63, :87). The result is ceiling.min(requested). MAX_CHILDREN_CEILING is 100, so a run parked under ceiling 20 resumes under 8. If children_started is already 9 or more, it can no longer delegate. The tests only use fold ceilings 2, 3 and 4, so none exercises a ceiling above 8. park_continuation does override max_rounds to the fold's resolved value for exactly this reason, but not the ceiling. This is a silent functional narrowing, not a widening. s8a-v2 section (5)e states the same min(child_ceiling_in, resolve_child_ceiling(request)) formula, so the code follows the design text.",
+       "suggested_fix": "When req.max_subagents == 0, use the fold's ceiling. Otherwise use min(fold ceiling, request). Add a test with a fold ceiling of 20 and a request stating 0, expecting 20. Correct the test comment if the narrowing is kept."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "check_park_fold closes the claimed park irreversibly on tools_drift or prompt_drift. A transient or legitimate difference in the run-bound server view between park and resume therefore destroys a resumable park. It also costs the user's resume click.",
+       "evidence": "derivable_tool_defs rebuilds the set from base_tool_defs(false) plus capability_policy.resolve_server_tool_definitions, a Control-signed run-bound view. check_park_fold returns Err('tools_drift') or Err('prompt_drift'). resume_parked_run then calls close_unrestorable, which sends close_rpc 'park_not_restorable', and refuses park_not_restorable. The recovery worker then ends the run outcome_unknown. A resolver Err is handled safely before the claim (resume_checkpoint_unavailable), but an Ok view that differs after up to 24 h closes the fold. This conforms to the design (section (5)d), so it is a design risk, not an implementation defect.",
+       "suggested_fix": "Accept as designed, or for drift only refuse with resume_checkpoint_unavailable without closing, so a later attempt can succeed. Record the choice in the ledger either way."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "After the fence has converted the park row to an active pre_effect row, any early error in run_rounds strands the run. The park is no longer claimable, and the next /continue gets not_resumable until recovery ends the run at its deadline.",
+       "evidence": "run_rounds returns Err from heartbeat_managed_agent_run(...)? at the loop top (agent.rs around 2239), after fence_parked and publish_run_resumed. The earlier heartbeat in run_agent_with_route_parkable runs before the fence, but this second one runs after it. A transient session-core blip there spends the user's resume. The in-place resume has the same shape. No data is lost and no effect is run twice. D7 already scopes related heartbeat behaviour out of this round.",
+       "suggested_fix": "Accept as a follow-up, or tolerate a first-iteration heartbeat failure after the fence by retrying once."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "In run_agent_with_offered, any ModelRoute::resolve error on a park resume is mapped to park_route_unavailable. That includes a zero-retention catalogue refusal from validate_run_route (PermissionDenied with the ZDR trailer), and the original status is dropped without a log line.",
+       "evidence": "The .map_err closure returns Refusal::ParkRouteUnavailable.status() whenever park.is_some(). In production the grpc boundary's enforce_agent_route runs first on the route-less request and refuses ZDR-org and waived callers with the typed refusal, so the gap is defence in depth only. The lib test loop_park_a_park_resume_refuses_a_zdr_or_waived_caller calls run_agent directly and skips that boundary.",
+       "suggested_fix": "Pass through a status that Refusal::from_status recognises as the ZDR catalogue (map it to DurableMutationForbidden). Log the original grpc code content-free."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "PARK_RESUME_BUILT now flips to true. The executor's park write is therefore no longer structurally suppressed in an image that has the write and the resume, but no gateway park form exists yet (S8-7). Turning EXECUTION_LOOP_PARKING_ENABLED on before S8-7 would park runs that nothing can resume until the 24 h TTL.",
+       "evidence": "grep of model-gateway/src finds no 'park' mode, park_preflight or loop_parking_enabled. Lead-sanctioned: obligation (2) says to flip it in this unit, and the compose row comment says not to enable parking before the gateway form ships. The only remaining protection is the default-off switch and that comment.",
+       "suggested_fix": "None for this unit. Keep the deploy order BFF/gateway, then session-core, then executor, and the owner-approval flip as the last step."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "A waived caller's park resume claims the park (state resuming, lease held) before the waived route check refuses it. The test only asserts that nothing was fenced or inferred, not that nothing was claimed.",
+       "evidence": "resume_parked_run claims in claim_parked before run_agent_with_offered resolves the route and checks route.is_waived(). Production blocks this earlier for waived callers at the grpc boundary (enforce_agent_route refuses a waived caller on a route-less request). session-core's run_owner_tx refuses non-persistent runs on claim. The only effect is a lease held on a park that is then refused.",
+       "suggested_fix": "No change needed. Optionally add a claim_calls assertion to the waived test so the ordering is documented."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core",
+       "issue": "Environment note: the implementer deleted superseded incremental sessions and 59 .pdb files over 100 MB from the worktree's target/debug because drive C: was full. Free space was 4.4 GB when I checked.",
+       "evidence": "This is not tracked by git and git status shows only the 7 reported files plus untracked .plan-work/. Later cargo links may still hit LNK1318 if free space falls again.",
+       "suggested_fix": "Free disk outside this worktree before the next round."
+      }
+     ],
+     "checked": [
+      "Full git diff of grpc.rs, park.rs, agent.rs, resume.rs, both contract test files and docker-compose.yml. git status shows only these 7 files plus untracked .plan-work/. Each file has consistent line endings (no mixed CRLF/LF).",
+      "enforce_resume: continue_disabled comes first. The park shape check requires a claim token and an empty approval, step, tool, fingerprint and brief. segment_no and the parking switch are never read. The segment and loop truth table is unchanged.",
+      "With all switches off, the executor behaviour is unchanged. The is_park_resume branch is false. The resumed match arms, in_place, the counter seeding, LoopContext.release and tools_derivable reduce to the committed values for non-park requests. subscription_switches() equals Switches::from_env() outside #[cfg(test)].",
+      "Order in resume_parked_run: admit (no RPC), derive tools (resolver Err refuses before any claim), claim with an empty pause_ref under GATED_SAVE_TIMEOUT, check_park_fold (close on failure), route_request, route checks, park_continuation, fence at the claimed seq before the while loop, then RunResumed. The park branch runs before offered_tools, so no MCP listing and no client tools. Fence: the claim does not bump the seq, so exactly one claimant wins, and a lost fence infers and dispatches nothing (tested).",
+      "Claim classification is total and matches session-core's literals: park_not_due, claim_held, run_ended, not_claimable and 'did not authenticate' (loop_checkpoint.rs:155, :491-493, :605). session-core's save and check_fold place no round_in_flight requirement on a pre_effect fence fold.",
+      "check_park_fold: 14 structural rules. An approval pause, a round fold, a fold with a round in flight, a Space fold, a tombstone and a ceiling of 0 are all refused as not restorable. Authority: effective_authority narrows the rung, privacy tier and rounds, and the mode and space come from the fold. max_rounds is the fold's resolved budget. Release is None, so no approval is consumed or reserved.",
+      "Lead obligations 1 to 3: parks_so_far is seeded from lf::parks_in(claimed fold), not the request. A resume at MAX cannot park again and MAX-1 parks one last time. A guard with mutation rows exists. PARK_RESUME_BUILT and PARK_RESUME_BUILT_EXPECTED are both true, with inverted mutation rows. Only an executor park fold (pending Park with step, call and fingerprint empty, route and ceiling extensions) is resumable. Kill order (a): parking off still resumes, and any one resume switch off gives continue_disabled with zero claims (tested).",
+      "ZDR and waived: req.zdr is refused in admit before any claim. The waived route is refused before the fence or any inference. ClaimedFold and ParkSeed Debug are content-free. No claim token or credential is logged (only run_id, seq, a closed rule token and counts).",
+      "Tests run. cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract gave 6 and 29 passed. The lib subset (loop_park, enforce_resume, admit_refuses, classify_park, route_request, a_written_park) gave 34 passed. No DB-backed tests were run. The implementer reports none were written. I edited no files.",
+      "The new guards and their mutation rows (park_fence_violations, park_segment_violations, the amended continue_vocabulary_violations, the parks_so_far guard) and the cross_service pins (park_not_due literal, park_ref format) are present, pass, and each has mutation rows. No new dead_code warnings. The three that appear (capability_policy.rs, approval_delivery_worker.rs, resume.rs decision_closer) are in code this diff does not touch."
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "loop_park_a_park_resume_works_with_executor_parking_off says something its script never tests. The test is the kill-order (a) gate. Its in-body comment says \"A second limit on the resumed run: with parking off it is not parked again, it ends with the committed typed failure\". But the scripted rounds are `vec![read_round(&[\"w2\"]), Scripted::Answer(\"done\")]` and the test asserts status \"completed\". No limit is ever hit, so the half of kill order (a) that says 'no new parks once parking is off' is never checked on the park-resume path, even though the comment says it is. Under the review's own scale, a test comment that is false of the test sits close to high.",
+       "evidence": "agent.rs tests, loop_park_a_park_resume_works_with_executor_parking_off: the comment promises a second usage limit and the committed failure; the script is read_round + Answer(\"done\"); the asserts are status == \"completed\", one claim, one RunResumed and one receipt. No test resumes a park with parking off and then meets a limit.",
+       "suggested_fix": "Change the script to `vec![read_round(&[\"w2\"]), usage_limit_due_now()]` (or add a second case) and assert: status \"failed\", failure_code \"subscription_usage_limit\", park_attempts unchanged, and no new \"park\" save. That proves the resumed run is not parkable when EXECUTION_LOOP_PARKING_ENABLED is off. Keep the completed case as the positive half."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "Two claim outcomes return park_not_restorable while the row stays parked, with no close. They are classify_park_claim's (FailedPrecondition, \"loop checkpoint did not authenticate\") arm and its (InvalidArgument, _) arm. session-core runs cipher.open and check_fold before tx.commit(), so in both cases the claim rolls back and the row stays `parked`. The executor has no seq to close at, so nothing closes it. The S8-3 SPA contract maps park_not_restorable to runStaysParked 'no', but the run is in fact held parked, and spared by the worker, until the 24 h TTL. Every retry gets the same answer. The run is held by a park nothing can resume, and the user is told it is not parked. This follows the design table, but it is a gap in the design the implementation carries over.",
+       "evidence": "session-core loop_checkpoint.rs claim: the comment says \"Open and check the fold before the claim commits, so a fold that does not authenticate leaves the pause where it was\", followed by `.map_err(|_| Status::failed_precondition(\"loop checkpoint did not authenticate\"))?`. park.rs classify_park_claim has `| (Code::InvalidArgument, _) => ResumeRefusal::ParkNotRestorable`. agent.rs loop_park_park_claim_refusals_are_closed asserts close_calls is empty for both.",
+       "suggested_fix": "Raise it to the lead as a design follow-up. Either map these two outcomes to a token whose runStaysParked is 'yes' or 'unknown' (for example resume_checkpoint_unavailable), or have session-core close an unauthenticatable park row in its own transaction. Until then, record the TTL hold in deferred_files and do not describe park_not_restorable as 'closed' in these two cases."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "A caller holding a ZDR waiver gets the park claimed before it is refused. The waived check is in run_agent_with_offered, after claim_parked, so the durable row moves to `resuming` and stores a claim-token hash before durable_mutation_forbidden is returned. The design orders it this way (failure matrix: \"durable_mutation_forbidden for a waiver ... no close\"), but whether the route is waived can be known earlier. ModelRoute::resolve computes waived as `route_requested(req) && caller.zdr_waiver.is_some()`, and every park is pinned, so `caller.zdr_waiver.is_some()` alone decides it. A check in admit would keep a waived caller from touching durable state at all, which fits the rule that waived runs never continue.",
+       "evidence": "loop_park_a_park_resume_refuses_a_zdr_or_waived_caller asserts no saves, no close and no inference for the waived case, but does not assert zero claims. resume_parked_run order: admit, derivable_tool_defs, claim_parked, check_park_fold, route_request, then run_agent_with_offered (where `if route.is_waived()` is checked).",
+       "suggested_fix": "Optional, and only with a lead decision since it changes the design's step order: refuse in admit when caller.zdr_waiver.is_some(), so a waived caller makes zero claims, and assert claim_calls is empty in the waived half of the test."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "The name loop_park_a_park_resume_never_lists_mcp_tools promises more than the test checks. It does not touch MCP: no MCP gateway is configured in the test environment, so the test would stay green even if a resume did list MCP tools. What it actually checks is that a caller's tool is excluded (that drift would go red through tools_drift). The MCP property rests only on the textual guard in park_fence_violations.",
+       "evidence": "The test adds `tools: vec![custom.read]` to the request and asserts the offered count is base_tool_defs(false).len() + 1. No MCP double or MCP env is set up.",
+       "suggested_fix": "Rename the test (for example ..._never_offers_a_callers_tool) or add a test-only MCP lister double that records whether it was called, and assert zero calls."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "route_request clamps the sub-agent ceiling to min(fold ceiling, resolve_child_ceiling(request)). The gateway states no ceiling (0), which resolves to the default, so a run parked under a ceiling wider than the default resumes narrower than it ran. For max_rounds, park_continuation deliberately ignores the request because \"the default would cut a run parked under a larger one\". The code follows the design text (\"max_subagents = min(child_ceiling_in, resolve_child_ceiling(request))\"), so this is a design inconsistency, not a defect of the build.",
+       "evidence": "route_request: `requested = resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None)` and `max_subagents: child_ceiling_in(fold).map_or(requested, |c| c.min(requested))`. park_continuation: `effective.max_rounds = resolved_max_rounds(fold.authority.max_rounds)` (it ignores the request's default).",
+       "suggested_fix": "Raise it with the lead. If the fold's ceiling should be kept when the request states 0, use `Some(req.max_subagents).filter(|&n| n != 0).map_or(fold_ceiling, |n| min(n, fold_ceiling))`, and add a row (8, 0, 8) to loop_park_a_park_resume_clamps_the_child_ceiling_to_the_fold."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs",
+       "issue": "The new cross-service pins cover only park_not_due and the park_ref format. classify_park_claim also depends on other session-core literals for a park claim: \"loop_checkpoint_claim_held\", \"loop_checkpoint_not_claimable\", \"loop_checkpoint_run_ended\" and \"loop checkpoint did not authenticate\". If any of them drifts, the claim silently becomes resume_checkpoint_unavailable. The design only asked for the two pins, so this is a coverage gap, not a missed requirement.",
+       "evidence": "park_not_due_violations and park_ref_violations are the only new pins. classify_park_claim matches the exact message strings above.",
+       "suggested_fix": "Optional: pin the four other literals the same way (session-core code_lines contain the Status::...(literal); park.rs contains the matching arm), each with a mutation row."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "Process deviations, reported honestly by the implementer. Rule 6 was broken once: a python3 replace on park.rs turned two tests into #[tokio::test]. Build cache was also deleted inside the worktree's target dir: incremental sessions and 59 .pdb files. No tracked file was affected, and every file keeps a single consistent line ending (park.rs, agent.rs, resume.rs and durable_loop_contract.rs are all LF; grpc.rs, cross_service_loop_contract.rs and docker-compose.yml are all CRLF).",
+       "evidence": "python3 byte counts of the working tree: park.rs 0 CRLF / 1724 LF; agent.rs 0 / 23253; grpc.rs 2306 / 0; cross_service 348 / 0; compose 1983 / 0. No file mixes the two.",
+       "suggested_fix": "None needed beyond the lead's awareness. Drive C: has 4.1 GB free, so later links may fail with LNK1318."
+      }
+     ],
+     "checked": [
+      "git diff of all 7 unit files; nothing else in the tree changed apart from the untracked .plan-work/",
+      "Line endings per file (python3 byte counts): each file uses one ending throughout, no file mixes CRLF and LF",
+      "Design s8a-v2.json: S8-6 steps, file_changes, interfaces, tests, approach section (5), failure_matrix, invariants and amendments, checked against the code",
+      "enforce_resume: continue_disabled still first; 'park' added to the first matches!; park shape check; segment_no and the parking switch never read; truth-table test covers every row, including that the committed segment/loop checks are unchanged",
+      "grpc run_agent boundary: enforce_persistence_free_execution, enforce_resume and enforce_agent_route run before run_agent; the rebuilt route is validated again by ModelRoute::resolve -> validate_run_route",
+      "admit order (route, space, zdr, park_resume_active, bearer) matches the design; park_resume_active needs all 4 resume switches; parking switch not read",
+      "derivable_tool_defs: base_tool_defs(false) + server-resolved; a resolver Err refuses before any claim (tested)",
+      "claim_parked: empty pause_ref, GATED_SAVE_TIMEOUT; classify_park_claim checked against session-core literals (park_not_due, claim_held, not_claimable, run_ended, did not authenticate); session-core rolls back the claim on decrypt or check_fold failure",
+      "check_park_fold: all 14 rules; the prompt digest is computed the same way as run_rounds' fold_prompt_digest (compose_system_prompt(allowlist) + tools); budget rule consistent with parkable (rounds_used counts the failed round)",
+      "route_request: model, provider and connection from the fold; plan_mode from the authority; child ceiling = min(fold, request)",
+      "park_continuation: release None; budget taken from the fold; step prefix s{fold.segment_no+1}; no writer_gate and no RPC; effective_authority still guards against widening",
+      "run_rounds: in_place covers Parked; one FoldWriter::seeded for either seed; parks_so_far seeded from the claimed fold (lead obligation 1); fence before the while loop, then RunResumed; fence failure returns through fence_refusal",
+      "session-core save: no claim-token or authority check on the fence save; the seq compare-and-set lets exactly one of two claimants win; the re-park ref n = parks_so_far+1 matches validate_park_save",
+      "Continuation.release is Option; every constructor checked (build_segment and restore_continuation are Some, park_continuation is None); tools_derivable change keeps approval continuations non-derivable",
+      "PARK_RESUME_BUILT flipped together with PARK_RESUME_BUILT_EXPECTED; mutation rows inverted (lead obligation 2)",
+      "Lead obligation 3: check_park_fold refuses pause, round and in-place folds; covered per rule in the unrestorable test",
+      "Content-free Debug: ParkSeed (custom impl), ParkClaimed via ClaimedFold's custom Debug",
+      "With every switch off: enforce_resume answers continue_disabled before run_agent; subscription_switches() is Switches::from_env() outside tests",
+      "No callers of changed private fns or structs outside agent.rs; no other crate affected",
+      "Committed tests not weakened: no removed lines in the agent.rs or park.rs test regions; durable_loop_contract only re-pointed the derivable and PARK_RESUME_BUILT rows (documented deviation)",
+      "Ran: cargo test -p execution-core --test durable_loop_contract --test cross_service_loop_contract (29 + 6 passed); cargo test -p execution-core --lib loop_park park::tests enforce_resume (44 passed); cargo build shows no new warnings (decision_closer, verification_result_for and capability_policy warnings are pre-existing)"
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "Exit 0. test result: ok. 1132 passed; 0 failed; 0 ignored (finished in 300.23s). No file-lock waits, LNK1104 or mid-edit failures, so no retries. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s8-6-verify-1.log",
+      "passed": "yes: 1132 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "Exit 0. test result: ok. 29 passed; 0 failed; 0 ignored (finished in 127.28s). Log: scratchpad/s8-6-verify-2.log",
+      "passed": "yes: 29 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test cross_service_loop_contract",
+      "outcome": "Exit 0. test result: ok. 6 passed; 0 failed; 0 ignored (finished in 0.03s). Log: scratchpad/s8-6-verify-3.log",
+      "passed": "yes: 6 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "Exit 0. Eight targets, all ok: lib 120, grounding_replay 1, loop_fold_golden 12, proto_wire_parity 3, proto_wire_parity_execution 8, run_context_posture 1, zdr_retention_matrix 5, doc-tests 2. Total 152 passed, 0 failed, 0 ignored. Log: scratchpad/s8-6-verify-4.log",
+      "passed": "yes: 152 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p session-core --bins",
+      "outcome": "Exit 0. test result: ok. 520 passed; 0 failed; 162 ignored (finished in 10.88s). The 162 #[ignore] tests were not run by me. The attributes sit in modules that also reference DATABASE_URL, but I did not list them one by one, so the DB-backed link is not confirmed per test. Log: scratchpad/s8-6-verify-5.log",
+      "passed": "yes: 520 passed, 0 failed, 162 ignored (not run)"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Exit 0, zero errors, Finished dev profile in 1m 04s. Five warnings, all pre-existing relative to this round's uncommitted edits: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/auth.rs:73 (method provider never used); .../rust/services/session-core/src/terminalization.rs:697 (start_managed_run_inner never used); .../rust/services/execution-core/src/capability_policy.rs:181 (unreachable else clause); .../rust/services/execution-core/src/approval_delivery_worker.rs:744 (verification_result_for never used); .../rust/services/execution-core/src/runtime_loop/resume.rs:554 (decision_closer never used). Four of the five sit in files the tree does not modify. decision_closer exists at HEAD (resume.rs:559) and is also referenced only from tests there, so its warning is not new. Log: scratchpad/s8-6-verify-6.log",
+      "passed": "yes: no errors, 5 warnings"
+     },
+     {
+      "command": "git status --short; git diff --stat HEAD (read-only, before and after the runs)",
+      "outcome": "Branch model-plane, HEAD c6a95ae0. The same 7 modified files were present before and after the runs (apps/Model Plane/deploy/docker-compose.yml; execution-core src/grpc.rs, src/runtime_loop/agent.rs, park.rs, resume.rs; tests/cross_service_loop_contract.rs, tests/durable_loop_contract.rs; 7 files, 2989 insertions, 94 deletions) plus untracked .plan-work/. git diff printed LF/CRLF normalization warnings for five of them; not investigated. No file was edited and no test was written or changed in this verify run. No docker, commit, stash or reset was run.",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  }
+ ],
+ "failedUnits": []
+}

@@ -1,0 +1,436 @@
+{
+ "batchId": "W1-20",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS07-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Model Plane/rust/services/session-core/migrations/0058_agent_skills_proposals.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0058_agent_skills_proposals.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_review_state_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/learning/learning.go",
+    "apps/Model Plane/go/services/capability-core/internal/learning/proposal_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/learning/loop_composition_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go",
+    "apps/Model Plane/go/services/capability-core/internal/llmreviewer/reason_schema_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/trigger.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/transcript.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/owner_gate_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillsink/sink_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillsink/sink_error_test.go",
+    "apps/Model Plane/scripts/verify-durable-layer.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core upsert_agent_skill",
+     "outcome": "3 passed (withheld reason table, closed skip tokens, conflict arm never assigns enabled/scope/owner/review_state)"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core learning_events",
+     "outcome": "19 passed, including zdr_and_waived_runs_are_never_announced (unchanged) and the new memory_paused_and_non_chat_origin_are_never_announced"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core (whole binary)",
+     "outcome": "600 passed, 0 failed, 214 ignored (DB tests, not run)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib skills",
+     "outcome": "28 passed, incl. user_scope_skill_does_not_flap_between_callers, learned_skill_without_ownership_is_not_usable, shared_skill_survives_other_bucket_prune, owner_skill_wins_name_tie"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test skill_budget_contract",
+     "outcome": "2 passed, file unchanged"
+    },
+    {
+     "command": "cargo check -p execution-core --lib --tests",
+     "outcome": "compiles with the new proto fields (its ListAgentSkillsRequest literals already carry for_user_id, added by someone else in the shared worktree)"
+    },
+    {
+     "command": "go vet ./... and go test ./... in apps/Model Plane/go/services/capability-core (GOFLAGS unset)",
+     "outcome": "all packages ok, vet clean; includes TestHandleRunCompleted_SkipsPausedUserBeforeTranscriptRead, TestPersist_WritesDisabledUserScopedProposal, TestParseRunCompleted_CarriesUserID, TestSkillListReturnsOriginAndReviewState"
+    },
+    {
+     "command": "go test ./... in apps/Model Plane/go/gen; go vet ./... in orchestrator-core",
+     "outcome": "ok / clean after regenerating sessions.pb.go"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/migration-expand-contract-test.sh",
+     "outcome": "migration expand/contract lint ok (0058 carries its -- contract: line and a revert)"
+    },
+    {
+     "command": "bash -n apps/Model Plane/scripts/verify-durable-layer.sh",
+     "outcome": "syntax ok; the script itself needs docker and was not run"
+    }
+   ],
+   "db_tests_written": [
+    "background_review_is_forced_to_disabled_user_scope",
+    "user_b_cannot_overwrite_user_a_learned_skill",
+    "conflict_never_reenables_an_admin_disabled_row",
+    "accepted_row_is_not_rewritten",
+    "list_agent_skills_scope_enforcement_against_real_pg",
+    "set_run_mode_and_upsert_skill_against_real_pg"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/learning/reviewer.go: in the anonymous struct of ParseReviewJSON add `Reason string `json:\"reason\"``; add `|| len([]rune(s.Reason)) > MaxReasonChars` to the candidate-invalid condition (or leave it unbounded, SelectForPersistence clamps to 300); set `Reason: strings.TrimSpace(s.Reason),` in the SkillCandidate literal.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: change `func startLearningConsumer(ctx, nc, sc, ic)` to take `opts ...sessionreview.Option` and pass them to `sessionreview.RunConsumer(ctx, js, sc, ic, model, opts...)`; at the call on line ~217 pass `sessionreview.WithMemoryControls(memoryClient)` only when memoryClient != nil (it comes from dialBackendsWithMemory on line 191; sessionCoreScopes already include session:memory-controls:read). Existing tests call startLearningConsumer with 4 args and keep compiling.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (reattach_skill, ~line 2446): filter the listed skills with `a.review_state.is_empty() || a.review_state == \"accepted\"` before recover_skill, as model-gateway tool_loop.rs now does; otherwise the owner's own proposals read as 'disabled' in the Do loop.",
+    "apply the ledger entry for 'learned skills as disabled owner-scoped proposals' (DEC-30 policy part: learningReview default disabled, owner accepts, no auto-accept) and add the 0058 contract note (drops agent_skills_org_name_uq; an older session-core cannot run over it).",
+    "run the ignored DB tests through the harness (scripts/tests/session-core-db-tests.sh): background_review_is_forced_to_disabled_user_scope, user_b_cannot_overwrite_user_a_learned_skill, conflict_never_reenables_an_admin_disabled_row, accepted_row_is_not_rewritten, list_agent_skills_scope_enforcement_against_real_pg, set_run_mode_and_upsert_skill_against_real_pg; update the harness count.",
+    "run bash \"apps/Model Plane/scripts/verify-durable-layer.sh\" (G7 section rewritten for the (org, scope, owner, name) key).",
+    "buf: run the lint ratchet (every new field has a comment) and attach the tag diff against git show HEAD:sessions.proto (additive only, tags 10-15, 4-5, 3, 13-18); confirm sessions.pb.go regenerates byte-identical.",
+    "rebuild session-core, capability-core, model-gateway (and execution-core once its edit is applied); session-core first so migration 0058 applies before capability-core's SELECT names review_state.",
+    "live proof per the plan: set learningReview=proposals and LEARNING_REVIEW_ENABLED=true, user A completes a seeded recurring-task chat; capture the NATS event with user_id, the agent_skills row (scope=user, enabled=false, review_state=proposed), user B's /api/v1/skills and a B chat turn with the same keywords not injecting it, and A's skill absent from B's MatchSkills; also pause A and show no proposal is written.",
+    "commit order suggestion: proto + migration + generated sessions.pb.go + session-core together (with the verify script); then model-gateway; then capability-core."
+   ],
+   "deviations": [
+    "gdpr.rs not changed: it only handles organization erasure (user-subject events are a documented no-op), and its org purge already deletes every agent_skills row including proposals; the row's 'purge by owner_user_id' has no user-erasure path to hang on.",
+    "ownership.rs not changed: the bucket and ref-count bookkeeping lives in skills.rs (SkillStore.refresh_learned), which needs nothing new from OwnershipStore; replace_org_kind stays for MCP.",
+    "The consumer's 'origin' skip reason is not implemented in capability-core: GetMemoryControls carries no thread origin and the envelope has none; session-core already withholds non-chat origins at announcement (learning_events.rs, tested). Consumer skip reasons are memory_state, org_policy, owner_unknown (plus retention_posture for zdr).",
+    "learning/reviewer.go (the JSON parser) is not in the owned list, so the reason field is in the prompt, the llmreviewer tool schema (optional, maxLength 300) and SkillCandidate.Reason (clamped in SelectForPersistence), but the parser does not yet read it from the reply: proposals carry an empty reason until the lead applies the 3-line parser edit.",
+    "sessions.pb.go was regenerated natively (buf 1.72 + protoc-gen-go 1.36.12, scratch output dir removed, only that one file copied) so the Go tests could compile; the lead may regenerate it again to confirm byte equality."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/internal/learning/reviewer.go (ParseReviewJSON must read the optional reason)",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go (wire WithMemoryControls into the learning consumer)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (reattach_skill lists with enabled_only false and should drop non-accepted rows like the gateway does)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the six ignored session-core DB tests through scripts/tests/session-core-db-tests.sh (background_review_is_forced_to_disabled_user_scope, user_b_cannot_overwrite_user_a_learned_skill, conflict_never_reenables_an_admin_disabled_row, accepted_row_is_not_rewritten, list_agent_skills_scope_enforcement_against_real_pg, set_run_mode_and_upsert_skill_against_real_pg) and update the harness count. They assume an ungoverned org policy (no credentials means learning is allowed), so run them without org-core credentials.",
+     "Run apps/Model Plane/scripts/verify-durable-layer.sh (G7 was rewritten for the (org, scope, owner, name) key). It needs docker.",
+     "Apply the shared edit in capability-core internal/learning/reviewer.go: ParseReviewJSON must read the optional reason field. Until then every proposal is stored with an empty proposal_reason.",
+     "Apply the shared edit in capability-core cmd/main.go: pass sessionreview.WithMemoryControls(memoryClient) into the learning consumer. Until then the consumer's pre-read gate is off.",
+     "Apply the shared edit in execution-core runtime_loop/mod.rs reattach_skill: drop non-accepted rows, as model-gateway tool_loop.rs now does.",
+     "Add the ledger entry (DEC-30 policy part) and the 0058 contract note to the plan ledger.",
+     "Run the buf lint ratchet and confirm sessions.pb.go regenerates byte-identical. I checked the proto diff by eye: it is additive, the tags are 10-15, 4-5, 3 and 13-18 as in Appendix B, and each new field has a comment.",
+     "Live two-user proof: set learningReview=proposals and LEARNING_REVIEW_ENABLED=true. User A completes a seeded recurring-task chat. Capture the NATS event with user_id and the agent_skills row (scope=user, enabled=false, review_state=proposed). Show that user B's /api/v1/skills and a B chat turn with the same keywords do not inject it, and that A's skill is absent from B's MatchSkills. Also pause A and show no proposal is written.",
+     "Deploy order: rebuild session-core first so migration 0058 applies before capability-core's SELECT names review_state, then capability-core and model-gateway, and execution-core after its edit."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Pre-existing in capability-core registry_apis.go: PATCH and DELETE /api/v1/skills/{id} are scoped only by id and org_id, so any org member holding the id of another user's private skill or proposal can edit its content or delete it (enabling a proposal is now refused, content edit and delete are not); add an owner/admin check or a scope predicate to both statements."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "learning/reviewer.go ParseReviewJSON does not read the reason field yet, so every proposal is stored with an empty proposal_reason until the lead applies the parser edit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "capability-core main.go must pass sessionreview.WithMemoryControls(memoryClient) or the consumer's pre-read gate is off (the session-core announcement gate and the upsert gate still hold, but the transcript read and the paid review run before the upsert refuses)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing here is live-verified: the two-user proof (proposal row shape, B's /api/v1/skills and chat turn, A's skill absent from B's MatchSkills, paused user writes nothing) and the DB harness run of the six ignored tests are still to do."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0058 drops agent_skills_org_name_uq: an older session-core cannot run its ON CONFLICT (org_id, name) over this schema, so rollback needs the revert file together with the image rollback; capability-core's new SELECT also fails until 0058 has applied, so deploy session-core first."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "There is no accept or reject path yet (S8 DecideSkillProposal): proposals stay disabled and unusable until S8 lands, and the gateway cache can lag an owner's later decision by up to SKILL_CACHE_TTL_SECONDS (60 s default)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "execution-core reattach_skill lists the caller's rows with enabled_only false and shows the owner's own proposals as 'disabled' by name (no content); filter non-accepted rows there too."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "gdpr.rs handles organization erasure only; a per-user erasure event does not remove that user's learned skills or proposals (they go with the org purge), a pre-existing gap for all user-owned rows."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The per-caller bucket logic is unit-tested on SkillStore only; no test drives the SSE and gRPC pull paths with two callers through fetch_skill_context and match_skills against a fake session client."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A learned proposal may share a name with a human-authored org skill (key includes scope and owner) and would shadow it for its owner after acceptance; learning.SelectForPersistence still drops names that collide with a visible user-origin skill, but whether an owner may shadow an org skill by name is an owner decision."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "learning.Screen is a package-level variable so WS26 can install its check with one assignment at start-up; replace it with an injected screener if a second consumer of the package ever needs a different one."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "upsert_agent_skill maps a lost conflict whose existing row cannot be re-read (deleted in between) to 'protected'; harmless for the loop but the token is slightly wrong in that race."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Pre-existing, in capability-core registry_apis.go: PATCH and DELETE /api/v1/skills/{id} are scoped only by id and org_id, so any org member who knows the id of another user's private skill or proposal can edit its content or delete it. The new guard refuses enabling a non-accepted skill but not a content edit or delete. Add an owner or admin predicate to both statements."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not live-verified. The six DB tests, verify-durable-layer.sh G7 and the two-user rig (proposal row shape, user B's skills list and chat turn, A's skill absent from B's MatchSkills, paused user writes nothing) still need the lead's docker run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "learning/reviewer.go ParseReviewJSON does not read reason. The parser is not strict about unknown fields, so the prompt and schema asking for reason do not break parsing. Proposals just carry an empty proposal_reason until the lead applies the 3-line edit handed back in lead_todo."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "capability-core cmd/main.go does not pass WithMemoryControls, so the consumer gate is off. Session-core's announcement gate and the upsert gate under the owner's row lock still hold, but the transcript read and the paid inference run before the upsert refuses. Wire it before LEARNING_REVIEW_ENABLED is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0058 drops agent_skills_org_name_uq (it carries its -- contract: line, the revert file exists, and the expand/contract lint passes). An older session-core's ON CONFLICT (org_id, name) cannot run over this schema, and capability-core's new SELECT fails until 0058 has applied, so deploy session-core first and roll back only together with the revert file."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "There is no accept or reject path until S8 (DecideSkillProposal). Proposals stay disabled and unusable, and the gateway cache can lag an owner's later decision by up to SKILL_CACHE_TTL_SECONDS (60 s default)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "execution-core reattach_skill lists with enabled_only false, so the owner's own proposals read as 'disabled' by name (no content) in the Do loop until the lead's filter edit lands. The agent.rs matcher uses enabled_only true and is unaffected."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The per-caller bucket logic is tested only at SkillStore level. No test drives fetch_skill_context or the gRPC match_skills path with two callers against a fake session client."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "memory_paused_and_non_chat_origin_are_never_announced and upsert_agent_skill_conflict_arm_never_touches_state_columns are source-scan tests (include_str! plus find). They would pass on a refactor that keeps the strings but changes the logic; the ignored DB tests are the real proof."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The key now includes scope and owner, so a learned proposal can share a name with a human-authored org skill and, once accepted, shadow it for its owner (owner_skill_wins_name_tie). SelectForPersistence only drops collisions with a visible user-origin skill. Whether an owner may shadow an org skill by name is the owner's call."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "gdpr.rs handles organization erasure only (user-subject events are a documented no-op), so a user's learned skills and proposals go only with the org purge. The row said 'purge by owner_user_id'; the implementer's deviation holds, and per-user erasure is a pre-existing gap for all user-owned rows."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The upsert maps a lost conflict whose existing row cannot be re-read (deleted in between) to skip_reason 'protected', slightly the wrong token in that race."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "learning.Screen is a package-level variable so WS26 can install its check with one assignment. Replace it with an injected screener if a second consumer ever needs a different one."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The skill_row_state test helper in session-core grpc.rs has a long run of spaces inside its SQL string literal, a line-continuation artifact. It is valid SQL but untidy."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr",
+    "audit"
+   ],
+   "notes": "What was built. Migration 0058 adds review_state, source_run_id, source_thread_id and proposal_reason to agent_skills (existing rows read accepted), replaces the unique key (org_id, name) with (org_id, scope, owner_user_id, name), and adds a partial index on proposed rows. Proto is additive at the reserved tags: UpsertAgentSkillRequest 10-15, UpsertAgentSkillResponse 4-5, ListAgentSkillsRequest 3, AgentSkill 13-18. session-core: a background_review upsert is forced to a disabled, user-scoped, proposed row owned by owner_user_id. It checks the memory and org-policy gate under the owner's row lock and returns a closed skip_reason (memory_state, org_policy, zdr, owner_required, protected, accepted_exists, rejected_exists). The conflict arm refreshes content and provenance on proposed learned rows only, never enabled/scope/owner/review_state. A human upsert cannot switch on a proposal. set_agent_skill_enabled refuses to enable a non-accepted row (failed_precondition proposal_requires_decision). list_agent_skills honours for_user_id for service callers only, hides proposals from share grantees, orders by name then scope DESC, and returns the new fields. capability-core: SessionRef.UserID; the review asks GetMemoryControls before any transcript read when the WithMemoryControls option is given (fail closed, retried on error; skips memory_state, org_policy, owner_unknown); the transcript source lists skills as the run owner; the sink writes a disabled user-scoped proposal with run, thread and reason and stops the batch on a policy refusal; learning gained Reason (cut to 300), the Screen hook (no-op), and a prompt asking for a reason; the registry returns origin, review_state, source_run_id, proposal_reason, hides proposals from grantees and admins, and refuses enabling a non-accepted skill with 409 proposal_requires_decision inside the UPDATE. model-gateway: skills.rs got per-pull Org and User(caller) buckets with a ref-counted holder book (refresh_learned replaces is_org_loaded/replace_learned/skill_ownership_entries), source_path prefixes session-core:org: and session-core:user:<owner>:, learned entries matched with usable (fail closed) while disk skills keep usable_or_untracked, the caller's own skill wins a name tie, and only owner-accepted rows are cached; grpc.rs, sse.rs and tool_loop.rs use it (reattach_skill drops non-accepted rows). verify-durable-layer.sh G7 was rewritten for the new conflict key (needs the lead's docker run)."
+  },
+  {
+   "id": "WS07-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/memory.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/MemorySection.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.remember.test.tsx",
+    "apps/Frontend Plane/verevonv3/tests/e2e/product-memory.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib memory_controls_route",
+     "outcome": "3 passed"
+    },
+    {
+     "command": "cargo test -q (in apps/Frontend Plane/verevonv3/apps/gateway, full suite incl. 5 new memory tests)",
+     "outcome": "731 passed, 0 failed, 1 ignored (lib/bin); the other targets passed. A later 'memory::' filter run: 8 passed."
+    },
+    {
+     "command": "pnpm vitest run src/shared/api/memory-client.test.ts src/features/settings/components/MemorySection.test.tsx src/shared/actions (with 3 temporary model-access.ts rows, since removed)",
+     "outcome": "170 passed, 1 failed: admission-contract.test.ts 'is the file every plane vendors', because the golden JSON has no rows for the three new ids (lead wiring, see lead_todo). Every other test passed. Without the model-access.ts rows, MODEL_ACCESS is missing three keys, so typecheck and the manifest test fail until the lead adds them."
+    },
+    {
+     "command": "pnpm vitest run src/features/chat/components/ChatMessages.remember.test.tsx ChatMessages.schedule-action.test.tsx ChatMessages.read-aloud.test.tsx",
+     "outcome": "11 passed (4 new)"
+    },
+    {
+     "command": "pnpm typecheck, filtered to the files I touched, with the 3 temporary model-access.ts rows",
+     "outcome": "no errors in my files (the memory-client.test.ts and MemorySection.test.tsx 'possibly undefined' errors were fixed). Pre-existing errors elsewhere (quarry-client, RemoteSupportPage, schedule-contract.test) are in files I did not touch."
+    },
+    {
+     "command": "npx eslint on the 8 touched TS/TSX files, plus product-memory.spec.ts",
+     "outcome": "0 errors. The 10 warnings in ChatMessages.tsx are solid/reactivity warnings on lines I did not touch. Full 'pnpm lint' diffed against HEAD was not run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: right after the line \"  'memory.delete': exempt('irreversible_destructive', 'destructive'),\" add exactly these three lines: \"  'memory.set_state': exempt('human_identity_or_security', 'external_write'),\" then \"  'memory.reset': exempt('irreversible_destructive', 'destructive'),\" then \"  'memory.remember': exempt('human_identity_or_security', 'external_write'),\". Without them MODEL_ACCESS lacks three ActionId keys, so pnpm typecheck fails and buildActionCatalogManifest breaks. With them, the 170 other frontend action tests pass.",
+    "Regenerate the admission golden: 'VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts' in apps/Frontend Plane/verevonv3, then refresh agent-action-admission.json.sha256 and re-vendor the copies named in scripts/tests/zdr-contract-sync.test.sh (same recipe as the WS07-S4 wiring commit c2853992d). The only currently failing frontend test (admission-contract 'is the file every plane vendors') should then pass.",
+    "Run the Playwright e2e on the live stack: tests/e2e/product-memory.spec.ts including the new 'paused user: no recall, no new memory, resume works'. It needs session-core with migration 0051 live, plus model-gateway and the gateway rebuilt with the new routes. The e2e calls PUT /api/v1/memory/controls through the BFF.",
+    "Rebuild model-gateway and the verevonv3 gateway images (new routes), then capture the evidence the plan row asks for: a second Vite dev server for the worktree (:5173 is the main checkout), screenshots of the three states, and a network capture of PUT /api/v1/memory/controls.",
+    "Run 'pnpm lint' (the full run) and diff its failing set against HEAD. I only ran eslint on the touched files."
+   ],
+   "deviations": [
+    "model-access.ts and agent-action-admission.json were not edited (not owned); their rows are handed back as shared-edit in lead_todo.",
+    "Added src/features/chat/components/ChatMessages.remember.test.tsx (a new test file beside ChatMessages.tsx) to cover the 'Husk dette' button; the plan row names no test for it.",
+    "session_memory_error in http_routes.rs gained a FailedPrecondition arm (a typed 409), which the plan row does not list; it is needed so a paused 'remember' reports as paused rather than as a 502."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json.sha256",
+    "the vendored admission copies and scripts/tests/zdr-contract-sync.test.sh named in the golden regeneration recipe"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: add the three exempt rows for memory.set_state (human_identity_or_security, external_write), memory.reset (irreversible_destructive, destructive) and memory.remember (human_identity_or_security, external_write) after the memory.delete row; until then 11 frontend tests fail and typecheck fails on that file. I re-ran and confirmed that every vitest failure comes from these rows.",
+     "Regenerate the admission golden (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts), refresh agent-action-admission.json.sha256 and re-vendor the copies named in scripts/tests/zdr-contract-sync.test.sh.",
+     "Re-run cargo test -q -p model-gateway --lib memory_controls_route once the WS07-S7 model-gateway consumers (grpc.rs, sse.rs, tool_loop.rs, skills.rs) are updated for the new proto fields. The crate does not compile today for that reason.",
+     "Live proof: rebuild model-gateway and the verevonv3 gateway, run tests/e2e/product-memory.spec.ts including 'paused user: no recall, no new memory, resume works' (needs session-core migration 0051 live), second Vite server for the worktree, screenshots of the three states, network capture of PUT /api/v1/memory/controls.",
+     "Full pnpm lint failing set diffed against HEAD was not run; only the touched files were linted, and they are clean."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing in this slice has run against a real session-core: the BFF to model-gateway to session-core path for controls, reset and remember is covered only by wiremock and unit tests, and the new e2e has not been run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "model-access.ts rows and the admission golden for memory.set_state, memory.reset and memory.remember are not in the tree yet (lead wiring); until then typecheck and the admission-contract test fail."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'Husk dette' on an assistant message saves the whole answer text as the memory with no edit step or selection. A long answer becomes one long memory row, so the owner may want 'save the selected text' or an edit-before-save step."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "MemorySection does not read ListMemoryResponse.hidden_reason (model-gateway's list route does not pass it either); the hidden-rows note comes from controls.hiddenRows only, so an org-disabled list reads as empty without a per-list reason."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No gateway-level test covers the route layering of /api/v1/memory/controls and /reset behind require_session and the rate limiter (the handlers are tested directly, as ai.rs does), and no test pins that /v1/memories/controls beats :memory_id in the model-gateway router."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "session_memory_error now maps every FailedPrecondition from the memory surfaces to a 409 with a code split at the first ':'; any future session-core failed_precondition message that is not a closed token would surface its raw text as the error code."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "memory.set_state, memory.reset and memory.remember are registered and dispatchable, but the SPA calls memory-client directly (as memory.delete does today), so the dispatch arms have no UI caller yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The new MemorySection.test.tsx and ChatMessages.remember.test.tsx are LF while MemorySection.tsx is CRLF; the other tests in these directories are LF, so this matches them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Until the lead adds the model-access.ts rows and regenerates the admission golden, the frontend suite is red (11 tests) and typecheck fails; the tree must not be committed without that wiring, as in c2853992d."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing in this slice has run against a live session-core: the BFF to model-gateway to session-core path for controls, reset and remember is covered only by wiremock and unit tests, and the new e2e is written but not run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The model-gateway route tests (3 in memory_controls_route_tests) cover state parsing, the controls JSON shape and the 409 mapping only; no test pins that /v1/memories/controls and /v1/memories/reset win over /v1/memories/:memory_id, and none covers the confirm_required 400 on reset."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF handlers are tested by direct call, so no test shows that /api/v1/memory/controls, /reset and POST /api/v1/memory sit behind require_session and the rate limiter; the route_layer calls cover them in code review but nothing asserts it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "session_memory_error now turns every tonic FailedPrecondition on any memory surface into a 409 whose error.code is the text before the first ':'; a future session-core failed_precondition message that is not a closed token would leak its raw text as the code."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'Husk dette' saves the whole assistant answer as one memory row with no edit or selection step; a long answer becomes one long row, so the owner may want a selection or an edit-before-save."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "MemorySection does not read ListMemoryResponse.hidden_reason; the hidden-rows note comes only from controls.hiddenRows, so an org-disabled list reads as empty without a per-list reason."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "memory.set_state, memory.reset and memory.remember have dispatcher and handler arms but the SPA calls memory-client directly (as memory.delete does), so the dispatch arms have no UI caller yet."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "git status shows chat-nodes/index.ts as modified although git diff is empty (stat or line-ending noise only, not part of this slice); worth a git add --renormalize check by the lead before staging."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "authority"
+   ],
+   "notes": "Built with every switch untouched (the slice adds none). model-gateway: GET/PUT /v1/memories/controls and POST /v1/memories/reset, user bearer only, with org and user taken from the claims. PUT accepts only the literal words on, paused, off. Reset needs confirm:true at the gateway as well as in session-core, and is not ZDR-blocked because it only erases. session_memory_error now maps FailedPrecondition to a typed 409 {error:{code,details.reason}}. This covers memory_not_enabled:<reason> from IndexMemory and the ZDR refusal of SetMemoryControls; both were a 502 before, and no other branch changed. The plan's route list does not name this mapping, but 'remember' needs it to report a paused refusal honestly.\n\nBFF (domains/memory.rs): GET/PUT /api/v1/memory/controls, POST /api/v1/memory/reset, POST /api/v1/memory (remember), all behind the existing require_session and rate-limit layers. Only state, confirm, threadId and content are forwarded, so a client cannot name another user. Five wiremock tests were added: only state is forwarded, confirm is forwarded as false rather than defaulted, a paused refusal comes back as 409, empty content makes no upstream hop, and the controls read goes upstream as a GET.\n\nActions: memory.set_state (low, reversible), memory.reset (high, requiresApproval, not reversible, input confirm: z.literal(true)) and memory.remember (low). Dispatchers and handler arms were added. All three are human-only.\n\nSPA: memory-client gained getMemoryControls, setMemoryState, resetMemory and rememberMemory. An unknown state becomes null and a missing flag becomes 'not allowed', never 'on'. MemorySection has an On/Pause/Off radiogroup, override banners for org_disabled, zdr and policy_unavailable, a hidden-rows note, and a two-step Reset with cancel. Under ZDR the selector is locked but Reset stays available. ChatMessages: one 'Husk dette' button and one handler on the assistant message, hidden in temporary chat or without a thread. A paused refusal shows its own note and never 'Husket'. i18n nb/en is inline through i18n.tr, like the rest of the file.\n\ne2e: product-memory.spec.ts gained 'paused user: no recall, no new memory, resume works'. It was written and type-checked but NOT run (it needs the live stack).\n\nStatus is partial only because the admission wiring in model-access.ts and the golden JSON is the lead's (not my owned files) and the e2e/screenshot evidence needs the stack. I edited model-access.ts temporarily to verify and restored it; git diff on that file is empty."
+  }
+ ]
+}

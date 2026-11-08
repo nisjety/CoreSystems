@@ -1,0 +1,244 @@
+{
+  "fixtures": [
+    {
+      "id": "article_basic",
+      "file": "article_basic.html",
+      "category": "static_article",
+      "expected": {
+        "title": "Test Article: Quarry Evaluation",
+        "lang": "en",
+        "must_contain": [
+          "Quarry Evaluation Benchmark",
+          "first paragraph of the article",
+          "readability-based extraction",
+          "Content precision",
+          "Content recall",
+          "Boilerplate ratio",
+          "Automated extraction quality"
+        ],
+        "must_not_contain": [
+          "Home",
+          "About",
+          "Contact",
+          "Privacy Policy",
+          "Terms of Service",
+          "All rights reserved"
+        ],
+        "min_links": 2,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "article_js_heavy",
+      "file": "article_js_heavy.html",
+      "category": "js_heavy",
+      "expected": {
+        "title": "JS-Heavy Page: Dynamic Content",
+        "lang": "en",
+        "must_contain": [
+          "Dynamic Content Rendering",
+          "paragraph is in the static HTML",
+          "Server-Rendered Section",
+          "Modern web applications"
+        ],
+        "must_not_contain": [
+          "Dashboard",
+          "Settings",
+          "Profile",
+          "injected by JS",
+          "app.bundle.js",
+          "vendor.bundle.js"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "blocked_page",
+      "file": "blocked_page.html",
+      "category": "blocked",
+      "expected": {
+        "title": "Access Denied",
+        "lang": "en",
+        "must_contain": [
+          "Access Denied",
+          "security service"
+        ],
+        "must_not_contain": [
+          "challenge.js"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "minimal_content",
+      "file": "minimal_content.html",
+      "category": "minimal",
+      "expected": {
+        "title": "Brief Notice",
+        "lang": "en",
+        "must_contain": [
+          "Service Maintenance Window",
+          "API endpoints will be unavailable"
+        ],
+        "must_not_contain": [
+          "Home",
+          "Archive",
+          "Example Corp",
+          "Status Page"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "table_heavy",
+      "file": "table_heavy.html",
+      "category": "table_heavy",
+      "expected": {
+        "title": "Q1 2026 Performance Report",
+        "lang": "en",
+        "must_contain": [
+          "Server Performance Report",
+          "Latency by Region",
+          "us-east-1",
+          "Throughput Summary",
+          "API Gateway",
+          "99.95% SLA target"
+        ],
+        "must_not_contain": [
+          "Dashboard",
+          "Reports",
+          "Settings",
+          "Metrics Platform",
+          "Privacy",
+          "Terms"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "multi_section",
+      "file": "multi_section.html",
+      "category": "multi_section",
+      "expected": {
+        "title": "Developer Changelog: May 2026",
+        "lang": "en",
+        "must_contain": [
+          "Developer Changelog",
+          "New Features",
+          "real-time collaboration",
+          "Improvements",
+          "P95 latency",
+          "Breaking Changes",
+          "v2 OAuth flow",
+          "Bug Fixes",
+          "timezone offset"
+        ],
+        "must_not_contain": [
+          "Related Posts",
+          "Privacy Policy",
+          "Terms of Use",
+          "All rights reserved"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "cache_warm",
+      "file": "cache_warm.html",
+      "category": "cache_warm",
+      "expected": {
+        "title": "Cache-Friendly Page: Warm Path Verification",
+        "lang": "en",
+        "must_contain": [
+          "Cache Warm-Hit Determinism",
+          "byte-identical content",
+          "warm path is the most common",
+          "fingerprints this fixture twice"
+        ],
+        "must_not_contain": [
+          "Privacy",
+          "Terms"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "js_blocked",
+      "file": "js_blocked.html",
+      "category": "js_blocked",
+      "expected": {
+        "title": "JavaScript Required: Content Hidden",
+        "lang": "en",
+        "must_contain": [
+          "JavaScript Required",
+          "JavaScript-enabled browser"
+        ],
+        "must_not_contain": [
+          "runtime.bundle.js",
+          "__APP_CONFIG__",
+          "featureFlags"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "change_precision",
+      "file": "change_precision.html",
+      "category": "change_precision",
+      "expected": {
+        "title": "Change Detection Precision Probe",
+        "lang": "en",
+        "must_contain": [
+          "Change Detection Precision",
+          "whitespace-only changes",
+          "paragraph reordering",
+          "false positives"
+        ],
+        "must_not_contain": [
+          "Privacy"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    },
+    {
+      "id": "profile_restore",
+      "file": "profile_restore.html",
+      "category": "profile_restore",
+      "expected": {
+        "title": "Profile Restore Verification: Authenticated Dashboard",
+        "lang": "en",
+        "must_contain": [
+          "Welcome back",
+          "post-login dashboard",
+          "auth cookie",
+          "Session-dependent content",
+          "profile-restore scenario"
+        ],
+        "must_not_contain": [
+          "Privacy",
+          "Terms"
+        ],
+        "min_links": 0,
+        "link_must_contain": [],
+        "fingerprint_stable": true
+      }
+    }
+  ]
+}

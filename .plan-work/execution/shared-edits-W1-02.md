@@ -1,0 +1,6 @@
+## WS10-S2
+shared-edit apps/Control Plane/docker-compose.yml (org-core service, the single line under ORG_CORE_SERVICE_CREDENTIALS: >-): (a) replace the model-gateway entry `"scopes":["org:read:any"]` (the one whose principal is model-gateway) with `"scopes":["org:read:any","org:model-entitlement:read:any"]`; (b) append directly after the model-gateway entry and before the application-space-lifecycle entry: `{"principal":"inference-core","audience":"org-core","token":"${INFERENCE_ORG_CORE_SERVICE_TOKEN:?INFERENCE_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:model-entitlement:read:any"]}`. A tested copy of the full result is at C:\Users\IMAFER~1\AppData\Local\Temp\claude\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\0c471def-955a-414e-8256-870b2ff081a7\scratchpad\compose-proposed.yml (the org-core line can be copied from it). Optionally add a comment above the block naming the new principal.
+
+## WS10-S2
+shared-edit apps/Control Plane/scripts/run-isolated-control-lifecycle-e2e.sh: add a step running the Postgres test above (go test ./internal/modelentitlement -run TestControlLifecycleModelEntitlementRepositoryUnderRLS -count=1) beside the existing ./internal/org and ./internal/http steps (lines ~202-234), or run it by hand through the disposable-Postgres harness.
+

@@ -1,0 +1,7 @@
+title: This connection supports ZDR
+continue: Close
+cancel: Close
+
+This connection is registered with Verevon as ZDR-approved. Your organisation is not using ZDR now, so nothing changes.
+
+The registration applies only to this connection. It changes if the basis for it changes.

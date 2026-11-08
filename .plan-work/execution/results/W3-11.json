@@ -1,0 +1,518 @@
+{
+ "batchId": "W3-11",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-14-S5",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/run_ledger.proto",
+    "apps/Model Plane/proto/model_plane/v1/events.proto",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/run_timing.rs (new)",
+    "apps/Model Plane/rust/services/session-core/src/run_ledger_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_timing_persist.rs (new)",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/api/contracts/zdr-refusals.json",
+    "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/run-console-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/RunWaterfall.tsx (new)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/RunWaterfall.test.tsx (new)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/RunLedger.tsx"
+   ],
+   "deviations": [
+    "Assumed D2-199 = accept the WS15-S4 additive fields. The design gives no recommendation for D2-199. failed_attempts_ms and retry_wait_ms are optional and only sent when non-zero, and turn-timing-v1 stores them as part of its shape (documented in mp_contracts::run_timing::SCHEMA_TURN). The SSE wire itself is unchanged.",
+    "Assumed D11 = the recommendation: turn and round timing are stored as events of a new EventType, and tool timing is read from the existing session_tool_audit_intents rows. The payload is RunTimingRecorded in run_ledger.proto.",
+    "Assumed D13 = the recommendation: a waived run is treated as ZDR. The gateway stores no timing for ZDR or waived turns, session-core refuses the write with zdr_durable_mutation_forbidden, and the read returns nothing for a run that is not persistent.",
+    "The EventType number is 161, not the reserved 150. Since round A, 150-156 have been the WS10.S2 trace types (150-159 is the trace block) and 160 is BROWSER_ATTACH_SHARED_JAR. 161 is the next free value after both integration reports.",
+    "Write path: session-core has no generic event-append RPC for the gateway. I added RunLedgerService.RecordRunTiming (session-core owns the store). The gateway calls it with the user's forwarded session bearer, so the event is attributed to the run owner. Session-core checks owner, org, a ZDR credential and the retention class again before the write.",
+    "Ask-turn hook: emit_turn_timing has no state, run or bearer, and it has 32 call sites. So run_timing_persist keeps a bounded table, keyed by request id with a 30-minute TTL, filled once by arm_turn after session prepare and drained by persist_turn inside emit_turn_timing. sse.rs gets 3 call sites (arm, persist_turn, persist_rounds), not the 2 in the design.",
+    "Added a switch the design does not name: VITE_CHAT_RUN_WATERFALL (default off). Without it the ledger would call the new route even with every server switch off. With it on, the panel fetches only when the user asks.",
+    "No zdr-posture-matrix rows, following the batch rule: the run_inspection refusal is a feature refusal. It goes in the refusal catalogue (JSON, FE copy, FE labels; the mp-contracts FEATURES table is a shared edit). The proposed e_* rows were not added.",
+    "The BFF route is /api/v1/agents/runs/{run_id}/timing in agents_runs.rs, not /api/v1/runs/*. /api/v1/runs/* is routed in chat.rs, which belongs to another agent.",
+    "session-core: delete_thread_rows is now pub(crate) so the run_timing_rows_erased_with_thread test can call it. Added RUN_TIMING_RECORDED => 161 to event_type_to_i32."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/lib.rs: add line `pub mod run_timing;` right after `pub mod run_origin;` (line 28). Needed by session-core, model-gateway and the run_ledger_proto_roundtrip test.",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in FEATURES, after the `Feature { key: \"conversation_import\", label: \"conversation import\", },` entry (about line 371), add `Feature { key: \"run_inspection\", label: \"run timing and request inspection\", },` with the comment `// EP-14 S5/S7: the run timing and request-inspection reads refuse a ZDR caller.` Order must match api/contracts/zdr-refusals.json, which already lists it last. Without this edit, Refusal::feature_not_supported(\"run_inspection\") hits its debug_assert.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF): (1) import `run_ledger_service_client::RunLedgerServiceClient,` in the mp_contracts::model_plane::v1 use block. (2) Field after `pub event_log_client: EventLogClient<Channel>,`: `/// Session Core's RunLedgerService (EP-14 S5 run timing write and read) on the session_client endpoint.` then `pub run_ledger_client: RunLedgerServiceClient<Channel>,`. (3) In new() after `event_log_client: EventLogClient::new(session_channel.clone()),` add `run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),`. (4) In from_env, beside `let event_log_client = EventLogClient::new(Self::lazy_channel(\"SESSION_CORE_URL\",\"SESSION_CORE_ADDR\",\"http://localhost:9091\")?);`, add the same for `let run_ledger_client = RunLedgerServiceClient::new(...)`. (5) After both `state.event_log_client = event_log_client;` lines (about 897 and 964), add `state.run_ledger_client = run_ledger_client;`. (6) Any with_nats constructor that lists every field also gets `run_ledger_client`.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (CRLF): in parked_response's RunAgentResponse literal, after `usage: None,` (line 534), add `        // The caller that holds the loop's round log sets it.` and `        round_timing: Vec::new(),`. In the test literal at line 1518, after `usage: None,`, add `                round_timing: Vec::new(),`. Without this, execution-core does not compile: RunAgentResponse gained field 12.",
+    "shared-edit apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json: copy apps/Model Plane/api/contracts/zdr-refusals.json byte-for-byte (adds the run_inspection feature). Re-pin go/pkg/zdrrefusal/zdr-refusals.json.sha256 and apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256 to `96cce805b28ece23aace053e6d2a7b726318effd4defe72113174e7128086515 *zdr-refusals.json` (LF ending). Then run scripts/tests/zdr-contract-sync.test.sh and compare against the D0-003 baseline by name.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block next to MODEL_GATEWAY_RUN_CONTEXT add `MODEL_GATEWAY_RUN_TIMING_PERSIST: ${MODEL_GATEWAY_RUN_TIMING_PERSIST:-false}`. In the session-core block next to SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED (line 1139) add `SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}`. In the execution-core block next to EXECUTION_EFFECT_LEDGER_ENABLED (line 1509) add `EXECUTION_ROUND_TIMING: ${EXECUTION_ROUND_TIMING:-false}`. Add compose-contract assertions if the gate requires them. The owner adds .env.example entries, including VITE_CHAT_RUN_WATERFALL for the SPA.",
+    "Regenerate proto bindings (Go gen, Python mp-events-py, any TS) for run_ledger.proto (new RPCs RecordRunTiming and GetRunTiming; messages RunTimingRecorded, RunActionTiming, RecordRunTiming*, GetRunTiming*; imports google/protobuf/timestamp.proto), events.proto (EVENT_TYPE_RUN_TIMING_RECORDED = 161) and execution.proto (RoundTiming, RunAgentResponse.round_timing = 12). Then run buf lint, buf breaking --against proto/baseline.binpb and the buf-lint ratchet. If the Go wire-parity test (go/gen/model_plane/v1/proto_wire_parity_test.go) pins EventType values, add 161 there.",
+    "Lead docs: in apps/Model Plane/docs/decisions/ledger.md add \"Run timing is content-free and stored as run events (EVENT_TYPE_RUN_TIMING_RECORDED = 161, written through RunLedgerService.RecordRunTiming with the owner's bearer); ZDR and waived runs store none\" (D11, D13, D2-199 assumed accepted). In apps/Model Plane/ZDR.md add the RUN_TIMING_RECORDED event row (not written for ZDR or waived; erased with thread delete and org purge) and the run_inspection feature refusal on GET /v1/runs/:run_id/timing.",
+    "Optional CSS: the waterfall uses classes verevon-chat-waterfall, __group, __chart, __table and __panel. Styles go in the ledger stylesheet that owns .verevon-chat-ledger (not my file). Bars use fill=currentColor, so the panel needs a color and a chart height (for example height: calc(lanes * 18px)).",
+    "Guard compile and test: cargo test -p mp-contracts --lib run_ledger_proto_roundtrip; -p model-gateway --lib run_timing_persist and get_run_timing; -p execution-core --lib round_timing; session-core DB harness get_run_timing, record_run_timing_refuses_zdr_and_waived_runs and run_timing_rows_erased_with_thread (--ignored); vitest RunWaterfall.test.tsx and RunLedger.test.tsx; BFF cargo test. The sse.rs source-text tests that scan agentic_run_stream (around sse.rs:22769, 23763, 24400) must still pass with the new persist_rounds call line."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+    "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json(.sha256)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D2-199 assumed: turn-timing-v1 stores the WS15-S4 optional failed_attempts_ms and retry_wait_ms as part of its shape; the owner must confirm before MODEL_GATEWAY_RUN_TIMING_PERSIST is switched on, because a gate added later would make it v2."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D11 assumed (recommendation): timing is a RUN_TIMING_RECORDED event (EventType 161, not the reserved 150, which the trace already uses) plus a read over session_tool_audit_intents; the integrator must confirm 161."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D13 assumed (recommendation): a waived run is treated as ZDR at both layers. The gateway never arms or writes for a waived turn, session-core refuses the write, and GetRunTiming returns an empty response for a non-persistent run."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not live-proven: after a rebuild with all three switches on, one Ask turn and one Do run must each leave exactly one type-161 event with no content columns, GET /api/v1/agents/runs/:id/timing must return them, and a ZDR-TEST org turn must leave a row delta of 0 and get zdr_feature_not_supported/run_inspection from the route."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "session-core RecordRunTiming is not behind a session-core switch; only the gateway's MODEL_GATEWAY_RUN_TIMING_PERSIST gates writes. Any owner bearer can write a validated content-free record (max 64 KiB, idempotent per run, request and schema) to its own persistent run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Ask-turn arm table in run_timing_persist is process-global, bounded at 4096 and cleared after 30 minutes. A turn armed on one replica whose report is built on another (a resumed stream) is not recorded; this is best effort by design."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no end-to-end test that a real Ask stream with the switch on calls RecordRunTiming once with the turn-timing-v1 report, or that a Do stream forwards RunAgentResponse.round_timing. The unit tests cover the switch, ZDR, waived and failure paths and the route only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Round timing covers only the root loop of one invocation: a continuation or park resume is a new invocation with its own clock and its own round-timing-v1 record, and delegated loops are not listed separately."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The waterfall has no stylesheet yet (classes verevon-chat-waterfall*); the bars inherit currentColor with no set chart height."
+    }
+   ],
+   "notes": "I built the slice dark behind four switches, all off by default: MODEL_GATEWAY_RUN_TIMING_PERSIST, EXECUTION_ROUND_TIMING, SESSION_CORE_RUN_LEDGER_READ and VITE_CHAT_RUN_WATERFALL. Per the code-first order, nothing was compiled or run.\n\n- **Proto:** run_ledger.proto gains RecordRunTiming and GetRunTiming plus their messages. events.proto gains EVENT_TYPE_RUN_TIMING_RECORDED = 161. execution.proto gains RoundTiming and RunAgentResponse.round_timing = 12. Every new field is commented.\n- **Shared contract (mp-contracts/src/run_timing.rs, new):** schema names, a 64 KiB cap, validate() and round_report(), plus the run_ledger_proto_roundtrip test.\n- **session-core (run_ledger_grpc.rs):** the owner-only write (refuses ZDR and waived runs) and the owner-only read (events plus up to 500 tool intents, truncated flag; UNIMPLEMENTED when the switch is off). Unit tests plus DB-harness tests: reads events and intents, foreign owner gets not found, truncates at 500, ZDR and waived refused, erased with thread delete.\n- **model-gateway:** run_timing_persist.rs arms an Ask turn after session prepare, persists the report from emit_turn_timing, and persists Do rounds after the dispatch result. Writes are spawned and best effort. sse.rs gets three call lines. New route GET /v1/runs/:run_id/timing returns {data:{timings,actions,truncated}} and refuses a ZDR bearer with 403 zdr_feature_not_supported/run_inspection. Route tests: get_run_timing_owner_only, get_run_timing_refuses_zdr_bearer.\n- **execution-core (agent.rs):** a RoundTimingLog on the root LoopContext, filled around the inference call and closed at loop end. Every exit (paused, parked, finalized) carries it. Tests: round_timing_offsets_monotonic, round_timing_off_leaves_response_unchanged.\n- **Frontend:** BFF pass-through /api/v1/agents/runs/{id}/timing, getRunTiming() in the client, RunWaterfall.tsx (stacked lanes, never sums spans, open calls stay open, table fallback, fetch only on click) with its test, and a mount line in RunLedger.tsx.\n\n**Blocking:** it will not compile until the guard applies the shared edits in lead_todo to mp-contracts lib.rs, zdr_refusal.rs FEATURES, model-gateway state.rs (run_ledger_client) and execution-core park.rs (round_timing), and regenerates the proto bindings.",
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S8",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\agent_actions.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\app\\App.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentBuilderPage.tsx (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentBuilderPage.test.tsx (new)"
+   ],
+   "notes": "I wrote the code and tests for EP-6-S8. Nothing was run (code-first order). Status is partial for three reasons: the routes need one new Convex read (a shared edit); the preview injector is written but not yet wired into chat streams.rs (a shared edit); and the page has no preview panel, because chat-client.ts is not mine.\n\nBFF (agent_actions.rs, LF): the routes are only added when the router is built with AGENT_DEFINITION_VERSIONS=true; read strictly, so 1 or TRUE stay off and the gateway returns its old 404. The four routes are GET and PUT /api/v1/agents/{agent_id}/draft, POST .../publish and GET .../versions. They call the S7 functions saveDraftForGateway, publishForGateway and listVersionsForGateway, plus the new agents:builderDefinitionForGateway.\n\nGate (authorize_agent_builder) applies to every route, reads included:\n- An org owner or admin may edit any agent.\n- The creator may edit their own org agent.\n- For a room-born agent, an owner or manager of the origin Space may edit it; the role comes from Control through the same user-core membership read create_space_agent uses.\n- Everyone else gets 403 agent_builder_forbidden.\n\nThe PUT body is strict: unknown fields return 400 invalid_agent_draft with details {field}. Its bounds mirror canonicalDefinitionBody. Publish with no saved draft returns 409 agent_draft_missing. Convex failures return typed 503s.\n\nPreview: inject_agent_draft_preview(state, user, org_id, body) does nothing unless the switch is on and the body carries agent_preview: {agent_ref}. A preview inside a thread, Space or mention is refused with 400 agent_preview_not_in_thread. Otherwise the injector:\n- runs the same gate and requires a saved draft;\n- overwrites any client agent_name and agent_system_prompt with the draft's;\n- forces agent_mode read_only and zdr true (so no transcript is stored);\n- drops the client's tools.\n\nFE:\n- Three contracts registered: agents.draft.save, agents.publish and agents.versions.list (strict zod, ownerPlane application).\n- New AgentBuilderPage at /agents/:agentId/edit, mounted only with VITE_AGENT_BUILDER=true. It has name, instructions, model from the served catalogue, a tool picker limited to capability ids from /api/v1/capabilities, and an autonomy cap. Publish saves what is on screen first. History lists versions newest first with a line diff of the instructions.\n\nTests written: gate, draft shape, preview persona and refusals, and router tests (switch off gives 404; creator publish works; a non-creator gets 403 and no publish call). Vitest covers the registry contracts and the page.",
+   "deviations": [
+    "Assumed OD-4 = (b) immutable published versions plus one editable draft with a publishedVersion pointer (design recommendation; S7 already built on it). The builder is dark behind AGENT_DEFINITION_VERSIONS (BFF) and VITE_AGENT_BUILDER (SPA).",
+    "Org owner/admin may edit any agent, including room-born ones, in addition to the design's creator / Space-manager rule (matches the schedule precedent 'admins keep org-wide control').",
+    "Builder routes are mounted at router build only when the switch is on (404 when off) rather than refusing per request; the switch is read from env, not AppState, because config.rs is not owned here.",
+    "Preview is a chat-body field (agent_preview) consumed by a BFF injector in agent_actions.rs, not a new route; it uses zdr:true as the only existing no-transcript mechanism. No FE preview panel was built (chat-client.ts not owned).",
+    "Model choice is the served model catalogue (assumed already WS10-entitled); the BFF does not re-check model entitlement on save.",
+    "New FE switch VITE_AGENT_BUILDER (not named in the design) gates the route so the build emits no builder chunk while off."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Application Plane/convex-core/convex/agents.ts (CRLF, keep CRLF): append after getVersionForGateway (end of the EP-6 S7 block) this query:\n/**\n * What the agent builder (EP-6 S8) reads before the gateway authorises an edit: the draft, the\n * pointer, the legacy fields a first draft is seeded from, and the two facts its gate needs (the\n * creator's Control subject, and the Space a room-born agent was created in). An agent of another\n * organisation reads as null, the same answer as an unknown id.\n */\nexport const builderDefinitionForGateway = query({\n  args: {\n    serviceKey: v.string(),\n    externalAuthId: v.string(),\n    externalOrgId: v.string(),\n    agentId: v.id(\"agents\"),\n  },\n  handler: async (ctx, args) => {\n    assertServiceKey(args.serviceKey);\n    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);\n    const agent = await ctx.db.get(args.agentId);\n    if (!agent || agent.orgId !== organization._id) return null;\n    const creator = agent.createdBy ? await ctx.db.get(agent.createdBy) : null;\n    // createSpaceAgentForGateway writes the agent and its first binding in one transaction with\n    // the same timestamp and no createdBy; that binding's Space is where the agent was born.\n    const origin = agent.createdBy\n      ? null\n      : (\n          await ctx.db\n            .query(\"spaceAgentBindings\")\n            .withIndex(\"by_external_org\", (q: any) => q.eq(\"externalOrgId\", args.externalOrgId))\n            .collect()\n        ).find((binding: any) => binding.agentId === args.agentId && binding.createdAt === agent.createdAt);\n    return {\n      agentRef: agent._id,\n      name: agent.name,\n      systemPrompt: agent.systemPrompt ?? null,\n      model: agent.model ?? null,\n      publishedVersion: agent.publishedVersion ?? null,\n      draft: agent.draft ?? null,\n      creatorExternalAuthId: creator?.externalAuthId ?? null,\n      originSpaceRef: origin?.spaceRef ?? null,\n    };\n  },\n});\nPlus one case in test/agent-definition-versions.test.cjs: another org's agent reads as null; a room-born agent reports its origin Space and no creator.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (LF): immediately after the line `  'agents.installations.list': exempt('no_owner_executor', 'read'),` add three lines: `  'agents.draft.save': exempt('agent_cannot_self_govern', 'external_write'),` / `  'agents.publish': exempt('agent_cannot_self_govern', 'external_write'),` / `  'agents.versions.list': exempt('no_owner_executor', 'read'),` (MODEL_ACCESS is Record<ActionId,...>, typecheck fails without them).",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs (stream_chat): immediately before `    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(` insert:\n    // EP-6 S8: a builder preview becomes a temporary read-only turn with the draft persona. Must run\n    // before the mention and thread injectors; a no-op unless AGENT_DEFINITION_VERSIONS is `true`.\n    if let Err((status, body)) = crate::domains::agent_actions::inject_agent_draft_preview(\n        &state,\n        &user,\n        &org_id,\n        &mut outbound_body,\n    )\n    .await\n    {\n        return (status, body).into_response();\n    }\nThen drop the `#[allow(dead_code, ...)]` line above inject_agent_draft_preview in agent_actions.rs.",
+    "guard: regenerate the agent-action-admission golden (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) after the model-access.ts edit; reconcile the registry count in action-registry.test.ts (set to 259 = 256 + 3 here) with any other W3-11 slice that also adds actions.",
+    "guard: run cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets agent_actions; pnpm exec vitest run src/features/agents src/shared/actions; pnpm lint; tsc6 -p tsconfig.app.json.",
+    "optional shared-edit apps/Frontend Plane/verevonv3/src/vite-env.d.ts: after `\treadonly VITE_FLEET_CONSOLE?: string;` add `\treadonly VITE_AGENT_BUILDER?: string;` (tab-indented, matching the file).",
+    "owner: document AGENT_DEFINITION_VERSIONS (BFF) and VITE_AGENT_BUILDER (SPA) in .env.example; both default off. No proto, no migration, no prompt-tool manifest change."
+   ],
+   "needs_other_files": [
+    "apps/Application Plane/convex-core/convex/agents.ts (new builderDefinitionForGateway query; every builder route depends on it)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (three MODEL_ACCESS rows)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs (wire inject_agent_draft_preview)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (an agentPreview request field for an in-builder preview panel; not built)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 was assumed to be option (b), immutable versions plus one draft; the builder routes, contracts and page all depend on it and stay dark until the owner rules."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The preview's read-only behaviour rests on agent_mode=read_only plus dropping client tools; with AGENT_MODES off, model-gateway may ignore agent_mode, so confirm Ask-turn tools stay read-only before switching the preview on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The preview forces zdr=true to store no transcript, so it fails closed when no ZDR-attested chat model is in the fleet, and whether a ZDR turn honours agent_system_prompt is still unverified live."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The ZDR golden e_zdr_token_agent_preview_stores_nothing (design section 5) is not written; it belongs to the Model Plane fixture owners."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "/api/v1/agents/{agent_id}/... sits beside the static /api/v1/agents/runs/{run_id}, chatbot/runtime and installations routes; add a router test with an agent id starting with r, c or i to prove matchit falls back to the parameter route."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Room-born origin is inferred from a binding whose createdAt equals the agent's createdAt and no createdBy; an explicit origin field written by createSpaceAgentForGateway would be sturdier."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Pre-existing: a chat turn with no mention forwards a client-supplied agent_system_prompt and agent_name unchanged to model-gateway (inject_mentioned_space_agent strips only mention fields), which lets a client forge a persona."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The builder has no preview panel and no entry link from the agents landing or installations page; both need a chat-client field and a link owned by other files."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live-prove draft save, publish (v1 then v2), the history diff, a non-creator's 403 and a room manager's edit of a room-born agent with AGENT_DEFINITION_VERSIONS=true after the Convex query lands and convex-gateway is restarted."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S1",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/inline-widget.css",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.inline-widget.test.tsx"
+   ],
+   "notes": "I wrote the code and tests and ran nothing, as the code-first order says. All files are LF. Nothing from an earlier attempt was in the tree.\n\n- **inline-widget.ts** (new, pure): the fence language and its limits (100,000 characters, at most 8 live widgets), the fence check, the size check, the theme CSS, the title, and the live-window check. The theme CSS maps 10 host tokens onto --vv-*. Values are filtered to [#a-zA-Z0-9(),.%\\s-] and cut at 200 characters, so a value cannot close the style element. Empty values are left out.\n- **sandbox-html.ts**: adds sandboxWidgetDocument(html, themeCss). It writes the same CSP meta first, then a style element with the theme and a base reset, then the body. sandboxHtmlDocument is unchanged, and a new test pins its exact output string.\n- **InlineWidget.tsx** (new):\n  - Switch: inlineWidgetsEnabled() is true only for the literal 'true' in VITE_CHAT_INLINE_WIDGETS.\n  - The InlineWidgetSurface context defaults to 'inert'. It uses the Solid 2 form <Ctx value>, as the repo does, not .Provider.\n  - The frame has sandbox=\"allow-scripts\" only (pinned as WIDGET_SANDBOX), plus referrerpolicy no-referrer and loading lazy, and a fixed height of 360 px.\n  - The toolbar has the title (falls back to \"Interaktiv widget\") and \"Vis kode\" / \"Åpne stort\".\n  - Over the size cap, the widget stays a code block with a one-line note.\n  - Only the 8 newest mounted widgets have a live frame. Older ones show \"Vis widget\", and a click keeps that one live.\n- **inline-widget.css** (new): uses tokens only.\n- **ChatMessages.tsx**:\n  - MarkdownCodeBlock has a third branch, inside the mermaid fallback. It runs only when the fence is closed, its language is widget, the surface is live and the switch is on.\n  - AssistantMessage wraps SettledTurnContent in InlineWidgetSurface, set to 'live' only when the switch is on. The context adds no DOM, so with the switch off the page renders exactly as before.\n  - The PDF export renders off-screen in a separate root, and the artifact panel and the Space room are outside this wrapper, so all of them stay inert.\n- **Tests**: every test the design names, plus these extras:\n  - widget over the cap, and the 8-live window\n  - long theme value bounded\n  - a widget fence still streaming stays code",
+   "deviations": [
+    "The design's \"Åpne i panel\" button is \"Åpne stort\" instead. It pins the same frame over the page with a CSS class, so the widget keeps its state. The SPA has no API to open the Resultat panel on a source that is not an artifact. Importing ArtifactHtmlPreview would also create an import cycle: ChatArtifactPanel already imports ChatMessages. Wiring the real panel needs a change to ChatPage.",
+    "The InlineWidgetSurface provider is always rendered, with value 'live' only when the switch is on. The design said to wrap only when the switch is on. The context adds no DOM, so the page renders the same either way.",
+    "Two extra --vv tokens beyond the design's list: --vv-color-scheme, so a dark host does not get a white frame, and --vv-background. Font size is read from the computed font-size property, because the host has no font-size token."
+   ],
+   "lead_todo": [
+    "Guard: run `pnpm exec vitest run src/features/chat/lib/inline-widget.test.ts src/shared/lib/sandbox-html.test.ts src/features/chat/components/InlineWidget.test.tsx src/features/chat/components/ChatMessages.inline-widget.test.tsx`, `pnpm lint` and `tsc -p tsconfig.app.json` from apps/Frontend Plane/verevonv3. The Solid 2 points to check: createSignal with { ownedWrite: true } at module scope, written from the widget's setup and cleanup, and `<InlineWidgetSurface value=...>` as the provider form.",
+    "Owner: add VITE_CHAT_INLINE_WIDGETS (default off) to the verevonv3 .env.example. Agents may not edit that file."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A plain-reply PDF export clones the live DOM (contentRef -> print.ts element.cloneNode). With the switch on it would copy the widget iframe (still sandboxed) and its toolbar instead of the code block that D2 promises for exports, so the export needs to swap widgets for code before switch-on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "With the switch on, on a second dev server: a slider+SVG widget renders at 1280 and 375 px, light and dark, with origin null; document.cookie throws; fetch is blocked by the CSP; the same text in a Space room post shows code."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The theme is read once, when a widget's srcdoc is first built, so switching light/dark leaves widgets already on screen in the old theme until they remount. S3's host-to-frame theme message should fix this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When a 9th widget mounts, the oldest live frame is torn down and its state is lost. The window is based on mount order, not thread position, so a history page loaded later could change which widgets are counted as newest."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Under VITE_CHAT_RENDER_LEGACY=true each token rebuilds every markdown block, so a closed widget's iframe would reload on every token while the rest of the answer streams. The incremental path keeps sealed blocks and has no such reload."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Escape closes the large view only while focus is on the host toolbar. A keypress inside the opaque frame does not bubble to the host, so S3 could add a close request over the bridge."
+    }
+   ],
+   "needs_other_files": [],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S6",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/inference-core/src/auth.rs"
+   ],
+   "notes": "auth.rs (CRLF kept): new api_key arm in validate_claims behind INFERENCE_API_KEY_PRINCIPAL. JwtVerifier gets an accept_api_key field: from_config sets it false and from_env applies the switch through with_api_key_principal, so the AuthConfig literals in the grpc test files still compile. Token shape: bounded printable key_id; sub == \"apikey:\"+key_id; acting_user_id present, at most 256 chars, unpadded, not itself a key; no user_id, service_id or reason. A waiver on a key is refused, and so is a key_id on another token type, but only while the switch is on. The principal keeps user_id None (fail-closed for codex and person-only paths) and gains is_api_key(), api_key_id() and entitlement_user_id(): the user, or the key owner (D2). budget_user_id() returns apikey:<key_id> for a key, so each key gets its own cache and budget scope. authorize_invoke requires agent:runs for a key and never inference:invoke. authorize_catalog and authorize_policy_admin refuse a key. New authorize_api_key_rpc(chat_turn) is the method allow-list hook. enforce_zdr_route refuses a key that names a user connection. ZDR only raises; a persistent key token of a ZDR org gets POSTURE_MISMATCH. Tests: api_key_shape_is_exact, api_key_refused_when_switch_off, api_key_principal_parser_takes_only_literal_true, api_key_only_reaches_infer, entitlement_subject_is_the_key_owner, zdr_api_key_takes_the_zdr_route_or_is_refused. Nothing compiled or run.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/grpc.rs: in `impl InferenceService`, change `async fn authorize<T: TenantRequest>(` to `async fn authorize<T: TenantRequest + 'static>(`, and directly after the line `crate::metered::note_caller(request.extensions(), &principal);` insert:\n        // EP-12 S6: an API-key principal reaches only the chat turn (Infer, InferStream, both\n        // `pb::InferRequest`); every other RPC, including request types added later, is refused.\n        principal.authorize_api_key_rpc(\n            std::any::TypeId::of::<T>() == std::any::TypeId::of::<pb::InferRequest>(),\n        )?;",
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/entitlement.rs: in `pub async fn resolve`, replace `self.resolve_for(&principal.org_id, principal.user_id.as_deref())` with `self.resolve_for(&principal.org_id, principal.entitlement_user_id())`. Without this, an api_key principal (user_id None) resolves as service_exempt.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the inference-core service `environment:` block, next to `INFERENCE_CORE_AUTH_AUDIENCE`, add the line `      INFERENCE_API_KEY_PRINCIPAL: ${INFERENCE_API_KEY_PRINCIPAL:-false}`",
+    "Guard: cargo test -q -p inference-core --lib auth, plus cargo fmt check on auth.rs."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Cost-core's budget check cannot authenticate an api_key bearer: authctx AcceptAPIKey is off and handleBudgetCheck pins only user and service principals. The posture for a key turn comes back Unknown (skipped), not refused, so before switch-on the S7 turn must be metered and capped by the gateway's service path, or S7 must refuse until a cost slice exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Until the grpc.rs authorize_api_key_rpc call and the entitlement.rs entitlement_user_id edit land, an api_key principal with the switch on would pass authorize_invoke on every non-catalogue RPC (speech, image, embedding, video) and would resolve entitlement as service_exempt; both shared edits are required in this batch."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No grpc-level test proves a key token is refused on CreateEmbedding and the modality RPCs and admitted on Infer; add one in grpc/ tests once the TypeId gate lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live: a 120 s aud=inference-core api_key token from the S2 exchange infers with the switch on, is unauthenticated with it off, is refused on ListModels and on a subscription_connection_id, and its entitlement reads the owner."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "budget_user_id for a key is the subject apikey:<key_id>, so the prompt cache, request capture and budget scope are per key, never shared with the owner or another key."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/entitlement.rs",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "deviations": [
+    "Method allow-list is enforced through authorize_api_key_rpc(chat_turn), which grpc.rs's generic authorize must call (shared edit), because auth.rs alone cannot see the RPC name.",
+    "A key's invoke scope is agent:runs (what the S2 exchange grants for inference-core), not inference:invoke.",
+    "enforce_zdr_route also refuses a key that names a user connection (D2/D5 Ask-only), beyond what the design lists."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S8",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs"
+   ],
+   "notes": "I wrote the code and tests but ran nothing: no cargo, fmt or clippy. The new file and both edits are CRLF, like their sibling files.\n\nWhat was built:\n- **New domain `agent_api.rs`.** It serves the six S3 routes under `/api/agent/v1/*` and forwards them to model-gateway `/v1/agent/*`.\n- **Switch.** `GATEWAY_AGENT_API_ENABLED` is read once when the router is built, and only the literal `true` turns it on. Off, `router()` returns an empty `Router`, so the gateway answers exactly as before. I read the switch in `router()` and not in `config.rs` (not my file); tests call `router_with(...)` directly, so no test races on the env var.\n- **No caller header reaches model-gateway.** The upstream request is built from an allow-list: the exchanged bearers (`Authorization`, `x-session-authorization`, plus `x-inference-authorization` on the start route only), `Last-Event-ID` on the event stream (checked first), and the request id.\n- **Exchange.** `ApiKeyExchangeClient` calls `POST {auth_core_url}/api/{aud}/api-key-exchange` with `x-service-id` and `x-service-api-key`, body `{apiKey, orgId, scopes:[\"agent:runs\"]}`. The credential is the `verevon-gateway` registry principal's `consumerEnv`, `MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY`; that principal already lists the three audiences under `apiKeyExchange`. This is the one exchange helper in the crate: INNH-10 GW-1 should add its audiences to `ExchangeAudience` rather than write a second client.\n- **Token cache.** Keyed by a domain-separated SHA-256 of the key plus the org and audience, never the raw key. Entries are dropped at `exp - 10 s`, the cache is bounded at 10,000 entries, and a key's tokens are dropped when model-gateway answers 401.\n- **Per-key rate limit.** Uses `RateLimiter::from_cache_with_rpm`, keyed `agent_api:<digest>`, set by `GATEWAY_AGENT_API_RPM_PER_KEY` (default 60). It runs before any exchange.\n- **Error mapping.**\n  - An auth-core refusal maps to `api_key_invalid` (401 or 403 for an org key, org mismatch or ex-member), `agent_api_scope_missing`, `agent_api_disabled`, `rate_limited`, `internal_error` or `upstream_unavailable`.\n  - A model-gateway error that already carries an S3 code is passed on with this gateway's fixed message, keeping only the contract's allowed `details` keys with scalar values. Anything else is mapped by status.\n  - A 404 with no error code means model-gateway's Agent API routes are switched off, so it answers `agent_api_disabled`.\n- **Logging.** The key is never logged; the only log fields are `error_class` and `audience`.\n\nTests are in `agent_api::tests`:\n- `switch_takes_only_literal_true`, `switch_off_route_absent`, `switch_on_full_router_has_no_overlapping_routes` (sets the env var under `TEST_ENV_LOCK` and restores it).\n- `without_a_service_credential_every_route_is_disabled`, `missing_or_repeated_key_and_missing_org_are_refused_before_exchange`.\n- `key_is_only_sent_to_auth_core`, `caller_authorization_headers_are_stripped`.\n- `start_route_also_exchanges_the_inference_token`, `start_body_must_be_a_json_object`.\n- `exchange_refusals_classify_into_the_contract`, `exchange_denial_maps_to_typed_error`.\n- `token_cache_deadline_is_exp_minus_margin`, `token_cache_is_keyed_by_hash_and_expires`, `upstream_401_forgets_the_cached_tokens`, `rate_limit_per_key`.\n- `upstream_errors_relay_only_contract_codes_and_details`, `upstream_refusal_reaches_the_caller_as_a_typed_envelope`.\n- `events_stream_forwards_last_event_id_and_bytes`, `error_codes_match_the_s3_golden` (reads `apps/Model Plane/api/contracts/agent-api-v1.json` from `CARGO_MANIFEST_DIR` and returns early if that file is not there), `page_query_is_a_closed_allow_list`, `identifiers_cannot_add_a_path_or_query`.\n\n`git diff` also shows `domains/agent_actions.rs` changed in this tree. That is another agent's file and I did not touch it.",
+   "deviations": [
+    "The S3 spec and golden name only `x-api-key`, but auth-core's exchange (S2) requires `orgId` and checks it against the key's `metadata.org_id`. The gateway therefore needs the organisation from the caller: it reads a required `x-agent-org-id` header and sends it only to auth-core, where it is verified. `x-org-id` and `x-verevon-org-id` could not be used because the global `strip_inbound_identity_headers` middleware removes them first.",
+    "The switch and the per-key rate are read from the environment when the router is built, inside `agent_api::router()`, not on `AppState` (`config.rs` is not this slice's file). They are read once at startup, never in a handler.",
+    "The gateway does not repeat model-gateway's allow-list of start-body fields: it checks only that the body is a JSON object of at most 256 KiB. model-gateway's S7 owns the allow-list, so the closed field list is not kept in two places."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: in the gateway service `environment`, right after the line `MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}`, add these three lines (same indentation): `# EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.` then `GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}` then `GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}`",
+    "guard: cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets agent_api (also run the whole crate, which includes `full_router_builds_without_overlapping_routes` and the `log_field_discipline` test; the new file should add no log-field violations), then cargo fmt and cargo clippy on the gateway",
+    "owner (never the agent): add GATEWAY_AGENT_API_ENABLED and GATEWAY_AGENT_API_RPM_PER_KEY to .env.example if wanted",
+    "S16 flip and live proof F2: rebuild the BFF image; turn on API_KEY_AGENT_EXCHANGE_ENABLED, SESSION_CORE_API_KEY_PRINCIPAL, INFERENCE_API_KEY_PRINCIPAL, MODEL_GATEWAY_AGENT_API and GATEWAY_AGENT_API_ENABLED; then curl /api/agent/v1/runs with x-api-key and x-agent-org-id"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/agent-api.v1.yaml and apps/Model Plane/api/contracts/agent-api-v1.json (S3 owner): document the required `x-agent-org-id` request header on every route. Alternative: auth-core S2 derives `orgId` from the key's `metadata.org_id` when the body omits it, and the gateway stops sending the header."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The public contract names only x-api-key, but auth-core's exchange requires orgId, so the ingress requires a caller header x-agent-org-id (checked by auth-core against the key's org binding). Before switch-on, either the spec and golden must list this header or S2 must derive the org from the key."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "F2 must show three things: model-gateway receives no x-api-key and no caller Authorization or x-org-id header; a key whose org is ZDR gets 412 zdr_feature_not_supported (feature agent_api) through the ingress; the auth-core audit shows one api_key_token_exchanged event per audience per roughly 110 s of cache, not one per request."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each exchange calls Better Auth verifyApiKey, which spends the key's own plugin rate limit, so a first start-run spends three verifications (model-gateway, session-core and inference-core tokens). A key with a tight Better Auth limit can be refused with key_rate_limited (mapped to 429) even when the gateway's per-key bucket has room."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ingress shares the gateway principal credential MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY (registry consumerEnv of verevon-gateway) with the mail-task bridge, so rotating that credential affects both paths."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing checks that the six axum routes in agent_api.rs match the golden's route list; error_codes_match_the_s3_golden pins only the error table, the auth header and scope, and the prefixes."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Public callers also pass the gateway's global per-IP limiter (GATEWAY_RATE_LIMIT_RPM) and its browser CORS layer before the per-key bucket. Server-to-server callers are unaffected, but a shared egress IP could be throttled by the IP bucket first."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S13",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/docs/decisions/conversation-share-model.md",
+    "apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json",
+    "apps/Control Plane/user-core/internal/authztaxonomy/taxonomy_test.go",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs"
+   ],
+   "notes": "Added \"conversation_snapshot\" to ownable (sorted, before \"document\") in resource_taxonomy.json and the identical one-line OWNABLE parity mirror in retrieval-engine taxonomy.rs, plus a Rust unit test conversation_snapshot_is_ownable_conversation_is_not. Go test TestConversationSnapshotIsOwnableAndNotTeamShared asserts Classify=ownable, not team-shared, ValidateUserGrant accepts it, conversation stays team-shared, and the type has no OwnerService and is not SpaceGrantable (inert). New proposed ADR apps/Model Plane/docs/decisions/conversation-share-model.md (CRLF like its neighbours): snapshot not live link, org-only, Control resource_grants on conversation_snapshot with session-core as future owner service, static redacted text, never feeds a model, D8 refusals, revocation deletes the body, retention CASCADE with thread + org purge; no migration number cited (S14 owns it). Verified no code enumerates Ownable() to grant defaults; Rust is_ownable has no consumers; only grant writers are the owner-asserted facade (fenced: no owner service) and the legacy internal authz facade. No tests run (code-first). All edited files CRLF preserved. No switch (taxonomy entry is inert).",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add newest-first entry (CRLF) after the '---' following the header: '## 2026-11-03 - Share model: org-only immutable snapshots on a new ownable type (EP-12 D10, DEC-40)' / blank / '**Status: proposed.** ADR `docs/decisions/conversation-share-model.md` (awaits owner OD-5). A conversation is shared as an immutable redacted snapshot in session-core, granted per org member through Control `resource_grants` on the new ownable type `conversation_snapshot` (added to the taxonomy, inert: no owner service). Rejected: a live link (viewer would see later turns and act through the owner's connectors) and a Data Plane document copy (chat state crossing into retrieval). Supersedes nothing.' / blank / '---'",
+    "guard: run bash scripts/lint-resource-taxonomy.sh; cd \"apps/Control Plane/user-core\" && go test ./internal/authztaxonomy/...; cd \"apps/Data Plane v2/services/retrieval-engine-rs\" && cargo test -q --lib authz::taxonomy"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Once conversation_snapshot is ownable, the legacy internal facade POST /api/v1/internal/authz/grant (non-owner-asserted path, AclRepository.Grant) accepts grant rows for it from any caller holding the authz write scope, though nothing reads them until S14."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "S14 must register session-core as the owner service for conversation_snapshot in authztaxonomy/owner_service.go and confirm a Control grant-check decision exists for non-document types, else ship owner-only reads."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The ADR adds that revoking a snapshot also removes its Control grants and that membership is re-checked at read, beyond the design's 'revoked_at + delete body'; S14 should implement or the owner should strike it at OD-5."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+    "outcome": "11 'not ok' lines, all unrelated pre-existing pins (zdr-posture-matrix vendored .sha256, run-trace-envelope, space-denial-codes, usage-envelopes, cross-plane-token-requests, quarry-token-claims, zdr-feature-matrix). None involves zdr-refusals or agent-action-admission, and no file this batch touched is among them.",
+    "clean": false
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (apps/Model Plane/proto) + go-gen-drift.sh",
+    "outcome": "copied events.pb.go, execution.pb.go, run_ledger.pb.go, run_ledger_grpc.pb.go; go-gen-drift: 46 generated Go files match",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml",
+    "outcome": "events_pb2.py and execution_pb2.py updated in mp-events-py (tree's 7.36.2 runtime pin kept); run_ledger has no committed python binding",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb",
+    "outcome": "no findings",
+    "clean": true
+   },
+   {
+    "command": "buf lint + scripts/gates/buf-lint-ratchet.py",
+    "outcome": "ratchet reports 252 findings not in the committed baseline (pre-existing); the finding set is identical to batch W3-10's (.plan-work/buf-lint-w310.json, 1265 = 1265, 0 new)",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed; golden rewritten (+39 lines, 3 new agents.* actions)",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished, no errors; only warnings are pre-existing (anthropic.rs unused fn, http_routes.rs:18616 unused Json in an untouched test)",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished, no errors; 3 pre-existing warnings in untouched files",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... in apps/Model Plane/go/{gen,pkg/zdrrefusal,services/capability-core}",
+    "outcome": "clean",
+    "clean": true
+   },
+   {
+    "command": "GOWORK=off go build ./... && go vet ./... in apps/Control Plane/user-core",
+    "outcome": "clean",
+    "clean": true
+   },
+   {
+    "command": "bash scripts/lint-resource-taxonomy.sh",
+    "outcome": "canonical JSON OK: 2 ownable, 9 team_shared; Go/Rust taxonomy parity OK",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+    "outcome": "first run: 2 errors (AgentBuilderPage.tsx:359 dateTime + baseline). After the fix: only the 1 pre-existing error in src/shared/api/schedule-contract.test.ts",
+    "clean": true
+   },
+   {
+    "command": "node --check test/agent-definition-versions.test.cjs (convex-core)",
+    "outcome": "syntax ok",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentBuilderPage.tsx",
+    "slice": "EP-6-S8",
+    "what": "line 359: <time dateTime=...> -> <time datetime=...> (Solid's JSX attribute is lowercase; TS2322)"
+   }
+  ],
+  "still_broken": [],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/events.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/run_ledger.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/run_ledger_grpc.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/events_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/execution_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (golden) and its byte-identical copies in apps/Model Plane/api/contracts/, go/services/capability-core/internal/api/testdata/, rust/services/execution-core/tests/fixtures/, rust/services/model-gateway/tests/fixtures/; apps/Model Plane/api/contracts/agent-action-admission.json.sha256 = a525b170142afb021634fb4895a071d302b12079a279e2572fb463f394a87ea9; old digest 4f691721... replaced in scripts/tests/zdr-contract-sync.test.sh"
+  ],
+  "shared_edits_applied": [
+   "mp-contracts/src/lib.rs (CRLF): pub mod run_timing; after pub mod run_origin; (EP-14-S5)",
+   "mp-contracts/src/zdr_refusal.rs (CRLF): run_inspection Feature + comment after conversation_import (EP-14-S5)",
+   "model-gateway/src/state.rs (CRLF): RunLedgerServiceClient import, run_ledger_client field + doc, new(), from_env lazy channel, both state.run_ledger_client assignments; with_nats goes through new() so it needs no change (EP-14-S5)",
+   "execution-core/src/runtime_loop/park.rs (LF): round_timing: Vec::new() in parked_response (with comment) and in the test literal (EP-14-S5)",
+   "zdr-refusals.json copied byte-for-byte to go/pkg/zdrrefusal/ AND to the Quarry fixture apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/ (the sync script mirrors it there too); .sha256 pin (96cce805...) copied to go/pkg/zdrrefusal, the Quarry fixture and the verevonv3 contracts copy; old golden digest 4d6cce0d... replaced in scripts/tests/zdr-contract-sync.test.sh line 118 (EP-14-S5)",
+   "apps/Model Plane/deploy/docker-compose.yml (LF): MODEL_GATEWAY_RUN_TIMING_PERSIST, SESSION_CORE_RUN_LEDGER_READ, EXECUTION_ROUND_TIMING (EP-14-S5) and INFERENCE_API_KEY_PRINCIPAL (EP-12-S6), all default false with a one-line comment each; no compose-contract gate references these blocks",
+   "go/gen/model_plane/v1/proto_wire_parity_test.go: EVENT_TYPE_RUN_TIMING_RECORDED: 161 pinned in TestTraceEventTypesAreAllocated (EP-14-S5)",
+   "inference-core/src/grpc.rs (CRLF): authorize<T: TenantRequest + 'static> + authorize_api_key_rpc(TypeId == pb::InferRequest) call after note_caller (EP-12-S6)",
+   "inference-core/src/entitlement.rs (CRLF): resolve_for(..., principal.entitlement_user_id()) (EP-12-S6)",
+   "verevonv3/src/shared/actions/model-access.ts (LF): 3 MODEL_ACCESS rows for agents.draft.save, agents.publish, agents.versions.list (EP-6-S8)",
+   "verevonv3/apps/gateway/src/domains/chat/streams.rs (CRLF): inject_agent_draft_preview call before the mention injector's comment block; removed the #[allow(dead_code...)] line in agent_actions.rs (EP-6-S8)",
+   "verevonv3/src/vite-env.d.ts (LF, tab): readonly VITE_AGENT_BUILDER?: string; (EP-6-S8, optional)",
+   "convex-core/convex/agents.ts (CRLF): builderDefinitionForGateway query appended after getVersionForGateway; test/agent-definition-versions.test.cjs (LF): the service-key/membership loop now includes builderDefinitionForGateway, plus a new source-pinning case (another org reads null; a room-born agent derives originSpaceRef and has no creator). The package has no DB harness, so this follows the file's existing source-reading pattern (EP-6-S8)",
+   "verevonv3/docker-compose.yml (LF): GATEWAY_AGENT_API_ENABLED (false) and GATEWAY_AGENT_API_RPM_PER_KEY (60) with the comment after MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID (EP-12-S8)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (EP-14-S5 run timing, EP-12-S13 share model): lead books these",
+   "apps/Model Plane/ZDR.md / docs/ZDR.md RUN_TIMING_RECORDED row and run_inspection refusal (EP-14-S5 'Lead docs'): lead",
+   "All .env.example entries (VITE_CHAT_RUN_WATERFALL, VITE_CHAT_INLINE_WIDGETS, VITE_AGENT_BUILDER, AGENT_DEFINITION_VERSIONS, GATEWAY_AGENT_API_*, MODEL_GATEWAY_RUN_TIMING_PERSIST etc.): owner",
+   "Optional waterfall CSS in the ledger stylesheet (EP-14-S5): not a shared-edit item and has no exact lines; left to the lead",
+   "verevonv3 src/shared/api/chat-client.ts agentPreview field (EP-6-S8 needs_other_files, 'not built'): design work, not a mechanical edit",
+   "Agent API spec x-agent-org-id header in agent-api.v1.yaml / agent-api-v1.json (EP-12-S8 needs_other_files): S3 owner decision"
+  ],
+  "notes": "The batch now compiles: the Rust Model Plane workspace, the verevonv3 gateway, the Go modules and the frontend typecheck (at its 1-error baseline) all pass. Only one compile fix was needed, the Solid `datetime` attribute in AgentBuilderPage.tsx. Steps 4 and 4b did not apply: no prompt or tool definition changed, and zdr-posture-matrix.json did not change. The action-registry count stays at 259, because EP-6-S8 is the only W3-11 slice that adds actions. rustfmt diffs in the edited Rust files are at the same offsets as at HEAD, so these edits add no new formatting drift. Tests were not run (guard rule); the builders' test commands are still for the lead. Re-pinned digests: zdr-refusals 96cce805b28ece23aace053e6d2a7b726318effd4defe72113174e7128086515 and agent-action-admission a525b170142afb021634fb4895a071d302b12079a279e2572fb463f394a87ea9. Lint output saved at C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.plan-work\\buf-lint-w311.json. Nothing staged or committed."
+ }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "quarry.zdr-tombstone.v1",
+  "title": "ZDR run tombstone (WS4.J)",
+  "description": "The ONLY fields a Zero Data Retention run tombstone may carry: ids, closed-vocabulary classes, counts and timestamps. It never carries a URL, host, title, query, user id, content, digest, fingerprint or free text, and a value that contains '://' is refused. Authored data owned by Quarry; the edge serializer (crates/quarry-edge/src/zdr_tombstone.rs), the quarry-control handler (internal/resources/zdr_tombstone.go) and the migration (015_zdr_run_tombstones.sql) are each tested to name exactly these keys and these vocabularies. OFF BY DEFAULT: counsel review gates enabling the tombstone, not building it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "org_id", "kind", "retention_class", "outcome", "ended_at"],
+  "properties": {
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+    "org_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+    "kind": { "enum": ["scrape", "search", "answer", "extract", "agent_run"] },
+    "retention_class": { "const": "zdr" },
+    "outcome": { "enum": ["ok", "error", "refused", "cancelled", "timeout"] },
+    "driver": { "enum": ["static", "browser", "tls"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "step_count": { "type": "integer", "minimum": 0 },
+    "cost_units": { "type": "number", "minimum": 0, "exclusiveMaximum": 100000000000 },
+    "error_class": {
+      "enum": [
+        "BAD_REQUEST", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND", "CONFLICT",
+        "RATE_LIMITED", "TIMEOUT", "SECURITY_BLOCKED", "ACTION_UNKNOWN",
+        "CHALLENGE_DETECTED", "RUNTIME_NOT_READY", "CHECKPOINT_LOST",
+        "TARGET_REPAIR_REQUIRED", "DRIVER_FAILED", "UPSTREAM_BLOCKED",
+        "UNSUPPORTED", "UNSUPPORTED_MEDIA", "BUDGET_EXHAUSTED", "USER_TOOK_OVER",
+        "INTERNAL", "timeout", "connect", "status", "decode", "request"
+      ]
+    }
+  }
+}

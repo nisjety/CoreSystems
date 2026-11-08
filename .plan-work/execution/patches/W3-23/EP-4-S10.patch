@@ -1,0 +1,1815 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs
+index f6b5ea7d8..ad1752933 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs	
+@@ -41,8 +41,10 @@ use serde_json::Value;
+ use crate::{
+     config::AppState,
+     domains::chat::shared::{
+-        data_plane_authorization_value, delegated_auth_unavailable, model_token,
+-        proxy_model_json_with_capability, required_capability_token,
++        data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
++        proxy_model_json_with_capability, proxy_model_json_with_delegations,
++        required_capability_token, required_execution_token, required_inference_token,
++        required_session_token,
+     },
+     envelope::error,
+     middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
+@@ -74,6 +76,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+         // The HTML app an MCP tool declares (Wave 3 EP-4 S8). model-gateway checks the viewer,
+         // re-discovers the tool and answers 404 while its switch is off.
+         .route("/api/v1/mcp-apps/resource", get(get_mcp_app_resource))
++        // A read tool an MCP App calls on its own server (Wave 3 EP-4 S10). model-gateway checks the
++        // run owner, the server and the tool's class, and answers 404 while its switch is off.
++        .route("/api/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
+         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
+         // `require_session` (written last → outer) runs first and inserts
+         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
+@@ -487,6 +492,76 @@ async fn get_mcp_app_resource(
+     proxy_tool_surface(&state, &user, &headers, Method::GET, &url, None).await
+ }
+ 
++/// The keys an app tool call forwards. Anything else the browser adds (an org
++/// or user id among them) is dropped here; model-gateway reads the org and the
++/// viewer from the minted tokens only.
++const MCP_APP_TOOL_CALL_KEYS: [&str; 5] =
++    ["run_id", "server_id", "tool", "arguments", "frame_nonce"];
++
++/// The body forwarded for an app tool call: the five known keys, as sent.
++fn mcp_app_tool_call_body(body: &Value) -> Value {
++    let mut forwarded = serde_json::Map::new();
++    if let Some(object) = body.as_object() {
++        for key in MCP_APP_TOOL_CALL_KEYS {
++            if let Some(value) = object.get(key) {
++                forwarded.insert(key.to_owned(), value.clone());
++            }
++        }
++    }
++    Value::Object(forwarded)
++}
++
++/// Pass-through of an app tool call (EP-4 S10). model-gateway runs the call
++/// through execution-core's `ExecuteStep` as the viewer, so it needs the
++/// viewer's session, execution, data-plane and inference credentials beside the
++/// capability one; each is minted here from the session, and no scoping header
++/// is added. A credential that cannot be minted is the typed 503; a missing
++/// data-plane one is left to model-gateway, which refuses the call.
++async fn post_mcp_app_tool_call(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Json(body): Json<Value>,
++) -> Response {
++    let url = format!("{}/v1/mcp-apps/tool-call", state.model_gateway_url);
++    let token = model_token(&state, &user, &headers).await;
++    let capability = match required_capability_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return delegated_auth_unavailable(error).into_response(),
++    };
++    let session = match required_session_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return delegated_auth_unavailable(error).into_response(),
++    };
++    let execution = match required_execution_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return delegated_auth_unavailable(error).into_response(),
++    };
++    let inference = match required_inference_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(error) => return delegated_auth_unavailable(error).into_response(),
++    };
++    let data_plane = data_plane_token(&state, &user, &headers).await;
++    let (status, body) = proxy_model_json_with_delegations(
++        &state,
++        Method::POST,
++        &url,
++        Some(mcp_app_tool_call_body(&body)),
++        token.as_deref(),
++        data_plane.as_deref(),
++        Some(capability.as_str()),
++        Some(inference.as_str()),
++        Some(execution.as_str()),
++        None,
++        Some(session.as_str()),
++        None,
++        None,
++        &user,
++    )
++    .await;
++    (status, body).into_response()
++}
++
+ /// Forward one request of the per-tool surface with the caller's model-gateway
+ /// and capability-core credentials, exactly as the server routes above do.
+ async fn proxy_tool_surface(
+@@ -716,6 +791,7 @@ mod tests {
+             "/api/v1/tool-policies\"",
+             "/api/v1/tool-policies/{capability_id}",
+             "/api/v1/mcp-apps/resource",
++            "/api/v1/mcp-apps/tool-call",
+             "from_fn_with_state(state, require_session)",
+         ] {
+             assert!(router.contains(route), "{route}");
+@@ -755,4 +831,50 @@ mod tests {
+             assert!(!handler.contains(forbidden), "{forbidden}");
+         }
+     }
++
++    #[test]
++    fn the_mcp_app_tool_call_forwards_only_the_known_keys() {
++        let body = serde_json::json!({
++            "run_id": "run-1",
++            "server_id": "srv-1",
++            "tool": "echo_read",
++            "arguments": { "q": "x", "org_id": "kept-as-an-argument" },
++            "frame_nonce": "frame-0123456789abcdef",
++            "org_id": "org-2",
++            "user_id": "user-2",
++            "permission_mode": "auto",
++        });
++        assert_eq!(
++            mcp_app_tool_call_body(&body),
++            serde_json::json!({
++                "run_id": "run-1",
++                "server_id": "srv-1",
++                "tool": "echo_read",
++                "arguments": { "q": "x", "org_id": "kept-as-an-argument" },
++                "frame_nonce": "frame-0123456789abcdef",
++            })
++        );
++        // Not an object: nothing is forwarded, and model-gateway answers the typed 400.
++        assert_eq!(
++            mcp_app_tool_call_body(&serde_json::json!([1, 2])),
++            serde_json::json!({})
++        );
++    }
++
++    #[test]
++    fn the_mcp_app_tool_call_sends_no_scoping_header_of_its_own() {
++        // Source-text pin: only the minted credentials go upstream; the handler
++        // sets no header and reads no org or user from the browser.
++        let source = include_str!("mcp.rs");
++        let handler = source
++            .split("async fn post_mcp_app_tool_call")
++            .nth(1)
++            .and_then(|rest| rest.split("\n}").next())
++            .expect("the handler");
++        assert!(handler.contains("proxy_model_json_with_delegations("));
++        assert!(handler.contains("mcp_app_tool_call_body(&body)"));
++        for forbidden in [".header(", "x-org", "x-user", "org_id", "user_id"] {
++            assert!(!handler.contains(forbidden), "{forbidden}");
++        }
++    }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts
+index 4514d622f..8b7ef1487 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts	
+@@ -1,13 +1,19 @@
+-import { describe, expect, it } from 'vitest'
++import { describe, expect, it, vi } from 'vitest'
+ import {
+   APP_CALL_REQUIRES_CHAT,
++  APP_TOOL_CALLS_PER_MINUTE,
++  JSON_RPC_DECLINED,
++  JSON_RPC_INVALID_PARAMS,
+   JSON_RPC_METHOD_NOT_FOUND,
+   MCP_APP_METHODS,
+   MCP_APPS_PROTOCOL_VERSION,
+   createMcpAppBridgeHost,
++  createMcpAppToolCaller,
+   parseMcpToolName,
++  toolCallReply,
+   toolResultParams,
+   type JsonRpcMessage,
++  type McpAppToolCaller,
+ } from './mcp-app-bridge'
+ import { createTokenBucket, MAX_WIDGET_HEIGHT } from './widget-bridge'
+ 
+@@ -165,3 +171,105 @@ describe('mcp-app-bridge', () => {
+     }
+   })
+ })
++
++describe('mcp-app-bridge tools/call (EP-4 S10)', () => {
++  /** A frame window that records what the host posts to it. */
++  function frameWithInbox() {
++    const inbox: unknown[] = []
++    return { inbox, window: { postMessage: (message: unknown) => inbox.push(message) } }
++  }
++
++  function hostWith(frameWindow: unknown, toolCaller: McpAppToolCaller | null) {
++    return createMcpAppBridgeHost({
++      frameWindow: () => frameWindow,
++      messageBudget: createTokenBucket(5, 60_000, () => 0),
++      hostContext: { theme: 'light', locale: 'nb' },
++      toolInput: {},
++      toolOutput: '',
++      toolCaller,
++      now: () => 0,
++    })
++  }
++
++  const callRequest = (source: unknown, id: number, params: Record<string, unknown>) => ({
++    source,
++    origin: 'null',
++    data: { jsonrpc: '2.0', id, method: MCP_APP_METHODS.toolsCall, params },
++  })
++
++  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
++
++  it('makes no caller while the switch is off or without a run', () => {
++    const call = vi.fn()
++    expect(createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: false, call })).toBeNull()
++    expect(createMcpAppToolCaller({ runId: undefined, serverId: 'srv-1', enabled: true, call })).toBeNull()
++    expect(createMcpAppToolCaller({ runId: '  ', serverId: 'srv-1', enabled: true, call })).toBeNull()
++    expect(call).not.toHaveBeenCalled()
++  })
++
++  it('tools_call_forwards_when_on', async () => {
++    const call = vi.fn().mockResolvedValue({ ok: true, output: '{"content":[{"type":"text","text":"ok"}]}', truncated: false })
++    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call, frameNonce: 'frame-0123456789abcdef' })
++    const frame = frameWithInbox()
++    const bridge = hostWith(frame.window, caller)
++    // The capability is advertised only with a caller.
++    const initialize = { source: frame.window, origin: 'null', data: { jsonrpc: '2.0', id: 1, method: MCP_APP_METHODS.initialize, params: {} } }
++    const [init] = sent(bridge.handle(initialize))
++    expect((init as unknown as { result: { hostCapabilities: Record<string, unknown> } }).result.hostCapabilities).toEqual({ openLinks: {}, serverTools: {} })
++
++    // The app names a tool and its arguments; the run, server and nonce are the frame's.
++    const outcome = bridge.handle(callRequest(frame.window, 2, { name: 'echo_read', arguments: { q: 'x' }, serverId: 'srv-2', runId: 'run-2' }))
++    expect(outcome).toEqual({ ok: true, send: [], action: null })
++    expect(call).toHaveBeenCalledWith({ runId: 'run-1', serverId: 'srv-1', tool: 'echo_read', arguments: { q: 'x' }, frameNonce: 'frame-0123456789abcdef' })
++    await settle()
++    expect(frame.inbox).toEqual([{ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'ok' }] } }])
++  })
++
++  it('refusal_maps_to_jsonrpc_error', () => {
++    expect(toolCallReply(3, { ok: false, code: APP_CALL_REQUIRES_CHAT })).toEqual({
++      jsonrpc: '2.0',
++      id: 3,
++      error: { code: JSON_RPC_METHOD_NOT_FOUND, message: APP_CALL_REQUIRES_CHAT, data: { reason: APP_CALL_REQUIRES_CHAT } },
++    })
++    expect(toolCallReply(4, { ok: false, code: 'rate_limited' })).toMatchObject({ error: { code: JSON_RPC_DECLINED, message: 'rate_limited' } })
++    // A code the host does not know is not passed on.
++    expect(toolCallReply(5, { ok: false, code: 'registry_unavailable' })).toMatchObject({ error: { code: JSON_RPC_DECLINED, message: 'tool_call_failed' } })
++    expect(toolCallReply(6, { ok: true, output: 'plain', truncated: true })).toEqual({
++      jsonrpc: '2.0',
++      id: 6,
++      result: { content: [{ type: 'text', text: 'plain' }] },
++    })
++  })
++
++  it('a failed call is answered, and a malformed one is refused before it is sent', async () => {
++    const call = vi.fn().mockRejectedValue(new Error('network'))
++    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call })
++    const frame = frameWithInbox()
++    const bridge = hostWith(frame.window, caller)
++    for (const params of [{}, { name: '' }, { name: 'x'.repeat(257) }, { name: 'echo_read', arguments: [1] }]) {
++      expect(bridge.handle(callRequest(frame.window, 1, params))).toMatchObject({
++        send: [{ error: { code: JSON_RPC_INVALID_PARAMS, message: 'invalid_tool_call' } }],
++      })
++    }
++    expect(call).not.toHaveBeenCalled()
++    bridge.handle(callRequest(frame.window, 9, { name: 'echo_read' }))
++    await settle()
++    expect(frame.inbox).toEqual([
++      { jsonrpc: '2.0', id: 9, error: { code: JSON_RPC_DECLINED, message: 'tool_call_failed', data: { reason: 'tool_call_failed' } } },
++    ])
++  })
++
++  it('calls are bounded per frame', () => {
++    const call = vi.fn().mockReturnValue(new Promise(() => {}))
++    const caller = createMcpAppToolCaller({ runId: 'run-1', serverId: 'srv-1', enabled: true, call })
++    const frame = frameWithInbox()
++    const bridge = hostWith(frame.window, caller)
++    for (let id = 0; id < APP_TOOL_CALLS_PER_MINUTE; id += 1) {
++      expect(bridge.handle(callRequest(frame.window, id, { name: 'echo_read' }))).toEqual({ ok: true, send: [], action: null })
++    }
++    expect(bridge.handle(callRequest(frame.window, 99, { name: 'echo_read' }))).toMatchObject({
++      send: [{ id: 99, error: { code: JSON_RPC_DECLINED, message: 'rate_limited' } }],
++    })
++    expect(call).toHaveBeenCalledTimes(APP_TOOL_CALLS_PER_MINUTE)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts
+index 206245c6f..2cc14cee6 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts	
+@@ -8,8 +8,10 @@
+  * told the call's input and result once, may size itself, may ask to open a safe
+  * link the person confirms, and may stage a message the person sends (D3). It
+  * gets no storage, no network and no host data. A `tools/call` from the app is
+- * refused with `app_call_requires_chat` until app-initiated calls exist (S10);
+- * every other request is method-not-found.
++ * refused with `app_call_requires_chat` unless the frame was given a tool caller
++ * (S10, `VITE_MCP_APP_TOOL_CALLS`): then it goes to the gateway, which runs only
++ * a read tool on the app's own server for the run's owner and answers anything
++ * else with the same refusal. Every other request is method-not-found.
+  *
+  * The extension's method names live in `MCP_APP_METHODS` only (checked against
+  * the 2026-01-26 revision), because the extension is young and they may move.
+@@ -18,6 +20,7 @@
+  * is testable without a frame.
+  */
+ 
++import { callMcpAppTool, type McpAppToolCallOutcome, type McpAppToolCallRequest } from '@/shared/api/chat-client'
+ import { isSafeLinkHref } from './safe-href'
+ import {
+   clampWidgetHeight,
+@@ -48,7 +51,7 @@ export const MCP_APP_METHODS = {
+   openLink: 'ui/open-link',
+   /** App to host request: a user message (staged as a chip the person sends). */
+   message: 'ui/message',
+-  /** App to host request: call a tool on the app's server (refused until S10). */
++  /** App to host request: call a tool on the app's server (forwarded only with a tool caller, S10). */
+   toolsCall: 'tools/call',
+   /** App to host request: liveness. */
+   ping: 'ping',
+@@ -60,9 +63,51 @@ export const JSON_RPC_INVALID_PARAMS = -32602
+ /** Implementation-defined server error: the request was valid but the host declined it now. */
+ export const JSON_RPC_DECLINED = -32000
+ 
+-/** The refusal an app reads for `tools/call` while app-initiated calls are off (D13). */
++/** The refusal an app reads for a `tools/call` the host will not make (D13). */
+ export const APP_CALL_REQUIRES_CHAT = 'app_call_requires_chat'
+ 
++/**
++ * `VITE_MCP_APP_TOOL_CALLS`, literal `'true'` only. Off: no tool caller is made and
++ * `tools/call` is refused exactly as before S10.
++ */
++export const mcpAppToolCallsEnabled = () => import.meta.env.VITE_MCP_APP_TOOL_CALLS === 'true'
++
++/** Calls one frame sends per minute; the gateway holds the same bound per frame nonce and is the authority. */
++export const APP_TOOL_CALLS_PER_MINUTE = 10
++
++/** Longer than any tool name a server registers; bounds what is forwarded. */
++const MAX_TOOL_NAME_CHARS = 256
++
++/** Gateway refusals an app is told by name; any other failure reads `tool_call_failed`. */
++const DECLINED_CALL_CODES: ReadonlySet<string> = new Set(['rate_limited', 'not_found', 'zdr_feature_not_supported'])
++
++/** One app-initiated call for the frame's own run and server; the frame binds both, the app names only the tool. */
++export type McpAppToolCaller = (tool: string, args: Record<string, unknown>) => Promise<McpAppToolCallOutcome>
++
++/** A per-frame nonce the gateway keys its rate limit on: unguessable, `[A-Za-z0-9-]`. */
++function mintFrameNonce(): string {
++  return globalThis.crypto.randomUUID()
++}
++
++/**
++ * The tool caller for one mounted frame (`chat.mcp_app_tool_call`), or null when
++ * app-initiated calls are off or the answer has no run to call under. The run and
++ * server are the frame's, fixed here, so an app can only ever name a tool.
++ */
++export function createMcpAppToolCaller(options: {
++  runId: string | undefined
++  serverId: string
++  enabled?: boolean
++  call?: (request: McpAppToolCallRequest) => Promise<McpAppToolCallOutcome>
++  frameNonce?: string
++}): McpAppToolCaller | null {
++  const runId = options.runId?.trim()
++  if (!(options.enabled ?? mcpAppToolCallsEnabled()) || !runId) return null
++  const frameNonce = options.frameNonce ?? mintFrameNonce()
++  const call = options.call ?? callMcpAppTool
++  return (tool, args) => call({ runId, serverId: options.serverId, tool, arguments: args, frameNonce })
++}
++
+ /** Longer than any request id an app needs; bounds what the host echoes back. */
+ const MAX_ID_CHARS = 64
+ 
+@@ -161,6 +206,19 @@ const failure = (id: JsonRpcId, code: number, message: string): JsonRpcMessage =
+ 
+ const notification = (method: string, params: Record<string, unknown>): JsonRpcMessage => ({ jsonrpc: '2.0', method, params })
+ 
++/** The JSON-RPC answer to a forwarded `tools/call`. A requires-chat refusal keeps the shape apps already read. */
++export function toolCallReply(id: JsonRpcId, outcome: McpAppToolCallOutcome): JsonRpcMessage {
++  if (outcome.ok) return result(id, toolResultParams(outcome.output))
++  if (outcome.code === APP_CALL_REQUIRES_CHAT) return failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)
++  return failure(id, JSON_RPC_DECLINED, DECLINED_CALL_CODES.has(outcome.code) ? outcome.code : 'tool_call_failed')
++}
++
++/** Post a late answer to the frame's window, as the frame posts its own answers ('*': an opaque origin has none to name). */
++function postToFrame(target: unknown, message: JsonRpcMessage): void {
++  const post = (target as { postMessage?: unknown } | null)?.postMessage
++  if (typeof post === 'function') post.call(target, message, '*')
++}
++
+ /**
+  * The text of a `ui/message`: a user-role text block (the extension sends one
+  * block; a list of blocks is read for its text blocks). Null when there is no
+@@ -206,9 +264,12 @@ export function createMcpAppBridgeHost(options: {
+   toolInput: unknown
+   /** The settled call's output text. */
+   toolOutput: string
++  /** Set only while app-initiated calls are on (`createMcpAppToolCaller`); absent, `tools/call` is refused. */
++  toolCaller?: McpAppToolCaller | null
+   now?: () => number
+ }): McpAppBridgeHost {
+   const sizeBudget = createTokenBucket(SIZE_MESSAGES_PER_SECOND, 1000, options.now)
++  const toolCallBudget = createTokenBucket(APP_TOOL_CALLS_PER_MINUTE, 60_000, options.now)
+   const dropped: Partial<Record<McpAppBridgeDrop, number>> = {}
+   let initializeAnswered = false
+   let callSent = false
+@@ -228,8 +289,9 @@ export function createMcpAppBridgeHost(options: {
+           result(id, {
+             protocolVersion: MCP_APPS_PROTOCOL_VERSION,
+             hostInfo: { name: 'Verevon', version: '1' },
+-            // Links only: no server tools or resources (S10), no logging, no display modes beyond inline.
+-            hostCapabilities: { openLinks: {} },
++            // Links, and server tools only with a tool caller (S10); no resources, no logging, no display modes
++            // beyond inline.
++            hostCapabilities: options.toolCaller ? { openLinks: {}, serverTools: {} } : { openLinks: {} },
+             hostContext: {
+               theme: options.hostContext.theme,
+               locale: options.hostContext.locale,
+@@ -255,8 +317,27 @@ export function createMcpAppBridgeHost(options: {
+         messageStaged = true
+         return answer([result(id)], { kind: 'stage_message', text })
+       }
+-      case MCP_APP_METHODS.toolsCall:
+-        return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)])
++      case MCP_APP_METHODS.toolsCall: {
++        const caller = options.toolCaller
++        if (!caller) return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, APP_CALL_REQUIRES_CHAT)])
++        const name = typeof params.name === 'string' ? params.name.trim() : ''
++        const args = params.arguments === undefined ? {} : params.arguments
++        if (!name || name.length > MAX_TOOL_NAME_CHARS || !isPlainObject(args)) {
++          return answer([failure(id, JSON_RPC_INVALID_PARAMS, 'invalid_tool_call')])
++        }
++        if (!toolCallBudget.take()) return answer([failure(id, JSON_RPC_DECLINED, 'rate_limited')])
++        // The answer arrives later; it goes to the window that asked, and to nothing if the frame was replaced.
++        const target = options.frameWindow()
++        void caller(name, args)
++          .then(
++            (outcome) => toolCallReply(id, outcome),
++            () => failure(id, JSON_RPC_DECLINED, 'tool_call_failed'),
++          )
++          .then((reply) => {
++            if (options.frameWindow() === target) postToFrame(target, reply)
++          })
++        return answer([])
++      }
+       default:
+         return answer([failure(id, JSON_RPC_METHOD_NOT_FOUND, 'method_not_found')])
+     }
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index cafa880ac..f20477dd6 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1142,6 +1142,29 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the app-initiated MCP tool call as a medium-risk action the model cannot execute (EP-4-S10)', () => {
++    const call = getActionDescriptor('chat.mcp_app_tool_call')
++    expect(call).toMatchObject({ ownerPlane: 'model', risk: 'medium', requiresApproval: false, reversible: false })
++    expect(isModelExecutableAction('chat.mcp_app_tool_call')).toBe(false)
++    expect(call?.description ?? '').toContain('Never model-executable')
++    expect(call?.description ?? '').toContain('app_call_requires_chat')
++    const valid = { runId: 'run-1', serverId: 'srv-1', tool: 'echo_read', arguments: { q: 'x' }, frameNonce: 'frame-0123456789abcdef' }
++    expect(call?.inputSchema.safeParse(valid).success).toBe(true)
++    for (const input of [
++      { ...valid, runId: '' },
++      { ...valid, tool: '' },
++      // A server id with `__` would name another server's tool.
++      { ...valid, serverId: 'srv__other' },
++      { ...valid, arguments: [1] },
++      { ...valid, frameNonce: 'short' },
++      // The org, the viewer and the permission posture are never the caller's to name.
++      { ...valid, orgId: 'org-2' },
++      { ...valid, permissionMode: 'auto' },
++    ]) {
++      expect(call?.inputSchema.safeParse(input).success).toBe(false)
++    }
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1679,7 +1702,8 @@ describe('action registry', () => {
+     // +4 after EP-11-S6 registered templates.create, templates.update, presets.create and presets.update.
+     // +4 after EP-11-S5 registered skills.draft.save, skills.publish, skills.draft.discard and skills.version.restore.
+     // +2 after EP-4-S9 registered chat.open_mcp_app and chat.stage_mcp_app_message, the MCP App host.
+-    expect(ids).toHaveLength(316)
++    // +1 after EP-4-S10 registered chat.mcp_app_tool_call, an app's read tool call on its own server.
++    expect(ids).toHaveLength(317)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 97d334e2e..69499c1a6 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1490,6 +1490,18 @@ const chatStageMcpAppMessageInput = z
+   })
+   .strict()
+ 
++// A tool an MCP App calls on its own server (EP-4 S10). The run and server are the frame's and the nonce
++// is the frame's own; the org and the viewer are the session's, so none of them is an input here.
++const chatMcpAppToolCallInput = z
++  .object({
++    runId: z.string().trim().min(1).max(256),
++    serverId: z.string().trim().min(1).max(256).refine((value) => !value.includes('__')),
++    tool: z.string().trim().min(1).max(256),
++    arguments: z.record(z.string(), z.unknown()),
++    frameNonce: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4988,6 +5000,17 @@ export const actionRegistry = [
+     inputSchema: chatStageMcpAppMessageInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.mcp_app_tool_call',
++    label: 'Run a read tool an MCP App asked for',
++    description: 'Run a tool an MCP App in a chat answer asked its host to call, on the app\'s own server, as the person viewing it, and hand the app the result. The gateway runs it only for the owner of the run that drew the app, only for a tool the server\'s allowlist names and the registry classes as a read with no approval floor, and through the same execution step and policy check a Do run uses; anything else is refused with app_call_requires_chat and the app may stage a message instead. At most ten calls per app per minute; the output is scrubbed and capped at 64 KiB, and the arguments are never logged. Refused in a temporary chat (zero data retention). Never model-executable: an app is a server\'s content, not the model\'s.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: chatMcpAppToolCallInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts
+index 581a73027..f9bf64f9d 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
+@@ -3,6 +3,7 @@ import {
+   AttachmentsNotSentError,
+   approvePlan,
+   buildChatWireBody,
++  callMcpAppTool,
+   groupChatModels,
+   listModels,
+   rejectPlan,
+@@ -3224,3 +3225,52 @@ describe('EP-4 S9 MCP app resource read', () => {
+     await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
+   })
+ })
++
++describe('EP-4 S10 MCP app tool call', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
++    JSON.stringify(body),
++    { status, headers: { 'Content-Type': 'application/json' } },
++  ))
++
++  const request = {
++    runId: 'run-1',
++    serverId: 'srv-1',
++    tool: 'echo_read',
++    arguments: { q: 'x' },
++    frameNonce: 'frame-0123456789abcdef',
++  }
++
++  it('posts the call with the frame nonce and nothing that scopes it', async () => {
++    vi.stubGlobal('fetch', json({ data: { output: '{"content":[]}', truncated: true } }))
++    expect(await callMcpAppTool(request)).toEqual({ ok: true, output: '{"content":[]}', truncated: true })
++    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? []
++    expect(String(url)).toContain('/api/v1/mcp-apps/tool-call')
++    expect((init as RequestInit).method).toBe('POST')
++    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
++      run_id: 'run-1',
++      server_id: 'srv-1',
++      tool: 'echo_read',
++      arguments: { q: 'x' },
++      frame_nonce: 'frame-0123456789abcdef',
++    })
++  })
++
++  it('answers a refusal with its typed code', async () => {
++    vi.stubGlobal('fetch', json({ error: { code: 'app_call_requires_chat', message: 'ask in the chat' } }, 403))
++    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'app_call_requires_chat' })
++    vi.stubGlobal('fetch', json({ error: { code: 'rate_limited', message: 'slow down' } }, 429))
++    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'rate_limited' })
++    // Switched off, the route does not exist.
++    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
++    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'not_found' })
++  })
++
++  it('a reply without output is a failed call', async () => {
++    vi.stubGlobal('fetch', json({ data: { truncated: false } }))
++    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'tool_call_failed' })
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 88fd87ffd..a22ad1abc 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -4177,6 +4177,53 @@ export async function getMcpAppResource(serverId: string, tool: string): Promise
+   return { uri, html, needsNetwork: record?.needs_network === true }
+ }
+ 
++/** One call an MCP App asks its host to make on the app's own server (EP-4 S10). */
++export type McpAppToolCallRequest = {
++  /** The run of the turn that drew the app; the gateway checks the viewer owns it. */
++  runId: string
++  /** The app's own server: the frame's, never one the app names. */
++  serverId: string
++  tool: string
++  arguments: Record<string, unknown>
++  /** The nonce the frame minted when it mounted; the gateway bounds calls per frame by it. */
++  frameNonce: string
++}
++
++/** What the app is answered: the tool's output, or the typed code of the refusal. */
++export type McpAppToolCallOutcome =
++  | { ok: true; output: string; truncated: boolean }
++  | { ok: false; code: string }
++
++/**
++ * Ask the gateway to run a read tool on the app's own server as the viewer (`chat.mcp_app_tool_call`). The
++ * gateway decides everything: the run owner, the server's allowlist, the tool's registered class, the frame's
++ * rate limit, and zero retention; a refusal comes back as its typed code (`app_call_requires_chat`,
++ * `rate_limited`, `not_found` while the switch is off or for a run the viewer does not own, ...). Only a
++ * failure that is not a typed answer (the network) rejects.
++ */
++export async function callMcpAppTool(request: McpAppToolCallRequest): Promise<McpAppToolCallOutcome> {
++  let raw: unknown
++  try {
++    raw = await requestJson<unknown>('/api/v1/mcp-apps/tool-call', {
++      method: 'POST',
++      body: JSON.stringify({
++        run_id: request.runId,
++        server_id: request.serverId,
++        tool: request.tool,
++        arguments: request.arguments,
++        frame_nonce: request.frameNonce,
++      }),
++    })
++  } catch (error) {
++    if (error instanceof ApiError) return { ok: false, code: error.code ?? 'tool_call_failed' }
++    throw error
++  }
++  const record = objectValue(raw)
++  const output = record?.output
++  if (typeof output !== 'string') return { ok: false, code: 'tool_call_failed' }
++  return { ok: true, output, truncated: record?.truncated === true }
++}
++
+ /**
+  * One page of an artifact's stored revisions, newest first, text included.
+  * `beforeVersion` pages to older revisions. Rejects with the typed `ApiError`
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 716875129..9a00e05e2 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -700,6 +700,9 @@ fn proxy_routes() -> Router<AppState> {
+         // The HTML app an MCP tool declares, read with the viewer's authority and never stored
+         // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
+         .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
++        // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
++        // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
++        .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -885,6 +888,126 @@ async fn mcp_app_resource(
+     })))
+ }
+ 
++// ---------------------------------------------------------------------------
++// Wave 3 EP-4 S10: `POST /v1/mcp-apps/tool-call` - a read tool an MCP App calls on its own server.
++// ---------------------------------------------------------------------------
++
++/// The viewer's delegated bearers an app call needs, each optional so a missing one is answered by
++/// the handler, after the switch, with the typed envelope.
++struct McpAppCallBearers {
++    capability: Option<Extension<VerifiedCapabilityBearer>>,
++    session: Option<Extension<VerifiedModelBearer>>,
++    execution: Option<Extension<VerifiedExecutionBearer>>,
++    data_plane: Option<Extension<VerifiedBearer>>,
++    inference: Option<Extension<VerifiedInferenceBearer>>,
++}
++
++/// `POST /v1/mcp-apps/tool-call` - see [`mcp_app_tool_call`].
++async fn post_mcp_app_tool_call(
++    state: State<AppState>,
++    claims: Extension<Claims>,
++    capability: Option<Extension<VerifiedCapabilityBearer>>,
++    session: Option<Extension<VerifiedModelBearer>>,
++    execution: Option<Extension<VerifiedExecutionBearer>>,
++    data_plane: Option<Extension<VerifiedBearer>>,
++    inference: Option<Extension<VerifiedInferenceBearer>>,
++    body: Bytes,
++) -> Result<Json<Value>, HttpJsonError> {
++    let bearers = McpAppCallBearers {
++        capability,
++        session,
++        execution,
++        data_plane,
++        inference,
++    };
++    mcp_app_tool_call(state, claims, bearers, body, crate::mcp_app_calls::enabled()).await
++}
++
++/// Call `tool` on the app's own `server_id` for the run `run_id`, `{data: {output, truncated}}`
++/// (`crate::mcp_app_calls`). With the switch off the route is a 404 as if it did not exist, decided
++/// before the body is read. A zero-retention or waived bearer is refused before anything else, with
++/// feature `mcp_execution`: the call carries the app's arguments to the MCP server. The org and the
++/// viewer come from the verified claims only; the body names the run, the server, the tool, its
++/// arguments and the frame nonce, and nothing that scopes the call.
++async fn mcp_app_tool_call(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearers: McpAppCallBearers,
++    body: Bytes,
++    enabled: bool,
++) -> Result<Json<Value>, HttpJsonError> {
++    if !enabled {
++        return Err(run_trace_error(
++            StatusCode::NOT_FOUND,
++            "not_found",
++            "no such route",
++        ));
++    }
++    if claims.zdr || claims.zdr_waiver.is_some() {
++        return Err((
++            StatusCode::FORBIDDEN,
++            Json(
++                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
++                    crate::mcp_app_calls::ZDR_FEATURE,
++                )
++                .json_body(),
++            ),
++        ));
++    }
++    let parsed: crate::mcp_app_calls::AppCallBody = serde_json::from_slice(&body).map_err(|_| {
++        run_trace_error(
++            StatusCode::BAD_REQUEST,
++            "invalid_request",
++            "the body must be a JSON object",
++        )
++    })?;
++    let call = crate::mcp_app_calls::validate(parsed).map_err(mcp_app_call_error)?;
++    let (Some(capability), Some(session), Some(execution), Some(data_plane), Some(inference)) = (
++        non_empty_bearer(bearers.capability.as_ref().map(|Extension(bearer)| bearer.as_str())),
++        non_empty_bearer(bearers.session.as_ref().map(|Extension(bearer)| bearer.as_str())),
++        non_empty_bearer(bearers.execution.as_ref().map(|Extension(bearer)| bearer.as_str())),
++        non_empty_bearer(bearers.data_plane.as_ref().map(|Extension(bearer)| bearer.as_str())),
++        non_empty_bearer(bearers.inference.as_ref().map(|Extension(bearer)| bearer.as_str())),
++    ) else {
++        return Err(run_trace_error(
++            StatusCode::UNAUTHORIZED,
++            "delegated_credential_required",
++            "an app tool call needs the viewer's verified capability, session, execution, data-plane and inference credentials",
++        ));
++    };
++    let output = crate::mcp_app_calls::call_app_tool(
++        &state,
++        &claims.org_id,
++        &claims.user_id,
++        &call,
++        &crate::mcp_app_calls::ViewerBearers {
++            capability,
++            session,
++            execution,
++            data_plane,
++            inference,
++        },
++    )
++    .await
++    .map_err(mcp_app_call_error)?;
++    Ok(Json(json!({
++        "data": {
++            "output": output.output,
++            "truncated": output.truncated,
++        }
++    })))
++}
++
++/// An app call's refusal in the typed envelope; the message is the module's own, never upstream text.
++fn mcp_app_call_error(error: crate::mcp_app_calls::AppCallError) -> HttpJsonError {
++    run_trace_error(error.status(), error.code(), error.message())
++}
++
++/// A bearer the auth layer verified and that is not blank.
++fn non_empty_bearer(bearer: Option<&str>) -> Option<&str> {
++    bearer.filter(|value| !value.trim().is_empty())
++}
++
+ /// Request body cap for the two audio routes, `/v1/ai/dictate` and
+ /// `/v1/ai/speech`. Their audio arrives base64-encoded inside JSON, so axum's
+ /// 2 MiB default held a recording to about 1.5 MiB. 8 MiB matches the BFF's
+@@ -23217,3 +23340,128 @@ mod mcp_app_resource_route_tests {
+         assert_eq!(body["error"]["code"], "capability_credential_required");
+     }
+ }
++
++#[cfg(test)]
++mod mcp_app_tool_call_route_tests {
++    //! Wave 3 EP-4 S10: the app tool-call route. The switch, the zero-retention refusal, the body
++    //! and the missing credentials are all decided before session-core, capability-core,
++    //! execution-core or an MCP server is asked, so these tests need none of them; the gate itself is
++    //! covered by `mcp_app_calls::tests`.
++    use super::*;
++
++    use axum::{body::Body, http::Request as HttpRequest};
++    use tower::ServiceExt;
++
++    fn claims(zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
++            "user_id": "user-a", "principal_type": "user", "zdr": zdr
++        }))
++        .expect("claims")
++    }
++
++    /// The route with its switch on (`/v1/...`) and off (`/off/v1/...`); the env read stays out of
++    /// parallel tests.
++    fn app(zdr: bool, with_bearers: bool) -> Router {
++        fn route(enabled: bool) -> axum::routing::MethodRouter<AppState> {
++            post(
++                move |state: State<AppState>,
++                      claims: Extension<Claims>,
++                      capability: Option<Extension<VerifiedCapabilityBearer>>,
++                      session: Option<Extension<VerifiedModelBearer>>,
++                      execution: Option<Extension<VerifiedExecutionBearer>>,
++                      data_plane: Option<Extension<VerifiedBearer>>,
++                      inference: Option<Extension<VerifiedInferenceBearer>>,
++                      body: Bytes| {
++                    let bearers = McpAppCallBearers {
++                        capability,
++                        session,
++                        execution,
++                        data_plane,
++                        inference,
++                    };
++                    mcp_app_tool_call(state, claims, bearers, body, enabled)
++                },
++            )
++        }
++        let router = Router::new()
++            .route("/v1/mcp-apps/tool-call", route(true))
++            .route("/off/v1/mcp-apps/tool-call", route(false))
++            .with_state(AppState::new())
++            .layer(Extension(claims(zdr)));
++        if with_bearers {
++            router
++                .layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
++                .layer(Extension(VerifiedModelBearer::for_test("session-bearer")))
++                .layer(Extension(VerifiedExecutionBearer::for_test("execution-bearer")))
++                .layer(Extension(VerifiedBearer::for_test("data-plane-bearer")))
++                .layer(Extension(VerifiedInferenceBearer::for_test("inference-bearer")))
++        } else {
++            router
++        }
++    }
++
++    async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, Value) {
++        let response = router
++            .oneshot(
++                HttpRequest::builder()
++                    .method("POST")
++                    .uri(uri)
++                    .header(CONTENT_TYPE, "application/json")
++                    .body(Body::from(body.to_owned()))
++                    .unwrap(),
++            )
++            .await
++            .unwrap();
++        let status = response.status();
++        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
++            .await
++            .unwrap();
++        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
++    }
++
++    const BODY: &str = r#"{"run_id":"run-1","server_id":"srv-1","tool":"echo_read","arguments":{"q":"x"},"frame_nonce":"frame-0123456789abcdef"}"#;
++
++    #[tokio::test]
++    async fn route_404_when_switch_off() {
++        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no body.
++        for (zdr, with_bearers, body) in [(false, true, BODY), (true, true, BODY), (false, false, "")] {
++            let (status, response) =
++                post_json(app(zdr, with_bearers), "/off/v1/mcp-apps/tool-call", body).await;
++            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearers={with_bearers}");
++            assert_eq!(response["error"]["code"], "not_found");
++        }
++    }
++
++    #[tokio::test]
++    async fn zdr_token_refused() {
++        let (status, body) = post_json(app(true, true), "/v1/mcp-apps/tool-call", BODY).await;
++        assert_eq!(status, StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
++        assert_eq!(body["error"]["feature"], "mcp_execution");
++    }
++
++    #[tokio::test]
++    async fn the_body_must_be_a_valid_call() {
++        for body in [
++            "",
++            "not json",
++            "[]",
++            r#"{"server_id":"srv-1","tool":"echo_read","frame_nonce":"frame-0123456789abcdef"}"#,
++            r#"{"run_id":"run-1","server_id":"srv__x","tool":"t","frame_nonce":"frame-0123456789abcdef"}"#,
++            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","arguments":[1],"frame_nonce":"frame-0123456789abcdef"}"#,
++            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","frame_nonce":"short"}"#,
++        ] {
++            let (status, response) = post_json(app(false, true), "/v1/mcp-apps/tool-call", body).await;
++            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
++            assert_eq!(response["error"]["code"], "invalid_request");
++        }
++    }
++
++    #[tokio::test]
++    async fn needs_every_delegated_credential() {
++        let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
++        assert_eq!(status, StatusCode::UNAUTHORIZED);
++        assert_eq!(body["error"]["code"], "delegated_credential_required");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 295cfd22d..45063830b 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -55,6 +55,7 @@ pub mod locale_hint;
+ pub mod lsp;
+ mod mail_task_bridge_auth;
+ mod managed_start_key;
++pub mod mcp_app_calls;
+ pub mod mcp_apps;
+ pub mod mcp_elicitation;
+ pub mod mcp_http;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs b/apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs
+new file mode 100644
+index 000000000..ef04e0562
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs	
+@@ -0,0 +1,863 @@
++//! App-initiated MCP tool calls (Wave 3 EP-4 S10).
++//!
++//! An MCP App drawn under a chat answer (S9) may ask its host to call a tool on
++//! its own server, for example to refresh what it shows. This is a second entry
++//! into tool execution beside the run loop, so it is held narrow (D13): only the
++//! person who owns the run that drew the app, only a tool on the app's own
++//! server that the server's allowlist names, and only a tool the registry
++//! classes `read` with no approval floor, an approved review state and an
++//! `allow` policy. Anything else answers `app_call_requires_chat`, and the app
++//! may stage a message the person sends instead. Every call is bounded per frame
++//! (a nonce the SPA mints per mounted frame) and per viewer.
++//!
++//! The call itself is execution-core's `ExecuteStep` with the viewer's delegated
++//! bearers and `permission_mode = ask`, as `tools::handle_code_interpreter` calls
++//! it for `code_interpreter`: execution-core authorises the caller and the run
++//! owner again, asks capability-core for a signed decision, and dispatches the
++//! `mcp__` name through `execute_mcp` with the signed class. The gateway never
++//! decides the class; it only refuses earlier than execution-core would.
++//!
++//! Nothing is stored here. The output is scrubbed and capped before the app sees
++//! it, and the audit line carries ids, the tool, the class and the outcome, never
++//! the arguments or the output.
++
++use std::collections::{HashMap, VecDeque};
++use std::sync::{Mutex, OnceLock, PoisonError};
++use std::time::{Duration, Instant};
++
++use axum::http::StatusCode;
++use mp_contracts::model_plane::v1::{
++    ExecuteStepRequest, ExecuteStepResponse, PrivacyTier, ResolveToolBindingsRequest, ToolBinding,
++};
++use mp_contracts::tool_class::{effective_floor, ApprovalFloor, SideEffectClass};
++use serde::Deserialize;
++use serde_json::Value;
++
++use crate::state::AppState;
++
++/// The switch: only the literal `true` turns the route on.
++pub const ENABLED_VAR: &str = "MCP_APP_TOOL_CALLS";
++/// The catalogue feature a zero-retention or waived caller is refused with: the
++/// call carries the app's arguments to the MCP server, as a tool call does.
++pub const ZDR_FEATURE: &str = "mcp_execution";
++/// The typed refusal for every call this route will not make (D13).
++pub const REQUIRES_CHAT: &str = "app_call_requires_chat";
++/// Calls one frame may make in [`RATE_WINDOW`].
++pub const CALLS_PER_FRAME: usize = 10;
++/// Calls one viewer may make in [`RATE_WINDOW`] across every frame, so minting
++/// fresh frames cannot lift the per-frame bound.
++pub const CALLS_PER_VIEWER: usize = 60;
++/// The window both bounds count in.
++pub const RATE_WINDOW: Duration = Duration::from_secs(60);
++/// The largest output an app is handed, in bytes of UTF-8.
++pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
++/// The largest arguments object accepted, serialised.
++pub const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
++/// Bound on the run id, server id and tool name a caller may send.
++pub const MAX_NAME_BYTES: usize = 256;
++/// Frame nonce bounds: long enough to be unguessable, short enough to key on.
++const MIN_NONCE_BYTES: usize = 16;
++const MAX_NONCE_BYTES: usize = 128;
++/// Frames and viewers tracked per process; when full and nothing has expired,
++/// a call is refused rather than tracked without bound.
++const MAX_TRACKED_KEYS: usize = 4096;
++/// How long one `ExecuteStep` may take before the app is told the call failed:
++/// inside the BFF's 25 s upstream budget, so the typed answer reaches the app.
++const EXECUTE_STEP_TIMEOUT: Duration = Duration::from_secs(20);
++/// The capability ids the registry derives for MCP tool rows; a binding under
++/// any other id is not an MCP tool's and is not trusted here.
++const MCP_CAPABILITY_PREFIX: &str = "cap.mcp_tool.";
++/// The registry review state of a definition a person approved.
++const REVIEW_APPROVED: &str = "approved";
++/// The registry's own policy answer that needs no person.
++const POLICY_ALLOW: &str = "allow";
++
++/// `MCP_APP_TOOL_CALLS`: only the literal `true` turns it on.
++#[must_use]
++pub fn enabled_from_env_value(value: Option<&str>) -> bool {
++    value == Some("true")
++}
++
++/// The process's `MCP_APP_TOOL_CALLS`, read once so it cannot change under a request.
++#[must_use]
++pub fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| enabled_from_env_value(std::env::var(ENABLED_VAR).ok().as_deref()))
++}
++
++/// `POST /v1/mcp-apps/tool-call` body. Every field defaults so a missing one is
++/// answered by [`validate`], after the switch, not by the extractor. No org or
++/// user is read from it: both come from the verified claims.
++#[derive(Default, Deserialize)]
++pub struct AppCallBody {
++    /// The run of the turn that drew the app.
++    #[serde(default)]
++    pub run_id: String,
++    /// The app's own server; the call can name no other.
++    #[serde(default)]
++    pub server_id: String,
++    /// The tool on that server, as the server names it.
++    #[serde(default)]
++    pub tool: String,
++    /// The tool's arguments: a JSON object, or absent for none.
++    #[serde(default)]
++    pub arguments: Value,
++    /// The per-frame nonce the SPA minted when it mounted the frame.
++    #[serde(default)]
++    pub frame_nonce: String,
++}
++
++/// A call that passed [`validate`]. Its `Debug` leaves the arguments out, so a
++/// stray debug print cannot log them.
++#[derive(Clone, PartialEq, Eq)]
++pub struct ValidatedCall {
++    pub run_id: String,
++    pub server_id: String,
++    pub tool: String,
++    /// `mcp__<server_id>__<tool>`, the name execution-core dispatches.
++    pub qualified_name: String,
++    /// The arguments as the tool input execution-core forwards.
++    pub tool_input: String,
++    pub frame_nonce: String,
++}
++
++impl std::fmt::Debug for ValidatedCall {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter
++            .debug_struct("ValidatedCall")
++            .field("run_id", &self.run_id)
++            .field("server_id", &self.server_id)
++            .field("tool", &self.tool)
++            .field("tool_input_bytes", &self.tool_input.len())
++            .finish_non_exhaustive()
++    }
++}
++
++/// What the app is handed for a completed call.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AppCallOutput {
++    pub output: String,
++    pub truncated: bool,
++}
++
++/// Why a call was not made or did not complete. Each maps to one typed error
++/// code; none carries text from the MCP server or execution-core.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AppCallError {
++    /// The body is malformed or over a bound.
++    Invalid(&'static str),
++    /// No such run, server or tool for this viewer. One code for all, so a
++    /// viewer learns nothing about runs or servers they cannot use.
++    NotFound,
++    /// The tool is not one an app may call on its own (D13).
++    RequiresChat,
++    /// The frame or the viewer is over its bound.
++    RateLimited,
++    /// The run owner or the MCP registry could not be read.
++    Unavailable,
++    /// execution-core could not be reached in time.
++    ExecutionUnavailable,
++    /// The call ran and did not complete.
++    Failed,
++}
++
++impl AppCallError {
++    #[must_use]
++    pub const fn code(self) -> &'static str {
++        match self {
++            Self::Invalid(_) => "invalid_request",
++            Self::NotFound => "not_found",
++            Self::RequiresChat => REQUIRES_CHAT,
++            Self::RateLimited => "rate_limited",
++            Self::Unavailable => "registry_unavailable",
++            Self::ExecutionUnavailable => "execution_unavailable",
++            Self::Failed => "tool_call_failed",
++        }
++    }
++
++    #[must_use]
++    pub const fn message(self) -> &'static str {
++        match self {
++            Self::Invalid(message) => message,
++            Self::NotFound => "no such run, server or tool for this viewer",
++            Self::RequiresChat => {
++                "an app may only call read tools on its own server; ask in the chat instead"
++            }
++            Self::RateLimited => "too many tool calls from this app; try again in a minute",
++            Self::Unavailable => "the run or the tool registry is unavailable",
++            Self::ExecutionUnavailable => "the tool could not be run right now",
++            Self::Failed => "the tool call did not complete",
++        }
++    }
++
++    #[must_use]
++    pub const fn status(self) -> StatusCode {
++        match self {
++            Self::Invalid(_) => StatusCode::BAD_REQUEST,
++            Self::NotFound => StatusCode::NOT_FOUND,
++            Self::RequiresChat => StatusCode::FORBIDDEN,
++            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
++            Self::Unavailable | Self::ExecutionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
++            Self::Failed => StatusCode::BAD_GATEWAY,
++        }
++    }
++}
++
++const NAMES_REQUIRED: &str = "run_id, server_id and tool are required";
++const BAD_NAME: &str = "run_id, server_id or tool is malformed";
++const BAD_NONCE: &str = "frame_nonce must be 16 to 128 characters of A-Z, a-z, 0-9, '_' or '-'";
++const BAD_ARGUMENTS: &str = "arguments must be a JSON object of at most 16 KiB";
++
++fn plain_name(value: &str) -> bool {
++    !value.chars().any(|ch| ch.is_control() || ch.is_whitespace())
++}
++
++/// Check a body and build the call. A server id with `__` is refused: the
++/// qualified name splits on the first `__` after the prefix, so such an id
++/// would name another server's tool.
++///
++/// # Errors
++/// [`AppCallError::Invalid`].
++pub fn validate(body: AppCallBody) -> Result<ValidatedCall, AppCallError> {
++    let run_id = body.run_id.trim();
++    let server_id = body.server_id.trim();
++    let tool = body.tool.trim();
++    if [run_id, server_id, tool].iter().any(|value| value.is_empty()) {
++        return Err(AppCallError::Invalid(NAMES_REQUIRED));
++    }
++    if [run_id, server_id, tool]
++        .iter()
++        .any(|value| value.len() > MAX_NAME_BYTES || !plain_name(value))
++        || server_id.contains("__")
++    {
++        return Err(AppCallError::Invalid(BAD_NAME));
++    }
++    let nonce = body.frame_nonce.as_str();
++    if !(MIN_NONCE_BYTES..=MAX_NONCE_BYTES).contains(&nonce.len())
++        || !nonce
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
++    {
++        return Err(AppCallError::Invalid(BAD_NONCE));
++    }
++    let arguments = match body.arguments {
++        Value::Null => Value::Object(serde_json::Map::new()),
++        Value::Object(map) => Value::Object(map),
++        _ => return Err(AppCallError::Invalid(BAD_ARGUMENTS)),
++    };
++    let tool_input = arguments.to_string();
++    if tool_input.len() > MAX_ARGUMENT_BYTES {
++        return Err(AppCallError::Invalid(BAD_ARGUMENTS));
++    }
++    Ok(ValidatedCall {
++        run_id: run_id.to_owned(),
++        server_id: server_id.to_owned(),
++        tool: tool.to_owned(),
++        qualified_name: format!("mcp__{server_id}__{tool}"),
++        tool_input,
++        frame_nonce: nonce.to_owned(),
++    })
++}
++
++/// Whether the registry's binding for `qualified_name` lets an app call it on
++/// its own: exactly one MCP binding, approved, classed `read`, no approval floor
++/// once the class's own floor is applied, and an `allow` policy. An empty or
++/// unknown class reads as `unclassified`, so a mixed-version registry cannot make
++/// a tool look like a read.
++///
++/// # Errors
++/// [`AppCallError::RequiresChat`] for anything else.
++pub fn admit_binding(
++    qualified_name: &str,
++    bindings: &[ToolBinding],
++) -> Result<SideEffectClass, AppCallError> {
++    let mut matches = bindings
++        .iter()
++        .filter(|binding| binding.tool_name == qualified_name);
++    let (Some(binding), None) = (matches.next(), matches.next()) else {
++        return Err(AppCallError::RequiresChat);
++    };
++    let class = SideEffectClass::from_wire(&binding.side_effect_class);
++    let floor = effective_floor(class, ApprovalFloor::from_wire(&binding.approval_floor));
++    let admitted = binding.capability_id.starts_with(MCP_CAPABILITY_PREFIX)
++        && binding.review_state == REVIEW_APPROVED
++        && binding.effective_policy == POLICY_ALLOW
++        && class == SideEffectClass::Read
++        && floor == ApprovalFloor::None;
++    if admitted {
++        Ok(class)
++    } else {
++        Err(AppCallError::RequiresChat)
++    }
++}
++
++/// The app's view of a finished `ExecuteStep`. A step that paused for approval
++/// is refused, not waited on: an app call never asks the person for anything.
++///
++/// # Errors
++/// [`AppCallError::RequiresChat`] for a paused step, [`AppCallError::Failed`] otherwise.
++pub fn step_output(response: &ExecuteStepResponse) -> Result<AppCallOutput, AppCallError> {
++    match response.status.as_str() {
++        "completed" => {
++            let (output, truncated) = capped(&mp_scrub::scrub_string(&response.output));
++            Ok(AppCallOutput { output, truncated })
++        }
++        "awaiting_approval" => Err(AppCallError::RequiresChat),
++        _ => Err(AppCallError::Failed),
++    }
++}
++
++/// `text` cut to [`MAX_OUTPUT_BYTES`] on a character boundary.
++fn capped(text: &str) -> (String, bool) {
++    if text.len() <= MAX_OUTPUT_BYTES {
++        return (text.to_owned(), false);
++    }
++    let mut end = MAX_OUTPUT_BYTES;
++    while !text.is_char_boundary(end) {
++        end -= 1;
++    }
++    (text[..end].to_owned(), true)
++}
++
++type FrameKey = (String, String, String);
++type ViewerKey = (String, String);
++
++#[derive(Default)]
++struct Windows {
++    frames: HashMap<FrameKey, VecDeque<Instant>>,
++    viewers: HashMap<ViewerKey, VecDeque<Instant>>,
++}
++
++/// Drop the calls older than the window; `true` when fewer than `limit` remain.
++fn has_room(calls: &mut VecDeque<Instant>, now: Instant, window: Duration, limit: usize) -> bool {
++    while calls
++        .front()
++        .is_some_and(|first| now.saturating_duration_since(*first) >= window)
++    {
++        calls.pop_front();
++    }
++    calls.len() < limit
++}
++
++/// Sliding-window bounds per (org, viewer, frame) and per (org, viewer). The
++/// frame is keyed with its viewer, so one person's nonce never spends another's.
++pub struct FrameRateLimiter {
++    windows: Mutex<Windows>,
++    window: Duration,
++    per_frame: usize,
++    per_viewer: usize,
++}
++
++impl FrameRateLimiter {
++    #[must_use]
++    pub fn new(window: Duration, per_frame: usize, per_viewer: usize) -> Self {
++        Self {
++            windows: Mutex::new(Windows::default()),
++            window,
++            per_frame,
++            per_viewer,
++        }
++    }
++
++    /// The process's limiter.
++    pub fn global() -> &'static Self {
++        static LIMITER: OnceLock<FrameRateLimiter> = OnceLock::new();
++        LIMITER.get_or_init(|| Self::new(RATE_WINDOW, CALLS_PER_FRAME, CALLS_PER_VIEWER))
++    }
++
++    /// Count one call at `now` when both bounds have room; otherwise count
++    /// nothing and refuse.
++    pub fn admit(&self, org_id: &str, user_id: &str, frame_nonce: &str, now: Instant) -> bool {
++        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
++        let window = self.window;
++        if windows.frames.len() >= MAX_TRACKED_KEYS || windows.viewers.len() >= MAX_TRACKED_KEYS {
++            let live = |calls: &VecDeque<Instant>| {
++                calls
++                    .back()
++                    .is_some_and(|last| now.saturating_duration_since(*last) < window)
++            };
++            windows.frames.retain(|_, calls| live(calls));
++            windows.viewers.retain(|_, calls| live(calls));
++        }
++        let frame_key = (org_id.to_owned(), user_id.to_owned(), frame_nonce.to_owned());
++        let viewer_key = (org_id.to_owned(), user_id.to_owned());
++        let frame_known = windows.frames.contains_key(&frame_key);
++        let viewer_known = windows.viewers.contains_key(&viewer_key);
++        if (!frame_known && windows.frames.len() >= MAX_TRACKED_KEYS)
++            || (!viewer_known && windows.viewers.len() >= MAX_TRACKED_KEYS)
++        {
++            return false;
++        }
++        let frame_room = has_room(
++            windows.frames.entry(frame_key.clone()).or_default(),
++            now,
++            window,
++            self.per_frame,
++        );
++        let viewer_room = has_room(
++            windows.viewers.entry(viewer_key.clone()).or_default(),
++            now,
++            window,
++            self.per_viewer,
++        );
++        if !(frame_room && viewer_room) {
++            return false;
++        }
++        windows.frames.entry(frame_key).or_default().push_back(now);
++        windows.viewers.entry(viewer_key).or_default().push_back(now);
++        true
++    }
++}
++
++/// The audit line of one call: ids, the tool, the class and the outcome. It has
++/// no field for the arguments or the output, so it cannot carry either.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct AuditLine<'a> {
++    pub org_id: &'a str,
++    pub user_id: &'a str,
++    pub run_id: &'a str,
++    pub server_id: &'a str,
++    pub tool: &'a str,
++    pub class: &'static str,
++    pub outcome: &'static str,
++}
++
++impl std::fmt::Display for AuditLine<'_> {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(
++            formatter,
++            "org_id={} user_id={} run_id={} server_id={} tool={} class={} outcome={}",
++            self.org_id,
++            self.user_id,
++            self.run_id,
++            self.server_id,
++            self.tool,
++            self.class,
++            self.outcome
++        )
++    }
++}
++
++/// The viewer's delegated bearers, each verified by the gateway's auth layer.
++/// `ExecuteStep` authenticates the data-plane and inference bearers for every
++/// tool, so all five are needed even though an MCP call uses neither.
++pub struct ViewerBearers<'a> {
++    pub capability: &'a str,
++    pub session: &'a str,
++    pub execution: &'a str,
++    pub data_plane: &'a str,
++    pub inference: &'a str,
++}
++
++/// Make one app-initiated call for the viewer `user_id` in `org_id`, after the
++/// route refused a switched-off, zero-retention or malformed request. In order:
++/// the frame and viewer bounds, the run owner (session-core), the server and
++/// its allowlist, the registry's binding (capability-core, with the viewer's
++/// own capability bearer), then `ExecuteStep`. One audit line per call.
++///
++/// # Errors
++/// See [`AppCallError`].
++pub async fn call_app_tool(
++    state: &AppState,
++    org_id: &str,
++    user_id: &str,
++    call: &ValidatedCall,
++    bearers: &ViewerBearers<'_>,
++) -> Result<AppCallOutput, AppCallError> {
++    let mut class = "unchecked";
++    let result = run_call(state, org_id, user_id, call, bearers, &mut class).await;
++    let line = AuditLine {
++        org_id,
++        user_id,
++        run_id: &call.run_id,
++        server_id: &call.server_id,
++        tool: &call.tool,
++        class,
++        outcome: match &result {
++            Ok(_) => "completed",
++            Err(error) => error.code(),
++        },
++    };
++    tracing::info!(target: "audit", audit = %line, "mcp app tool call");
++    result
++}
++
++async fn run_call(
++    state: &AppState,
++    org_id: &str,
++    user_id: &str,
++    call: &ValidatedCall,
++    bearers: &ViewerBearers<'_>,
++    class: &mut &'static str,
++) -> Result<AppCallOutput, AppCallError> {
++    if !FrameRateLimiter::global().admit(org_id, user_id, &call.frame_nonce, Instant::now()) {
++        return Err(AppCallError::RateLimited);
++    }
++    crate::session_flow::require_durable_run_owner_with_token(
++        state,
++        &call.run_id,
++        org_id,
++        user_id,
++        bearers.session,
++    )
++    .await
++    .map_err(|status| match status.code() {
++        tonic::Code::PermissionDenied | tonic::Code::NotFound | tonic::Code::InvalidArgument => {
++            AppCallError::NotFound
++        }
++        _ => AppCallError::Unavailable,
++    })?;
++    crate::runtime_registries::hydrate_mcp_registry(
++        &state.mcp,
++        &state.ownership,
++        &state.http_client,
++        &state.capability_core_base_url,
++        org_id,
++        bearers.capability,
++    )
++    .await
++    .map_err(|error| {
++        tracing::warn!(%org_id, error_len = error.len(), "mcp app call: registry hydration failed");
++        AppCallError::Unavailable
++    })?;
++    crate::mcp_apps::authorize(
++        &state.mcp,
++        &state.ownership,
++        org_id,
++        user_id,
++        &call.server_id,
++        &call.tool,
++    )
++    .map_err(|_| AppCallError::NotFound)?;
++    let bindings = resolve_bindings(state, org_id, user_id, call, bearers.capability).await?;
++    *class = admit_binding(&call.qualified_name, &bindings)?.as_str();
++    let response = execute_step(state, org_id, user_id, call, bearers).await?;
++    step_output(&response)
++}
++
++/// The registry's binding for the call's tool, read as the viewer: a user
++/// caller may only resolve bindings for themselves.
++async fn resolve_bindings(
++    state: &AppState,
++    org_id: &str,
++    user_id: &str,
++    call: &ValidatedCall,
++    capability_bearer: &str,
++) -> Result<Vec<ToolBinding>, AppCallError> {
++    let mut request = tonic::Request::new(ResolveToolBindingsRequest {
++        org_id: org_id.to_owned(),
++        run_id: call.run_id.clone(),
++        user_id: user_id.to_owned(),
++        tool_names: vec![call.qualified_name.clone()],
++    });
++    insert_bearer(&mut request, "authorization", capability_bearer)?;
++    state
++        .capability_client
++        .clone()
++        .resolve_tool_bindings(request)
++        .await
++        .map(|response| response.into_inner().bindings)
++        .map_err(|status| {
++            tracing::warn!(code = ?status.code(), "mcp app call: tool binding lookup failed");
++            AppCallError::Unavailable
++        })
++}
++
++/// One `ExecuteStep` for the call, carrying the viewer's bearers as
++/// `tools::handle_code_interpreter` does. `ask`, never `auto`: a tool the run's
++/// gate would pause on pauses, and the pause is answered as requires-chat.
++async fn execute_step(
++    state: &AppState,
++    org_id: &str,
++    user_id: &str,
++    call: &ValidatedCall,
++    bearers: &ViewerBearers<'_>,
++) -> Result<ExecuteStepResponse, AppCallError> {
++    let mut request = tonic::Request::new(ExecuteStepRequest {
++        run_id: call.run_id.clone(),
++        step_id: format!("app-{}", mp_ids::new_ulid()),
++        tool_name: call.qualified_name.clone(),
++        tool_input: call.tool_input.clone(),
++        permission_mode: "ask".to_owned(),
++        hook_context: crate::runtime_registries::hook_context_json(&state.hooks, org_id),
++        org_id: org_id.to_owned(),
++        user_id: user_id.to_owned(),
++        // The route refused zero-retention and waived callers before this point.
++        zdr: false,
++        min_privacy_tier: PrivacyTier::Unspecified as i32,
++        // An app call is personal: no Space sandbox, no thread workspace, no files or skills.
++        space_id: String::new(),
++        thread_id: String::new(),
++        attachments: Vec::new(),
++        skill_mounts: Vec::new(),
++    });
++    insert_bearer(&mut request, "authorization", bearers.execution)?;
++    insert_bearer(&mut request, "x-session-authorization", bearers.session)?;
++    insert_bearer(&mut request, "x-data-plane-authorization", bearers.data_plane)?;
++    insert_bearer(&mut request, "x-inference-authorization", bearers.inference)?;
++    let mut client = state.execution_client.clone();
++    match tokio::time::timeout(EXECUTE_STEP_TIMEOUT, client.execute_step(request)).await {
++        Ok(Ok(response)) => Ok(response.into_inner()),
++        Ok(Err(status)) => {
++            tracing::warn!(code = ?status.code(), "mcp app call: ExecuteStep refused or failed");
++            Err(match status.code() {
++                tonic::Code::PermissionDenied | tonic::Code::NotFound => AppCallError::NotFound,
++                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
++                    AppCallError::ExecutionUnavailable
++                }
++                _ => AppCallError::Failed,
++            })
++        }
++        Err(_) => Err(AppCallError::ExecutionUnavailable),
++    }
++}
++
++fn insert_bearer<T>(
++    request: &mut tonic::Request<T>,
++    header: &'static str,
++    bearer: &str,
++) -> Result<(), AppCallError> {
++    let value = format!("Bearer {bearer}")
++        .parse()
++        .map_err(|_| AppCallError::Unavailable)?;
++    request.metadata_mut().insert(header, value);
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    const NONCE: &str = "frame-0123456789abcdef";
++
++    fn body(server_id: &str, tool: &str, arguments: Value) -> AppCallBody {
++        AppCallBody {
++            run_id: "run-1".to_owned(),
++            server_id: server_id.to_owned(),
++            tool: tool.to_owned(),
++            arguments,
++            frame_nonce: NONCE.to_owned(),
++        }
++    }
++
++    fn binding(name: &str, class: &str, floor: &str) -> ToolBinding {
++        ToolBinding {
++            tool_name: name.to_owned(),
++            capability_id: "cap.mcp_tool.abc".to_owned(),
++            capability_version: "v1".to_owned(),
++            side_effect_class: class.to_owned(),
++            approval_floor: floor.to_owned(),
++            tool_digest: "d".repeat(64),
++            review_state: REVIEW_APPROVED.to_owned(),
++            effective_policy: POLICY_ALLOW.to_owned(),
++        }
++    }
++
++    #[test]
++    fn switch_parses_strictly() {
++        assert!(enabled_from_env_value(Some("true")));
++        for value in [
++            None,
++            Some(""),
++            Some("TRUE"),
++            Some("1"),
++            Some(" true"),
++            Some("yes"),
++        ] {
++            assert!(!enabled_from_env_value(value), "{value:?}");
++        }
++    }
++
++    #[test]
++    fn the_call_names_only_the_apps_own_server() {
++        let call = validate(body("srv-1", "echo_read", json!({ "q": "x" }))).expect("valid");
++        assert_eq!(call.qualified_name, "mcp__srv-1__echo_read");
++        assert_eq!(call.tool_input, r#"{"q":"x"}"#);
++        // No arguments is an empty object, never a null the server must guess at.
++        let call = validate(body("srv-1", "echo_read", Value::Null)).expect("valid");
++        assert_eq!(call.tool_input, "{}");
++    }
++
++    #[test]
++    fn other_server_tool_is_refused() {
++        // A server id with `__` would make the qualified name split onto another server.
++        for server in ["srv__other", "srv-1__x"] {
++            assert_eq!(
++                validate(body(server, "echo_read", Value::Null)),
++                Err(AppCallError::Invalid(BAD_NAME)),
++                "{server}"
++            );
++        }
++        // A binding the registry returns for another server's name is not this call's.
++        let other = binding("mcp__srv-2__echo_read", "read", "none");
++        assert_eq!(
++            admit_binding("mcp__srv-1__echo_read", &[other]),
++            Err(AppCallError::RequiresChat)
++        );
++    }
++
++    #[test]
++    fn malformed_bodies_are_refused() {
++        assert_eq!(
++            validate(body("", "echo_read", Value::Null)),
++            Err(AppCallError::Invalid(NAMES_REQUIRED))
++        );
++        assert_eq!(
++            validate(body("srv-1", "echo read", Value::Null)),
++            Err(AppCallError::Invalid(BAD_NAME))
++        );
++        for arguments in [json!([1, 2]), json!("x"), json!(3)] {
++            assert_eq!(
++                validate(body("srv-1", "echo_read", arguments)),
++                Err(AppCallError::Invalid(BAD_ARGUMENTS))
++            );
++        }
++        let big = json!({ "q": "x".repeat(MAX_ARGUMENT_BYTES) });
++        assert_eq!(
++            validate(body("srv-1", "echo_read", big)),
++            Err(AppCallError::Invalid(BAD_ARGUMENTS))
++        );
++        for nonce in ["short", "has space in the nonce!", &"n".repeat(MAX_NONCE_BYTES + 1)] {
++            let mut bad = body("srv-1", "echo_read", Value::Null);
++            bad.frame_nonce = nonce.to_owned();
++            assert_eq!(validate(bad), Err(AppCallError::Invalid(BAD_NONCE)), "{nonce}");
++        }
++    }
++
++    #[test]
++    fn write_class_is_refused_with_requires_chat() {
++        let name = "mcp__srv-1__tool";
++        assert_eq!(
++            admit_binding(name, &[binding(name, "read", "none")]),
++            Ok(SideEffectClass::Read)
++        );
++        for class in [
++            "external_write",
++            "destructive",
++            "owner_effect",
++            "context_write",
++            "sandbox_compute",
++            "unclassified",
++            "",
++            "mystery",
++        ] {
++            assert_eq!(
++                admit_binding(name, &[binding(name, class, "none")]),
++                Err(AppCallError::RequiresChat),
++                "{class:?}"
++            );
++        }
++        // A read the registry floors at ask, or an unknown floor (read as the strictest), asks a person.
++        for floor in ["ask", "durable_owner", "odd"] {
++            assert_eq!(
++                admit_binding(name, &[binding(name, "read", floor)]),
++                Err(AppCallError::RequiresChat),
++                "{floor:?}"
++            );
++        }
++        let mut pending = binding(name, "read", "none");
++        pending.review_state = "drifted".to_owned();
++        let mut asks = binding(name, "read", "none");
++        asks.effective_policy = "ask".to_owned();
++        let mut builtin = binding(name, "read", "none");
++        builtin.capability_id = "cap.command.sandbox".to_owned();
++        for refused in [pending, asks, builtin] {
++            assert_eq!(admit_binding(name, &[refused]), Err(AppCallError::RequiresChat));
++        }
++        // No binding, or an ambiguous one, is not a read.
++        assert_eq!(admit_binding(name, &[]), Err(AppCallError::RequiresChat));
++        let twice = [binding(name, "read", "none"), binding(name, "read", "none")];
++        assert_eq!(admit_binding(name, &twice), Err(AppCallError::RequiresChat));
++    }
++
++    #[test]
++    fn rate_limit_per_frame() {
++        let limiter = FrameRateLimiter::new(RATE_WINDOW, CALLS_PER_FRAME, CALLS_PER_VIEWER);
++        let start = Instant::now();
++        for _ in 0..CALLS_PER_FRAME {
++            assert!(limiter.admit("org-a", "user-a", NONCE, start));
++        }
++        assert!(!limiter.admit("org-a", "user-a", NONCE, start));
++        // Another frame, and another viewer with the same nonce, have their own bound.
++        assert!(limiter.admit("org-a", "user-a", "frame-fedcba9876543210", start));
++        assert!(limiter.admit("org-a", "user-b", NONCE, start));
++        // The window slides.
++        assert!(limiter.admit("org-a", "user-a", NONCE, start + RATE_WINDOW));
++    }
++
++    #[test]
++    fn fresh_frames_cannot_lift_the_viewer_bound() {
++        let limiter = FrameRateLimiter::new(RATE_WINDOW, CALLS_PER_FRAME, 3);
++        let start = Instant::now();
++        for frame in 0..3 {
++            assert!(limiter.admit("org-a", "user-a", &format!("frame-nonce-00000{frame}"), start));
++        }
++        assert!(!limiter.admit("org-a", "user-a", "frame-nonce-000009", start));
++    }
++
++    #[test]
++    fn arguments_never_logged() {
++        let secret = "sekret-argument-value";
++        let call = validate(body("srv-1", "echo_read", json!({ "q": secret }))).expect("valid");
++        assert!(!format!("{call:?}").contains(secret));
++        let line = AuditLine {
++            org_id: "org-a",
++            user_id: "user-a",
++            run_id: &call.run_id,
++            server_id: &call.server_id,
++            tool: &call.tool,
++            class: "read",
++            outcome: "completed",
++        };
++        let rendered = line.to_string();
++        assert!(!rendered.contains(secret));
++        assert!(rendered.contains("tool=echo_read"));
++        assert!(rendered.contains("outcome=completed"));
++    }
++
++    #[test]
++    fn output_is_scrubbed_and_capped() {
++        let completed = |output: String| ExecuteStepResponse {
++            step_id: "app-1".to_owned(),
++            status: "completed".to_owned(),
++            output,
++            ..ExecuteStepResponse::default()
++        };
++        let secret = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
++        let out = step_output(&completed(format!("token {secret}"))).expect("completed");
++        assert!(!out.output.contains("eyJhbGciOiJIUzI1NiJ9"));
++        assert!(!out.truncated);
++        // A multi-byte character at the cut is never split.
++        let big = "\u{e6}".repeat(MAX_OUTPUT_BYTES);
++        let out = step_output(&completed(big)).expect("completed");
++        assert!(out.truncated);
++        assert!(out.output.len() <= MAX_OUTPUT_BYTES);
++        assert!(out.output.chars().all(|ch| ch == '\u{e6}'));
++    }
++
++    #[test]
++    fn a_paused_step_requires_chat_and_a_failure_is_typed() {
++        let with_status = |status: &str| ExecuteStepResponse {
++            status: status.to_owned(),
++            error: "upstream said something".to_owned(),
++            ..ExecuteStepResponse::default()
++        };
++        assert_eq!(
++            step_output(&with_status("awaiting_approval")),
++            Err(AppCallError::RequiresChat)
++        );
++        for status in ["failed", "cancelled", "aborted", ""] {
++            assert_eq!(step_output(&with_status(status)), Err(AppCallError::Failed), "{status}");
++        }
++    }
++
++    #[test]
++    fn errors_map_to_typed_codes() {
++        assert_eq!(AppCallError::RequiresChat.code(), "app_call_requires_chat");
++        assert_eq!(AppCallError::RequiresChat.status(), StatusCode::FORBIDDEN);
++        assert_eq!(AppCallError::RateLimited.status(), StatusCode::TOO_MANY_REQUESTS);
++        assert_eq!(AppCallError::NotFound.code(), "not_found");
++        assert_eq!(AppCallError::Invalid(BAD_NAME).status(), StatusCode::BAD_REQUEST);
++    }
++}

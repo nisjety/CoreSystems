@@ -1,0 +1,880 @@
+{
+ "outcomes": [
+  {
+   "unit": "s7c-b",
+   "impl": {
+    "summary": "S7c-B2 (step 9) is built and verified. Five new guards sit in execution-core's tests/durable_loop_contract.rs (18 to 23 tests); the BFF parity tests are in continue_error_vocabulary.rs (2 to 4). The three vocabulary lists already agreed, so no gateway, BFF or SPA list needed changing. I wrote no DB-backed test; the new store_proofs rows name the existing #[ignore] DB tests, which I did not run. No docker, commit, push, stash or rustfmt.\n\n1. Gateway pre-consume guard (`gateway_consume_violations`, test `the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task`):\n   - Exactly one `ConsumeApprovalRequest` literal in the whole gateway, inside `preconsume_request`, and every mention of `omit_call` is `omit_call: true`.\n   - One `.consume_approval(` call, inside `impl ApprovalConsumer for GrpcApprovalConsumer` and inside `consume_within_bound`. Only `.consumed` is read from the answer. No `.tool_input_json`, `.tool_name`, `.authority`, `.step_id`, `.same_claim` or `.already_consumed` in the flow.\n   - Exactly one `tokio::spawn(`, in `spawn_consume_then_launch`; none in the other pre-consume functions or in `continue_run`.\n   - `trait ApprovalConsumer` declares `Send + Sync`. The Sync-less variant is a compile mutation (`spawn_consume_then_launch` stops building with E0277), described in a comment; the in-memory mutation only proves the guard names the supertraits.\n   - `continue_run` reads the switch once, builds one launch closure, returns `Ok(launch())` with the switch off, and only then calls `spawn_consume_then_launch(`.\n   - The one `AgentResume` literal names only mode, approval_id, claim_token, brief and segment_no.\n2. Spend gate and refusal arms (`spend_gate_violations` and `refusal_arm_violations` (c2), one test):\n   - The spent arm is guarded by `spend.is_spent()` alone, comes before the confirmed arm, and never terminalizes.\n   - The request-construction failure checks `spend.is_spent()` before it terminalizes.\n   - `SpentByGateway` is named only in the builders of the spend.\n   - The two callers of `agentic_run_stream` state `ApprovalSpend::NotSpent` and `approval_spend_for(resume_enabled)`.\n   - Three `dispatch_unknown_event(spend,` sites and one `connected_payload(.., spend)`.\n   - The five arms keep the order spent, confirmed, typed, unreachable, final. The typed arm is guarded by `continuing` and `!spend.is_spent()` and contains no terminalize, `RUN_DISPATCH_DEGRADED`, `approval_spent` or `SpentByGateway`.\n3. Closed vocabulary (`continue_vocabulary_violations`, test `every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary`):\n   - Every carrier-code literal on the executor's resume path, and every word of the `Refusal` enum in resume.rs, is in the gateway's lists.\n   - Every token is sent by some executor or session-core production code.\n   - The frame list equals the 17 message tokens plus the five derived and gateway-made codes.\n   - This confirmed the executor-sourced list is complete: all 17 tokens are present. `in_place_seed_invalid` is Internal, so it is not a refusal and classifies as unknown.\n4. Coupled flip (test `the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation`):\n   - `resume_pair_violations`: every `.same_claim` read in the executor is followed by `&& replay_is_fenced`, and `replay_is_fenced` is bound once to `ledger_enabled()`.\n   - `gateway_resume_reader_violations`: `loop_resume_enabled()` is called exactly once in the gateway, inside `continue_run`; the gateway never names the env var or `LOOP_RESUME_ENV`; `switch_table()` has model-gateway and execution-core rows for the switch.\n   - `no_attestation_violations`: no `consumed_by_gateway` in Rust production sources under the guard's source trees or in non-comment proto lines.\n5. Writer-gate guard (`writer_gate_argument_violations`, test `a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release`):\n   - `run_rounds` calls `writer_gate(req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some(), in_place)` in exactly that shape.\n   - A child context is built from `depth: parent.depth + 1`.\n   - `decide` still refuses `self.depth > 0`.\n   - The mutation proof (a literal `0` depth) turns the guard red.\n6. `store_proofs` rows: the Continue row gains 9 tests (5 in sse.rs, 4 in `tests/continue_preconsume_test.rs`); the Consume row gains 6 (session-core omit_call, renewal and terminalization). Seven of the new rows have rename or comment-out mutation proofs.\n7. Compose: the gateway line `EXECUTION_LOOP_RESUME_ENABLED: ${...:-false}` already existed and `switch_table()` already pinned it, so I only verified it. One stale comment sentence was corrected (see deviations).\n8. BFF parity (`tests/continue_error_vocabulary.rs`):\n   - New test: the BFF list is a subset of the gateway's `CONTINUE_HTTP_REFUSALS` with equal statuses, and the difference is exactly `continue_incomplete` and `missing_bearer`.\n   - New test: the SPA's `CHAT_RUN_CONTINUE_FRAME_REFUSALS` equals the gateway's `CONTINUE_FRAME_REFUSALS`, in order, 22 tokens.\n   - The model-gateway source is read only as a test. No SPA, BFF or gateway list changed.\n\nCounts, before to after:\n- durable_loop_contract 18 to 23, run with 1 new `every_guard` mutation block: 23 passed.\n- model-gateway lib 1857 to 1857 (4 ignored).\n- BFF unit tests 647 passed, 1 ignored.\n- continue_error_vocabulary 2 to 4; sse_relay_no_allowlist 3 and ssrf_forward_not_fetch 1, unchanged.\n- cargo check --workspace --all-targets --keep-going: no errors, only the existing 7 warnings.\n- Frontend: I changed no TypeScript file. Vitest on chat-run-continue-contract, orchestration-client and action-registry: 72 passed. tsc -b: 34 errors, eslint: 1 error and 191 warnings, both equal to the recorded baseline. The full vitest baseline (7 failing tests in 5 files) was not re-measured.\n\nMutation checks:\n- In-memory mutations: about 100, in every_guard.\n- Production sse.rs, 11 mutations (`omit_call: false`, spawn removed, Sync dropped, switch read twice, env name in the gateway, spent arm keyed on the resume, typed arm without `continuing`, DEGRADED in the typed arm, connected frame claiming spent, a token dropped from the closed list, an attestation field): each turned at least one of the 5 new tests red, and sse.rs was restored byte for byte (cmp identical, final cmp identical).\n- Production, BFF side, 7 mutations on the SPA contract, orchestration.rs and sse.rs lists: each red, each file restored identical.\n- Production agent.rs and fold.rs were not mutated (the other unit owns them), so the writer-gate and `replay_is_fenced` guards are proved in memory only.",
+    "files_changed": [
+     "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+     "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+     "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "tests_added": [
+     "durable_loop_contract: the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task",
+     "durable_loop_contract: the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge",
+     "durable_loop_contract: every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary",
+     "durable_loop_contract: the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation",
+     "durable_loop_contract: a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release",
+     "durable_loop_contract every_guard_goes_red_when_the_code_it_guards_regresses (changed, same test fn): a new mutation block for every new guard, plus 7 renamed-or-commented-out proofs for the new store_proofs rows",
+     "continue_error_vocabulary: the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_relays",
+     "continue_error_vocabulary: the_spa_frame_tuple_is_the_gateways_frame_list"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline, before any edit)",
+      "outcome": "18 passed"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary (after the new BFF tests)",
+      "outcome": "4 passed"
+     },
+     {
+      "command": "python3 mutate_bff.py (7 mutations on the SPA contract, orchestration.rs and sse.rs, restore plus cmp each)",
+      "outcome": "every mutation turned a named test red; each file restored identical"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract -- --skip every_guard, then every_guard alone",
+      "outcome": "22 passed (17 old + 5 new), then every_guard passed in 59 s"
+     },
+     {
+      "command": "python3 mutate_contract.py (11 production mutations of sse.rs, restore plus cmp each)",
+      "outcome": "every mutation red in at least one of the 5 new tests; final cmp identical"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (final)",
+      "outcome": "23 passed"
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib",
+      "outcome": "1857 passed, 4 ignored"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (from apps/Frontend Plane/verevonv3)",
+      "outcome": "647 passed 1 ignored; continue_error_vocabulary 4; sse_relay_no_allowlist 3; ssrf_forward_not_fetch 1"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Finished, no errors, 7 existing warnings"
+     },
+     {
+      "command": "node_modules/.bin/vitest run chat-run-continue-contract.test.ts orchestration-client.test.ts action-registry.test.ts",
+      "outcome": "first attempt failed to start workers (timeout, machine under cargo load); rerun: 3 files, 72 passed"
+     },
+     {
+      "command": "node_modules/.bin/tsc -b ; node_modules/.bin/eslint . -f json",
+      "outcome": "tsc 34 errors; eslint 1 error and 191 warnings; equal to the recorded baseline"
+     }
+    ],
+    "deviations": [
+     "The design's B2 order `continue_preflight( < spawn_consume_then_launch( < agentic_run_stream(` is not what the guard reads. The launch closure holds the one `agentic_run_stream(` call and precedes the spawn (B1's layout, one closure for both paths). The guard reads continue_preflight( < loop_resume_enabled() < agentic_run_stream( < the `if !resume_enabled { return Ok(launch()); }` return < spawn_consume_then_launch(.",
+     "I edited apps/Model Plane/deploy/docker-compose.yml, which the spec marks VERIFY ONLY and neither unit owns: one comment hunk. The model-gateway entry said the service reads the variable 'from S7c-B; until then only this entry exists', which is no longer true. Nothing else in the file changed.",
+     "I changed two existing parts of durable_loop_contract.rs: store_proof_violations now cleans each file once per call instead of once per named test (behaviour-preserving, it keeps the suite's time down), and the gateway row's reason text in switch_table() no longer says the reader arrives later.",
+     "Test-first holds for the BFF pair only in the sense that the lists already agreed, so the new BFF tests passed at once and their red proof is the 7 mutations. The contract guards were written over code that already existed, so each guard's red proof is its in-memory mutation block plus the 11 production mutations of sse.rs rather than a failing run before implementation.",
+     "The vocabulary guard's resume path is the executor's consume_for_resume, released_call, build_segment, begin_continuation, restore_continuation and run_rounds, resume.rs select_stage, in_place_scope and `impl Refusal`, and grpc.rs enforce_resume. A carrier-code literal (failed_precondition, aborted, invalid_argument, permission_denied, unauthenticated) on any of them must be a listed token. `internal(..)` statuses are deliberately not refusals. approval_snapshot_too_large lives at the pause site, not on the resume path, so it is out of scope by design.",
+     "The attestation scan covers Rust production sources under the guard's source trees plus non-comment proto lines. It does not scan the generated Go, the BFF or the SPA.",
+     "The `Sync` mutation is described in a comment, not run: with `trait ApprovalConsumer: Send` alone, spawn_consume_then_launch stops compiling. The in-memory mutation only proves the guard names Send and Sync.",
+     "The agent.rs-dependent guards (`replay_is_fenced`, the writer_gate call shape, `depth: parent.depth + 1`) are proved in memory only: agent.rs belongs to the s7b-hardening unit, so I did not mutate it on disk. If that unit moves the replay rule or the call, these guards fail loudly with the pattern that moved.",
+     "sse.rs was briefly mutated on disk for the 7 BFF-side and 11 contract production mutations, about 12 seconds per mutation (7 BFF mutations, 3 of them on sse.rs; 11 contract ones). A build of model-gateway by the other unit in that window could have seen it. It is restored byte for byte.",
+     "The first vitest attempt failed to start its workers (timeout) while cargo was compiling; the rerun was green. I did not rerun the full vitest suite because no TypeScript file was changed."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md",
+      "content": "Dated entry (2026-10-18) under the 2026-10-16 durable-loop decision, state stays proposed.\n\nWS03 S7c-B2 built: the gateway's pre-consume and the coupled flip are held by contract guards in execution-core tests/durable_loop_contract.rs, each with in-memory mutation proofs, and the three closed continue vocabularies are pinned to each other across planes.\n\nWhat is now read from source: (a) the gateway builds exactly one ConsumeApprovalRequest (preconsume_request) and it says omit_call: true, every mention of omit_call is that literal; the consume RPC is called in one place (GrpcApprovalConsumer, inside consume_within_bound) and only .consumed is read from the answer; the consume and the launch are one detached task (exactly one tokio::spawn in the pre-consume flow, in spawn_consume_then_launch), trait ApprovalConsumer declares Send + Sync (dropping Sync is a compile error, not reproducible in memory); continue_run reads loop_resume_enabled() once, returns Ok(launch()) with the switch off before any consume, and the one AgentResume literal names only mode, approval_id, claim_token, brief and segment_no. (b) The frames of a continuation are gated on the gateway's own spend knowledge: the spent arm of agentic_run_stream is guarded by spend.is_spent() alone, precedes the committed confirmed-rejection arm and never terminalizes; the typed-refusal arm for a continuation nobody pre-consumed sits after the confirmed arm and before the unreachable and final arms and contains no terminalize, RUN_DISPATCH_DEGRADED or approval_spent; SpentByGateway is named only in the builders of the spend; the two callers state ApprovalSpend::NotSpent and approval_spend_for(resume_enabled). (c) Every carrier-code message of the executor's resume path (and every Refusal word) is in CONTINUE_EXECUTOR_MESSAGE_TOKENS or the frame list, and every token is sent by executor or session-core production code; the frame list is exactly the 17 tokens plus approval_not_found, durable_mutation_forbidden and the three gateway-made codes. in_place_seed_invalid is Internal, not a refusal, and classifies as unknown. (d) D1: the executor accepts a same-claim replay only through replay_is_fenced bound to effect::ledger_enabled(); the gateway reads the resume switch through loop_resume_enabled alone and compose sets it on both services; no consumed_by_gateway anywhere. (e) A delegated child never writes a fold: run_rounds hands the writer gate ctx.depth and ctx.release.is_some() in that shape. The BFF test now proves the BFF relays a subset of the gateway's CONTINUE_HTTP_REFUSALS with equal statuses, the difference being exactly continue_incomplete and missing_bearer, and that the SPA's frame tuple equals CONTINUE_FRAME_REFUSALS in order (the gateway source is read as a test only). The store_proofs map gained the gateway pre-consume tests (Continue row) and the session-core spend-only and recovery-renewal tests (Consume row); the DB-backed ones are #[ignore] and are run by the disposable-Postgres harness. Not live-proven."
+     },
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+      "content": "Build ledger row for S7c-B2 (2026-10-18): the new durable_loop_contract guards done with their mutation proofs. Added: gateway_consume_violations, spend_gate_violations, refusal_arm_violations (c2), continue_vocabulary_violations, resume_pair_violations, gateway_resume_reader_violations, no_attestation_violations, writer_gate_argument_violations (the guard the previous review asked for: run_rounds passes ctx.depth and ctx.release.is_some() to writer_gate, with a literal-0-depth mutation proof); switch_table row text updated; store_proofs rows added (Continue +9, Consume +6); store_proof_violations cleans each file once. BFF tests/continue_error_vocabulary.rs: BFF list subset of the gateway's with the difference exactly {continue_incomplete, missing_bearer}, SPA frame tuple equals CONTINUE_FRAME_REFUSALS; no list needed changing. Compose: gateway line already present, one stale comment corrected. Counts: durable_loop_contract 18 -> 23, model-gateway lib 1857 unchanged, continue_error_vocabulary 2 -> 4, BFF unit tests 647 passed, cargo check --workspace clean, vitest touched files 72 passed, tsc 34 and eslint 1/191 equal to baseline. 11 production mutations of sse.rs and 7 BFF-side mutations each turned a named test red and were restored cmp-clean. Open for the lead: the guards that read agent.rs (replay_is_fenced, the writer_gate call shape) will fail loudly if the s7b-hardening unit moves those lines; the DB harness rerun and the live proof (s7-0..s7-H2) remain lead steps."
+     }
+    ],
+    "names_for_later_units": [
+     "durable_loop_contract.rs guards: gateway_consume_violations(&[(String,String)]) (takes the whole gateway source list and finds sse.rs by the /sse.rs suffix), spend_gate_violations(&str), refusal_arm_violations(&str), continue_vocabulary_violations(sse, grpc, agent, resume, produced_elsewhere), resume_pair_violations(&[(String,String)]), gateway_resume_reader_violations(&[(String,String)], &switch_table()), no_attestation_violations(rust, protos), writer_gate_argument_violations(agent, fold).",
+     "Helpers in the same file: dispatch_arms(&Code) -> Vec<DispatchArm>, ArmRole, arm_role, call_arguments, block_span, const_words, matches_of, mutate_re, replace_source, move_arm, proto_files, executor_and_session_production_text. Consts: GATEWAY_PRECONSUME_TESTS, SESSION_TERMINALIZATION, PROTO_DIR.",
+     "Test names: the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task, the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge, every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary, the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation, a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release.",
+     "BFF test names: the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_relays, the_spa_frame_tuple_is_the_gateways_frame_list; helpers model_gateway_sse_source, gateway_const_list, gateway_http_refusals, spa_frame_refusals.",
+     "What the guards pin in sse.rs that a refactor must keep: continue_run statement order, the closure named launch, `if !resume_enabled { return Ok(launch()); }`, `let resume_enabled = ..loop_resume_enabled();`, the five `Ok(Ok(Err(status)))` arms of agentic_run_stream in the order spent, confirmed, typed, unreachable, final, `continuing` as the typed-arm guard, `ApprovalSpend` named only in the spend builders. In agent.rs: `let replay_is_fenced = ..ledger_enabled();`, `.same_claim && replay_is_fenced`, and the writer_gate( call in run_rounds with ctx.depth, ctx.release.is_some() and in_place."
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S7c-B1 (step 8) is built and verified. continue_run now pre-consumes the approval when EXECUTION_LOOP_RESUME_ENABLED is on at the gateway, and agentic_run_stream classifies dispatch failures by the gateway's own spend knowledge. Nothing was committed. No DB-backed test was written or changed. I ran no docker.\n\nCounts (before then after):\n- model-gateway lib: 1846 -> 1857 passed, 4 ignored unchanged. continue_run_tests went 40 -> 51.\n- continue_preconsume_test: new file, 7 passed.\n- zdr_posture_matrix: 6 -> 6.\n- e2e_invoke_chain_test: 118 -> 118. orchestration_http_test: 19 -> 19.\n- execution-core durable_loop_contract: 18 -> 18. The builder guard was re-pointed and gained four mutation rows inside the existing every_guard test, so the count is the same.\n- cargo check --workspace --all-targets --keep-going: no errors. The only warnings are the existing ones in execution-core and session-core.\n- No LNK1104 or lock failure needed a retry. Cargo only blocked briefly on the target-dir lock while the other unit built.\n\nWhat changed in sse.rs (production):\n- continue_resume(approval_id, claim_token, mode: &'static str) is still the one AgentResume literal. It now writes mode: mode.to_owned(), segment_no 0, and nothing else.\n- continue_run reads loop_resume_enabled() once, after continue_preflight, and picks the stage with resume_mode_for(resume_enabled, detail.resumable).\n  - It builds the consumer and the spend-only request from clones, before the launch closure takes ownership.\n  - The one 'static launch closure holds the single agentic_run_stream call. approval_spend_for(resume_enabled) is evaluated inside it, so the spent state is claimed only when the closure runs.\n  - Switch off: return Ok(launch()), no consume, no spawn, segment mode, NotSpent.\n  - Switch on: spawn_consume_then_launch(..).await. Closed(status, code) becomes continue_error, Status(st) becomes grpc_status_to_http, and a vanished task becomes 503 continue_unavailable.\n- agentic_run_stream gained a trailing spend: ApprovalSpend parameter, and invoke_stream_sse passes NotSpent. It computes continuing before the resume moves and builds the first frame through connected_payload.\n- The three agent_dispatch_unavailable sites now call dispatch_unknown_event(spend, ..).\n- A request-construction failure after a spend sends continue_refused and does not terminalize.\n- Arm order for Ok(Ok(Err(status))):\n  - spent arm: guarded by spend.is_spent(), uses classify and continue_failure_event, publishes RUN_DISPATCH_DEGRADED only for Unreachable and Unknown, never terminalizes.\n  - the committed confirmed-rejection arm, unchanged.\n  - the new typed-refusal arm: guarded by continuing, not spent, and classify returning Refused. It sends continue_refusal_event with no approval_spent, no RUN_DISPATCH_DEGRADED, no terminalization.\n  - the committed unreachable arm.\n  - the committed final arm.\n- The five review findings from the pure-pieces round:\n  - (1) classify_continue_dispatch_failure's doc now says it is spend-agnostic and why the arm order matters. Tests pin both regimes.\n  - (2) the spend is claimed only inside the closure, scan-guarded.\n  - (3) a zero-retention trailer on the consume keeps its typed body (see deviation 1).\n  - (4) the 10 s bound is tested through the real GrpcApprovalConsumer::consume (a paused-clock test over a real transport with a never-answering server), plus a scan that the impl contains consume_within_bound(client.consume_approval(.\n  - (5) the same-token race runs over the real transport against a single-use server that gives the real replay answer shape (consumed false, already_consumed true, same_claim true, with the call only when it was not omitted). The doubles in the integration file use the same shape.\n  - (6) the claim token is never logged, scan-guarded.\n- #[allow(dead_code)] was removed from everything now wired. CONTINUE_HTTP_REFUSALS is now read by a debug_assert in continue_error.\n- The doc comments of continue_run, continue_resume and the block header were updated.\n\nTests:\n- Unit tests in continue_run_tests: a hung session-core through the real consumer, the bound scan, the same-token and distinct-token race over a real transport, the ZDR trailer on the consume, the off-switch byte-identity of the request, continue_resume's stage, the order and shape scan of continue_run, the spent-state-in-closure scan, the arm-order scan, the stream's ambiguous and connected frames, and the claim-token log scan.\n- The three existing tests that needed the new arity were updated, with no assertion weakened. A re-grep found no test expecting agent_dispatch_unavailable on a FailedPrecondition path.\n- Integration file tests/continue_preconsume_test.rs:\n  - consume strictly before RunAgent, with the spend-only request and the session bearer;\n  - switch off: no consume and a byte-identical connected payload;\n  - a lost consume (another claim, or the same token) is a 409 with zero RunAgent;\n  - refused consumes map to their closed codes with no upstream message;\n  - two simultaneous same-token clicks give one dispatch;\n  - the full frame table, 17 cases across switch on and off, covering FailedPrecondition, Aborted, NotFound, InvalidArgument, PermissionDenied, DeadlineExceeded, an unlisted refusal, unreachable and dropped, with frame code, approval_spent, RUN_DISPATCH_DEGRADED and terminalization checked;\n  - a client that disconnects mid-consume still gets exactly one RunAgent. This one is exercised end to end, not unverified.\n\nMutation checks (on sse.rs, my file): 13 mutations were applied and restored; cmp was identical after every run and at the end, and the final tree is identical to the backup.\n\n| Mutation | Red tests |\n|---|---|\n| spawn tied to the caller | disconnect: unit (after I strengthened it) and integration |\n| typed arm off | arm-order scan and the frame table |\n| spend always claimed | approval_spend_for test, frame table, switch-off test |\n| omit_call false | 4 unit tests plus the integration order test |\n| a lost consume proceeds | 5 unit tests plus 2 integration |\n| consume without the bound | hung-through-the-real-consumer test and the bound scan |\n| spent arm keyed on resume | arm scan and the frame table |\n| connected frame not spent | scan plus 2 integration |\n| always consume | scan plus 2 integration |\n| mode always loop | integration only |\n| ZDR passthrough removed | unit only |\n| spent arm terminalizes | scan and the frame table |\n| typed arm publishes DEGRADED | scan and the frame table |\n\nThe first run showed the disconnect unit test was green under the 'spawn tied to the caller' mutation, because it was racy. I fixed it with a 150 ms delay before the gate opens. It is now red under that mutation, deterministically. The existing A4 test a_hung_consume_ends_ambiguous_within_the_bound stays green when the bound is removed from the gRPC consumer, as the reviewer said; the new tests catch it.\n\nExecutor-sourced vocabulary: I used the closed token list from build3b-final.json as given. in_place_seed_invalid (Internal) is not a closed token. It classifies as Unknown: continue_outcome_unknown after a spend, and the committed agent_dispatch_unavailable otherwise. continue_replay_refused_ledger_off is a log line only, not a status token.",
+     "files_changed": [
+      "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+      "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+      "apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs"
+     ],
+     "tests_added": [
+      "sse.rs continue_run_tests: a_hung_session_core_ends_ambiguous_through_the_real_consumer",
+      "sse.rs continue_run_tests: the_grpc_consumer_applies_the_bound_to_its_own_rpc",
+      "sse.rs continue_run_tests: two_same_token_clicks_over_the_real_transport_get_one_proceed_and_one_409",
+      "sse.rs continue_run_tests: a_zero_retention_refusal_of_the_consume_keeps_its_typed_body",
+      "sse.rs continue_run_tests: with_the_resume_switch_off_the_continue_request_is_the_one_it_always_was",
+      "sse.rs continue_run_tests: continue_resume_states_the_stage_it_was_given",
+      "sse.rs continue_run_tests: continue_run_consumes_through_the_spawned_helper_after_the_preflight",
+      "sse.rs continue_run_tests: the_spent_state_is_claimed_only_inside_the_launch_closure",
+      "sse.rs continue_run_tests: the_dispatch_arms_of_a_continuation_are_spent_then_confirmed_then_typed_then_the_committed_ones",
+      "sse.rs continue_run_tests: the_stream_asks_the_spend_for_its_ambiguous_frames_and_its_connected_frame",
+      "sse.rs continue_run_tests: nothing_that_logs_in_the_pre_consume_flow_names_the_claim_token",
+      "sse.rs continue_run_tests (changed): the_gateway_leaves_the_segment_number_to_the_executor now covers both stages; a_dropped_receiver_cannot_spend_an_approval_without_dispatching now waits 150 ms before the gate opens; a_real_continue_states_only_neutral_placeholders and continue_request_for use the new continue_resume arity",
+      "tests/continue_preconsume_test.rs: the_gateway_consumes_the_approval_before_it_dispatches_the_run",
+      "tests/continue_preconsume_test.rs: with_the_switch_off_nothing_is_consumed_and_the_first_frame_is_the_committed_one",
+      "tests/continue_preconsume_test.rs: a_lost_consume_is_a_409_and_dispatches_nothing",
+      "tests/continue_preconsume_test.rs: a_refused_consume_is_its_closed_code_and_dispatches_nothing",
+      "tests/continue_preconsume_test.rs: two_simultaneous_clicks_with_one_token_dispatch_once",
+      "tests/continue_preconsume_test.rs: frame_codes_pair_with_the_spend_state_per_switch_state (17 cases)",
+      "tests/continue_preconsume_test.rs: a_client_that_disconnects_mid_consume_still_gets_exactly_one_dispatch",
+      "durable_loop_contract.rs (changed, same test count): builder_and_validator_violations now reads the quoted stages of resume_mode_for and requires mode: mode.to_owned() in continue_resume; every_guard_goes_red has four new mutation rows (resume_mode_for segment to resume, loop to segment, builder naming its own stage, builder not using its argument) and keeps the segment_no: 2 mutation"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p model-gateway --lib (baseline)",
+       "outcome": "1846 passed, 4 ignored"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --test zdr_posture_matrix / e2e_invoke_chain_test / orchestration_http_test and cargo test -q -p execution-core --test durable_loop_contract (baselines)",
+       "outcome": "6 / 118 / 19 / 18 passed"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib continue_run_tests (new tests written first, production still on the old arity)",
+       "outcome": "5 failed for the right reasons: no wiring, no spend, no ZDR passthrough"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib continue_run_tests (after the ZDR hunk, then after the wiring)",
+       "outcome": "4 failed, then 51 passed"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --test continue_preconsume_test",
+       "outcome": "7 passed (one expectation corrected first: the committed rejected and unreachable frames never carried run_id)"
+      },
+      {
+       "command": "python3 scratchpad/mutate.py (13 mutations, unit and integration each, restore plus cmp), then detach and connected_not_spent again after strengthening the disconnect unit test",
+       "outcome": "every mutation red in at least one suite; sse.rs restored byte for byte, cmp identical; table in the summary"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib; --test zdr_posture_matrix; --test continue_preconsume_test; --test orchestration_http_test; --test e2e_invoke_chain_test",
+       "outcome": "1857 passed, 4 ignored; 6; 7; 19; 118 passed"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract",
+       "outcome": "18 passed (after the builder-guard re-point)"
+      },
+      {
+       "command": "cargo check --workspace --all-targets --keep-going",
+       "outcome": "Finished, no errors; only the existing execution-core and session-core warnings"
+      }
+     ],
+     "deviations": [
+      "The ZDR trailer on the consume keeps its typed body on ANY code, not only FailedPrecondition: preconsume_refusal checks mp_contracts::zdr_refusal::Refusal::from_status first and returns PreconsumeRefusal::Status, which the handler answers through grpc_status_to_http. A catalogue refusal means session-core refused before consuming, so a typed body is right for an Unavailable-coded one too, not the ambiguous 503. The unit test covers four codes.",
+      "Layout of continue_run: the launch closure (holding the one agentic_run_stream call) is defined BEFORE the spawn_consume_then_launch( call, so textually continue_preflight( < move || { < agentic_run_stream( < spawn_consume_then_launch(. The design's B2 text says 'continue_preflight( < spawn_consume_then_launch( < agentic_run_stream(', which cannot hold together with 'one closure that is also used for Ok(launch()) with the switch off'. The B2 guard (the lead's or the next unit's) must use my order, or the closure must be inlined at the cost of a second agentic_run_stream call. My own scan test uses my order.",
+      "The frame table (switch on or off x RunAgent status) is an integration test, not a unit test, because the arms live inside the stream task. This is more faithful than a unit table: real router, real executor double, real publisher, real terminal-receipt double.",
+      "Test-only extensions inside sse.rs: ConsumeOnlyServer gained a ServerBehaviour (script, hang, single-use compare-and-set by token) and consumer_over_grpc was split into client_over_grpc plus a wrapper. The A4 tests that use it still pass unchanged. The disconnect unit test gained a 150 ms delay so it is deterministic.",
+      "continue_error gained a debug_assert that its (status, code) pair is in CONTINUE_HTTP_REFUSALS. This makes the closed HTTP vocabulary a runtime check and removes the last dead-code reason for CONTINUE_HTTP_REFUSALS. It is a debug assertion only; release behaviour is unchanged.",
+      "The typed-refusal arm calls classify_continue_dispatch_failure twice (guard and body) instead of binding once, because a match guard cannot bind. The function is pure. The body falls back to continue_refused rather than panicking, though that branch is unreachable.",
+      "The new integration file hand-rolls the orchestration and run-service doubles per method (GetApproval, ConsumeApproval, ResolveRunOwner, GetRun, everything else Unimplemented) using the tonic::server::Grpc plus tower::service_fn pattern A4 used. The StreamRunEvents tail is deliberately not served: the route follows past an unopened tail. The execution-core and managed-run-lifecycle doubles implement their generated traits. Nothing in tests/e2e_invoke_chain_test.rs was edited.",
+      "tracing::warn! lines added to continue_run (closed token or gRPC code, plus run_id) and to the spent and typed arms (closed token or Debug of the closed ContinueDispatchFailure, plus run_id); no claim token and no upstream message text, scan-guarded.",
+      "Process notes: mutations were applied and restored with a python script on sse.rs (mutating my own file, cmp-verified), and I used python once to restructure my own new test file; every edit to an existing file used the Edit tool. All three files are LF (sse.rs and durable_loop_contract.rs were LF in the worktree, not CRLF as the design and the task said; the new file is LF; http_routes.rs is CRLF and was not touched). While the mutation runs were in progress sse.rs was briefly mutated on disk, so the other unit's durable_loop_contract or compile runs in that window could have seen it; the file is restored.",
+      "Not done in this stage by design: the B2 contract guards (gateway_consume_violations, spend gate, refusal-arm guard, resume pair), switch_table and one-parser assertions, store_proofs rows, and the compose verification. No BFF, Frontend or http_routes.rs change was needed for B1."
+     ],
+     "blockers": [],
+     "names_for_later_units": [
+      "sse.rs continue_run body order (what B2 guards must expect): continue_persistent_gate( < req.approval_id.trim() < require_durable_run_owner_with_token( < .get_run( < .get_approval( < continue_preflight( (immediately followed by .map_err) < loop_resume_enabled() (once) < resume_mode_for( < continue_resume(&req.approval_id, &req.claim_token, mode) < GrpcApprovalConsumer::new( < preconsume_request( < let launch = move || { agentic_run_stream(.. approval_spend_for(resume_enabled)) } < if !resume_enabled { return Ok(launch()); } < spawn_consume_then_launch(consumer, preconsume, launch).await. Exactly one agentic_run_stream(, one loop_resume_enabled(, one spawn_consume_then_launch(, no direct consume_then_launch( in the body, no segment_no, no env var name, no \"loop\" or \"segment\" literal.",
+      "sse.rs agentic_run_stream: trailing parameter spend: ApprovalSpend; the arm order is spent (Ok(Ok(Err(status))) if spend.is_spent()) < confirmed (is_confirmed_agent_dispatch_rejection) < typed refusal (if continuing && !spend.is_spent() && matches!(classify_continue_dispatch_failure(&status), ContinueDispatchFailure::Refused(_))) < unreachable (dispatch_never_reached_execution_core) < final (Ok(Ok(Err(status))) => {). The spent arm contains no terminalize_agent_dispatch_rejection_authenticated and no AgentDispatchFailure; the typed arm contains no terminalize, no RUN_DISPATCH_DEGRADED, no approval_spent and no SpentByGateway; the final arm calls dispatch_unknown_event(spend,. The construction-failure branch has `if spend.is_spent()` before its terminalization. The stream names the spend only through connected_payload, continue_refusal_event, continue_failure_event and dispatch_unknown_event; SpentByGateway appears only in the ApprovalSpend enum, is_spent, approval_spend_for, continue_failure_event and dispatch_unknown_event (a unit test enforces this).",
+      "sse.rs: continue_resume(approval_id, claim_token, mode: &'static str) is the one AgentResume literal; the stages are named only in resume_mode_for (\"loop\" and \"segment\"). durable_loop_contract builder_and_validator_violations now reads resume_mode_for's quoted words, requires each to be in the executor's accepted set and both to be present, requires mode: mode.to_owned() in the builder and no quoted stage there.",
+      "sse.rs preconsume_refusal: a ZDR trailer, on any code, returns PreconsumeRefusal::Status. The consume's HTTP answers are exactly those of CONTINUE_HTTP_REFUSALS plus grpc_status_to_http for PermissionDenied, Unauthenticated and the ZDR trailer. continue_error debug_asserts membership in CONTINUE_HTTP_REFUSALS.",
+      "Handler-level doubles in tests/continue_preconsume_test.rs that B2 or the live-proof units can reuse by copying: rig(Case), Rig::post, Answer::frames, ConsumeBehaviour::{Won, SingleUse, Parked, Refused}, ExecutionKind::{Answers, Unreachable, Dropping}, serve! macro, double_service! macro.",
+      "Frame facts for the contract and the SPA: with the switch on every failure frame after a won consume has approval_spent true and retryable false; a spent InvalidArgument or PermissionDenied from RunAgent is the executor's own token (resume_incomplete, resume_forbidden), not agent_dispatch_rejected, and the run is not terminalized; with the switch off those two codes still give agent_dispatch_rejected plus exactly one terminal receipt (source GatewayAgentDispatchRejected, bearer gateway-terminalizer-token); FailedPrecondition, Aborted and NotFound give the typed frame without approval_spent and without RUN_DISPATCH_DEGRADED. The committed agent_dispatch_rejected and agent_dispatch_unreachable frames carry no run_id, as before.",
+      "Ledger and plan text for later: see deferred_files."
+     ],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md",
+       "content": "Dated entry (2026-10-18) under the 2026-10-16 durable-loop decision, state stays proposed.\n\nWS03 S7c-B1 built: model-gateway wires the pre-consume into POST /v1/orchestration/runs/{run_id}/continue. With EXECUTION_LOOP_RESUME_ENABLED on at the gateway (read once through mp_contracts::loop_fold::loop_resume_enabled), continue_run consumes the approval itself after continue_preflight (ConsumeApproval, the user's session bearer, omit_call true, step_id and action_fingerprint empty, 10 s bound) in ONE detached task that also launches the run (spawn_consume_then_launch), so a client disconnect cannot spend a click without a RunAgent; only a consume this request won proceeds, every other answer (the same claim token included) is a closed HTTP refusal (409 continuation_already_consumed and the rest of CONTINUE_HTTP_REFUSALS; PermissionDenied, Unauthenticated and a zero-retention trailer answer through grpc_status_to_http). There is no attestation field: the executor's own consume is a same-claim replay accepted only with the effect ledger on, so the gateway resume switch, the executor resume switch, the ledger, the continue switches and the checkpoint switches are one coupled flip (gateway off first when rolling back). The first frame says approval_spent only when the gateway itself consumed the approval (ApprovalSpend, claimed inside the launch closure). After a spend every failed dispatch is a typed frame (the executor's closed token, continue_refused, continue_unreachable or continue_outcome_unknown), retryable false, run_id named, approval_spent true, never terminalized by the gateway. For a continuation the gateway did not pre-consume the committed arms are unchanged for InvalidArgument, Unauthenticated and PermissionDenied (terminalized, agent_dispatch_rejected), and an executor refusal that is FailedPrecondition, Aborted, NotFound or a trailer on another code is a typed non-retryable frame with no approval_spent field, no RUN_DISPATCH_DEGRADED and no terminalization (the 'a refused or replayed segment is never a degraded dispatch' reading; behaviour change on /continue only, which needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED). With the resume switch off the route issues no consume, states segment, and its first frame is byte-identical to the committed one. Residual windows unchanged from the design: a gateway crash between consume and RunAgent leaves a spent click until the renewed 15 minute deadline; the detached task is not in the drain registry. Verified by unit tests, a 7-test handler-level integration file (17-case frame table, disconnect, same-token race over the real compare-and-set shape) and 13 mutation checks; not yet live-proven."
+      },
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+       "content": "Build ledger row for S7c-B1 (2026-10-18): gateway wiring of the pre-consume done in model-gateway sse.rs (continue_run, agentic_run_stream, continue_resume arity, typed refusal arm, spent arms, connected_payload), tests/continue_preconsume_test.rs added, durable_loop_contract builder guard re-pointed to resume_mode_for (the same commit as the arity change). Counts: model-gateway lib 1846 -> 1857, continue_run_tests 40 -> 51, continue_preconsume_test 7, zdr_posture_matrix 6, e2e 118, durable_loop_contract 18. Open for S7c-B2: the new durable_loop_contract guards (note the textual order in continue_run: the launch closure holding agentic_run_stream( precedes spawn_consume_then_launch(), switch_table and one-parser assertions, store_proofs rows, compose verification. No DB-backed test in this stage."
+      }
+     ]
+    },
+    {
+     "summary": "S7c-B2 (step 9) is built and verified. Five new guards sit in execution-core's tests/durable_loop_contract.rs (18 to 23 tests); the BFF parity tests are in continue_error_vocabulary.rs (2 to 4). The three vocabulary lists already agreed, so no gateway, BFF or SPA list needed changing. I wrote no DB-backed test; the new store_proofs rows name the existing #[ignore] DB tests, which I did not run. No docker, commit, push, stash or rustfmt.\n\n1. Gateway pre-consume guard (`gateway_consume_violations`, test `the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task`):\n   - Exactly one `ConsumeApprovalRequest` literal in the whole gateway, inside `preconsume_request`, and every mention of `omit_call` is `omit_call: true`.\n   - One `.consume_approval(` call, inside `impl ApprovalConsumer for GrpcApprovalConsumer` and inside `consume_within_bound`. Only `.consumed` is read from the answer. No `.tool_input_json`, `.tool_name`, `.authority`, `.step_id`, `.same_claim` or `.already_consumed` in the flow.\n   - Exactly one `tokio::spawn(`, in `spawn_consume_then_launch`; none in the other pre-consume functions or in `continue_run`.\n   - `trait ApprovalConsumer` declares `Send + Sync`. The Sync-less variant is a compile mutation (`spawn_consume_then_launch` stops building with E0277), described in a comment; the in-memory mutation only proves the guard names the supertraits.\n   - `continue_run` reads the switch once, builds one launch closure, returns `Ok(launch())` with the switch off, and only then calls `spawn_consume_then_launch(`.\n   - The one `AgentResume` literal names only mode, approval_id, claim_token, brief and segment_no.\n2. Spend gate and refusal arms (`spend_gate_violations` and `refusal_arm_violations` (c2), one test):\n   - The spent arm is guarded by `spend.is_spent()` alone, comes before the confirmed arm, and never terminalizes.\n   - The request-construction failure checks `spend.is_spent()` before it terminalizes.\n   - `SpentByGateway` is named only in the builders of the spend.\n   - The two callers of `agentic_run_stream` state `ApprovalSpend::NotSpent` and `approval_spend_for(resume_enabled)`.\n   - Three `dispatch_unknown_event(spend,` sites and one `connected_payload(.., spend)`.\n   - The five arms keep the order spent, confirmed, typed, unreachable, final. The typed arm is guarded by `continuing` and `!spend.is_spent()` and contains no terminalize, `RUN_DISPATCH_DEGRADED`, `approval_spent` or `SpentByGateway`.\n3. Closed vocabulary (`continue_vocabulary_violations`, test `every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary`):\n   - Every carrier-code literal on the executor's resume path, and every word of the `Refusal` enum in resume.rs, is in the gateway's lists.\n   - Every token is sent by some executor or session-core production code.\n   - The frame list equals the 17 message tokens plus the five derived and gateway-made codes.\n   - This confirmed the executor-sourced list is complete: all 17 tokens are present. `in_place_seed_invalid` is Internal, so it is not a refusal and classifies as unknown.\n4. Coupled flip (test `the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation`):\n   - `resume_pair_violations`: every `.same_claim` read in the executor is followed by `&& replay_is_fenced`, and `replay_is_fenced` is bound once to `ledger_enabled()`.\n   - `gateway_resume_reader_violations`: `loop_resume_enabled()` is called exactly once in the gateway, inside `continue_run`; the gateway never names the env var or `LOOP_RESUME_ENV`; `switch_table()` has model-gateway and execution-core rows for the switch.\n   - `no_attestation_violations`: no `consumed_by_gateway` in Rust production sources under the guard's source trees or in non-comment proto lines.\n5. Writer-gate guard (`writer_gate_argument_violations`, test `a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release`):\n   - `run_rounds` calls `writer_gate(req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some(), in_place)` in exactly that shape.\n   - A child context is built from `depth: parent.depth + 1`.\n   - `decide` still refuses `self.depth > 0`.\n   - The mutation proof (a literal `0` depth) turns the guard red.\n6. `store_proofs` rows: the Continue row gains 9 tests (5 in sse.rs, 4 in `tests/continue_preconsume_test.rs`); the Consume row gains 6 (session-core omit_call, renewal and terminalization). Seven of the new rows have rename or comment-out mutation proofs.\n7. Compose: the gateway line `EXECUTION_LOOP_RESUME_ENABLED: ${...:-false}` already existed and `switch_table()` already pinned it, so I only verified it. One stale comment sentence was corrected (see deviations).\n8. BFF parity (`tests/continue_error_vocabulary.rs`):\n   - New test: the BFF list is a subset of the gateway's `CONTINUE_HTTP_REFUSALS` with equal statuses, and the difference is exactly `continue_incomplete` and `missing_bearer`.\n   - New test: the SPA's `CHAT_RUN_CONTINUE_FRAME_REFUSALS` equals the gateway's `CONTINUE_FRAME_REFUSALS`, in order, 22 tokens.\n   - The model-gateway source is read only as a test. No SPA, BFF or gateway list changed.\n\nCounts, before to after:\n- durable_loop_contract 18 to 23, run with 1 new `every_guard` mutation block: 23 passed.\n- model-gateway lib 1857 to 1857 (4 ignored).\n- BFF unit tests 647 passed, 1 ignored.\n- continue_error_vocabulary 2 to 4; sse_relay_no_allowlist 3 and ssrf_forward_not_fetch 1, unchanged.\n- cargo check --workspace --all-targets --keep-going: no errors, only the existing 7 warnings.\n- Frontend: I changed no TypeScript file. Vitest on chat-run-continue-contract, orchestration-client and action-registry: 72 passed. tsc -b: 34 errors, eslint: 1 error and 191 warnings, both equal to the recorded baseline. The full vitest baseline (7 failing tests in 5 files) was not re-measured.\n\nMutation checks:\n- In-memory mutations: about 100, in every_guard.\n- Production sse.rs, 11 mutations (`omit_call: false`, spawn removed, Sync dropped, switch read twice, env name in the gateway, spent arm keyed on the resume, typed arm without `continuing`, DEGRADED in the typed arm, connected frame claiming spent, a token dropped from the closed list, an attestation field): each turned at least one of the 5 new tests red, and sse.rs was restored byte for byte (cmp identical, final cmp identical).\n- Production, BFF side, 7 mutations on the SPA contract, orchestration.rs and sse.rs lists: each red, each file restored identical.\n- Production agent.rs and fold.rs were not mutated (the other unit owns them), so the writer-gate and `replay_is_fenced` guards are proved in memory only.",
+     "files_changed": [
+      "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+      "apps/Model Plane/deploy/docker-compose.yml"
+     ],
+     "tests_added": [
+      "durable_loop_contract: the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task",
+      "durable_loop_contract: the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge",
+      "durable_loop_contract: every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary",
+      "durable_loop_contract: the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation",
+      "durable_loop_contract: a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release",
+      "durable_loop_contract every_guard_goes_red_when_the_code_it_guards_regresses (changed, same test fn): a new mutation block for every new guard, plus 7 renamed-or-commented-out proofs for the new store_proofs rows",
+      "continue_error_vocabulary: the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_relays",
+      "continue_error_vocabulary: the_spa_frame_tuple_is_the_gateways_frame_list"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline, before any edit)",
+       "outcome": "18 passed"
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary (after the new BFF tests)",
+       "outcome": "4 passed"
+      },
+      {
+       "command": "python3 mutate_bff.py (7 mutations on the SPA contract, orchestration.rs and sse.rs, restore plus cmp each)",
+       "outcome": "every mutation turned a named test red; each file restored identical"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract -- --skip every_guard, then every_guard alone",
+       "outcome": "22 passed (17 old + 5 new), then every_guard passed in 59 s"
+      },
+      {
+       "command": "python3 mutate_contract.py (11 production mutations of sse.rs, restore plus cmp each)",
+       "outcome": "every mutation red in at least one of the 5 new tests; final cmp identical"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract (final)",
+       "outcome": "23 passed"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib",
+       "outcome": "1857 passed, 4 ignored"
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (from apps/Frontend Plane/verevonv3)",
+       "outcome": "647 passed 1 ignored; continue_error_vocabulary 4; sse_relay_no_allowlist 3; ssrf_forward_not_fetch 1"
+      },
+      {
+       "command": "cargo check --workspace --all-targets --keep-going",
+       "outcome": "Finished, no errors, 7 existing warnings"
+      },
+      {
+       "command": "node_modules/.bin/vitest run chat-run-continue-contract.test.ts orchestration-client.test.ts action-registry.test.ts",
+       "outcome": "first attempt failed to start workers (timeout, machine under cargo load); rerun: 3 files, 72 passed"
+      },
+      {
+       "command": "node_modules/.bin/tsc -b ; node_modules/.bin/eslint . -f json",
+       "outcome": "tsc 34 errors; eslint 1 error and 191 warnings; equal to the recorded baseline"
+      }
+     ],
+     "deviations": [
+      "The design's B2 order `continue_preflight( < spawn_consume_then_launch( < agentic_run_stream(` is not what the guard reads. The launch closure holds the one `agentic_run_stream(` call and precedes the spawn (B1's layout, one closure for both paths). The guard reads continue_preflight( < loop_resume_enabled() < agentic_run_stream( < the `if !resume_enabled { return Ok(launch()); }` return < spawn_consume_then_launch(.",
+      "I edited apps/Model Plane/deploy/docker-compose.yml, which the spec marks VERIFY ONLY and neither unit owns: one comment hunk. The model-gateway entry said the service reads the variable 'from S7c-B; until then only this entry exists', which is no longer true. Nothing else in the file changed.",
+      "I changed two existing parts of durable_loop_contract.rs: store_proof_violations now cleans each file once per call instead of once per named test (behaviour-preserving, it keeps the suite's time down), and the gateway row's reason text in switch_table() no longer says the reader arrives later.",
+      "Test-first holds for the BFF pair only in the sense that the lists already agreed, so the new BFF tests passed at once and their red proof is the 7 mutations. The contract guards were written over code that already existed, so each guard's red proof is its in-memory mutation block plus the 11 production mutations of sse.rs rather than a failing run before implementation.",
+      "The vocabulary guard's resume path is the executor's consume_for_resume, released_call, build_segment, begin_continuation, restore_continuation and run_rounds, resume.rs select_stage, in_place_scope and `impl Refusal`, and grpc.rs enforce_resume. A carrier-code literal (failed_precondition, aborted, invalid_argument, permission_denied, unauthenticated) on any of them must be a listed token. `internal(..)` statuses are deliberately not refusals. approval_snapshot_too_large lives at the pause site, not on the resume path, so it is out of scope by design.",
+      "The attestation scan covers Rust production sources under the guard's source trees plus non-comment proto lines. It does not scan the generated Go, the BFF or the SPA.",
+      "The `Sync` mutation is described in a comment, not run: with `trait ApprovalConsumer: Send` alone, spawn_consume_then_launch stops compiling. The in-memory mutation only proves the guard names Send and Sync.",
+      "The agent.rs-dependent guards (`replay_is_fenced`, the writer_gate call shape, `depth: parent.depth + 1`) are proved in memory only: agent.rs belongs to the s7b-hardening unit, so I did not mutate it on disk. If that unit moves the replay rule or the call, these guards fail loudly with the pattern that moved.",
+      "sse.rs was briefly mutated on disk for the 7 BFF-side and 11 contract production mutations, about 12 seconds per mutation (7 BFF mutations, 3 of them on sse.rs; 11 contract ones). A build of model-gateway by the other unit in that window could have seen it. It is restored byte for byte.",
+      "The first vitest attempt failed to start its workers (timeout) while cargo was compiling; the rerun was green. I did not rerun the full vitest suite because no TypeScript file was changed."
+     ],
+     "blockers": [],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md",
+       "content": "Dated entry (2026-10-18) under the 2026-10-16 durable-loop decision, state stays proposed.\n\nWS03 S7c-B2 built: the gateway's pre-consume and the coupled flip are held by contract guards in execution-core tests/durable_loop_contract.rs, each with in-memory mutation proofs, and the three closed continue vocabularies are pinned to each other across planes.\n\nWhat is now read from source: (a) the gateway builds exactly one ConsumeApprovalRequest (preconsume_request) and it says omit_call: true, every mention of omit_call is that literal; the consume RPC is called in one place (GrpcApprovalConsumer, inside consume_within_bound) and only .consumed is read from the answer; the consume and the launch are one detached task (exactly one tokio::spawn in the pre-consume flow, in spawn_consume_then_launch), trait ApprovalConsumer declares Send + Sync (dropping Sync is a compile error, not reproducible in memory); continue_run reads loop_resume_enabled() once, returns Ok(launch()) with the switch off before any consume, and the one AgentResume literal names only mode, approval_id, claim_token, brief and segment_no. (b) The frames of a continuation are gated on the gateway's own spend knowledge: the spent arm of agentic_run_stream is guarded by spend.is_spent() alone, precedes the committed confirmed-rejection arm and never terminalizes; the typed-refusal arm for a continuation nobody pre-consumed sits after the confirmed arm and before the unreachable and final arms and contains no terminalize, RUN_DISPATCH_DEGRADED or approval_spent; SpentByGateway is named only in the builders of the spend; the two callers state ApprovalSpend::NotSpent and approval_spend_for(resume_enabled). (c) Every carrier-code message of the executor's resume path (and every Refusal word) is in CONTINUE_EXECUTOR_MESSAGE_TOKENS or the frame list, and every token is sent by executor or session-core production code; the frame list is exactly the 17 tokens plus approval_not_found, durable_mutation_forbidden and the three gateway-made codes. in_place_seed_invalid is Internal, not a refusal, and classifies as unknown. (d) D1: the executor accepts a same-claim replay only through replay_is_fenced bound to effect::ledger_enabled(); the gateway reads the resume switch through loop_resume_enabled alone and compose sets it on both services; no consumed_by_gateway anywhere. (e) A delegated child never writes a fold: run_rounds hands the writer gate ctx.depth and ctx.release.is_some() in that shape. The BFF test now proves the BFF relays a subset of the gateway's CONTINUE_HTTP_REFUSALS with equal statuses, the difference being exactly continue_incomplete and missing_bearer, and that the SPA's frame tuple equals CONTINUE_FRAME_REFUSALS in order (the gateway source is read as a test only). The store_proofs map gained the gateway pre-consume tests (Continue row) and the session-core spend-only and recovery-renewal tests (Consume row); the DB-backed ones are #[ignore] and are run by the disposable-Postgres harness. Not live-proven."
+      },
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+       "content": "Build ledger row for S7c-B2 (2026-10-18): the new durable_loop_contract guards done with their mutation proofs. Added: gateway_consume_violations, spend_gate_violations, refusal_arm_violations (c2), continue_vocabulary_violations, resume_pair_violations, gateway_resume_reader_violations, no_attestation_violations, writer_gate_argument_violations (the guard the previous review asked for: run_rounds passes ctx.depth and ctx.release.is_some() to writer_gate, with a literal-0-depth mutation proof); switch_table row text updated; store_proofs rows added (Continue +9, Consume +6); store_proof_violations cleans each file once. BFF tests/continue_error_vocabulary.rs: BFF list subset of the gateway's with the difference exactly {continue_incomplete, missing_bearer}, SPA frame tuple equals CONTINUE_FRAME_REFUSALS; no list needed changing. Compose: gateway line already present, one stale comment corrected. Counts: durable_loop_contract 18 -> 23, model-gateway lib 1857 unchanged, continue_error_vocabulary 2 -> 4, BFF unit tests 647 passed, cargo check --workspace clean, vitest touched files 72 passed, tsc 34 and eslint 1/191 equal to baseline. 11 production mutations of sse.rs and 7 BFF-side mutations each turned a named test red and were restored cmp-clean. Open for the lead: the guards that read agent.rs (replay_is_fenced, the writer_gate call shape) will fail loudly if the s7b-hardening unit moves those lines; the DB harness rerun and the live proof (s7-0..s7-H2) remain lead steps."
+      }
+     ],
+     "names_for_later_units": [
+      "durable_loop_contract.rs guards: gateway_consume_violations(&[(String,String)]) (takes the whole gateway source list and finds sse.rs by the /sse.rs suffix), spend_gate_violations(&str), refusal_arm_violations(&str), continue_vocabulary_violations(sse, grpc, agent, resume, produced_elsewhere), resume_pair_violations(&[(String,String)]), gateway_resume_reader_violations(&[(String,String)], &switch_table()), no_attestation_violations(rust, protos), writer_gate_argument_violations(agent, fold).",
+      "Helpers in the same file: dispatch_arms(&Code) -> Vec<DispatchArm>, ArmRole, arm_role, call_arguments, block_span, const_words, matches_of, mutate_re, replace_source, move_arm, proto_files, executor_and_session_production_text. Consts: GATEWAY_PRECONSUME_TESTS, SESSION_TERMINALIZATION, PROTO_DIR.",
+      "Test names: the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task, the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge, every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary, the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation, a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release.",
+      "BFF test names: the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_relays, the_spa_frame_tuple_is_the_gateways_frame_list; helpers model_gateway_sse_source, gateway_const_list, gateway_http_refusals, spa_frame_refusals.",
+      "What the guards pin in sse.rs that a refactor must keep: continue_run statement order, the closure named launch, `if !resume_enabled { return Ok(launch()); }`, `let resume_enabled = ..loop_resume_enabled();`, the five `Ok(Ok(Err(status)))` arms of agentic_run_stream in the order spent, confirmed, typed, unreachable, final, `continuing` as the typed-arm guard, `ApprovalSpend` named only in the spend builders. In agent.rs: `let replay_is_fenced = ..ledger_enabled();`, `.same_claim && replay_is_fenced`, and the writer_gate( call in run_rounds with ctx.depth, ctx.release.is_some() and in_place."
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "With the resume switch off, the stream of a continuation is not byte-identical to the committed code. The new typed-refusal arm (guard `continuing && !spend.is_spent() && Refused`) fires for every NotSpent continuation. Committed behaviour for a FailedPrecondition, Aborted or NotFound from RunAgent was: publish RUN_DISPATCH_DEGRADED and send agent_dispatch_unavailable with retryable true. Now it sends a typed frame with retryable false and publishes no DEGRADED. Hard rule 1 still holds when EVERY switch is off, because continue_persistent_gate and continue_preflight refuse with continue_disabled first. It does not hold in the state where AGENT_CONTINUE_AFTER_APPROVAL_ENABLED is on and EXECUTION_LOOP_RESUME_ENABLED is off. That is the first step of the documented rollback ('gateway off first'). The lead's B1 text said 'With the switch off the route is byte-identical to the committed one (Ok(launch()) path)'.",
+       "evidence": "sse.rs agentic_run_stream, arm `Ok(Ok(Err(status))) if continuing && !spend.is_spent() && matches!(classify_continue_dispatch_failure(&status), ContinueDispatchFailure::Refused(_))` sits before the committed final arm. continue_preconsume_test frame table rows 'off / FailedPrecondition', 'off / Aborted' and 'off / NotFound' expect typed frames, retryable false and degraded false. s7c-v3.json approach section A lists this openly as exception (e) to byte identity, and the deferred ledger text says 'behaviour change on /continue only'.",
+       "suggested_fix": "No code change if the lead accepts exception (e). The lead should record the acceptance explicitly in the 2026-10-18 ledger entry: the rollback-intermediate state (continue on, resume off) changes the frames of executor refusals. Otherwise, also gate the typed arm on the resume switch so that resume-off is byte-identical."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "The RunAgent request is built (spawn_run_dispatch) only after the gateway has won its consume. A deterministic local construction failure therefore spends the click with nothing sent. The run is not terminalized, the user gets continue_refused, and the run waits out the renewed 15-minute recovery window. The design accepts this, but it can be avoided: the request does not depend on the consume.",
+       "evidence": "In agentic_run_stream, the spent path of the request-construction branch (`if spend.is_spent() { ... continue_refusal_event(.., \"continue_refused\", spend) ...; return; }`) runs inside the stream task. The stream task is launched by the closure that spawn_consume_then_launch calls only after preconsume_refusal returned Ok.",
+       "suggested_fix": "Follow-up only: validate or build the RunAgent request (bearers, metadata) in continue_run before spawn_consume_then_launch, so a construction failure refuses before anything is consumed."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "resume_pair_violations accepts `.same_claim && !replay_is_fenced` as well as `.same_claim && replay_is_fenced`, because the pattern has an optional `!`. It allows the negation because agent.rs needs it for the refusal branch. As a result, a mutation that inverts the ACCEPT condition (accept a same-claim replay only when the ledger is OFF) passes this guard. Only the behavioural agent.rs tests (a_same_claim_replay_is_refused_when_the_ledger_is_off and the table test) would catch it.",
+       "evidence": "`let followed = Regex::new(r\"^\\.\\s*same_claim\\s*&&\\s*!?\\s*replay_is_fenced\\b\")`. agent.rs consume_for_resume has `|| (consumed.already_consumed && consumed.same_claim && replay_is_fenced))` on the accept path and `if consumed.already_consumed && consumed.same_claim && !replay_is_fenced {` on the refusal path.",
+       "suggested_fix": "Tell the two sites apart: require exactly one un-negated `.same_claim && replay_is_fenced` inside the accept expression (the `consumed.consumed ||` disjunction). Add an in-memory mutation row that negates it."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "gateway_consume_violations checks two things: every `omit_call` mention is the literal `true`, and at least one mention exists. It does not check that the mention is inside the one ConsumeApprovalRequest literal in preconsume_request. If the field is dropped from the literal (the default is false, which asks for the full call) while `omit_call: true` survives in some other non-test struct literal, the guard stays green. The unit test sse.rs preconsume_request tests and the integration assertion `consume.omit_call` would still catch it at runtime.",
+       "evidence": "The omit_call loop scans all of `code.text` and only counts `omit_mentions`. The literal check confirms only that the literal sits inside fn preconsume_request.",
+       "suggested_fix": "Require that the `omit_call: true` match lies inside the span of the one literal found in preconsume_request."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/deploy/docker-compose.yml",
+       "issue": "A file neither unit owns, which the spec marks VERIFY ONLY, was edited. The change is one comment hunk; nothing functional changed. The implementer disclosed it under deviations.",
+       "evidence": "git diff: the model-gateway entry comment 'This service reads the variable from S7c-B; until then only this entry exists.' was replaced by 'reads the variable once, in the /continue handler, through loop_resume_enabled (S7c-B; ...)'.",
+       "suggested_fix": "The lead accepts or reverts the comment hunk when staging. No functional effect."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+       "issue": "The handler-level frame table has no Unauthenticated row and no row for a zero-retention trailer on RunAgent (durable_mutation_forbidden) in either switch state. With the switch off, Unauthenticated takes the terminalizing confirmed arm, and a trailer on a FailedPrecondition takes the typed arm. Only the classify unit tests and the arm-order source scan pin these, not the handler.",
+       "evidence": "The `cases` vector in frame_codes_pair_with_the_spend_state_per_switch_state lists FailedPrecondition, Aborted, NotFound, InvalidArgument, PermissionDenied, an unlisted refusal, DeadlineExceeded, unreachable and dropped. It has no Code::Unauthenticated row and no Refusal trailer row.",
+       "suggested_fix": "Add rows 'on/off Unauthenticated' and 'on/off ZDR trailer (durable_mutation_forbidden)', each with its expected terminalization and approval_spent."
+      }
+     ],
+     "checked": [
+      "Read the sse.rs diff: invoke_stream_sse passes NotSpent; agentic_run_stream gains the spend parameter, the continuing flag and connected_payload; the arm order is spent < confirmed < typed < unreachable < final; the spent arm never terminalizes; the typed arm publishes no DEGRADED and says nothing about approval_spent; there are three dispatch_unknown_event sites; the construction failure takes the spent path first.",
+      "continue_run order: continuation_gate, then continue_persistent_gate (refuses ZDR and waived turns before the consume), body check, bearer check, owner check, GetRun, GetApproval, continue_preflight, one loop_resume_enabled read, resume_mode_for, then the launch closure with approval_spend_for inside it, then `if !resume_enabled { return Ok(launch()) }`, then spawn_consume_then_launch.",
+      "The Ok(launch()) path with the switch off: agentic_run_stream gets the same arguments as before; the AgentResume and RunAgentRequest prost bytes equal the committed literal (unit test). The integration test shows no consume and a connected payload with no approval_spent.",
+      "The pre-consume uses the user's session bearer (VerifiedModelBearer), with omit_call true and step_id and action_fingerprint empty. session-core CONSUME_APPROVAL_SQL accepts an empty fingerprint (`$5 = ''`). A spend-only consume returns no call; the executor's Full replay with the same claim gets the call back.",
+      "session-core consume refuses ZDR callers (refuse_zdr_continuation) and non-persistent or waived runs (retention_class predicate, answered NotFound, which the gateway maps to 404 approval_not_found, so nothing is spent).",
+      "Executor replay rule: agent.rs consume_for_resume accepts `already_consumed && same_claim && replay_is_fenced` with `replay_is_fenced = effect::ledger_enabled()` (D1, no attestation field).",
+      "Disconnect: spawn_consume_then_launch detaches consume plus launch; agentic_run_stream ignores a closed tx and follow_agentic_run never aborts the dispatch on a client hang-up.",
+      "preconsume_refusal: Ok(false) gives 409 continuation_already_consumed, including for the same token; a ZDR trailer goes to grpc_status_to_http (catalogue body); no upstream message is echoed on the closed codes. continue_error's debug_assert covers every caller.",
+      "Claim token: no tracing statement in continue_run, the stream or the pre-consume helpers names it or an upstream message.",
+      "Reviewed the B2 guards: gateway_consume_violations, gateway_resume_reader_violations, no_attestation_violations, resume_pair_violations, writer_gate_argument_violations, the store_proofs rows, and the switch_table text change. The builder-guard re-point keeps an accepted-stage check through resume_mode_for's quoted words.",
+      "Reviewed the BFF parity tests in continue_error_vocabulary.rs (BFF list is a subset of the gateway's HTTP list, the difference is {continue_incomplete, missing_bearer}, and the SPA frame tuple equals CONTINUE_FRAME_REFUSALS).",
+      "Read the docker-compose.yml diff: a comment-only change in an unowned file.",
+      "Ran `cargo test -p model-gateway --test continue_preconsume_test`: 7 passed.",
+      "Ran `cargo test -p model-gateway --lib continue_run_tests`: 51 passed.",
+      "Ran `cargo test -p execution-core --test durable_loop_contract`: 23 passed.",
+      "Ran the BFF test `cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary`: 4 passed.",
+      "Ran no docker and no DB-backed tests. Edited no files."
+     ]
+    },
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "No test runs the new branch where request construction fails after the gateway has already spent the approval (agentic_run_stream, `if spend.is_spent()` inside the `Err(error)` arm of spawn_run_dispatch). In that branch the click is spent, nothing is dispatched, no RUN_DISPATCH_DEGRADED is published and the run is not terminalized. Only a source scan checks it (the guard looks for `if spend.is_spent()` before the terminalize call). Nothing in a test checks the frame it sends (continue_refused, approval_spent true, retryable false, run_id named) or that no terminal receipt is written.",
+       "evidence": "sse.rs agentic_run_stream: `Err(error) => { tracing::warn!(..); if spend.is_spent() { ... continue_refusal_event(&request_id, &run.run_id, \"continue_refused\", spend) ... return; } let terminalized = ...terminalize_agent_dispatch_rejection_authenticated(` . The 17-case frame table in tests/continue_preconsume_test.rs (frame_codes_pair_with_the_spend_state_per_switch_state) only covers RunAgent statuses, unreachable and dropped. It has no case for a construction failure.",
+       "suggested_fix": "Add a unit test that drives agentic_run_stream with ApprovalSpend::SpentByGateway and a state whose spawn_run_dispatch fails (for example, a bearer that cannot become metadata). Assert the frame is continue_refused with approval_spent true and retryable false, and that the terminalizer double sees zero receipts. Pair it with the NotSpent case, which must keep the committed terminalizing frame."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+       "issue": "The frame table misses two cases, so the claim that each regime is pinned is incomplete. (1) Unauthenticated, one of the three codes whose handling differs between regimes, is tested in neither switch state. (2) A zero-retention trailer on RunAgent is not tested. That covers the spent durable_mutation_forbidden frame, and the not-spent typed arm reached through a trailer on a code outside the confirmed set (for example Internal or Unavailable).",
+       "evidence": "The cases vector holds FailedPrecondition, Aborted, NotFound, InvalidArgument, PermissionDenied, an unlisted refusal, DeadlineExceeded, unreachable and dropped. It has no Status::unauthenticated and no Refusal trailer. Yet the doc of classify_continue_dispatch_failure says the handler-level continue_preconsume_test pins both regimes for InvalidArgument, Unauthenticated and PermissionDenied.",
+       "suggested_fix": "Add four rows: on and off for Unauthenticated (spent typed frame / agent_dispatch_rejected with one receipt), and on and off for a ZDR catalogue status carried on Internal (spent durable_mutation_forbidden / typed frame without approval_spent, no DEGRADED, no receipt)."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "Behaviour changes with AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on and EXECUTION_LOOP_RESUME_ENABLED off. Before, a FailedPrecondition, Aborted or NotFound from RunAgent on /continue produced a retryable agent_dispatch_unavailable plus RUN_DISPATCH_DEGRADED. Now it produces a typed non-retryable frame. The design asks for this (s7c-v3: 'spent by the gateway or not'), and with every switch off the route is never reached. But the implementer's wording, that with the resume switch off the route is byte-identical, is true only of the request and the first frame. This is also the configuration during a rollback (gateway off first).",
+       "evidence": "The typed arm is guarded by `continuing && !spend.is_spent() && matches!(classify_continue_dispatch_failure(&status), ContinueDispatchFailure::Refused(_))`. In the frame table, 'off / FailedPrecondition' expects typed(\"continue_disabled\") with degraded false. The deferred ledger text does acknowledge it ('behaviour change on /continue only').",
+       "suggested_fix": "Keep the code, but make the ledger and plan rows say precisely that the off-switch identity covers the handler, the request and the connected frame, not the failure frames of a continuation with AGENT_CONTINUE on. That way the rollback runbook does not promise the old retryable frames."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "writer_gate_argument_violations only checks the writer_gate call inside run_rounds. agent.rs has a second production call, in the continuation path, that passes a literal 0 depth and literal true flags: `writer_gate(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)`. The guard neither covers it nor says it is deliberately left out. A delegated child that ever reached that path would not be caught.",
+       "evidence": "grep in agent.rs finds `writer_gate(` at the run_rounds call (about line 1516) and at about line 6057 with a literal `0` depth. The guard runs `find_iter(&agent.skel[open..close])` restricted to fn_span(\"run_rounds\").",
+       "suggested_fix": "Make the guard count every production writer_gate( call. For the continuation call, require either that its function is only reachable at depth 0 (for example, an assertion on ctx.depth) or an explicit allowlist entry with the reason."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "A doc comment is attached to the wrong item. The comment 'A gRPC server that answers ConsumeApproval from a script and nothing else...' used to document ConsumeOnlyServer. It now sits directly above the new `enum ServerBehaviour` and merges with that enum's own doc line, so ConsumeOnlyServer has no doc and the enum's doc describes the server.",
+       "evidence": "In continue_run_tests: `/// A gRPC server that answers ConsumeApproval from a script ... calls one.\\n    /// How the double answers a consume.\\n    #[derive(Clone)]\\n    enum ServerBehaviour {`",
+       "suggested_fix": "Move the first three doc lines back above `struct ConsumeOnlyServer` and update them, since the server now also hangs or acts as single-use."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/deploy/docker-compose.yml",
+       "issue": "A file neither unit owns was edited: one comment hunk on the model-gateway EXECUTION_LOOP_RESUME_ENABLED entry. The edit is harmless and corrects a stale sentence, but it goes beyond the 'verify only' scope.",
+       "evidence": "git diff: the line '# variable from S7c-B; until then only this entry exists.' was replaced by two lines naming loop_resume_enabled and the durable_loop_contract guard. No value changed.",
+       "suggested_fix": "Have the lead accept it explicitly in the commit, or move the correction to the lead's ledger/plan update."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "The task requires no consumed_by_gateway 'in any source', but no_attestation_violations scans only Rust production sources and non-comment proto lines. Generated Go, the BFF and the SPA are not scanned, so a regression there would pass. git grep shows no occurrence today outside this test file.",
+       "evidence": "The implementer's deviation says the scan 'does not scan the generated Go, the BFF or the SPA'. `git grep -il consumed_by_gateway` over Model Plane and verevonv3 src/apps/gateway matches only durable_loop_contract.rs.",
+       "suggested_fix": "Extend the scan to the generated Go (go/gen or wherever the protos land), and to the BFF and SPA through the same cross-plane test reader. Alternatively, state the narrower scope in the guard's doc and in the ledger."
+      }
+     ],
+     "checked": [
+      "git diff (histogram) of sse.rs production part: continue_run wiring, agentic_run_stream arm order (spent < confirmed < typed < unreachable < final), construction-failure spend branch, dispatch_unknown_event sites, connected_payload, continue_resume arity, preconsume_refusal ZDR-trailer passthrough, continue_error debug_assert (all callers' (code,status) pairs are in CONTINUE_HTTP_REFUSALS)",
+      "Switch off path: Ok(launch()) with NotSpent, no consume, mode segment; consumer/request built from clones with no IO; only callers of agentic_run_stream are invoke_stream_sse (NotSpent) and continue_run",
+      "Spend claimed only inside the launch closure; lost/refused consume never reaches the closure; the detached task in spawn_consume_then_launch owns the launch",
+      "Executor side: consume_for_resume is shared by segment and in-place stages and accepts a same-claim replay only with replay_is_fenced = ledger_enabled(), so a pre-consume followed by a segment-mode continuation also works under the coupled flip",
+      "Executor-sourced vocabulary vs build3b-final.json names_for_later_units: all closed tokens present in CONTINUE_EXECUTOR_MESSAGE_TOKENS; in_place_seed_invalid is Internal (unknown)",
+      "durable_loop_contract.rs: histogram diff shows only 23 deleted lines (builder guard re-point, store_proofs row reshaped with the original test kept, switch_table row text, cleaned-once map); no #[test] removed or renamed; 18 -> 23 tests",
+      "tests/continue_preconsume_test.rs read in full for the scenarios: env switches via EnvGuard with serial_test; SingleUse double uses the real replay shape (consumed false, already_consumed true, same_claim true, call only when not omitted); frame table assertions on code, retryable, run_id, approval_spent, DEGRADED, receipts",
+      "Unit test changes in continue_run_tests: only arity updates and the 150 ms delay; no assertion weakened; ConsumeOnlyServer extension keeps Script behaviour for A4 tests",
+      "BFF continue_error_vocabulary.rs: subset-with-equal-status and exact-difference test, SPA frame tuple equality test; SPA contract has the three regimes",
+      "Claim-token logging: new tracing lines log run_id, code, closed token or Debug of the closed enum only",
+      "No consumed_by_gateway anywhere in Model Plane or verevonv3 src/BFF (git grep)",
+      "compose diff: comment-only change",
+      "Ran: cargo test -p model-gateway --test continue_preconsume_test (7 passed); cargo test -p model-gateway --lib continue_run_tests (51 passed); cargo test -p model-gateway --test zdr_posture_matrix (6 passed); cargo test -p execution-core --test durable_loop_contract (23 passed, 60 s); cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary (4 passed). No docker, no DB tests, no edits."
+     ]
+    },
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs (agentic_run_stream, post-response outcome arms)",
+       "issue": "Two frames of a pre-consumed continuation still say retryable: true and carry no approval_spent: agent_run_failed (the run ended failed) and agent_run_state_unknown. The design's invariant says every pre-consumed failure frame is retryable false with approval_spent true, but approach E says post-response frames keep their committed values, and the code follows E. The two statements contradict each other. A client that follows `retryable` literally and does not remember the connected frame's approval_spent re-posts the continue and gets 409 continuation_already_consumed.",
+       "evidence": "sse.rs, after the dispatch result: ChatEvent::Error { code: \"agent_run_failed\", retryable: true } and { code: \"agent_run_state_unknown\", retryable: true } are built without `spend`. The SPA contract does handle the connected frame's approval_spent, but no test pins that these two frames are read together with it. The frame table in tests/continue_preconsume_test.rs covers only Err statuses from RunAgent, not Ok responses with status failed or unknown.",
+       "suggested_fix": "Either add approval_spent: true (and retryable false) to these two frames when spend.is_spent(), as an additive change gated on the gateway's own spend knowledge. Or record in the ledger that the connected frame is the only spent marker for post-response outcomes, fix the invariant wording, and add a frame-table row for an Ok(failed) and an Ok(unknown) response with the switch on."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs (continue_run_tests, ConsumeOnlyServer)",
+       "issue": "The new `ServerBehaviour` enum and its doc line were inserted between the existing doc comment of `ConsumeOnlyServer` and the struct. The comment 'A gRPC server that answers ConsumeApproval from a script and nothing else' now documents `ServerBehaviour`, and `ConsumeOnlyServer` has no doc.",
+       "evidence": "sse.diff hunk at old line 15738: '/// A gRPC server that answers ...' is followed by '/// How the double answers a consume.' and 'enum ServerBehaviour'.",
+       "suggested_fix": "Move the old doc block back onto `ConsumeOnlyServer`."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs (LOOP_RESUME_ENV doc, line ~344)",
+       "issue": "The doc still says the gateway's reader arrives with S7c-B and that until then only its compose entry exists. S7c-B1 and S7c-B2 now provide the reader and the guard. This file belongs to the s7b-hardening unit, which edited this same comment block and left the sentence in place.",
+       "evidence": "Grep for 'only its compose entry' under apps/Model Plane finds only loop_fold.rs:344. Compose (this unit) and sse.rs were updated and no other stale mention remains.",
+       "suggested_fix": "The lead should reword it to say the gateway reads the switch once, in continue_run, through loop_resume_enabled, guarded by durable_loop_contract."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs and tests/continue_preconsume_test.rs",
+       "issue": "Some spent and typed paths are covered only by source scans, not behaviour. (a) The request-construction failure after a spend (continue_refused, no terminalize) has no behavioural test. (b) The frame table has no NotSpent row for an unlisted FailedPrecondition message, which gives continue_refused without approval_spent. (c) No router-level row sends a zero-retention trailer on RunAgent through the typed arm.",
+       "evidence": "The only mentions of the construction branch in tests are scan helpers (arm_text(&code, \"Err(error) => {\", \"let run_started =\")). The frame table rows are limited to FailedPrecondition/Aborted/NotFound/InvalidArgument/PermissionDenied with listed tokens, one unlisted token in the spent regime only, DeadlineExceeded, unreachable and dropped.",
+       "suggested_fix": "Add the three rows, or a unit test that drives the Err(error) branch with a spent state. These are defence-in-depth paths, so this is not blocking."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs (agentic_run_stream, spent Refused path and NotSpent typed arm)",
+       "issue": "RUN_STARTED is published before the dispatch result. A refused continuation (spent or typed) then publishes neither RUN_DISPATCH_DEGRADED nor a terminal envelope, so the metrics stream shows a started run with no closing event until session-core recovery terminalizes it about 15 minutes later. This is what the design specifies ('no DEGRADED publish for Refused'), but its metrics consequence is not recorded.",
+       "evidence": "The RUN_STARTED publish sits after spawn_run_dispatch succeeds; the spent arm publishes DEGRADED only for non-Refused failures; the typed arm publishes nothing.",
+       "suggested_fix": "Record it as a known metrics gap in the ledger text. Optionally publish a content-free closing envelope for a refused continuation."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "Several new guards read execution-core files that the s7b-hardening unit is editing in the same round: agent.rs for replay_is_fenced, the writer_gate call shape and depth: parent.depth + 1, and fold.rs for decide. The writer-gate and replay_is_fenced guards were proved only in memory, never by mutating the production file. The 23 tests are green against the tree as it stood during this review, but a later hardening hunk could move the matched text.",
+       "evidence": "The B2 report says agent.rs and fold.rs were not mutated because the other unit owns them. agent.rs at HEAD+working tree has `let replay_is_fenced = super::effect::ledger_enabled();` and a second writer_gate( call in begin_continuation (depth 0, true, true), which the run_rounds-only guard does not cover. The guard is correct for that call, but it is not held.",
+       "suggested_fix": "The lead should rerun durable_loop_contract once both units have landed. Optionally extend the writer-gate guard to pin the begin_continuation call and its agreement with run_rounds."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/deploy/docker-compose.yml",
+       "issue": "B2 edited a file that neither unit owns, with the spec marking it verify-only. The edit is one comment hunk (gateway entry text). No key or value changed, there is no CR drift, and the guard that reads it passes. It is flagged here only because it is outside the ownership list.",
+       "evidence": "git diff shows one 3-line comment hunk, with 0 CR bytes before and after.",
+       "suggested_fix": "None needed. The lead can accept the hunk."
+      }
+     ],
+     "checked": [
+      "Read the whole sse.rs production diff (continue_run, agentic_run_stream arms, continue_resume arity, helper docs, debug_assert in continue_error) against s7c-v3 approach, invariants and failure_matrix, D1 to D9 and reconcile. Switch off is Ok(launch()) with no consume, mode segment, NotSpent and the committed connected payload. Switch on is one detached task owning consume and launch.",
+      "Arm order of the Ok(Ok(Err(status))) match: spent, confirmed, typed refusal (guarded by continuing && !spent), unreachable, final. The spent arm never terminalizes. The three agent_dispatch_unavailable sites go through dispatch_unknown_event(spend). The construction-failure branch has an early spent path. approval_spend_for is evaluated inside the launch closure, so it is claimed only after a won consume.",
+      "preconsume_refusal against the spec table: ZDR trailer keeps its typed body, FailedPrecondition tokens are closed, every other code is 503. The consume is spend-only (omit_call true, empty step_id and fingerprint) with the session bearer, the same one the executor receives. Cross-checked against session-core consume_approval, consume_approval_with and consume_response: a same-claim replay returns the call only to the claimant, a spend-only consume never reads the call, and a win renews the obligation.",
+      "Executor interface: consume_for_resume accepts a same-claim replay only through replay_is_fenced = effect::ledger_enabled(). All executor message tokens (enforce_resume, Refusal table, session-core consume refusals) are in CONTINUE_EXECUTOR_MESSAGE_TOKENS. in_place_seed_invalid is Internal and classifies as Unknown. session-core claim has no consumed-approval predicate, so a pre-consume does not block the in-place claim. No consumed_by_gateway exists anywhere under apps.",
+      "Read tests/continue_preconsume_test.rs in full: order, switch-off byte identity, lost consume (another token and the same token), refused consumes, same-token race, the 17-case frame table, and disconnect mid-consume. Reviewed the changed sse.rs unit tests: the arity changes weaken no assertion, and the 150 ms delay makes the disconnect test deterministic.",
+      "Read the new durable_loop_contract guards: gateway_consume_violations, spend_gate_violations, refusal_arm_violations, continue_vocabulary_violations, resume_pair_violations, gateway_resume_reader_violations, no_attestation_violations, writer_gate_argument_violations. Read the BFF parity tests and the SPA transport-failure contract. Compose edit is comment-only. Line endings are LF with 0 CR in HEAD and in the working tree for every touched file.",
+      "Ran, with no flakiness seen: model-gateway --test continue_preconsume_test x4 (7 passed each), --lib continue_run_tests x3 (51 passed), --lib full (1857 passed, 4 ignored), --test zdr_posture_matrix (6), execution-core --test durable_loop_contract (23 passed, every_guard 60 s), BFF --test continue_error_vocabulary (4), cargo check --workspace --all-targets --keep-going (no errors). Not run: DB-backed #[ignore] tests (none written by this unit) and docker.",
+      "No Frontend TS file changed in this unit, so the tsc 34 / eslint 1+191 / vitest 7-in-5 baselines are untouched. I did not re-measure them. The mutation tables are the implementers' reports and I did not re-run them. I edited no file."
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --lib (in apps/Model Plane/rust)",
+      "outcome": "exit 0, no warnings, build already fresh (no recompile). 1857 passed, 0 failed, 4 ignored. The 4 ignored are pre-existing environment-gated tests: 3 Redis tests in stream_buffer (need REDIS_URL and probe flags) and 1 A/B helper in source_validation (needs VEREVON_AB_CASES). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_mg_lib.log",
+      "passed": "1857 passed, 0 failed, 4 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_posture_matrix",
+      "outcome": "exit 0. 6 passed, 0 failed, 0 ignored. Matches the 6 #[test] attributes in the file. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_mg_zdr.log",
+      "passed": "6 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test continue_preconsume_test",
+      "outcome": "exit 0. 7 passed, 0 failed, 0 ignored (7.44s). The file has 7 tokio tests (5 plain #[tokio::test], 2 with flavor = multi_thread) and all 7 ran. The file is new and untracked, CRLF, and contains no #[ignore]. Path: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+      "passed": "7 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract (in apps/Model Plane/rust)",
+      "outcome": "exit 0. 23 passed, 0 failed, 0 ignored (60.66s); the 23 #[test] attributes outside string literals all ran. The compose guard in this file reads deploy/docker-compose.yml (COMPOSE constant, line 75) and passes against its current text. The build printed 3 execution-core lib warnings, all present at HEAD: capability_policy.rs:181 unreachable else, approval_delivery_worker.rs:744 verification_result_for unused, runtime_loop/resume.rs:542 decision_closer unused (its only HEAD callers are in-module tests). Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_ec_dlc.log",
+      "passed": "23 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "apps/Frontend Plane/verevonv3: cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+      "outcome": "exit 0, no warnings. src/main.rs unit tests: 647 passed, 0 failed, 1 ignored (onboarding::crawl_preview::stream_e2e::dump_crawl_preview_stream, a diagnostic dump). tests/continue_error_vocabulary.rs: 4 passed. tests/sse_relay_no_allowlist.rs: 3 passed. tests/ssrf_forward_not_fetch.rs: 1 passed. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_gw_all.log",
+      "passed": "655 passed, 0 failed, 1 ignored (647 + 4 + 3 + 1)"
+     },
+     {
+      "command": "apps/Frontend Plane/verevonv3: node_modules/.bin/vitest run src/shared/actions/chat-run-continue-contract.test.ts src/features/chat/components/ChatMessages.continue.test.tsx src/features/chat/components/use-chat-controller.continue-generation.test.ts",
+      "outcome": "exit 0. 3 of 3 files, 51 of 51 tests passed (19.1s). The first file is the unit's contract test; the other two are the existing continue UI tests, run as related coverage. The Frontend TypeScript tree has no uncommitted changes, so these ran against HEAD TypeScript. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_vitest_continue.log",
+      "passed": "51 passed, 0 failed (3 files)"
+     },
+     {
+      "command": "apps/Frontend Plane/verevonv3: pnpm typecheck (tsc -b), baseline 34 errors",
+      "outcome": "exit 1 with 34 'error TS' lines, equal to the baseline, so no new errors. By file: src/shared/api/quarry-client.ts 21, src/features/support/components/RemoteSupportPage.tsx 12, src/shared/api/chat-client.ts 1. By code: TS7006 x20, TS7031 x7, TS2307 x4, TS2488 x1, TS2556 x1, TS6133 x1. None of these files is modified and none is a continue-contract file. No project was skipped. This is the pre-existing baseline, not green in absolute terms. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_tsc.log",
+      "passed": "34 errors, equal to baseline"
+     },
+     {
+      "command": "apps/Frontend Plane/verevonv3: pnpm lint (eslint .), baseline 1 error and 191 warnings",
+      "outcome": "exit 1: 192 problems = 1 error + 191 warnings, equal to the baseline. The one error is src/shared/api/chat-client.ts:945:10, 'failureFeature' is defined but never used (@typescript-eslint/no-unused-vars). That file is unmodified. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_lint.log",
+      "passed": "1 error and 191 warnings, equal to baseline"
+     },
+     {
+      "command": "apps/Model Plane/rust: cargo check --workspace --all-targets --keep-going",
+      "outcome": "exit 0, 0 errors, finished in 1m 38s. 5 warnings, all present at HEAD: the 3 execution-core lib warnings above, plus session-core bin auth.rs:73 (method provider never used) and terminalization.rs:691 (start_managed_run_inner never used; its HEAD callers in grpc.rs at lines 10544 and 10679-10680 are test-only, since the non-test build reports it unused). None come from model-gateway or any unit test target. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/vf_check_ws.log",
+      "passed": "0 errors, 5 pre-existing warnings"
+     },
+     {
+      "command": "Read-only scope and state checks (git status, git diff, git show, git grep, line-ending counts); no edits made",
+      "outcome": "Working tree vs HEAD: modified sse.rs, durable_loop_contract.rs and continue_error_vocabulary.rs (this unit); agent.rs, resume.rs and mp-contracts loop_fold.rs (s7b-hardening); and apps/Model Plane/deploy/docker-compose.yml, which neither unit's ownership list covers. Its diff is comment-only (one comment line replaced by two, referencing loop_resume_enabled and the durable_loop_contract guard), so the lead should confirm who made it: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml. Untracked: continue_preconsume_test.rs (new, CRLF) and .plan-work/. Every modified file is CRLF in both HEAD and the worktree, so there is no line-ending drift; the git CRLF warnings come from core.autocrlf=true. No #[ignore] attributes exist in the unit's test files (the only mentions are comments), so no DB-backed test is in scope here. Tests written or changed by me: none (verify mode; no edits, no commits, no stash). No command failed, so no retries were needed. Tree fingerprint at the end: git diff HEAD sha256 d4950314d866f77f9932a87d66240caffe3c0e0adfda7600ed8f15d043265819, 9 status entries.",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s7b-hardening",
+   "impl": {
+    "summary": "UNIT s7b-hardening is done and verified. Items 1-6 are built test-first and item 7 is recorded as ledger text (see deferred_files). Counts: execution-core lib 1077 -> 1081, with the four new tests listed under tests_added. durable_loop_contract is 18 and unchanged. mp-contracts is 114 and unchanged. Every other suite is unchanged. cargo check --workspace --all-targets --keep-going is clean; the only warnings are pre-existing (decision_closer, verification_result_for, an unreachable else in capability_policy, two in session-core). I ran no docker, no DB-backed test, and wrote none. Nothing was committed.\n\nITEM 1 (done). Added PausedRun::consume_as(consumed, same_claim) plus two tests. an_in_place_resume_through_a_consume_the_executor_wins_runs_end_to_end drives a consume the executor wins (consumed true, already_consumed false, same_claim false) through consume, claim, ledger read, fence at the claimed seq, release reserve, dispatch, finalize and round save, with an in_place loop_resume_stage line. In the same test the ledger-off run is downgraded to stage 1 with a won consume: no claim, no fold RPC, the release dispatched once, and one loop_resume_downgraded line with reason ledger_off. a_consume_lost_to_another_claim_is_refused_before_any_claim_or_dispatch drives a consume lost to another claim (consumed false, already_consumed true, same_claim false), ledger on and off. It is refused with continuation_already_consumed, with no claim, no list, no fold RPC, no reservation, no dispatch, no heartbeat, no inference round, and no continue_replay_refused_ledger_off line.\n\nITEM 2 (done). In stage 1 the call is the only call of the batch, so a read release that dispatches is reserved once whether or not the pre-reserve exists. The one observable only the pre-reserve gives is a read release the pre-pass refused, because it has no phase-2 slot. New test a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run: a lookup_thing release whose arguments miss the schema is reserved under its own class (read), finalized not_run, never dispatched, and a replay ends with continuation_already_consumed and no second model loop. Mutation proof: with the pre-reserve block disabled via `if false && first_of_segment && ctx.effect_ledger`, this test and a_release_rejected_in_phase_one_is_still_reserved_and_closed_not_run go red. The old a_read_release_is_pre_reserved_with_its_own_class_in_stage_one stays green, as the review said; it pins class and order, not existence, and its role is now stated in the new test's rustdoc. agent.rs was restored byte for byte (cmp clean).\n\nITEM 3 (done). New test loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim, with a won consume for ledger_off and a real waived route for waived. Both cases assert no claim, no list, no loop_save and no close_calls, one loop_resume_downgraded line with the right reason (ledger_off, waived), and one loop_resume_stage line with resume_stage stage_one. Helper change: resume_with now delegates to a new resume_on_route(.., waived, ..), which resolves a waived ModelRoute from the shaped request and calls run_agent_with_route; resume_with keeps its signature. Mutation proofs, each restored cmp-clean: `else if false && !ledger_on` makes the ledger_off case red. `else if false && waived` makes the waived case red on the downgrade-line assertion only. The no-claim assertions still held for waived because the pre-claim writer gate (WriterInactive) is a second, independent barrier. Defence in depth confirmed.\n\nITEM 4 (done). SeededCall no longer derives Debug. It has a manual content-free Debug like SeedSlot: step ids, the tool name, output_bytes and failed for a resolved call, never output or error text. It and seeded_call became pub(super) so the resume.rs test can reach them. the_content_bearing_types_debug_without_content now prints SeededCall for each restored slot and for the None slot, and checks that \"found 1 document\" and \"is not offered\" never appear, and that \"Run { step_id: ... }\", \"output_bytes: 16\" and \"Closed\" do. Mutation proof: a Debug that prints the output turns it red; restored cmp-clean.\n\nITEM 5 (done). The rustdoc of publish_plan_transition is moved back above it from above struct Continuation. Stale comments fixed in resume.rs (loop_resume_enabled and resumed_step_id), in agent.rs (the run_agent_with_route fold comment that spoke of the in-place resume as a later reader), and in mp-contracts loop_fold.rs (a test comment that said \"a later build's resume\", and the LOOP_RESUME_ENV doc, which also gained the item-7(c) sentence). I grepped agent.rs, resume.rs, fold.rs, effect.rs, closers.rs and mod.rs for \"removes this allow\", \"no production caller\", \"until S7b\" and similar. No other stale claim was found, and the remaining \"read by the tests only\" notes sit on cfg(test) items and are accurate.\n\nITEM 6 (done). writer_gate keeps `resumed: holds_release && !in_place` exactly (the contract guard's regex still matches). Its rustdoc now says the expression is redundant, names what protects the invariant (the two forced-false sites FoldWriter::seeded and resume::in_place_writer_off, with their agreement test), and says the guard holds it textually only.\n\nITEM 7 (recorded, no code). The text is in deferred_files for (a), (b) and (c), plus one observation (O1).\n\nOBSERVATION O1, not in scope. A pinned or waived stage-1 continuation can never run its release. The synthetic seed round carries no provider_used or model_used, so ctx.route.verify_response stops the run subscription_route_unavailable before the first dispatch. It is unreachable today, because a waived or pinned run is never offered a loop approval. The new waived case therefore asserts only the posture, and a comment in the test says so.\n\nTransient build notes. Cargo contended with another unit's builds; the lock waits cost minutes but there were no LNK1104 errors and no build failures in the other unit's files, so no retry was needed. durable_loop_contract.rs was edited by the other unit this round; it passes 18/18 against my edits. No guard there needed a change because of them.",
+    "files_changed": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+     "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs"
+    ],
+    "tests_added": [
+     "agent::tests::an_in_place_resume_through_a_consume_the_executor_wins_runs_end_to_end (item 1, won consume, ledger on and off)",
+     "agent::tests::a_consume_lost_to_another_claim_is_refused_before_any_claim_or_dispatch (item 1, ledger on and off)",
+     "agent::tests::a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run (item 2)",
+     "agent::tests::loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim (item 3)",
+     "resume::tests::the_content_bearing_types_debug_without_content (extended, item 4)",
+     "test helpers: PausedRun::consume_as and resume_on_route (resume_with now delegates to it)"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -p mp-contracts (baseline, then after)",
+      "outcome": "114 passed, 0 failed, both times"
+     },
+     {
+      "command": "cargo test -p execution-core --lib (baseline, then after)",
+      "outcome": "1077 passed before; 1081 passed after, 0 failed (includes the 300 s hung-child test)"
+     },
+     {
+      "command": "cargo test -p execution-core --tests (baseline, then after)",
+      "outcome": "all suites ok both times; durable_loop_contract 18 passed; lib 1081; every other suite unchanged"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Finished; only pre-existing warnings"
+     },
+     {
+      "command": "mutation: disable the release pre-reserve block in run_rounds",
+      "outcome": "a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run and a_release_rejected_in_phase_one_is_still_reserved_and_closed_not_run red; a_read_release_is_pre_reserved_with_its_own_class_in_stage_one stayed green; restored cmp-clean"
+     },
+     {
+      "command": "mutation batch: SeededCall Debug prints output; select_stage ignores ledger_off and waived; consume_for_resume refuses a won consume and accepts a foreign claim",
+      "outcome": "the Debug test, the won-consume test, the lost-consume test and the downgrade test red; restored cmp-clean"
+     },
+     {
+      "command": "mutation: select_stage ignores waived only",
+      "outcome": "the downgrade test red on the waived case (missing loop_resume_downgraded line); restored cmp-clean"
+     }
+    ],
+    "deviations": [
+     "I used a python one-line replace on agent.rs once (adding pub(super) to `fn seeded_call`) instead of the Edit tool. The result is identical, the file stays LF, and every other change to existing files used Edit. The python scripts used for mutations were mutation checks on files this unit owns and were restored byte for byte.",
+     "SeededCall and seeded_call became pub(super) (they were private) so the extended resume.rs test can print them, as the task asked. No behaviour change.",
+     "Waived case of item 3: the waived stage-1 run ends subscription_route_unavailable before the release dispatches (see O1), so for waived the test asserts the posture (no claim, no fold RPC, one downgrade line, stage_one, status failed) and not the release dispatch. The ledger_off case does assert the dispatch.",
+     "Item 7 (a)-(c) is recorded as ledger text only. I wrote no test for 7(b), whose residual window I describe from reading the code, not from a run."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (append under the 2026-10-18 WS03 S7 entry; the lead applies it)",
+      "content": "### WS03 S7b hardening (2026-10-18): recorded decisions\n\n(a) Fence failures after a won claim are a refusal, not a fallback. Once the in-place resume has claimed the fold, a deterministic failure of the fence save (ContentRefused, StoreOff, InvalidArgument; also Unavailable, Stale and Closed) ends the request with the closed token resume_checkpoint_unavailable. A denial stays resume_forbidden and a ZDR trailer stays the catalogue refusal (fence_refusal). Nothing of the restored round has run. Why not a fallback to stage 1: the claim has already made the fold `resuming` and the consume has spent the click, and a stage-1 segment that ran now would be a second, unfenced continuation of the same pause. The fence is the only thing that lets exactly one claimant dispatch. A deterministic failure (a content refusal, a store switched off, an invalid argument) would fail again for any other claimant, so refusing is honest and retrying cannot help. The cost is a spent click and a stranded `resuming` fold, which the renewed recovery window (D9) and the lease expiry handle. A fallback is taken only BEFORE the claim (the writer-off decision, in_place_writer_off) or for failures the design lists as post-claim fold or ledger unreadability (FoldUnreadable, check_fold failures, LedgerUnavailable, PausedStepUnsettled, LedgerIdentityMismatch), where nothing has been dispatched and D3 leaves the fold alone.\n\n(b) Stage 1 and an ambiguous release pre-reserve. In stage 1 a release pre-reserve that fails, or whose answer is lost, holds the release back (it is not run, whatever its class) and lets the loop go on. The earlier claim that the at-most-one-model-loop-per-approval invariant holds for a read release too is true only when the pre-reserve answered. What bounds it: the consume has a single winner (another claim token is refused with continuation_already_consumed); a same-claim replay is accepted only with the effect ledger on; a second loop needs the same client-chosen claim token twice AND the reserve failing or being lost both times; the released call itself is run by neither; and with the ledger on the later rounds of two loops of one segment compute the same step ids, so an effect of the second loop should meet the first loop's row (AlreadyReserved) and be closed unknown_outcome, not run twice. What does NOT bound it: the duplicated inference rounds, their cost and any duplicated read calls or assistant messages; and the post-claim fallback path (D3), where a lapsed 120 s lease lets a same-claim retry claim the OLD pause again and run it beside or after a stage-1 loop that has moved the run on (reconcile L1 refuses only when the release row exists, and stage 1 holds no row after an ambiguous reserve). The gateway's 409-first rule (D1) makes this hard to reach through the gateway; a non-gateway same-claim caller can reach it. The in-place stage does not have the window: it ends with resume_checkpoint_unavailable and dispatches nothing. Follow-up, not built: end the stage-1 request without running further rounds after an ambiguous pre-reserve, as the in-place stage already does, which would make INV-02 hold whatever the ledger answers. It would change stage-1 behaviour with the switches on, so it needs its own decision.\n\n(c) A deliberate, log-only change. With AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on and every S7 switch off, a continuation (a `segment` request included) logs one content-free info line, loop_resume_stage {run_id, resume_stage: stage_one, fallback_reason: \"\"}; a `loop` request also logs loop_resume_downgraded before the consume (and still logs it when the consume then refuses). Runtime results are unchanged. With every switch off, continue included, grpc.rs refuses continue_disabled first and no line is reached, so the byte-identical rule holds for the shipped defaults. The earlier statement that the only reachable difference was one warn line is superseded by this one.\n\nO1 (observation, not decided). A pinned or waived stage-1 continuation never reaches its release: the synthetic seed round carries no provider_used or model_used, and ModelRoute::verify_response stops the run subscription_route_unavailable before the first dispatch. It is unreachable today, since a waived or pinned run is never offered a loop approval (the pause site makes it cold), and a continue for one is downgraded or refused. If pinned continuations are ever enabled, the seed needs the route's own provider and model."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "UNIT s7b-hardening is done and verified. Items 1-6 are built test-first and item 7 is recorded as ledger text (see deferred_files). Counts: execution-core lib 1077 -> 1081, with the four new tests listed under tests_added. durable_loop_contract is 18 and unchanged. mp-contracts is 114 and unchanged. Every other suite is unchanged. cargo check --workspace --all-targets --keep-going is clean; the only warnings are pre-existing (decision_closer, verification_result_for, an unreachable else in capability_policy, two in session-core). I ran no docker, no DB-backed test, and wrote none. Nothing was committed.\n\nITEM 1 (done). Added PausedRun::consume_as(consumed, same_claim) plus two tests. an_in_place_resume_through_a_consume_the_executor_wins_runs_end_to_end drives a consume the executor wins (consumed true, already_consumed false, same_claim false) through consume, claim, ledger read, fence at the claimed seq, release reserve, dispatch, finalize and round save, with an in_place loop_resume_stage line. In the same test the ledger-off run is downgraded to stage 1 with a won consume: no claim, no fold RPC, the release dispatched once, and one loop_resume_downgraded line with reason ledger_off. a_consume_lost_to_another_claim_is_refused_before_any_claim_or_dispatch drives a consume lost to another claim (consumed false, already_consumed true, same_claim false), ledger on and off. It is refused with continuation_already_consumed, with no claim, no list, no fold RPC, no reservation, no dispatch, no heartbeat, no inference round, and no continue_replay_refused_ledger_off line.\n\nITEM 2 (done). In stage 1 the call is the only call of the batch, so a read release that dispatches is reserved once whether or not the pre-reserve exists. The one observable only the pre-reserve gives is a read release the pre-pass refused, because it has no phase-2 slot. New test a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run: a lookup_thing release whose arguments miss the schema is reserved under its own class (read), finalized not_run, never dispatched, and a replay ends with continuation_already_consumed and no second model loop. Mutation proof: with the pre-reserve block disabled via `if false && first_of_segment && ctx.effect_ledger`, this test and a_release_rejected_in_phase_one_is_still_reserved_and_closed_not_run go red. The old a_read_release_is_pre_reserved_with_its_own_class_in_stage_one stays green, as the review said; it pins class and order, not existence, and its role is now stated in the new test's rustdoc. agent.rs was restored byte for byte (cmp clean).\n\nITEM 3 (done). New test loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim, with a won consume for ledger_off and a real waived route for waived. Both cases assert no claim, no list, no loop_save and no close_calls, one loop_resume_downgraded line with the right reason (ledger_off, waived), and one loop_resume_stage line with resume_stage stage_one. Helper change: resume_with now delegates to a new resume_on_route(.., waived, ..), which resolves a waived ModelRoute from the shaped request and calls run_agent_with_route; resume_with keeps its signature. Mutation proofs, each restored cmp-clean: `else if false && !ledger_on` makes the ledger_off case red. `else if false && waived` makes the waived case red on the downgrade-line assertion only. The no-claim assertions still held for waived because the pre-claim writer gate (WriterInactive) is a second, independent barrier. Defence in depth confirmed.\n\nITEM 4 (done). SeededCall no longer derives Debug. It has a manual content-free Debug like SeedSlot: step ids, the tool name, output_bytes and failed for a resolved call, never output or error text. It and seeded_call became pub(super) so the resume.rs test can reach them. the_content_bearing_types_debug_without_content now prints SeededCall for each restored slot and for the None slot, and checks that \"found 1 document\" and \"is not offered\" never appear, and that \"Run { step_id: ... }\", \"output_bytes: 16\" and \"Closed\" do. Mutation proof: a Debug that prints the output turns it red; restored cmp-clean.\n\nITEM 5 (done). The rustdoc of publish_plan_transition is moved back above it from above struct Continuation. Stale comments fixed in resume.rs (loop_resume_enabled and resumed_step_id), in agent.rs (the run_agent_with_route fold comment that spoke of the in-place resume as a later reader), and in mp-contracts loop_fold.rs (a test comment that said \"a later build's resume\", and the LOOP_RESUME_ENV doc, which also gained the item-7(c) sentence). I grepped agent.rs, resume.rs, fold.rs, effect.rs, closers.rs and mod.rs for \"removes this allow\", \"no production caller\", \"until S7b\" and similar. No other stale claim was found, and the remaining \"read by the tests only\" notes sit on cfg(test) items and are accurate.\n\nITEM 6 (done). writer_gate keeps `resumed: holds_release && !in_place` exactly (the contract guard's regex still matches). Its rustdoc now says the expression is redundant, names what protects the invariant (the two forced-false sites FoldWriter::seeded and resume::in_place_writer_off, with their agreement test), and says the guard holds it textually only.\n\nITEM 7 (recorded, no code). The text is in deferred_files for (a), (b) and (c), plus one observation (O1).\n\nOBSERVATION O1, not in scope. A pinned or waived stage-1 continuation can never run its release. The synthetic seed round carries no provider_used or model_used, so ctx.route.verify_response stops the run subscription_route_unavailable before the first dispatch. It is unreachable today, because a waived or pinned run is never offered a loop approval. The new waived case therefore asserts only the posture, and a comment in the test says so.\n\nTransient build notes. Cargo contended with another unit's builds; the lock waits cost minutes but there were no LNK1104 errors and no build failures in the other unit's files, so no retry was needed. durable_loop_contract.rs was edited by the other unit this round; it passes 18/18 against my edits. No guard there needed a change because of them.",
+     "files_changed": [
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+      "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+      "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs"
+     ],
+     "tests_added": [
+      "agent::tests::an_in_place_resume_through_a_consume_the_executor_wins_runs_end_to_end (item 1, won consume, ledger on and off)",
+      "agent::tests::a_consume_lost_to_another_claim_is_refused_before_any_claim_or_dispatch (item 1, ledger on and off)",
+      "agent::tests::a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run (item 2)",
+      "agent::tests::loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim (item 3)",
+      "resume::tests::the_content_bearing_types_debug_without_content (extended, item 4)",
+      "test helpers: PausedRun::consume_as and resume_on_route (resume_with now delegates to it)"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -p mp-contracts (baseline, then after)",
+       "outcome": "114 passed, 0 failed, both times"
+      },
+      {
+       "command": "cargo test -p execution-core --lib (baseline, then after)",
+       "outcome": "1077 passed before; 1081 passed after, 0 failed (includes the 300 s hung-child test)"
+      },
+      {
+       "command": "cargo test -p execution-core --tests (baseline, then after)",
+       "outcome": "all suites ok both times; durable_loop_contract 18 passed; lib 1081; every other suite unchanged"
+      },
+      {
+       "command": "cargo check --workspace --all-targets --keep-going",
+       "outcome": "Finished; only pre-existing warnings"
+      },
+      {
+       "command": "mutation: disable the release pre-reserve block in run_rounds",
+       "outcome": "a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run and a_release_rejected_in_phase_one_is_still_reserved_and_closed_not_run red; a_read_release_is_pre_reserved_with_its_own_class_in_stage_one stayed green; restored cmp-clean"
+      },
+      {
+       "command": "mutation batch: SeededCall Debug prints output; select_stage ignores ledger_off and waived; consume_for_resume refuses a won consume and accepts a foreign claim",
+       "outcome": "the Debug test, the won-consume test, the lost-consume test and the downgrade test red; restored cmp-clean"
+      },
+      {
+       "command": "mutation: select_stage ignores waived only",
+       "outcome": "the downgrade test red on the waived case (missing loop_resume_downgraded line); restored cmp-clean"
+      }
+     ],
+     "deviations": [
+      "I used a python one-line replace on agent.rs once (adding pub(super) to `fn seeded_call`) instead of the Edit tool. The result is identical, the file stays LF, and every other change to existing files used Edit. The python scripts used for mutations were mutation checks on files this unit owns and were restored byte for byte.",
+      "SeededCall and seeded_call became pub(super) (they were private) so the extended resume.rs test can print them, as the task asked. No behaviour change.",
+      "Waived case of item 3: the waived stage-1 run ends subscription_route_unavailable before the release dispatches (see O1), so for waived the test asserts the posture (no claim, no fold RPC, one downgrade line, stage_one, status failed) and not the release dispatch. The ledger_off case does assert the dispatch.",
+      "Item 7 (a)-(c) is recorded as ledger text only. I wrote no test for 7(b), whose residual window I describe from reading the code, not from a run."
+     ],
+     "blockers": [],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (append under the 2026-10-18 WS03 S7 entry; the lead applies it)",
+       "content": "### WS03 S7b hardening (2026-10-18): recorded decisions\n\n(a) Fence failures after a won claim are a refusal, not a fallback. Once the in-place resume has claimed the fold, a deterministic failure of the fence save (ContentRefused, StoreOff, InvalidArgument; also Unavailable, Stale and Closed) ends the request with the closed token resume_checkpoint_unavailable. A denial stays resume_forbidden and a ZDR trailer stays the catalogue refusal (fence_refusal). Nothing of the restored round has run. Why not a fallback to stage 1: the claim has already made the fold `resuming` and the consume has spent the click, and a stage-1 segment that ran now would be a second, unfenced continuation of the same pause. The fence is the only thing that lets exactly one claimant dispatch. A deterministic failure (a content refusal, a store switched off, an invalid argument) would fail again for any other claimant, so refusing is honest and retrying cannot help. The cost is a spent click and a stranded `resuming` fold, which the renewed recovery window (D9) and the lease expiry handle. A fallback is taken only BEFORE the claim (the writer-off decision, in_place_writer_off) or for failures the design lists as post-claim fold or ledger unreadability (FoldUnreadable, check_fold failures, LedgerUnavailable, PausedStepUnsettled, LedgerIdentityMismatch), where nothing has been dispatched and D3 leaves the fold alone.\n\n(b) Stage 1 and an ambiguous release pre-reserve. In stage 1 a release pre-reserve that fails, or whose answer is lost, holds the release back (it is not run, whatever its class) and lets the loop go on. The earlier claim that the at-most-one-model-loop-per-approval invariant holds for a read release too is true only when the pre-reserve answered. What bounds it: the consume has a single winner (another claim token is refused with continuation_already_consumed); a same-claim replay is accepted only with the effect ledger on; a second loop needs the same client-chosen claim token twice AND the reserve failing or being lost both times; the released call itself is run by neither; and with the ledger on the later rounds of two loops of one segment compute the same step ids, so an effect of the second loop should meet the first loop's row (AlreadyReserved) and be closed unknown_outcome, not run twice. What does NOT bound it: the duplicated inference rounds, their cost and any duplicated read calls or assistant messages; and the post-claim fallback path (D3), where a lapsed 120 s lease lets a same-claim retry claim the OLD pause again and run it beside or after a stage-1 loop that has moved the run on (reconcile L1 refuses only when the release row exists, and stage 1 holds no row after an ambiguous reserve). The gateway's 409-first rule (D1) makes this hard to reach through the gateway; a non-gateway same-claim caller can reach it. The in-place stage does not have the window: it ends with resume_checkpoint_unavailable and dispatches nothing. Follow-up, not built: end the stage-1 request without running further rounds after an ambiguous pre-reserve, as the in-place stage already does, which would make INV-02 hold whatever the ledger answers. It would change stage-1 behaviour with the switches on, so it needs its own decision.\n\n(c) A deliberate, log-only change. With AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on and every S7 switch off, a continuation (a `segment` request included) logs one content-free info line, loop_resume_stage {run_id, resume_stage: stage_one, fallback_reason: \"\"}; a `loop` request also logs loop_resume_downgraded before the consume (and still logs it when the consume then refuses). Runtime results are unchanged. With every switch off, continue included, grpc.rs refuses continue_disabled first and no line is reached, so the byte-identical rule holds for the shipped defaults. The earlier statement that the only reachable difference was one warn line is superseded by this one.\n\nO1 (observation, not decided). A pinned or waived stage-1 continuation never reaches its release: the synthetic seed round carries no provider_used or model_used, and ModelRoute::verify_response stops the run subscription_route_unavailable before the first dispatch. It is unreachable today, since a waived or pinned run is never offered a loop approval (the pause site makes it cold), and a continue for one is downgraded or refused. If pinned continuations are ever enabled, the seed needs the route's own provider and model."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "high",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (deferred ledger text 7(b), grounded in tool_step_id)",
+       "issue": "The recorded bound for the stage-1 ambiguous-reserve window is wrong: it says the later rounds of two loops of one segment 'compute the same step ids', so a second loop's effect 'should meet the first loop's row (AlreadyReserved)' and close unknown_outcome. Step ids are not deterministic across two independent model loops.",
+       "evidence": "tool_step_id(prefix, seq, call) formats `{prefix}tool_{seq}_{call.id or call.name}`. call.id is the provider's tool-call id, chosen anew by each inference run. Two loops that both lost the release reserve will in general produce different step ids, so different ledger action_ids and no AlreadyReserved. Each loop can then dispatch the same effectful call (duplicate effect). Only a provider that emits an empty id, or the same id twice, gets the claimed fence. The same text also says the released call is 'run by neither' loop. That holds only if the reserve fails both times: if the first reserve fails without committing and the second succeeds, the second loop runs the release.",
+       "suggested_fix": "Do not record the 'same step ids' bound as a mitigation. State that with real providers the second loop's effects are NOT fenced (what is bounded is the release call and the consume's single winner, nothing else). Mark the INV-02 gap open. Take the follow-up the report names (end the stage-1 request without running further rounds after an ambiguous pre-reserve, as the in-place stage does) as a tracked item, not a 'should'."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+       "issue": "The LOOP_RESUME_ENV rustdoc this unit edited now says the gateway reader 'arrives with S7c-B; until then only its compose entry exists and the executor takes the consume itself'. The same round puts the reader in the tree, so the sentence is stale on arrival. It is the same kind of stale-comment defect item 5 was meant to remove. The ledger text and the new test rustdoc ('the only production path until the gateway pre-consumes') have the same time-bound claim.",
+       "evidence": "model-gateway/src/sse.rs:14262 `let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();` in continue_run, followed by resume_mode_for(resume_enabled, detail.resumable). This is the other unit's uncommitted diff to sse.rs. HEAD's sse.rs has no such call (grep of the HEAD blob gave nothing).",
+       "suggested_fix": "Reword to a statement that stays true: 'with the gateway switch off, or before its pre-consume is wired, the executor takes the consume itself'. Reword the test rustdoc and ledger text the same way. Re-grep once the sibling unit lands."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (test loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim, waived case)",
+       "issue": "The waived case pins that a waived continuation consumes the approval and runs as stage 1. It asserts only `status == \"failed\"`, not the reason, and the 'subscription_route_unavailable' explanation (O1) is never asserted. begin_continuation has no waived refusal: select_stage downgrades and consume_for_resume runs before any posture check. So a waived /continue that is ever offered spends the click and then fails, a click spent for nothing. The rule in force is that a waived run must never keep a consume or continue; its only guard is the cold pause site.",
+       "evidence": "The test asserts `r.consume_calls.len() == 1` for the waived case, `assert_eq!(response.status, \"failed\", ...)` and nothing about the cause. begin_continuation: select_stage(.., route.is_waived()) gives Segment(Some(Waived)), then `consume_for_resume(...)` always runs. Any failure (including an unrelated one) satisfies the waived assertion, so the 'posture' it claims to hold is only the downgrade line and the absence of claim and fold RPCs.",
+       "suggested_fix": "Assert the cause (the response error or terminal reason is subscription_route_unavailable), so a different failure cannot satisfy the case. Record as a lead decision whether a waived continue should be REFUSED before the consume rather than downgraded, so no click is spent. Until then name the test and O1 so a reader does not take it as proof that a waived run cannot consume."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs (test the_content_bearing_types_debug_without_content)",
+       "issue": "The new `\"output_bytes: 16\"` positive assertion is vacuous for SeededCall. SeedSlot's own Debug (resume.rs ~:963) already prints `output_bytes: 16` into the same `printed` buffer, so it passes even if SeededCall::Resolved's Debug printed nothing or something else. The shape of SeededCall::Resolved's Debug is therefore unpinned.",
+       "evidence": "`impl Debug for SeedSlot` prints `.field(\"output_bytes\", &output.len())` and the test appends `{slot:?}` before `{call:?}`. The negative content checks ('found 1 document', 'is not offered') are real and went red under the implementer's mutation. Only the positive shape check is vacuous.",
+       "suggested_fix": "Format the SeededCall Debug into its own string and assert on that string (`Resolved { step_id: .., output_bytes: 16, failed: false, ..`), or assert the substring count is 2."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "Process deviation from hard rule 6 (existing files edited only with the Edit tool): a python one-line replace was used to add `pub(super)` to `fn seeded_call`. It is disclosed. I found no content problem. Line endings are LF in all three files, as they were at HEAD.",
+       "evidence": "The report's deviations list. grep -c $'\\r' gives 0 for agent.rs, resume.rs and loop_fold.rs, and 0 at HEAD.",
+       "suggested_fix": "None needed beyond noting it. Production behaviour is unchanged: the diff against HEAD in these three files is tests, doc comments, the manual SeededCall Debug (PartialEq/Eq kept), and the moved publish_plan_transition doc."
+      }
+     ],
+     "checked": [
+      "Read the full git diff of agent.rs, resume.rs and loop_fold.rs. The only production-code change is SeededCall (manual content-free Debug, derive PartialEq/Eq kept, now pub(super)). Everything else is tests, rustdoc and moved comments, so with every switch off behaviour is unchanged. LF line endings preserved.",
+      "Ran the seven new or extended tests: all pass (an_in_place_resume_through_a_consume_the_executor_wins..., a_consume_lost_to_another_claim..., a_read_release_rejected_in_phase_one..., a_read_release_is_pre_reserved..., a_release_rejected_in_phase_one_is_still_reserved..., loop_mode_on_a_ledger_off_or_a_waived_run..., the_content_bearing_types_debug_without_content). Also ran cargo test -p mp-contracts (114 ok) and the durable_loop_contract suite (18 ok). I did NOT rerun the whole execution-core lib or cargo check --workspace, and ran no mutation (read-only review). I reasoned about the item-2 mutation from the code: with the pre-reserve removed, a pre-pass-refused read release gets no reservation, so the new test's reservations.len()==1 fails.",
+      "Item 1: won-consume and lost-consume paths are driven through begin_continuation / consume_for_resume. The lost consume is refused continuation_already_consumed with no claim, list, fold RPC, reservation, dispatch, heartbeat or model round, for ledger on and off. consume_for_resume's acceptance rule `consumed || (already_consumed && same_claim && ledger_enabled)` matches the test's expectations.",
+      "Item 2: the observable is valid. A refused read release has no phase-2 slot, and only the pre-reserve block (Created and not release_dispatches, then finalize not_run) gives it a row. The replay-ends-at-ledger half goes through ReserveOutcome::AlreadyReserved.",
+      "Item 3: select_stage's order (resume, checkpoint, ledger, zdr, waived) matches the cases. The waived and ledger_off downgrade lines are asserted, with no claim, list or fold saves. Weakness reported above.",
+      "Item 5: grepped execution-core src and mp-contracts for stale 'removes this allow', 'no production caller' and 'until S7' claims. None remain in agent.rs, resume.rs, fold.rs, effect.rs, closers.rs or mod.rs. publish_plan_transition's doc is back above it. A new stale claim was introduced (LOOP_RESUME_ENV).",
+      "Item 6: writer_gate doc is accurate. The agreement of FoldWriter::seeded and in_place_writer_off is what protects the invariant.",
+      "Item 7(a): matches fence_refusal (Denied gives Forbidden, NotPersistent gives DurableMutationForbidden, the rest CheckpointUnavailable) and the in-place pre-reserve Err gives CheckpointUnavailable. Item 7(c): matches begin_continuation (the stage_one line is always logged, loop_resume_downgraded precedes the consume) and grpc.rs enforce_resume (continue_disabled first). Item 7(b): the bound is wrong, see the high finding.",
+      "Credentials, claim token and content in logs: the new log lines (loop_resume_stage, loop_resume_downgraded, resume_fallback) carry only run_id and closed tokens. The claim token is never logged in the changed code. The SeededCall Debug is content-free and its content checks are real."
+     ]
+    },
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/docs/decisions/ledger.md (deferred text 7(a) in the implementer report)",
+       "issue": "The reason the deferred ledger text 7(a) gives for refusing does not hold together. It says a stage-1 fallback after a won claim 'would be a second, unfenced continuation of the same pause'. Yet the same paragraph keeps post-claim fallbacks to stage 1 for FoldUnreadable, check_fold failures, LedgerUnavailable, PausedStepUnsettled and LedgerIdentityMismatch. All of those also come after the claim has made the fold `resuming` and the click is spent. For both groups nothing has been dispatched. So 'unfenced second continuation' cannot be what tells the two apart. The only reason that does is that a deterministic failure would fail again for any claimant.",
+       "evidence": "begin_continuation: restore_continuation's Err(Fallback) goes to build_segment for every RestoreFailure, including the ones after the claim. In run_rounds, the save_fence error goes through resume::fence_refusal (resume.rs), which maps every SaveError except Denied and NotPersistent to Refusal::CheckpointUnavailable. The 7(a) text says: 'a stage-1 segment that ran now would be a second, unfenced continuation of the same pause. The fence is the only thing that lets exactly one claimant dispatch.'",
+       "suggested_fix": "Rewrite 7(a) so the refuse-or-fallback split rests on one stated reason: a fence failure is a refusal because it is deterministic, or because it happens after the restored round is committed to the fence. Then either drop the 'unfenced second continuation' argument, or say why it does not apply to the post-claim fallbacks D3 allows."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+       "issue": "In the_content_bearing_types_debug_without_content, the new positive assertion \"output_bytes: 16\" passes without SeededCall printing anything, because SeedSlot's own Debug (pushed for the same slot one line earlier) already prints it. Of the new 'shown' strings, only \"Run { step_id: ... }\" is unique to SeededCall. The content-absence half of the test is sound (the mutation proof covers it), but the positive half does not show that SeededCall's Resolved arm prints its counts.",
+       "evidence": "resume.rs SeedSlot Debug: `.field(\"output_bytes\", &output.len())`. The test pushes both `{slot:?}` and `{call:?}` into one `printed` string and then checks `printed.contains(\"output_bytes: 16\")`.",
+       "suggested_fix": "Format the SeededCall values into their own string and assert on that, e.g. that it contains `Resolved { step_id:` together with `output_bytes: 16` and `failed: true` for the refused slot."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "In loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim, the waived case only checks `response.status == \"failed\"`. It does not check why the run failed (the comment says subscription_route_unavailable). Any later regression that fails a waived stage-1 segment for some other reason would still pass. What the case pins is the retention posture (no claim, no fold RPC, one downgrade line). It says nothing about how the segment ends.",
+       "evidence": "`if waived { assert_eq!(response.status, \"failed\", \"{reason}\"); }` The comment in the test names subscription_route_unavailable, but no assertion checks it.",
+       "suggested_fix": "Also assert the closed failure token or error code in the response (subscription_route_unavailable), so O1 is pinned as observed. A future fix to the seed's provider_used/model_used would then turn this test red on purpose and get noticed."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "The new waived case asserts that a WAIVED run makes the executor's own consume (`consume_calls.len() == 1`, 'the executor's own consume'), and that consume carries the call (omit_call false). Hard rule 1 says waived runs never persist a consume. The behaviour comes from committed begin_continuation code: select_stage only downgrades and consume_for_resume always runs. It is not caused by this diff. But the test now records it as the expected behaviour rather than flagging it. It is unreachable today only because a waived run is never offered a loop approval (a_waived_run_never_offers_a_loop_approval).",
+       "evidence": "begin_continuation calls consume_for_resume unconditionally after select_stage. The test asserts `assert_eq!(r.consume_calls.len(), 1, \"{reason}: the executor's own consume\")` for reason == \"waived\".",
+       "suggested_fix": "Leave the assertion as is, but add a comment, plus a line in the deferred ledger text, saying that a waived continuation would consume (and persist the call) if one ever arrived. Record a follow-up: refuse a continue for a waived run before the consume, which is already true in effect because the approval is cold."
+      }
+     ],
+     "checked": [
+      "git diff of agent.rs, resume.rs and loop_fold.rs (the three files this unit claims). The production changes are limited to SeededCall: a manual content-free Debug, pub(super) visibility, and a pub(super) seeded_call. The rest are doc comments. No runtime behaviour changes, so the byte-identical rule holds with every switch off.",
+      "SeededCall's derive(Debug) was removed and replaced by a manual impl. The existing assert_eq! uses still compile. No usage crosses a crate.",
+      "resume_with keeps its signature and delegates to resume_on_route. PausedRun::consume_as is used by three tests. No struct-literal or trait-double breakage.",
+      "Item 1: the won-consume test drives consumed=true, already_consumed=false, same_claim=false through claim, list, pre_effect fence at claimed_seq, reserve, dispatch, finalize and round save, and logs in_place. With the ledger off it downgrades with reason ledger_off. The lost-consume test hits the consume_for_resume refusal (already_consumed && !same_claim) before any claim, fold RPC, reservation, dispatch or heartbeat, with the ledger on and off.",
+      "Item 2: the new read-release test fails without the pre-reserve, because a release the pre-pass refused has no phase-2 slot, and the replay then needs AlreadyReserved to avoid a second model loop. This also pins D6 (reserved whatever its class) for the read class.",
+      "Item 3: select_stage's order (resume, checkpoint, ledger, zdr, waived) is consistent with the test. A mutation that ignores waived would produce WriterInactive plus a resume_fallback line, which the test rejects.",
+      "Item 5: grep of runtime_loop/{agent,resume,fold,effect,closers,mod}.rs and loop_fold.rs for 'step 9', 'no production caller', 'removes this allow', 'until S7b', 'later build' and dead_code allows. Nothing stale is left beyond a section header. The publish_plan_transition rustdoc is back above its fn, and Continuation keeps its own doc.",
+      "Item 6: the comment's claims check out. in_place_writer_off sets `resumed: false`, FoldWriter::seeded sets `resumed: false`, and restore_continuation calls writer_gate(.., true, true).",
+      "Item 7: the deferred text agrees with the code for fence_refusal (Denied \u2192 Forbidden, NotPersistent \u2192 DurableMutationForbidden, else CheckpointUnavailable) and for the consume gate's same-claim/ledger rule. (a) has an inconsistent rationale (finding above).",
+      "Line endings: the working copies are uniformly CRLF (0 lines without CR in all three files). The HEAD blobs are LF-normalised. No mixed endings.",
+      "Ran: cargo test -p execution-core --lib filtered on the new and related tests: 15 passed, 1066 filtered out (1081 total, matching the reported count). I did not rerun the full suites or cargo check --workspace. I edited no file and ran no docker and no DB-backed test."
+     ]
+    }
+   ],
+   "blocking": [
+    {
+     "severity": "high",
+     "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (deferred ledger text 7(b), grounded in tool_step_id)",
+     "issue": "The recorded bound for the stage-1 ambiguous-reserve window is wrong: it says the later rounds of two loops of one segment 'compute the same step ids', so a second loop's effect 'should meet the first loop's row (AlreadyReserved)' and close unknown_outcome. Step ids are not deterministic across two independent model loops.",
+     "evidence": "tool_step_id(prefix, seq, call) formats `{prefix}tool_{seq}_{call.id or call.name}`. call.id is the provider's tool-call id, chosen anew by each inference run. Two loops that both lost the release reserve will in general produce different step ids, so different ledger action_ids and no AlreadyReserved. Each loop can then dispatch the same effectful call (duplicate effect). Only a provider that emits an empty id, or the same id twice, gets the claimed fence. The same text also says the released call is 'run by neither' loop. That holds only if the reserve fails both times: if the first reserve fails without committing and the second succeeds, the second loop runs the release.",
+     "suggested_fix": "Do not record the 'same step ids' bound as a mitigation. State that with real providers the second loop's effects are NOT fenced (what is bounded is the release call and the consume's single winner, nothing else). Mark the INV-02 gap open. Take the follow-up the report names (end the stage-1 request without running further rounds after an ambiguous pre-reserve, as the in-place stage does) as a tracked item, not a 'should'."
+    }
+   ],
+   "fix": {
+    "summary": "Fix round for s7b-hardening: the single finding (high, ledger text 7(b)) is REAL and FIXED. I confirmed it in agent.rs. tool_step_id formats \"{prefix}tool_{seq}_{call.id or call.name}\". call.id is the provider's tool-call id, chosen anew by each inference run, and step_prefix is only \"s{segment}.\" (or the delegating step id for subagents). So two independent stage-1 loops of one segment do not in general produce the same step ids or ledger action_ids. They therefore do not meet AlreadyReserved on each other, and a second loop can dispatch the same effectful call again. Only a provider that emits an empty or repeated id gets the fence. The \"run by neither\" claim was also wrong: it holds only if the reserve fails both times. If the first reserve fails without committing and the second succeeds, the second loop runs the release. No code in the tree carried the \"same step ids\" claim, so the correction is the replacement ledger text 7(b) below, plus one comment-only edit in agent.rs at the release_held_back site (the Err(reason) arm of the pre-reserve in run_rounds). That comment now says stage 1 keeps a window INV-02 does not close, that the later rounds of two loops are not fenced because step ids end in the provider's tool-call id, and that it is open and tracked. No behaviour changed, so there was no test to write first. Two existing tests pin what is true: a_same_claim_replay_with_a_read_release_runs_one_model_loop (pre-reserve answered) and the ambiguous-reserve test, and both stay green. I wrote no test for the window itself: pinning it would mean asserting the unfenced behaviour as correct, and the real fix is a follow-up that needs its own decision. Verification after the edit: mp-contracts 114 passed; execution-core --lib 1081 passed (unchanged); execution-core --tests every suite ok, durable_loop_contract 18 passed; cargo check --workspace --all-targets --keep-going finished with only the pre-existing warnings. Docker was not run, no DB-backed test was written or run, nothing was committed. Items 1-6 and 7(a), 7(c), O1 from the previous report stand unchanged. Item 7(b) is superseded by the replacement text in deferred_files (the lead should apply that text in place of the earlier 7(b)).",
+    "files_changed": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (comment-only hunk at the release_held_back site, in addition to the earlier round's changes)"
+    ],
+    "tests_added": [],
+    "commands_run": [
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "1081 passed, 0 failed (includes the 300 s hung-child test)"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "114 passed, 0 failed"
+     },
+     {
+      "command": "cargo test -p execution-core --tests",
+      "outcome": "all suites ok; durable_loop_contract 18 passed; lib 1081; no failures"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "Finished; only pre-existing warnings (3 in execution-core lib)"
+     }
+    ],
+    "deviations": [
+     "The fix is comment and ledger text only: the finding concerned a recorded claim, not behaviour, so there was no red-then-green test. I did not add a test that pins the unfenced behaviour, because that would assert a known gap as intended.",
+     "No LNK1104 or build failures occurred this round; cargo only waited on the lock."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (append under the 2026-10-18 WS03 S7 entry; REPLACES item (b) of the earlier S7b hardening text; items (a), (c) and O1 stand)",
+      "content": "(b) Stage 1 and an ambiguous release pre-reserve (CORRECTED 2026-10-18; INV-02 gap OPEN). In stage 1 a release pre-reserve that fails, or whose answer is lost, holds the release back (it is not run, whatever its class) and lets the loop go on. The earlier claim that the at-most-one-model-loop-per-approval invariant (INV-02) holds for a read release too is true ONLY when the pre-reserve answered.\n\nWhat is bounded: the consume has a single winner (another claim token is refused with continuation_already_consumed); a same-claim replay is accepted only with the effect ledger on; a second loop needs the same client-chosen claim token twice AND the release reserve failing or being lost both times; and the released call itself is not run by a loop whose reserve failed. Note that this last point is not a guarantee about the pair: if the first attempt's reserve fails without committing and the second attempt's reserve succeeds, the second attempt runs the release.\n\nWhat is NOT bounded: the second loop's effects are NOT fenced against the first loop's. An earlier draft said the later rounds of two loops of one segment compute the same step ids and so meet each other's rows (AlreadyReserved) and close unknown_outcome. That is wrong. tool_step_id formats `{prefix}tool_{seq}_{call.id or call.name}`; call.id is the provider's tool-call id, chosen anew by every inference run, and the prefix is only `s{segment}.`. With real providers two independent loops therefore produce different step ids and different ledger action_ids, and each can dispatch the same effectful call: a duplicate effect. Only a provider that emits an empty id, or the same id twice, would get the fence. The duplicated inference rounds, their cost, duplicated read calls and duplicated assistant messages are also unbounded. The post-claim fallback path (D3) has a related exposure: a lapsed 120 s lease lets a same-claim retry claim the OLD pause again and run it beside or after a stage-1 loop that has moved the run on (reconcile L1 refuses only when the release row exists, and stage 1 holds no row after an ambiguous reserve). The gateway's 409-first rule (D1) makes this hard to reach through the gateway; a non-gateway same-claim caller can reach it. The in-place stage does not have this window: after an ambiguous pre-reserve it ends the request with resume_checkpoint_unavailable and dispatches nothing.\n\nTRACKED FOLLOW-UP (not built, needs its own decision because it changes stage-1 behaviour with the switches on): end the stage-1 request without running further rounds after an ambiguous pre-reserve, exactly as the in-place stage already does. Until then the INV-02 gap for stage 1 stays open and is not mitigated by step-id collision. The in-code comment at the release_held_back site in runtime_loop/agent.rs records the same."
+     }
+    ]
+   },
+   "rereview": {
+    "verdict": "changes",
+    "findings": [
+     {
+      "severity": "medium",
+      "file": "apps/Model Plane/docs/decisions/ledger.md (deferred text 7(b), 'What is bounded' paragraph; not yet applied, lives in the fix report's deferred_files)",
+      "issue": "The corrected text still overstates one bound. It says a second stage-1 loop needs 'the release reserve failing or being lost both times'. The second loop needs far less: only the first attempt's reserve must fail without committing. The second attempt then reserves successfully (Created) and runs the release, or it also fails and holds it back. Either way two loops exist. Only a first reserve that committed (answered, or lost after committing) makes the second attempt meet AlreadyReserved and end with continuation_already_consumed. The 'not a guarantee about the pair' caveat that follows contradicts the 'both times' condition in the sentence before it.",
+      "evidence": "agent.rs run_rounds pre-reserve: Created with release_dispatches sets release_prereserved and the release runs; AlreadyReserved or IdentityConflict returns failed_precondition continuation_already_consumed; Err sets release_held_back (stage 1) and the loop continues. So the second-attempt outcomes are Created (a loop runs and runs the release), Err (a loop runs, release held back), AlreadyReserved (refused). Whether two loops exist depends on the first attempt's reserve not having committed, not on both failing.",
+      "suggested_fix": "In the 'What is bounded' list, replace 'the release reserve failing or being lost both times' with: a second loop needs the same client-chosen claim token twice AND the first attempt's release reserve to have failed without committing (a reserve that committed, answered or lost, makes the second attempt end in continuation_already_consumed). Then drop the separate caveat about the pair, or keep it as the consequence: in that case the second attempt may run the release itself. The comment in agent.rs at the Err arm is accurate as written and needs no change."
+     }
+    ],
+    "checked": [
+     "The blocking finding is resolved in substance. The 'same step ids' mitigation is gone from the corrected ledger text, which now says plainly that the second loop's effects are NOT fenced. The reason is tool_step_id (agent.rs ~4284): it formats prefix + tool_ + seq + _ + the provider's call.id, falling back to call.name only when call.id is empty. The prefix is s{segment}. (agent.rs ~6002), so the step ids, and hence the ledger action_ids, differ between two loops. The text marks the INV-02 gap open and names the tracked follow-up: end the stage-1 request after an ambiguous pre-reserve, as the in-place stage does.",
+     "The code comment at the release_held_back site (Err arm of the pre-reserve in run_rounds) matches the code. The in_place_round branch returns Refusal::CheckpointUnavailable and dispatches nothing. Stage 1 sets release_held_back, and the held-back release is turned into unrecorded_effect_outcome at dispatch. The comment says the later rounds are not fenced and the gap is open. The edit is comment-only and I saw no behaviour change at that site.",
+     "The D3 claim in the ledger text is grounded: session-core loop_checkpoint.rs has CLAIM_LEASE_SECONDS = 120.0. I did not verify the exact reconcile L1 wording (my search of reconcile.json for 'L1' returned nothing), so the sentence 'reconcile L1 refuses only when the release row exists' is unverified.",
+     "Ran cargo test -p execution-core --lib release: 29 passed, 0 failed. This includes the stage-1 failed-pre-reserve test, the in-place lost-or-failed pre-reserve test, the shared-ledger-action test and the same-claim read-release replay test. I did not re-run the full suites or cargo check --workspace myself; I relied on the fix report for those and found no sign in the tree that contradicts it.",
+     "No new critical or high problem found. The fix adds no code, so there is no new runtime risk."
+    ]
+   },
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "Read-only state check before the runs: git status, line endings, mtimes (no edits)",
+      "outcome": "Worktree was NOT clean at verification time, although the brief says it was clean at round start. Dirty paths: M apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs (9 lines changed vs HEAD); M apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (423 lines changed); M apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs (17 lines changed); M apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (other unit s7c-b); M apps/Model Plane/rust/services/model-gateway/src/sse.rs (other unit s7c-b); ?? apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs (other unit s7c-b); ?? .plan-work/. The three owned-file diffs total 429 insertions and 20 deletions vs HEAD. All six source files are CRLF on every line, both on disk and in HEAD where tracked; git printed LF-will-be-replaced-by-CRLF notices for loop_fold.rs, agent.rs and resume.rs, but the on-disk bytes are CRLF. Latest mtime of the six is 22:43:10 local, before the execution-core runs started (after 22:45:09), so no dirty file changed during the runs. Results describe this working tree, not a HEAD baseline (no checkout allowed).",
+      "passed": "n/a"
+     },
+     {
+      "command": "cargo test -p mp-contracts (manifest apps/Model Plane/rust/Cargo.toml, with --no-fail-fast)",
+      "outcome": "Exit 0, no failures. Per target: lib 114 passed; tests grounding_replay 1; loop_fold_golden 11; proto_wire_parity 3; proto_wire_parity_execution 5; run_context_posture 1; zdr_retention_matrix 5; doc-tests 2. Zero compiler warnings in the log. Log: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/target/verify-s7b-h/01-mp-contracts.log",
+      "passed": "142 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --lib (with --no-fail-fast)",
+      "outcome": "Exit 0, no failures. The suite's own timer reports 300.15 s; I did not identify which test accounts for the time. Zero compiler warnings in the log. Log: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/target/verify-s7b-h/02-execution-core-lib.log",
+      "passed": "1081 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --tests (with --no-fail-fast)",
+      "outcome": "Exit 0, no failing test by name. Per target: lib 1081 passed (re-run, 300.14 s); bin main.rs 0; tests autonomy_ladder_contract 4; browser_agent_e2e 11 passed and 2 ignored; compaction_parity_contract 11; cross_service_loop_contract 3; durable_loop_contract 18 (other unit's file, green in this state); loop_fold_zdr_matrix 7; runtime_loop_test 9; scrub_checkpoint_test 8; slo 4; subscription_refusal_contract 4; zdr_refusal_inventory 2. The 2 ignored tests are both in browser_agent_e2e.rs and are live-stack, not DB-backed, and were not run: browser_agent_drives_real_quarry_loop (needs quarry-edge plus inference-core) and planner_on_terra_returns_valid_action_json (spends ChatGPT Terra subscription calls). The same 3 non-test-build warnings as the check run appear in this log. Log: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/target/verify-s7b-h/03-execution-core-tests.log",
+      "passed": "1162 passed in total (1081 lib re-run plus 81 integration), 0 failed, 2 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going (manifest apps/Model Plane/rust/Cargo.toml)",
+      "outcome": "Exit 0, zero errors, Finished in 1.38 s (units already up to date). 5 warnings, all pre-existing: execution-core lib (non-test build) capability_policy.rs:181 unreachable else clause; approval_delivery_worker.rs:744 verification_result_for never used; runtime_loop/resume.rs:542 decision_closer never used. HEAD has the same decision_closer and verification_result_for definitions, with only test-module callers, so this round's diff did not cause them; resume.rs is this unit's file, so the hardening unit may want to address that warning. session-core bin: auth.rs:73 method provider never used; terminalization.rs:691 start_managed_run_inner never used. capability_policy.rs, approval_delivery_worker.rs and the session-core files are unmodified. Log: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/target/verify-s7b-h/04-workspace-check.log",
+      "passed": "n/a (check only): 0 errors, 5 warnings"
+     },
+     {
+      "command": "Notes on method and scope",
+      "outcome": "No source edits, no git writes, no docker, no stash. Added --no-fail-fast to each cargo test call so no test binary is skipped after a failure; no test failed, so the outcomes are unchanged. Logs were written under the worktree's target/verify-s7b-h/ folder rather than the scratchpad, to keep to the worktree boundary. No retries were needed: no LNK1104 and no mid-edit build failures occurred. I wrote or changed no tests. I did not run any DB-backed test; none of the ignored tests in these targets is DB-backed. No Windows link or toolchain failure occurred in these runs, so no failure needed classifying as pre-existing.",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  }
+ ],
+ "failedUnits": []
+}

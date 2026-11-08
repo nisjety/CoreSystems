@@ -1,0 +1,24 @@
+{
+  "packets": [
+    {
+      "key": "spa-stale-chunk-blank-page",
+      "rows": ["D1-809", "D1-169"],
+      "title": "verevonv3: a chunk that is still missing after the one automatic reload shows the stale-build notice instead of a blank page",
+      "severity": "high",
+      "cwd": "apps/Frontend Plane/verevonv3",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/app/shell/AppShell.tsx",
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.ts",
+        "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/app/shell/AppShell.test.tsx"
+      ],
+      "tests": [
+        "node_modules/.bin/vitest run src/app/chunk-recovery.test.ts src/app/shell --pool=threads   (from apps/Frontend Plane/verevonv3; never run pnpm, it prunes the lockfile)",
+        "node_modules/.bin/tsc -p tsconfig.app.json --noEmit   (or the project's typecheck tsconfig; report pre-existing errors separately from new ones)"
+      ],
+      "brief": "Measured by the lead 2026-10-28 on a production build (`vite build` + `vite preview --port 5176`; register D1-169: the chunk-recovery Playwright project had never run, and all three of its tests fail). With the sign-in route's lazy chunk answered 404 (what a deploy does to an old tab), a probe in headless Chromium saw: the first load fires `vite:preloadError`, `installChunkRecovery` (src/app/chunk-recovery.ts) marks the reload and reloads, as designed; on the second load the listener sets the notice signal (`setNoticeVisible(true)`) and returns WITHOUT preventDefault, so Vite's preload helper rethrows, the lazy route component rejects, nothing catches it, Solid logs `[REACTIVITY_HALTED] TypeError: Failed to fetch dynamically imported module ...AuthPage-*.js`, and the whole tree unmounts: `#root` has 0 children, the body is empty, and the notice (`<StaleBuildNotice />` in src/app/shell/AppShell.tsx, rendered inside the same tree) is never shown. On the first load the reload path also logs `[REACTIVITY_HALTED] Cannot read properties of undefined (reading 'default')`: after preventDefault the helper resolves `undefined` and the lazy reads `.default` of it (harmless only because the reload is already under way). So a user with a stale tab gets a blank page, not the notice.\n\nThe app runs Solid 2.0.0-rc.0 (`import ... from 'solid-js'`, `@solidjs/web`): its error boundary is `Errored` (exported by solid-js; there is no `ErrorBoundary`), read its signature in node_modules/solid-js before using it.\n\nDo (measure CRLF/LF per file and keep it):\n(1) In AppShell.tsx, wrap the routed content (the `<Show ...>` with CoreShell / the standalone children) in an `Errored` boundary, and keep `<StaleBuildNotice />` OUTSIDE that boundary, so the notice survives any failure of the routed tree. The boundary's fallback: when the failure is a chunk load failure (the same test chunk-recovery.ts uses, or a small exported predicate there, e.g. message matches 'Failed to fetch dynamically imported module' / 'Importing a module script failed' / 'error loading dynamically imported module', or the error came through the preload event), render nothing (the notice above explains it and offers the reload); for any other error render a minimal, existing-style error message (look for an existing app-level error view or i18n key; do not invent copy if one exists) so a non-chunk crash is not silently blank either. Do not change routing, the session load or CoreShell.\n(2) In chunk-recovery.ts, keep the reload logic exactly as it is (one automatic reload within CHUNK_RELOAD_WINDOW_MS, dirty-composer guards, sessionStorage marker). If a small exported helper (the chunk-failure predicate) is needed by AppShell, add it there with a unit test in chunk-recovery.test.ts.\n(3) Tests: a vitest + @solidjs/testing-library (or the testing library the repo's other .test.tsx files use; find one under src/ and copy its setup) test for AppShell, or for a small exported wrapper component if AppShell is hard to render alone (it uses the router and providers): a child that throws a chunk-load error renders no blank root, the notice stays mounted and becomes visible when the signal is set, and a child that throws another error renders the error view. Run the tests listed in the task record.\nThe lead then reruns the Playwright project `chunk-recovery` against a fresh production build; its spec (tests/e2e/chunk-recovery.spec.ts) is the regression test of record and must not be edited, except: if after your fix the only remaining failure is the navigation count (the probe counted 3 main-frame navigations where the spec expects 2), report what the third one is (for example the router's replace-navigate to /login) and propose the change, but do not make it. Keep the final report short and call the structured output before you stop."
+    }
+  ]
+}

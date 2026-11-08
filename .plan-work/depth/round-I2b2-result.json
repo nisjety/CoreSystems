@@ -1,0 +1,53 @@
+[
+ {
+  "key": "ws11-s8-gateway-run-level",
+  "rows": [],
+  "title": "ws11-s8-gateway-run-level",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/thinking.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/effort_ladder_contract.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib thinking",
+    "outcome": "16 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib carries",
+    "outcome": "60 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib (full)",
+    "outcome": "2369 passed, 0 failed, 4 ignored; no failing set to diff against HEAD",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test effort_ladder_contract --test zdr_feature_table --test e2e_invoke_chain_test --test continue_preconsume_test",
+    "outcome": "all four suites ok: 13, 153, 14 and 9 passed, 0 failed (listed in output order, may map differently to suites)",
+    "passed": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets",
+    "outcome": "Finished with no errors; only pre-existing dead-code warnings in session-core",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "With the ladder on, an unrecognised profile on a Do turn may bump gateway_effort_unknown_total twice, once from run_level and once if the turn's own plan() also runs effort_level. It is a metric over-count only and does not change behaviour.",
+   "do_run_level_uses_the_one_derivation finds the end of the launch call by the exact indentation \"\\n        );\\n\". read() normalises CRLF, so line endings are not a problem, but re-indenting the launch block would break the test. It would then fail loudly through expect, not pass silently.",
+   "The negative scan only looks for the literal `\"deep\" =>`. A profile match written another way, such as `\"extended\" |` arms, would not be caught. This is acceptable for a source-scan guard.",
+   "Line endings are preserved: sse.rs and effort_ladder_contract.rs stay LF, like HEAD, and thinking.rs stays all CRLF. The git autocrlf warning about these files is normal and not caused by this change.",
+   "The production clamp (admitted.clamp_effort at sse.rs:1266) runs only on the Ok(admitted) arm. The Err arm returns early, so the launch at sse.rs:1914 always sees the clamped effort. The contract test checks only that the clamp comes first in the source text, not the control flow."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Nothing is committed (the lead commits). The new field is inert unless the gateway's MODEL_GATEWAY_EFFORT_LADDER is literally \"true\" and execution-core's EXECUTION_CORE_RUN_EFFORT is literally \"true\". With the gateway switch off, every request is byte-identical to before. Discrepancies from the brief: (1) the task text listed \"Files you may edit: (none)\", but the packet record names the three files above, and I used the record as the brief directs. (2) The brief called the agentic_run_stream call near line 16633 a test caller. It is the production /continue launch inside continue_run, and it passes 0 as briefed. (3) The third new test sits in agent_route_tests instead of next to the continue_run tests, because build is defined there and is not in scope in continue_run_tests. (4) The brief's sse.rs line numbers were stale; I located every function by name.",
+  "summary": "WS11-S8 gateway half is in. A fresh Do or Plan run now carries the turn's clamped effort level in RunAgentRequest.reasoning_effort, and a continuation carries none. The level comes from one new function, thinking::run_level, which reuses effort_level and returns 0 when MODEL_GATEWAY_EFFORT_LADDER is off (the profile is not consulted then). thinking.rs (CRLF kept): run_level plus three unit tests (deep is 4 with the ladder on and equals plan's effort_wire; every profile is 0 with the ladder off; standard, unset and blank are 0). sse.rs (LF kept): resolved_run_agent_request takes run_effort as its last parameter and sets it only when resume is None (let fresh = resume.is_none() is captured before resume moves). spawn_run_dispatch and agentic_run_stream take run_effort as their last parameter and pass it through. The production launch in invoke_stream_sse passes crate::thinking::run_level(req.effort.as_deref().unwrap_or_default(), crate::thinking::ladder_enabled()). req.effort is clamped by admitted.clamp_effort at line ~1250 in the same function, and admit runs unconditionally before the agentic branch. The continue_run launch and the two test launches pass 0. The build_run_agent_request literal is unchanged, and only its comment was updated. New tests: a_fresh_do_run_carries_the_turn_level and a_continuation_carries_no_level (continue_run_tests, via a request_at_level helper), and the_pure_builder_sends_no_level (agent_route_tests, beside build). Contract test: do_run_level_uses_the_one_derivation checks that the clamp precedes the launch, that the launch passes run_level with the clamped field and ladder_enabled, and that sse.rs neither matches a profile name nor calls effort_level. No existing source-scan assertion needed changing: the sse.rs scans and the continue_run scans stay green with their original text. Not touched: the chat effort derivation, ZDR turn settings, the budget and admission order, tool_loop.rs, AgentRoute, and no new switch."
+ }
+]

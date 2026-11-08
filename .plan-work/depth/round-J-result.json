@@ -1,0 +1,39 @@
+[
+ {
+  "key": "ws04-s9-proof-script-three-bearers",
+  "rows": [],
+  "title": "ws04-s9-proof-script-three-bearers",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/verify-replica-run-control.sh",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/verify-replica-run-control-bearers-test.sh",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\verify-replica-run-control.sh",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\tests\\verify-replica-run-control-bearers-test.sh"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "bash -n \"apps/Model Plane/scripts/verify-replica-run-control.sh\"",
+    "outcome": "exit 0, syntax OK",
+    "passed": true
+   },
+   {
+    "command": "bash \"apps/Model Plane/scripts/tests/verify-replica-run-control-bearers-test.sh\"",
+    "outcome": "exit 0, final line 'PASS: the bearer checks passed'. Output tail was inspected and showed no failures. The later-mint-failure case passed all 7 checks, including the FAIL line in output and in the evidence file.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "fail() echoes to stdout, so any future fail() call inside a command substitution, e.g. CODE=\"$(http_post ...)\", loses its line the same way. Only the mint path is fixed. Every fail call site today is outside $(...).",
+   "Inside http_post the mint runs in the $(...) subshell, so the tokens it mints never reach the parent shell. That is correct today only because every bearer-carrying call re-mints first. A future call that relies on an earlier mint would send empty bearers in cookie mode.",
+   "The bearer test's script-text checks use fixed counts: 6 session call sites, 5 Stop call sites, and resume checked with grep -A1. Adding or reformatting a call site in the proof script breaks the test even when the change is correct.",
+   "The test waits a fixed sleep 1 for the evidence tee to flush. On a slow machine the evidence-file assertions could flake.",
+   "Queue, feedback, plan approval and the durable run cancel are checked only against the script text, never through a stubbed call. Whether the live stack accepts the session header on the plan-approval and durable-cancel routes still needs the live proof run."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No deploy step. The bearer test is offline: stub curl and docker are first on PATH, and it contacts no endpoint, container or auth-core. It wrote only to its own temp directory. Nothing was committed, no git command was run, and no .env file was read. Both files stay LF.",
+  "summary": "Applied the controller's two fixes and nothing else. (1) mint_token in verify-replica-run-control.sh: both mint FAIL lines now go to stderr (fail ... >&2) with a short comment. http_post runs mint_all inside CODE=\"$(...)\", so the old stdout FAIL line was captured into CODE and lost while the script exited 1 silently. The status-only text is unchanged and the body is never printed. (2) bearer test: the curl stub gained FAKE_MINT_FAIL_AFTER=<n>, which fails session-core mints once n have succeeded, and a new case sets n=3 so the mint fails on case 1's Stop. The case asserts exit 1, that three stream starts ran first (so the failure is on the Stop's http_post call), that \"FAIL: mint session-core: auth-core answered HTTP 503\" appears in both output and evidence file, that the body appears in neither, and that no /cancel call was sent. On the pre-fix script the two FAIL-line checks fail; after the fix all checks pass. Both files stay LF. The packet's \"Files you may edit: (none)\" line conflicts with the controller's named files, so I edited the two files the controller named (the packet's own files and new_files). Every other fail call site sits outside a command substitution, so the mint path was the only one that lost its line; a future fail() inside $(...) would lose its line the same way. The evidence file receives only the status-only FAIL line."
+ }
+]

@@ -1,0 +1,15 @@
+rust workspace --lib exit 0
+rust totals: passed 4697, failed 0, ignored 4
+go bridge-core: vet 0, test 0, ok packages 7, FAIL lines 0
+go browser-broker: vet 0, test 0, ok packages 5, FAIL lines 0
+go capability-core: vet 0, test 0, ok packages 32, FAIL lines 0
+go cost-core: vet 0, test 0, ok packages 7, FAIL lines 0
+go letta-bridge: vet 0, test 0, ok packages 5, FAIL lines 0
+go nats-provisioner: vet 0, test 0, ok packages 1, FAIL lines 0
+go orchestrator-core: vet 0, test 0, ok packages 9, FAIL lines 0
+go sandbox-manager: vet 0, test 0, ok packages 9, FAIL lines 0
+go gen: vet 0, test 0, ok packages 1, FAIL lines 0
+go audit-core: vet 0, test 0, ok packages 14, FAIL lines 0
+go org-core: vet 0, test 0, ok packages 11, FAIL lines 0
+go integration-corev2: vet 0, test 1, ok packages 22, FAIL lines 4
+done

@@ -1,0 +1,342 @@
+{
+ "slice": "S9 - Proof scripts, ZDR matrix test and contract tests for the WS03 durable loop (design only; no file was created or edited)",
+ "summary": "S9 is five artifacts: (1) durable-loop-proof.sh, a disposable-Postgres runner for the 17 DB-gated session-core tests of S2/S4/S5, with anti-skip guards; (2) durable-loop-live-proof.sh, a developer-stack-only runner: stage s5 re-creates the 2026-10-17 kill-mid-call proof with a bounded, always-removed finalize-delay trigger, stage s3 covers approve, restart, continue, and s7/s8 print BLOCKED until built; (3) execution-core tests/loop_fold_zdr_matrix.rs over the 27 vendored enforcement_rows through mp-contracts resolve_turn; (4) execution-core tests/durable_loop_contract.rs (gateway builder and executor validator share one function; the inline tool_loop.rs has no resume path); (5) a dated WS03 section in MODEL_PLANE_STATUS.md with per-slice source-verified and live-verified columns. Reading the code shows the matrix and contract tests will be RED on the current tree, for concrete reasons in S2/S3 code: waived turns are offered loop-mode approvals (agent.rs 2215-2222 and 4646-4650 use req.zdr only); /continue and consume do not refuse waived turns (sse.rs continue_preflight, retention_receipt.rs 241-246, orchestration_store.rs CONSUME_APPROVAL_SQL 986-991); the continuation segment is a literal 2 (sse.rs 13490) and the gateway never refuses an already-consumed approval, so a second /continue opens an SSE stream instead of returning 409; and deploy/docker-compose.yml does not pass AGENT_CONTINUE_AFTER_APPROVAL_ENABLED to model-gateway, where the route reads it. These are fixed before the live proof, not worked around. Everything S9 produces is source-verified (CI or a disposable database) or live-verified (one developer stack, one dated run). None of it is production evidence.",
+ "approach": "A. Disposable-DB runner (durable-loop-proof.sh). Copy the structure of scripts/tests/approval-continuation-proof.sh with four changes. Publish the container on loopback only (docker run -p 127.0.0.1::5432); the sibling uses -P, which binds every host interface with a known password. Use postgres:16.14-alpine3.24, the image the compose file pins. Name the database session_core_test, because the DB-gated tests assert the URL contains the word test (loop_checkpoint.rs:468, tool_ledger.rs:142, orchestration_store.rs:1907). Never touch the stack database (port 55434, container model-plane-postgres-1). Run one cargo command per filter group from the rust directory with no path arguments: cargo test -p session-core --bin session-core FILTER -- --ignored --test-threads=1, teeing to a log. A group passes only if the exit code is 0, a line reads test result: ok. N passed; 0 failed with N at or above the group minimum, the log has no skipping: DATABASE_URL unset line (those tests return early and pass silently when the variable is missing), and it has no panicked line. Afterwards query SELECT max(version), bool_and(success) FROM _sqlx_migrations and require at least 48 and true. The EXIT trap removes the container. The script prints what it proves and what it does not (no deployed flags, no provider effect, no live kill, no ZDR org). Windows Git Bash: docker exec without -t; strip carriage returns from captured output with tr -d; never pass Windows or POSIX paths to cargo (MSYS converts them); do not copy the /Volumes CARGO_TARGET_DIR default from the sibling scripts; preflight with command -v for docker, cargo, rg and protoc (all present; psql is absent on the host, so use docker exec).\n\nB. Live runner (durable-loop-live-proof.sh). Not in CI. It refuses to run unless DURABLE_LOOP_PROOF_CONFIRM=live-stack is set, MP_TOKEN is present (the signed-in user's bearer; never printed, never written), EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY is set by name (the 2026-10-16 recreate dropped it, and every shell decision then failed with invalid decision evidence), and no run is queued, running or awaiting_approval. It snapshots flag names and values, flips flags by exporting them in the shell before scripts/compose.sh up -d --no-deps SERVICE (compose lets the shell override deploy/.env; do not copy the compose -e pattern from reachability-live-proof.sh, which docker compose up does not accept), and restores them in the trap. Stage s5: in one transaction create table ws03_proof_finalize_delay(tool, seconds, until) and a BEFORE UPDATE trigger on session_tool_audit_intents that sleeps only for tool save_memory and only for a reserved-to-completed-or-failed transition, bounded by until (ten minutes). Send the captured Do body (BFF POST /api/v1/chat/stream, plan_mode false, agentic feature, a unique marker). Poll psql until the run's row is reserved, then docker kill --signal=KILL the execution-core container. The 2026-10-17 watcher is not committed, so the script must record the pause and kill order it used; session-core is unpaused in the trap. Wait past the window plus a margin and assert the row is still reserved with finalized_at NULL. If it finalized, the verdict is WINDOW_MISSED and the stage fails; it never passes. Restart execution-core, wait for the recovery worker to terminalize the run (about 15 minutes; budget 25), enable SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED on session-core, and assert status unknown_outcome, closed_by sweep, and outbox events tool_action_reserved then tool_action with outcome unknown_outcome. Assert the save_memory effect count is unchanged between kill and sweep (no replay). Drop the trigger, function and table, and assert zero ws03_proof triggers remain. Stage s3: POST /api/v1/orchestration/approvals/{id}/decide with body decision approve and reason empty; expect continuation_delivery awaiting_continue. Restart execution-core between pause and approve. POST /api/v1/orchestration/runs/{run_id}/continue with a fresh claim_token; expect the approved call to run once, approvals.consumed_at set, and zero approval delivery rows. A second continue with a different claim must return 409 continuation_already_consumed, which is RED until fix F6. A same-claim replay is a separate case: it must not re-run the call, and it needs EXECUTION_EFFECT_LEDGER_ENABLED=true. RunResumedAfterApproval is a broadcast event, not a database row, so do not assert it in SQL. The SPA sets the agentic feature only in plan mode, which is read-only, so the captured body is an API-level path, not a UI path.\n\nC. Matrix test (execution-core tests/loop_fold_zdr_matrix.rs). Use include_str of fixtures/zdr-posture-matrix.json. The api/contracts README forbids reading a golden from outside the consuming tree, and the sync script enforces byte identity. Pin 27 enforcement rows and the distribution zdr 4, persistent 3, waived 2, refuse 18. For each row build ClaimsView and RouteView from the JSON (waiver provider and connection borrowed from the Value), call resolve_turn, and assert decision and code equal the golden. Then, for each store in Fold, Consume, Continue and Park, assert refuse_unless_persistent is Ok exactly when the decision is persistent (the persistent rows are e_persistent_default_route, e_persistent_subscription_route_unchanged and e_service_persistent_without_org_claim). Assert the retention class equals the golden vocabulary (zdr to zdr, persistent to persistent, waived to zdr_waived), and that refuse_unless_persistent_class agrees with the resolution-based gate on every row, so the database predicate and the resolver cannot drift. Assert continuation_mode_for(persistent, true) is loop exactly for the persistent rows. Anti-vacuity: a hand-built Waived resolution must be refused, and a crate-internal unit test in runtime_loop/agent.rs must drive the production continuation-mode code with a waived caller built by AuthenticatedUser::for_test_with_waiver, so the call site is covered and not only the pure function.\n\nD. Contract test (execution-core tests/durable_loop_contract.rs), in the style of cross_service_loop_contract.rs. Read ../model-gateway/src/tool_loop.rs with comment lines removed and assert that none of these occur: AgentResume, ConsumeApproval, consume_approval, SaveLoopCheckpoint, ClaimLoopCheckpoint, CloseLoopCheckpoint, LoopFoldV1, loop_fold, continue_run, RunAgentRequest, continuation_mode, run_agent(, and resume:. Do not search for the bare word resume: tool_loop.rs line 352 says a resumed stream, which is about SSE replay. Read http_routes.rs and sse.rs and assert exactly one /continue route, bound to sse::continue_run, and exactly one non-test AgentResume literal. Preferred form: move build and validate into mp-contracts so the builder and the validator are one function; the source scans then cover only the no-resume-path rule and the call sites. Also assert that grpc.rs run_agent calls enforce_persistence_free_execution before enforce_resume, and that the mode words agree across planes: session-core accepts the empty string, segment and loop (orchestration_grpc.rs 2605); mp-contracts emits only empty and loop; the gateway preflight requires loop (sse.rs 13378); the executor accepts segment and loop. Three guards are red today and turn green with the fixes: no segment_no literal 2 in sse.rs; no continuation_mode_for(req.zdr in agent.rs; and the DURABLE_MUTATIONS list in model-gateway zdr_posture.rs names continue_run (the N7 inventory).\n\nE. Matrix copy and sync. Vendor the golden and its pin into execution-core tests/fixtures. In the same change add VENDORED rows (copy and .sha256) and one CONSUMERS row for execution-core to the repo-root scripts/tests/zdr-contract-sync.test.sh. A CONSUMERS row without a copy is reported pending by default, but it fails under REQUIRE_CONTRACT=1, which the receipts job sets, so the two must land together.\n\nF. Evidence and status. The runner never writes into the repository. The lead writes docs/compliance/evidence/live-proof-ws03-s9-durable-loop-DATE.txt from redacted captures held in the scratchpad, following live-proof-ws03-s5-effect-ledger-2026-10-17.txt: a header with the verification level, the switch table before and after, per-stage verdicts with identifiers only, a does-not-show section, cleanup verification, and findings F1-F9 marked open or fixed. MODEL_PLANE_STATUS.md gets a dated WS03 section with a table of slice, source-verified, live-verified with date, and not verified. The approval blocker section and the first product-claim bullet stay until the stage-1 live proof passes. docs/decisions/ledger.md stays proposed until both the stage-1 live proof and the D1 owner ruling are recorded; append a dated note and do not rewrite the entry. CAPABILITY_PROMOTION_LEDGER.tsv is unchanged: scripts/tests/capability-promotion-ledger-test.sh requires exactly the seeded capability ids, and every row stays source_only.\n\nSequencing: before the fixes, the disposable-DB run and the static guards can be green, while the waived, consumed-approval and segment guards are red. After the fixes, all S9 tests can be green. Stages s7 and s8 belong to S7 and S8 and are outside S9's build scope.",
+ "file_changes": [
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/durable-loop-proof.sh",
+   "change": "NEW. Disposable-Postgres runner per approach A: postgres:16.14-alpine3.24 on 127.0.0.1 with a random port, database session_core_test, one cargo test invocation per filter group (approval_consume 6, loop_checkpoint 4, tool_ledger 5, expired_worker_lease_reclaims_without_duplicate_start_receipt 1, inline_tool_audit_reservation_and_finalization_are_idempotent_in_postgres 1), anti-skip and anti-panic checks on each log, migration check (version 48 or later, success true), EXIT trap that removes the container. LF line endings; executable bit set with git update-index --chmod=+x at commit time."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/durable-loop-proof-test.sh",
+   "change": "NEW. Static guard with no docker, modelled on approval-continuation-proof-test.sh. Asserts the runner exists, is executable and has LF endings; every test name it runs exists in its source with an #[ignore] attribute within four lines above; forbidden tokens are absent (model-plane-postgres, 55434, docker compose, compose.sh, docker kill, docker restart, EXECUTION_CORE_SERVICE_API_KEY, the CONTROL token pattern, MODEL_GATEWAY_AUTH_DEV_BYPASS, ALLOW_INSECURE_DEV_DEFAULTS); required tokens are present (127.0.0.1, session_core_test, the skip check, an EXIT trap)."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/durable-loop-live-proof.sh",
+   "change": "NEW. Live-stack runner, not CI. Stages s5 (kill mid-call with the bounded finalize-delay trigger, sweep, no-replay check) and s3 (decide, restart, continue, second continue returns 409, same-claim replay case) are implemented; s7 and s8 exit 2 with BLOCKED until S7 and S8 exist. Options: --stage, --dry-run (prints the planned SQL and compose commands, runs nothing), --cleanup-only (restores flags, drops the trigger, unpauses). Refuses without DURABLE_LOOP_PROOF_CONFIRM=live-stack. Never prints MP_TOKEN or any Authorization header. Writes captures only to DURABLE_LOOP_PROOF_OUT (default a mktemp directory)."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/durable-loop-live-proof-test.sh",
+   "change": "NEW. Static guard for the live runner. Asserts the DURABLE_LOOP_PROOF_CONFIRM gate; no dev-bypass names; an EXIT trap that calls cleanup; every docker pause is paired with an unpause inside cleanup; MP_TOKEN is never passed to echo or printf; every trigger, function and table it creates is prefixed ws03_proof_; s7 and s8 return BLOCKED."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/fixtures/durable-loop/do-run-request.template.json",
+   "change": "NEW. Chat request body template with placeholders for the marker, the model and the prompt. It contains no user content and no credentials. An operator may substitute a body captured from the BFF, kept outside the repository and passed by path in DURABLE_LOOP_PROOF_REQUEST."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs",
+   "change": "NEW. Matrix test per approach C: include_str of the vendored copy; pins 27 rows and the 18/4/3/2 split; resolve_turn agrees with each row; the four durable stores open only for persistent; retention-class vocabulary agreement; continuation-mode truth table; hand-built waived refusal (anti-vacuity). The crate-internal waived call-site test lives in runtime_loop/agent.rs and is listed separately."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+   "change": "NEW. Source-contract test per approach D, in the style of cross_service_loop_contract.rs (reads sibling source with CARGO_MANIFEST_DIR and fails with a message to re-point the path rather than delete the assertion). Builder and validator agreement is asserted through the shared mp-contracts functions where they exist, and by source scan otherwise."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json",
+   "change": "NEW. Byte-identical copy of C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/zdr-posture-matrix.json (sha256 a6ff6879c7ee55e17688ee6eaf81ca2119cfa05721cc476719b3a3c09c8f4e1a)."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json.sha256",
+   "change": "NEW. Copy of the canonical pin file, same hash line format as api/contracts/zdr-posture-matrix.json.sha256."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+   "change": "MODIFIED (or NEW src/durable_gate.rs with pub mod in lib.rs). Add DurableStore with feature(), refuse_unless_persistent, refuse_unless_persistent_class, build_continue_resume, validate_continue_resume; change continuation_mode_for to take persistent: bool (callers pass !zdr && !waived); document refuse_if_zdr(bool) as insufficient because a waived bearer has zdr false. Add unit tests beside the existing ones (around lines 552-567). No new Cargo dependency."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "change": "MODIFIED. Offered snapshot (about lines 2215-2222) and CreateApproval continuation_mode (about 4646-4650) use persistent = !req.zdr && !route.is_waived(). prepare_resume (5099-5183) takes the step-prefix segment number from the retained pause snapshot instead of resume.segment_no.max(2) (about 5162). Add the crate-internal waived call-site unit test beside the waiver tests (about 13347-13425) using AuthenticatedUser::for_test_with_waiver."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+   "change": "MODIFIED. enforce_resume (676-693) delegates to mp_contracts validate_continue_resume and keeps the closed tokens. The order in run_agent (persistence-free check at about 1288, then enforce_resume at about 1293) is kept and asserted by durable_loop_contract.rs. Existing tests at about 2190-2230 are extended, not replaced."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "change": "MODIFIED. continue_preflight (13359-13388) gains approval_consumed and persistent parameters: consumed returns 409 continuation_already_consumed; non-persistent returns 409 not_resumable (or the approval_continuation feature refusal, open question Q5). continue_run (13399-13500) builds the body with build_continue_resume (segment_no 0) and derives persistent from crate::zdr_posture::decide_for(claims, &Route::plain(false)) matching TurnPosture::Persistent. Add cases to continue_run_tests (13521-13560). Do NOT change continuation_gate (zdr_posture.rs 257-264): decide_approval (http_routes.rs about 1502) and approve_plan use it for owner decision 17."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+   "change": "MODIFIED. Add the pair (sse.rs, continue_run) to the DURABLE_MUTATIONS list (about 826-840) of every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs (N7)."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+   "change": "MODIFIED. For every enforcement row also assert that the /continue preflight is Ok exactly when the decision is persistent, using the same pure preflight function that continue_run calls."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+   "change": "MODIFIED. consume_approval (902-1000) joins runs.retention_class for the approval's run and refuses unless it is persistent via refuse_unless_persistent_class(Consume, class). Add an #[ignore] DB test beside approval_consume_refuses_wrong_run_wrong_user_not_granted_and_cold_approvals (about 2128): approval_consume_refuses_a_waived_run_and_a_zdr_run."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+   "change": "MODIFIED. The consume handler (2733-2800) applies the same class check. refuse_zdr_continuation (retention_receipt.rs 241-246) keeps refusing ZDR tokens; whether service principals stay exempt on this path is open question Q4."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+   "change": "MODIFIED (tests only). Add an #[ignore] DB test every_purge_path_removes_the_fold covering purge_run (loop_checkpoint.rs 386), the terminal transition (terminalization.rs transition_managed_run_terminal 1066-1089), thread deletion (grpc.rs delete_thread_rows 365-490) and organisation purge (gdpr.rs purge_organization_data 226-236). Today gdpr.rs 675-700 checks only the text order of the statements, so no DB test proves erasure."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh",
+   "change": "MODIFIED (repo root). Add two VENDORED rows (the execution-core copy and its .sha256 pin, both pointing at apps/Model Plane/api/contracts) and one CONSUMERS row: apps/Model Plane/api/contracts/zdr-posture-matrix.json|execution-core|apps/Model Plane/rust/services/execution-core/|S9 (loop fold ZDR matrix). Same change; the golden digest in GOLDENS is unchanged."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/MODEL_PLANE_STATUS.md",
+   "change": "MODIFIED (CRLF; use the Edit tool). Add a dated WS03 section with a per-slice table (slice, source-verified, live-verified with date and developer-stack wording, not verified, evidence file). Keep the approval-continuation blocker (about lines 274-295) and the first product-claim bullet (about 419-444) until the stage-1 live proof passes."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml",
+   "change": "MODIFIED (S3-owned prerequisite for live stage s3). Add AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false} to the model-gateway environment block (the block starts about line 191; AGENTIC_SUBSCRIPTION_ENABLED is at about 378). Replace the stale execution-core comment at about 1038-1041, which says not to enable the flag until stage 1 /continue exists. The header at lines 4-5 cites ./build-verevon-services.sh, which is not in the worktree; correct the reference to scripts/compose.sh."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+   "change": "MODIFIED (comment only). AgentResume.segment_no (about lines 247-248) becomes executor-owned: the gateway sends 0 and the executor derives the segment. No tag change, so buf breaking is unaffected."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md",
+   "change": "MODIFIED later, only after the stage-1 live proof and the D1 owner ruling (CRLF). Append a dated note under the 2026-10-16 entry (lines 25-63); flip the State line only then. Until then the state stays proposed."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/compliance/evidence/live-proof-ws03-s9-durable-loop-DATE.txt",
+   "change": "NEW, written by the lead after the live run only, with DATE set to the run date. Follows live-proof-ws03-s5-effect-ledger-2026-10-17.txt. Contains identifiers and verdicts, no tokens or payload text, a does-not-show section, cleanup verification, and findings F1-F9 marked open or fixed."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/compliance/evidence/README.md",
+   "change": "OPTIONAL. Index rows for the WS03 evidence files (the existing index lists only the 2026-10 compliance reads). Keep the not-production wording."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+   "change": "NOT CHANGED. The ledger test requires exactly the seeded capability ids and source_only rows carry no evidence. S9 adds no cap row."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+   "change": "NOT CHANGED. The enforcement_rows model bearers and routes, not RPC names, so the N7 request for a row per new RPC cannot be expressed here (open question Q9). No row edit, so no digest change and no re-vendoring of the existing copies."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/approval-continuation-proof.sh",
+   "change": "NOT CHANGED in S9. Its -P publish binds the disposable database to every interface; record as a follow-up."
+  },
+  {
+   "path": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/model-plane-rust-ci.yml",
+   "change": "NOT CHANGED. New tests run under cargo test --workspace, fmt and check already. Adding a DB job to the receipts job is a WS01 decision, default no."
+  }
+ ],
+ "interfaces": "Rust, mp-contracts (new, pure, no I/O): pub enum DurableStore { Fold, Consume, Continue, Park } with fn feature(self) returning agent_run for Fold and Park and approval_continuation for Consume and Continue. pub fn refuse_unless_persistent(store: DurableStore, resolution: &Resolution<'_>) returns Result<(), Refusal>: Persistent is Ok; Refuse returns the resolver's own refusal unchanged; Zdr and Waived return Refusal::feature_not_supported(store.feature()). pub fn refuse_unless_persistent_class(store: DurableStore, retention_class: &str) returns Result<(), Refusal>, Ok only for the string persistent (the runs.retention_class value; the golden vocabulary maps zdr, persistent and waived to zdr, persistent and zdr_waived). pub const fn continuation_mode_for(persistent: bool, enabled: bool) returns loop only when both are true, otherwise the empty string. pub fn build_continue_resume(approval_id: &str, claim_token: &str) returns an AgentResume with mode segment, empty brief and segment_no 0, meaning the executor owns numbering. pub fn validate_continue_resume(resume: &AgentResume) returns Result<(), &'static str>: resume_incomplete for a mode outside segment or loop, or an empty approval_id or claim_token; resume_segment_client_supplied when segment_no is not 0. The executor's enforce_resume and the gateway builder both call these.\n\nGateway (model-gateway, sse.rs): continue_preflight(enabled, run_status, approval_matches_run, approval_granted, continuation_mode, approval_consumed, persistent) adds continuation_already_consumed (409) when approval_consumed is true, and not_resumable (409) when persistent is false. persistent comes from crate::zdr_posture::decide_for(claims, &Route::plain(false)) matching TurnPosture::Persistent. continue_run keeps its ZDR gate and owner check. Approval consumed_at is already populated by GetApproval (session-core orchestration_grpc.rs 1230), so no proto change is needed for F6.\n\nSession-core (SQL, consume): the approvals row joined to runs on run_id; the predicate is runs.retention_class = 'persistent' AND approvals.continuation_mode <> '' AND consumed_at IS NULL, and the refusal is feature approval_continuation.\n\nTemporary trigger for stage s5 (created inside one transaction, dropped in cleanup; every object name is prefixed ws03_proof_):\nCREATE TABLE ws03_proof_finalize_delay (tool TEXT PRIMARY KEY, seconds INT NOT NULL CHECK (seconds BETWEEN 1 AND 30), until TIMESTAMPTZ NOT NULL);\nCREATE FUNCTION ws03_proof_finalize_delay_fn() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE d INT; BEGIN SELECT seconds INTO d FROM ws03_proof_finalize_delay WHERE tool = NEW.tool AND until > now(); IF d IS NOT NULL AND OLD.status = 'reserved' AND NEW.status IN ('completed','failed') THEN PERFORM pg_sleep(d); END IF; RETURN NEW; END $$;\nCREATE TRIGGER ws03_proof_finalize_delay BEFORE UPDATE ON session_tool_audit_intents FOR EACH ROW EXECUTE FUNCTION ws03_proof_finalize_delay_fn();\nCleanup: DROP TRIGGER IF EXISTS ws03_proof_finalize_delay ON session_tool_audit_intents; DROP FUNCTION IF EXISTS ws03_proof_finalize_delay_fn(); DROP TABLE IF EXISTS ws03_proof_finalize_delay;\nFinal check: SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'ws03_proof%' AND NOT tgisinternal must return 0.\n\nScripts, CLI and environment: durable-loop-proof.sh takes no arguments. Optional DURABLE_LOOP_PROOF_DATABASE_URL is refused unless the database name contains test and the port is not 55434. DURABLE_LOOP_PROOF_KEEP=1 keeps the container. durable-loop-live-proof.sh --stage s5|s3|s7|s8 [--dry-run] [--cleanup-only]; required DURABLE_LOOP_PROOF_CONFIRM=live-stack and MP_TOKEN (never printed); MP_GATEWAY defaults to http://127.0.0.1:8080 (direct probes only); VEREVON_BASE_URL is the BFF origin (to confirm; BFF routes are POST /api/v1/chat/stream, POST /api/v1/orchestration/approvals/{id}/decide and POST /api/v1/orchestration/runs/{run_id}/continue); MP_PG_CONTAINER defaults to model-plane-postgres-1; MP_DB defaults to session_core; DURABLE_LOOP_PROOF_REQUEST is a captured body kept outside the repository; DURABLE_LOOP_PROOF_OUT defaults to a mktemp directory in the scratchpad.\n\nFlags (names as shipped in code and compose): AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (read by execution-core and model-gateway), EXECUTION_EFFECT_LEDGER_ENABLED (execution-core), SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED and SESSION_CORE_LOOP_CHECKPOINT_ENABLED (session-core). Planned, not yet in code: EXECUTION_LOOP_CHECKPOINT_ENABLED, EXECUTION_LOOP_RESUME_ENABLED, EXECUTION_LOOP_PARKING_ENABLED, SESSION_CORE_PARK_TTL_SECONDS (default 86400). Stage s7 and s8 flags are checked by name before a stage is allowed to run.\n\nMatrix golden: sha256 a6ff6879c7ee55e17688ee6eaf81ca2119cfa05721cc476719b3a3c09c8f4e1a; 27 enforcement rows; decisions refuse 18, zdr 4, persistent 3, waived 2; retention class vocabulary zdr, persistent, zdr_waived.",
+ "tests": [
+  {
+   "name": "loop_fold_zdr_matrix::the_vendored_matrix_is_the_pinned_golden_with_27_enforcement_rows",
+   "proves": "The vendored copy has 27 enforcement rows with the 18/4/3/2 split, so a silent edit or a dropped row fails."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::every_enforcement_row_resolves_to_its_golden_decision_and_code",
+   "proves": "The mp-contracts resolver answers every row as the golden says, through the same inputs execution-core builds."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::fold_consume_continue_and_park_open_only_for_a_persistent_turn",
+   "proves": "For every row and each of the four stores, refuse_unless_persistent is Ok exactly when the decision is persistent."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::a_waived_turn_is_refused_at_every_durable_store",
+   "proves": "Rows e_waiver_on_bound_route and e_equal_waived_bearers are refused by Fold, Consume, Continue and Park (DEC-32)."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::the_database_predicate_agrees_with_the_resolver",
+   "proves": "refuse_unless_persistent_class over the stored retention class agrees with the resolution-based gate on every row, so session-core and the resolver cannot drift."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::retention_class_matches_the_golden_vocabulary",
+   "proves": "zdr maps to zdr, persistent to persistent, waived to zdr_waived, as the golden vocabulary states."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::loop_mode_is_offered_only_to_a_persistent_turn_with_the_switch_on",
+   "proves": "continuation_mode_for(persistent, enabled) is loop only for persistent rows with the switch on, and empty otherwise."
+  },
+  {
+   "name": "loop_fold_zdr_matrix::a_hand_built_waived_resolution_is_refused",
+   "proves": "The matrix cannot pass vacuously: a constructed waived resolution is refused at every store."
+  },
+  {
+   "name": "runtime_loop::agent::a_waived_run_never_offers_a_loop_approval",
+   "proves": "The production continuation-mode call site, driven by AuthenticatedUser::for_test_with_waiver, offers no loop mode to a waived caller. Red until fix F1."
+  },
+  {
+   "name": "durable_loop_contract::the_inline_loop_has_no_resume_path",
+   "proves": "tool_loop.rs with comments stripped contains none of AgentResume, ConsumeApproval, consume_approval, SaveLoopCheckpoint, ClaimLoopCheckpoint, CloseLoopCheckpoint, LoopFoldV1, loop_fold, continue_run, RunAgentRequest, continuation_mode, run_agent( or resume:."
+  },
+  {
+   "name": "durable_loop_contract::the_continue_route_is_one_route_bound_to_one_handler",
+   "proves": "Exactly one /continue route in http_routes.rs, bound to sse::continue_run, and exactly one non-test AgentResume literal in sse.rs."
+  },
+  {
+   "name": "durable_loop_contract::the_builder_and_the_validator_agree_on_every_field",
+   "proves": "validate_continue_resume of build_continue_resume is Ok; a bad mode, an empty approval_id, an empty claim_token and a client-supplied segment_no are each refused with their closed token; grpc.rs enforce_resume delegates to it."
+  },
+  {
+   "name": "durable_loop_contract::the_continuation_mode_words_agree_across_planes",
+   "proves": "session-core accepts the empty string, segment and loop; mp-contracts emits only empty and loop; the gateway preflight requires loop; the executor accepts segment and loop."
+  },
+  {
+   "name": "durable_loop_contract::a_refused_zdr_run_never_reaches_the_continuation_check",
+   "proves": "In grpc.rs run_agent, enforce_persistence_free_execution precedes enforce_resume."
+  },
+  {
+   "name": "durable_loop_contract::segment_numbers_are_not_a_gateway_literal",
+   "proves": "sse.rs contains no segment_no literal 2, so a second continuation of one run does not reuse the s2 step prefix. Red until fix F5."
+  },
+  {
+   "name": "durable_loop_contract::the_durable_mutation_inventory_names_continue_run",
+   "proves": "zdr_posture.rs DURABLE_MUTATIONS lists sse.rs continue_run (N7). Red until the fix."
+  },
+  {
+   "name": "model-gateway continue_run_tests::a_consumed_approval_is_refused_with_409",
+   "proves": "continue_preflight returns 409 continuation_already_consumed when approval_consumed is true, closing the second-continue gap F6. Red until the fix."
+  },
+  {
+   "name": "model-gateway continue_run_tests::a_non_persistent_turn_is_refused_before_any_work",
+   "proves": "continue_preflight refuses a waived or ZDR turn before any upstream call (F2). Red until the fix."
+  },
+  {
+   "name": "model-gateway zdr_posture_matrix::continue_preflight_is_ok_exactly_for_persistent_rows",
+   "proves": "The gateway's /continue preflight agrees with the golden for all 27 rows, using the same pure function continue_run calls."
+  },
+  {
+   "name": "model-gateway continue_run_tests existing cases: a_continuation_is_refused_while_the_switch_is_off, a_finished_run_is_not_resumable, only_a_granted_loop_approval_of_this_run_continues",
+   "proves": "The existing preflight cases stay green after the signature change."
+  },
+  {
+   "name": "session-core orchestration_store::approval_consume_refuses_a_waived_run_and_a_zdr_run (DB-gated, ignored)",
+   "proves": "consume_approval refuses a waived or ZDR run at the database, not only at the token (F3). Red until the fix."
+  },
+  {
+   "name": "session-core loop_checkpoint::every_purge_path_removes_the_fold (DB-gated, ignored)",
+   "proves": "purge_run, the terminal transition, thread delete and organisation purge each remove the run_loop_checkpoints row, which the text-order test in gdpr.rs does not prove."
+  },
+  {
+   "name": "session-core loop_checkpoint existing DB-gated tests (ignored): saves_are_compare_and_set_and_a_stale_writer_is_refused, one_claim_wins_a_pause_and_the_fold_opens_under_its_scope, a_zdr_or_waived_run_never_keeps_a_fold, close_refuses_late_writers_and_purge_removes_the_fold",
+   "proves": "Fold store compare-and-set, single claim winner, refusal for zdr and zdr_waived runs, close and purge."
+  },
+  {
+   "name": "session-core orchestration_store approval_consume existing DB-gated tests (ignored, six)",
+   "proves": "Single-consume CAS including a six-way race, replay told apart from another claim, loop approvals make no delivery row, fingerprint check, wrong run, wrong user and cold approvals refused."
+  },
+  {
+   "name": "session-core tool_ledger existing DB-gated tests (ignored, five)",
+   "proves": "A finished run's reservation closes as unknown_outcome; a live run is untouched; a young reservation is left alone; class and digest bind on replay; finalize records the closing outcomes and a receipt only for completed."
+  },
+  {
+   "name": "durable-loop-proof-test.sh (static, no docker)",
+   "proves": "The runner is executable and LF, forbids the stack database and dev-bypass names, requires loopback binding and session_core_test, requires the skip check and an EXIT trap, and every test it names exists with #[ignore]."
+  },
+  {
+   "name": "durable-loop-live-proof-test.sh (static, no docker)",
+   "proves": "The live runner requires the explicit confirmation, has no dev bypass, restores flags and removes the trigger in cleanup, pairs every pause with an unpause, never echoes MP_TOKEN, prefixes its objects ws03_proof_, and returns BLOCKED for s7 and s8."
+  },
+  {
+   "name": "live stage s5 (developer stack, dated run, not CI)",
+   "proves": "On the developer stack a reserved save_memory row survives a kill of execution-core mid-finalize and is closed unknown_outcome by the sweep, with no replay. The verdict is WINDOW_MISSED, not PASS, if the finalize commits."
+  },
+  {
+   "name": "live stage s3 (developer stack, dated run, not CI)",
+   "proves": "Approve returns awaiting_continue; the approved call runs once after a continue; consumed_at is set; zero delivery rows; a second continue returns 409; a same-claim replay does not re-run the call with the ledger on."
+  },
+  {
+   "name": "zdr-contract-sync.test.sh and its --self-test (repo root scripts/tests)",
+   "proves": "The execution-core copy is byte-identical to the canonical golden and its pin; the new CONSUMERS row is satisfied; the existing goldens are unchanged."
+  },
+  {
+   "name": "capability-promotion-ledger-test.sh (existing)",
+   "proves": "No capability row was added or promoted, so every row stays source_only."
+  }
+ ],
+ "steps": [
+  "1. Decide the owner rulings first (open questions Q1-Q4). Without them the fixes for F1-F3 and the same-claim policy cannot be finished.",
+  "2. Land the fixes in S2/S3 scope, each test first (red), then the fix (green): F1 waived runs offered loop mode (agent.rs about 2215 and 4646); F2 continue_preflight refuses non-persistent turns (sse.rs only, not continuation_gate); F3 consume_approval joins runs.retention_class (orchestration_store.rs 902-1000); F5 executor-owned segment numbering (builder sends 0; executor derives from the pause snapshot); F6 continue_preflight refuses consumed approvals (approval.consumed_at is already populated); F7 compose passes AGENT_CONTINUE_AFTER_APPROVAL_ENABLED to model-gateway.",
+  "3. In mp-contracts add DurableStore, refuse_unless_persistent, refuse_unless_persistent_class, the new continuation_mode_for signature, build_continue_resume and validate_continue_resume, with unit tests. Run cargo test -p mp-contracts loop_fold.",
+  "4. Vendor the golden and its pin into execution-core tests/fixtures (byte copy). Add the VENDORED and CONSUMERS rows to the repo-root zdr-contract-sync.test.sh in the same change. Run the sync script and its --self-test from the worktree root.",
+  "5. Write loop_fold_zdr_matrix.rs and the crate-internal waived call-site test in agent.rs. Run cargo test -p execution-core --test loop_fold_zdr_matrix.",
+  "6. Write durable_loop_contract.rs (identifiers, not bare words; comments stripped). Run cargo test -p execution-core --test durable_loop_contract. The three guards for segment_no, the production continuation-mode call and the DURABLE_MUTATIONS entry turn green only after step 2.",
+  "7. Extend model-gateway: continue_preflight with the two new parameters and its cases, the DURABLE_MUTATIONS entry, and the /continue case in zdr_posture_matrix.rs. Run cargo test -p model-gateway continue_run and the matrix test.",
+  "8. Extend session-core: the waived consume DB test and the purge-path DB test (both #[ignore]). They run only through durable-loop-proof.sh or a manual DATABASE_URL run.",
+  "9. Write durable-loop-proof.sh and durable-loop-proof-test.sh. Run the static test with bash, which needs no docker. Then the lead runs the proof once, after confirming Docker memory headroom (the Docker VM has wedged twice).",
+  "10. Write durable-loop-live-proof.sh and its static test. Make --dry-run print every planned SQL and compose command without executing anything, and review it before any live run.",
+  "11. Lead-only live runs, each with explicit confirmation: first stage s5 (after the trigger dry-run and a check that no run is active), then stage s3 (after the compose flag fix). Save captures to the scratchpad, redact them, and confirm the cleanup checks (zero ws03_proof triggers; flags back to their snapshot; both services healthy).",
+  "12. Write the dated evidence file from the captures, update the dated WS03 section in MODEL_PLANE_STATUS.md with the Edit tool (CRLF preserved), and append a dated note to docs/decisions/ledger.md without flipping its state. Keep the approval blocker and product-claim bullet unless the stage-1 live proof passed.",
+  "13. Gates before handing over: cargo fmt --all -- --check; cargo check --workspace --all-targets; cargo test --workspace --no-fail-fast (judge by test names against HEAD, because the user's memory notes two Windows-only target failures and exit codes are unreliable there); bash scripts/tests/zdr-contract-sync.test.sh and --self-test; capability-promotion-ledger-test.sh; the BFF and FE suites from S3.",
+  "14. Commit hygiene: set the executable bit on the new .sh files with git update-index --chmod=+x; keep LF on .sh; do not stage .plan-work/ or other untracked scratch; the lead chooses the commit message and attribution."
+ ],
+ "risks": [
+  "R1 (high, F1): a waived run gets loop-mode approvals when the switch is on. execution-core uses req.zdr only (agent.rs about 2215-2222 and 4646-4650). The gateway sets RunAgentRequest.zdr from TurnPosture::zdr(), which is false for Waived (zdr_posture.rs 98-100; effective_zdr at sse.rs 1017 and 1502). Consume and continue then accept the approval. Latent: the flag is off by default.",
+  "R2 (high, F2 and F3): /continue accepts waived turns (zdr_posture.rs continuation_gate 257-264, which returns Ok for Waived at line 260), and consume_approval refuses only the zdr claim (retention_receipt.rs 241-246), not the stored retention class (orchestration_store.rs CONSUME_APPROVAL_SQL 986-991). The shared continuation_gate is also used by decide_approval (http_routes.rs about 1502) and approve_plan for owner decision 17, so changing it would change cold waived approvals too. Keep the fix in continue_preflight and in consume.",
+  "R3 (high, F5): the builder hardcodes segment_no 2 (sse.rs 13490); the executor clamps with resume.segment_no.max(2) (agent.rs about 5162), and the validator never checks it (grpc.rs 676-693). Every continuation of one run gets the prefix s2., and the approved call's step id is always s2.tool_1_approved (tool_step_id at agent.rs 3563-3570). Approvals are keyed by run_id plus step_id (agent.rs 4669), so a second gated call that reproduces that step id would hit the first approval's key. Not reproduced; test it statically and in the live s3 stage with two approvals in one run.",
+  "R4 (high, F6): the second /continue with a different claim is not refused at the gateway. continue_preflight takes no consumed flag (sse.rs 13359-13388), and agentic_run_stream returns an SSE stream synchronously (sse.rs 9573), so any refusal arrives inside a 200 stream, not as the 409 that C3 requires. The fix is local: consumed_at is already populated by GetApproval (orchestration_grpc.rs 1230).",
+  "R5 (high, exactly-once): a same-claim replay re-enters prepare_resume, and consume returns the call to the claim holder (orchestration_store.rs about 954-962; agent.rs about 5113-5124). The approved call can run a second time unless EXECUTION_EFFECT_LEDGER_ENABLED is on and the reservation blocks it (effect.rs 119-146; reserve is keyed by run_id and action_id). With the ledger off, a dropped-response retry can repeat an effectful call. Decide Q3 before the live s3 stage.",
+  "R6 (high, deployment): deploy/docker-compose.yml passes AGENT_CONTINUE_AFTER_APPROVAL_ENABLED to execution-core only (line 1042). The route reads the flag inside model-gateway (sse.rs continue_run calls continue_after_approval_enabled), so with compose defaults every continue returns continue_disabled. Setting the flag on execution-core alone is not enough for the live proof.",
+  "R7 (medium): the DB-gated tests skip silently. loop_checkpoint.rs, tool_ledger.rs, orchestration_store.rs and grpc.rs print skipping: DATABASE_URL unset and return early when the variable is missing, so a run can pass with zero assertions. The runner must check for that line and count passes. The CI receipts job already uses a minimum-count guard (model-plane-rust-ci.yml around lines 164-170).",
+  "R8 (medium): the database name must contain test (loop_checkpoint.rs 468, tool_ledger.rs 142, orchestration_store.rs 1907). The sibling approval-continuation-proof.sh uses session_core_proof, which would fail that assertion if the same helper were used.",
+  "R9 (medium): the sibling proof scripts publish with -P (all interfaces) and hard-code CARGO_TARGET_DIR to a macOS /Volumes path (approval-recovery-postgres-test.sh and chat-thread-replay-postgres-test.sh). Do not copy either pattern. Path arguments to cargo and docker are subject to MSYS conversion on Git Bash.",
+  "R10 (medium): the 2026-10-17 kill proof used a temporary trigger on the live ledger table and a watcher that is not committed. The exact pause and kill order is unknown, and no committed script reproduces the kill step. The trigger is DDL on the developer database, so the script must bound it by until, scope it to save_memory and to reserved-to-completed transitions, check that no run is active, drop it in the trap, and fail the stage (WINDOW_MISSED) if the finalize commits. A debug-only execution-core delay knob would be an alternative, but it is a code change outside S9 (Q7).",
+  "R11 (medium): the live proof can only send a plan_mode false body with the agentic feature by replaying a captured request, because the SPA sets agentic only in plan mode and plan mode is read-only (the 2026-10-17 finding). Label every such run API-level, not UI-level.",
+  "R12 (medium): memory side effects. The 2026-10-17 proof left a save_memory note (My favourite colour for the ledger test is blue.) in the user's memory store. The S9 live run must use a clearly marked string, and deleting user data is the user's decision, not the agent's.",
+  "R13 (medium): RunResumedAfterApproval is emitted by broadcast after the consume commits (orchestration_grpc.rs 2773-2787), not written in the same transaction as the S2 plan says, and it is not a database row. Its name says resumed, but it fires at consume time, before execution-core starts the segment. The S2 evidence requirement for a psql row cannot be met as built; record that honestly (Q6).",
+  "R14 (medium): vacuity. The pure gate is green when correct, so a green matrix says nothing about call sites. Keep the crate-internal call-site test and the source guards alongside it (approach C and D).",
+  "R15 (medium): the matrix copy. A golden change needs a re-vendored copy, a new pin and a GOLDENS digest, or the sync check fails. A CONSUMERS row without a copy is pending by default and fails under REQUIRE_CONTRACT=1, which the receipts job sets. Add the copy and the row together.",
+  "R16 (medium): N7 asks for one enforcement row per new durable RPC, but enforcement_rows evaluate bearers and routes, not RPC names, so no row can express SaveLoopCheckpoint refusing zdr. Use an inventory test instead, or record the choice (Q9). Do not add fake rows.",
+  "R17 (medium, policy): ZDR.md section 5.5 (line 357) lists approvals among the things a waived run persists, while DEC-32 says a waived run counts as ZDR for every new durable store. The reading in this design (cold approvals unchanged; loop mode, consume and continue refused for waived) is a proposal that needs the owner's ruling (Q1).",
+  "R18 (medium): the continuation brief is empty (sse.rs 13488), so a continuation is seeded with the goal and the approved call only, and prior tool results are not carried. The plan labels this lossy. The live evidence must say so.",
+  "R19 (low): AgentResume.mode is validated but otherwise ignored by the executor (grpc.rs 683 is the only read), so segment and loop behave identically until S7. The word mode also means the permission mode in prepare_resume (snapshot.mode) and continuation_mode on the approval. Name the three meanings in the test names and the proto comment.",
+  "R20 (low): the S2 DoD expects a psql row for RunResumedAfterApproval (R13), and the S3 DoD expects a ZDR-org typed refusal. The second needs a ZDR-org test identity, which may not exist; mark it not run if absent.",
+  "R21 (low): text-order tests are not behavioural. gdpr.rs 675-700 checks statement order only. Add the DB-gated purge-path test (see tests) before relying on erasure.",
+  "R22 (low): the Docker VM is memory constrained and has wedged twice; the lead runs each docker-based script once, after checking headroom. Agents do not run docker build, run or compose.",
+  "R23 (low): Windows toolchain. protoc (libprotoc 35.1), rg and cargo 1.97.1 are present on this machine. psql is not on the host (use docker exec). The user's memory notes two cargo targets that fail on Windows pre-existing; they were not identified from the worktree, so verify before relying on --all-targets. Git Bash needs tr -d on captured output and docker exec without -t.",
+  "R24 (low): the compose header (lines 4-5) cites ./build-verevon-services.sh, which is not in the worktree; compose.sh and the memory note describe the sanctioned path. Confirm before the live run (Q10).",
+  "R25 (low): the proof's temporary trigger and the pause of session-core both change the live stack. If the script is killed mid-run, the trap must unpause session-core and drop the trigger; test this with --cleanup-only before any live run."
+ ],
+ "invariants": [
+  "I1: fold, consume, continue and park open only when resolve_turn returns persistent. A waived turn counts as ZDR for every new durable loop store (DEC-32). In the database only runs.retention_class = 'persistent' passes.",
+  "I2: a granted loop approval is consumed at most once (CAS on consumed_at IS NULL). A different claim is refused. A same-claim replay must not re-run the approved call.",
+  "I3: the inline gateway loop (tool_loop.rs) has no resume path. Resume enters only through RunAgentRequest.resume on execution-core, via the /continue route.",
+  "I4: the builder and the validator agree on mode words (segment, loop) and required fields, and segment numbering belongs to the executor.",
+  "I5: no bearer, JWT, claim token or payload text is persisted, logged or written to evidence. claim_token is stored only as a blake3 hash (orchestration_grpc.rs 2759). Evidence records identifiers, statuses and counts only.",
+  "I6: the disposable proof never targets the stack database (port 55434 or container model-plane-postgres-1). The live proof runs only with explicit confirmation, restores its flags, removes its trigger and unpauses services in every exit path.",
+  "I7: DB-gated tests must run, not skip. The runner requires the pass counts and the absence of the skip line.",
+  "I8: capability promotion rows stay source_only. S9 adds no cap row and promotes none.",
+  "I9: evidence wording follows the status definitions: source-verified means repeatable local tests (CI or a disposable database); live-verified means one developer stack on one dated run. Never production, never a ZDR-org proof, never provider-side idempotency, never compliance evidence.",
+  "I10: the defaults of AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, EXECUTION_EFFECT_LEDGER_ENABLED, SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED and SESSION_CORE_LOOP_CHECKPOINT_ENABLED stay false in compose."
+ ],
+ "open_questions": [
+  "Q1 (owner, DEC-32 and ZDR.md 5.5): may a waived run keep cold approvals as today, with loop mode, consume and continue refused for it (the design's proposal), or must approvals of waived runs be refused entirely?",
+  "Q2 (owner, F5): executor-owned segment numbering, with the pause segment carried in the approval descriptor or in an add-only ConsumeApprovalResponse field, versus a run-level counter (a migration). The design prefers the first.",
+  "Q3 (owner, exactly-once): on a repeated continue with the same claim, should the gateway refuse every consumed approval with 409 (safest, the proposal), or allow a same-claim replay only when the ledger row exists?",
+  "Q4 (owner): should service principals be exempt from the ZDR refusal on consume (retention_receipt.rs 241-246 exempts them, while matrix rows 3 and 4 treat service tokens as ZDR)? The design says no for loop continuation.",
+  "Q5 (gateway): the /continue refusal for ZDR is zdr_durable_mutation_forbidden today (zdr_posture.rs 259), while the plan names feature approval_continuation. Which typed refusal does the SPA expect, and does the decision on Q1 change it?",
+  "Q6 (session-core): keep the RunResumedAfterApproval name for an event emitted at consume time, or rename it to an approval-consumed event; and should it be persisted, given it is broadcast-only today?",
+  "Q7 (owner, live proof): may the developer stack carry a temporary trigger for the kill proof, or should an execution-core debug-only delay knob be added (a code change outside S9)? The alternative is a long-running effectful call, if the sandbox path works.",
+  "Q8 (owner): the 2026-10-17 memory note (My favourite colour for the ledger test is blue.) stays until the user decides; the S9 run must use a marked string.",
+  "Q9 (owner, N7): enforcement_rows cannot express RPC-level refusals. Use a Rust inventory test over the new session-core RPCs, or add a separate table to the golden (which changes the digest and every vendored copy)?",
+  "Q10 (lead): which bring-up command is the sanctioned one for the developer stack (compose.sh, per the user's memory note; the compose header names ./build-verevon-services.sh, which is absent)? What is the BFF origin for VEREVON_BASE_URL?",
+  "Q11 (owner, ledger): when does docs/decisions/ledger.md flip from proposed to implemented: after the stage-1 live proof plus the D1 owner ruling, as the entry says, or after the S9 bundle is complete?",
+  "Q12 (lead): should the DB-gated loop tests join the CI receipts job (a WS01 decision), or stay manual? The design defaults to manual."
+ ],
+ "verification_commands": [
+  "bash \"apps/Model Plane/scripts/tests/approval-continuation-proof-test.sh\" (existing static guard; must stay green)",
+  "bash \"apps/Model Plane/scripts/tests/capability-promotion-ledger-test.sh\" (must stay green; no cap row changes)",
+  "bash scripts/tests/zdr-contract-sync.test.sh and bash scripts/tests/zdr-contract-sync.test.sh --self-test (run from C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b)",
+  "bash \"apps/Model Plane/scripts/tests/durable-loop-proof-test.sh\" (new static guard; no docker)",
+  "bash \"apps/Model Plane/scripts/tests/durable-loop-live-proof-test.sh\" (new static guard; no docker)",
+  "cd \"apps/Model Plane/rust\" && cargo test -p mp-contracts loop_fold",
+  "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test loop_fold_zdr_matrix -- --nocapture",
+  "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test durable_loop_contract",
+  "cd \"apps/Model Plane/rust\" && cargo test -p execution-core a_waived_run_never_offers_a_loop_approval",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway continue_run",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway zdr_posture_matrix",
+  "cd \"apps/Model Plane/rust\" && cargo test -p session-core --bin session-core approval_consume (non-database subset)",
+  "cd \"apps/Model Plane/rust\" && cargo fmt --all -- --check",
+  "cd \"apps/Model Plane/rust\" && cargo check --workspace --all-targets",
+  "cd \"apps/Model Plane/rust\" && cargo test --workspace --no-fail-fast (CI equivalent; compare failing names against HEAD)",
+  "pnpm --dir \"apps/Frontend Plane/verevonv3\" exec vitest run src/shared/api/orchestration-client.test.ts src/shared/actions/action-registry.test.ts (named tests only; the suite has pre-existing failures per the user's notes)",
+  "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets (the BFF continue tests: continue_forwards_only_the_approval_id_and_the_claim_token, continue_refuses_a_blank_identifier_before_any_upstream_call, continue_body_rejects_any_field_the_client_does_not_own)",
+  "git -C C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b diff --check",
+  "LEAD ONLY, docker: bash \"apps/Model Plane/scripts/tests/durable-loop-proof.sh\" (after a Docker memory check; the per-group logs must show the expected pass counts and no skip line)",
+  "LEAD ONLY, live stack: bash \"apps/Model Plane/scripts/tests/durable-loop-live-proof.sh\" --stage s5 --dry-run, then DURABLE_LOOP_PROOF_CONFIRM=live-stack MP_TOKEN=<from devtools, never logged> bash \"apps/Model Plane/scripts/tests/durable-loop-live-proof.sh\" --stage s5",
+  "LEAD ONLY, post-run checks: docker exec model-plane-postgres-1 psql -U postgres -d session_core -tAc \"SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'ws03_proof%' AND NOT tgisinternal\" (expect 0) and docker exec model-plane-postgres-1 psql -U postgres -d session_core -tAc \"SELECT max(version), bool_and(success) FROM _sqlx_migrations\" (expect at least 48 and t)"
+ ]
+}

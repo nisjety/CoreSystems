@@ -1,0 +1,54 @@
+== chained rows and heads
+ chained_rows | heads | all_rows 
+--------------+-------+----------
+           17 |     5 |   110176
+
+== chained rows, latest 12
+              org_id              | chain_seq |           event            |  plane  | chain_mode |     prev     |   row_hash   |          ingested_at          
+----------------------------------+-----------+----------------------------+---------+------------+--------------+--------------+-------------------------------
+ eDJiveH1XUJWTEMkia2CIMVu68bcMS4z |         1 | plane_service_token_issued | control | insert     | 4900b683280d | 216371e6f37f | 2026-10-27 06:06:50.937588+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |        11 | tool_action                | model   | insert     | 4692daa46282 | d9cc32e42930 | 2026-10-27 06:06:37.249602+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |        10 | plane_service_token_issued | control | insert     | 917d656ab910 | 4692daa46282 | 2026-10-27 06:06:37.243142+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         9 | tool_action_reserved       | model   | insert     | 3372ac86134c | 917d656ab910 | 2026-10-27 06:06:37.079189+00
+ global                           |         3 | plane_service_token_issued | control | insert     | 798c1cf6808a | 83371e7ee87f | 2026-10-27 06:06:37.074692+00
+ rfDfmPhdN7YWCTzfwaL23fzieBdf2S4M |         1 | plane_service_token_issued | control | insert     | 6834d957d1df | 0967669e8a5a | 2026-10-27 06:04:49.407637+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         8 | plane_service_token_issued | control | insert     | 892b4a371619 | 3372ac86134c | 2026-10-27 06:04:18.070589+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         7 | tool_action                | model   | insert     | 6528fbd1b159 | 892b4a371619 | 2026-10-27 06:04:14.528404+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         6 | tool_action_reserved       | model   | insert     | b8935e3c37c7 | 6528fbd1b159 | 2026-10-27 06:04:13.884711+00
+ global                           |         2 | plane_service_token_issued | control | insert     | d200804a8232 | 798c1cf6808a | 2026-10-27 06:04:13.351877+00
+ global                           |         1 | plane_service_token_issued | control | insert     | fcb515c7b7d7 | d200804a8232 | 2026-10-27 06:04:13.332213+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         5 | plane_service_token_issued | control | insert     | d3a73a7d011f | b8935e3c37c7 | 2026-10-27 06:04:05.77435+00
+
+== contiguity, links and genesis per org (expect gaps 0, link_breaks 0, genesis_ok t)
+              org_id              | rows | min | max | gaps | link_breaks | genesis_ok 
+----------------------------------+------+-----+-----+------+-------------+------------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |   11 |   1 |  11 |    0 |           0 | t
+ eDJiveH1XUJWTEMkia2CIMVu68bcMS4z |    1 |   1 |   1 |    0 |           0 | t
+ global                           |    3 |   1 |   3 |    0 |           0 | t
+ platform                         |    1 |   1 |   1 |    0 |           0 | t
+ rfDfmPhdN7YWCTzfwaL23fzieBdf2S4M |    1 |   1 |   1 |    0 |           0 | t
+
+== head equals the last row (expect seq_ok t, hash_ok t, state ok)
+              org_id              | head_seq | state |         activated_at          | seq_ok | hash_ok 
+----------------------------------+----------+-------+-------------------------------+--------+---------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |       11 | ok    | 2026-10-27 06:02:50.647924+00 | t      | t
+ eDJiveH1XUJWTEMkia2CIMVu68bcMS4z |        1 | ok    | 2026-10-27 06:06:50.937588+00 | t      | t
+ global                           |        3 | ok    | 2026-10-27 06:04:13.332213+00 | t      | t
+ platform                         |        1 | ok    | 2026-10-27 06:02:55.073254+00 | t      | t
+ rfDfmPhdN7YWCTzfwaL23fzieBdf2S4M |        1 | ok    | 2026-10-27 06:04:49.407637+00 | t      | t
+
+== verifier state
+              org_id              | last_status |  last_reason   | first_broken_seq | verified_through_seq | legacy_unchained_rows |          last_run_at          
+----------------------------------+-------------+----------------+------------------+----------------------+-----------------------+-------------------------------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf | partial     | no_attestation |                  |                    8 |                 25711 | 2026-10-27 06:06:37.079345+00
+ global                           | partial     | no_attestation |                  |                    3 |                 26693 | 2026-10-27 06:06:37.280261+00
+ platform                         | partial     | no_attestation |                  |                    1 |                 17140 | 2026-10-27 06:06:37.372691+00
+ rfDfmPhdN7YWCTzfwaL23fzieBdf2S4M | partial     | no_attestation |                  |                    1 |                 11401 | 2026-10-27 06:06:37.419965+00
+
+== the latest audit rows of any kind (plane, producer, event), last 10 minutes
+  plane  | source_producer |           event            | count |              max              
+---------+-----------------+----------------------------+-------+-------------------------------
+ control | auth-core       | plane_service_token_issued |    22 | 2026-10-27 06:06:50.937588+00
+ model   | session-core    | tool_action                |     2 | 2026-10-27 06:06:37.249602+00
+ model   | session-core    | tool_action_reserved       |     2 | 2026-10-27 06:06:37.079189+00
+

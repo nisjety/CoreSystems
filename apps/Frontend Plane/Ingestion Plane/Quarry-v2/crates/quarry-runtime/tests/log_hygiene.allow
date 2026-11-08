@@ -1,0 +1,12 @@
+# Reviewed exceptions for tests/log_hygiene.rs (WS12.S6).
+#
+# One entry per site, three fields separated by TABS:
+#   <path relative to crates/, for example quarry-runtime/src/x.rs>
+#   <the trimmed source line that holds the banned token>
+#   <the reason: why the value is not page or caller text>
+#
+# A reason is mandatory. An entry that matches no violation fails the test.
+# Prefer a `// zdr-log-ok: <reason>` comment on the macro line (or the line
+# above it) over an entry here: the comment sits next to the code it excuses.
+# The list is empty: every site the lint found is fixed or carries a reasoned
+# zdr-log-ok comment.

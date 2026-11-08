@@ -1,0 +1,66 @@
+[
+ {
+  "key": "ws04-s9-compose-expose",
+  "verdict": "pass",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/ws04-run-control-switches-compose-test.sh"
+  ],
+  "summary": "Edited the model-gateway environment block in deploy/docker-compose.yml: MODEL_GATEWAY_RUN_CONTROL_BUS now defaults to the literal false (was off), and two new keys were added with default false and short comments, MODEL_GATEWAY_SHARED_TURN_RECORD (WS04-S5) and MODEL_GATEWAY_SHARED_IDEMPOTENCY (WS04-S7). The replicas file is untouched. Added the contract test apps/Model Plane/scripts/tests/ws04-run-control-switches-compose-test.sh: for each of the five switches it checks exactly one default-false environment line and no on, 1 or yes default. It fails on the unedited tree and passes after the edit. No switch was flipped, no docker command ran, no .env file was read, and nothing was committed.",
+  "test_results": [
+   {
+    "command": "bash \"apps/Model Plane/scripts/tests/ws04-run-control-switches-compose-test.sh\"",
+    "passed": true,
+    "outcome": "exit 0; all 10 checks ok (5 switches x default-false once, no on/1/yes default); contract passed"
+   },
+   {
+    "command": "bash -n \"apps/Model Plane/scripts/tests/ws04-run-control-switches-compose-test.sh\"",
+    "passed": true,
+    "outcome": "exit 0, syntax ok"
+   },
+   {
+    "command": "git diff --ignore-cr-at-eol --stat on docker-compose.yml, plus file/CRLF check",
+    "passed": true,
+    "outcome": "1 file changed, 8 insertions, 1 deletion (1 changed line plus 7 added: 2 keys with 6 comment lines); file is LF (0 CRLF of 2153 lines), UTF-8 text"
+   }
+  ],
+  "db_tests": [],
+  "deploy_notes": "1) Scope conflict to confirm: the task text said 'Files you may edit or create: (none)', but the round-I.json packet ws04-s9-compose-expose lists docker-compose.yml under files and the new test script under new_files. I followed the packet, because the task text names the packet record as the instruction. If no edit was intended, revert the compose hunk and delete the new script before committing. 2) Behaviour is identical with the switches off: the parser mp_contracts::loop_fold::switch_from (rust/crates/mp-contracts/src/loop_fold.rs:334-336) accepts only 'true' (case-insensitive, trimmed), so 'false' and 'off' both read as off. The two new keys go through the same parser (chat_turn_registry.rs:219 and idempotency_registry.rs:313). 3) Comment accuracy checked against code: SharedClaimValue holds only request_id, run_id, thread_id and state (idempotency_registry.rs:346-352), and the shared turn record holds run_id and skill ids with a 24 h TTL (chat_turn_registry.rs, TURN_TTL). 4) No existing test, script, or Rust or Go test pins the old :-off default or the block layout. The other mentions are verify-replica-run-control.sh header comments, the docs, and one prose comment at docker-compose.replicas.yml:32; none were edited. 5) The edited lines (301 to 316) sit inside the model-gateway environment: service at line 191, environment at line 208, next service session-core at line 808. 6) Lead only, not run by me because docker is off limits for the coder: cd 'apps/Model Plane' && docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.replicas.yml config --quiet. PyYAML is not installed here, so the YAML was not parsed locally; the structure check above is by line position only. 7) core.filemode is false on this machine, so git will not record the script's exec bit (I set it to match its siblings); the test runs under bash, as the packet specifies. No .env file was opened and no docker command ran.",
+  "residual_risks": [
+   "The lead still has to run `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.replicas.yml config --quiet`. It is the only check that the two new keys reach the replicas through `extends`. Docker is forbidden here, so it was not run.",
+   "The contract test greps the raw file without checking which block a line sits in. A commented-out copy of a switch line would count as a second match and fail the test, and a copy moved into the wrong service would still pass. That is acceptable for a pin on default values.",
+   "The RUN_CONTROL_BUS and SEND_RECEIPTS comments still say 'Roll back with off plus a restart'. That is correct under the strict parser, but it is out of step with the new literal-false default. This is cosmetic and outside this packet's touch-no-other-line rule.",
+   "When the WS04-S9 flip commit lands, it must update the script's expected defaults for the four flipped switches, as the script's header comment says. Otherwise this test goes red."
+  ]
+ },
+ {
+  "key": "ws08-s8-dec37-ruling-record",
+  "verdict": "pass",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/program-2026-10-03/owner-rulings-and-defaults.md"
+  ],
+  "summary": "Appended the DEC-37 (OD18) ruling and the WS08-S8 gate form, append-only, CRLF kept, no existing line changed. ledger.md gets one new entry at the end, '## DEC-37 (OD18) ruled: attachment caps, local OCR, fonts; WS08-S8 gate form (2026-10-27)' (40 lines added: source, caps, OCR, fonts, ZDR, gate form, and the five blockers). owner-rulings-and-defaults.md gets item 7 after item 6 (line 13); the list sits mid-file, so the insert goes before the blank line and the '## Defaults' heading. The harness text said 'Files you may edit: (none)', but the packet's files field names these two files, so I followed the packet. Two wording changes to match sources: the brief says the 4 MB cap 'stays', but both caps default to 1 MB today (chat_extract.py:24, attachment_policy.rs DEFAULT_MAX_FILE_BYTES) and OD18 raises the cap to 4 MB after H1's zip guard, so the entry says it rises (the 60k limit does stay). D1-322 is the depth register's red action-surface-contract node test (register line 433, open), so the entry describes it that way. Lead notes: (1) both services use one file-size cap for every document type, so the 4 MB rise reaches all types until WS08-S7's per-type cap exists; the owner should confirm that is intended. (2) ws04-s9-docs-now also appends to ledger.md, so check that both entries survive. (3) The DEC-37 and WS08-S8 depth register rows are still the lead's; I did not edit the register.",
+  "test_results": [
+   {
+    "command": "git diff --stat on both files shows additions only",
+    "passed": true,
+    "outcome": "ledger.md 40 insertions, 0 deletions, single hunk appended at the end (lines 5262-5301). owner-rulings-and-defaults.md 1 insertion, 0 deletions (new item 7 after item 6, before the Defaults heading). Total 41 insertions, no deletions."
+   },
+   {
+    "command": "file <both> still reports CRLF line terminators",
+    "passed": true,
+    "outcome": "Both report 'with CRLF line terminators'. Byte count check: ledger.md 5301 CRLF = 5301 LF (0 bare LF); owner-rulings 29 CRLF = 29 LF (0 bare LF)."
+   }
+  ],
+  "db_tests": [],
+  "deploy_notes": "",
+  "residual_risks": [
+   "The ledger entry says the cap 'rises to 4 MB' where the brief said 4 MB 'stays'. The entry is the correct version: OD18 (CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:504) says to raise the cap to 4 MB, and attachment_policy.rs:42 sets DEFAULT_MAX_FILE_BYTES to 1_000_000. I could not confirm the imports-core 1 MB default in chat_extract.py: my grep found no match for MAX_BYTES.",
+   "Both services use one file-size cap for every attachment type. Until the WS08-S7 per-type cap exists, raising it to 4 MB affects all types, not only xlsx, pptx and pdf. The owner should confirm this is intended.",
+   "The ws04-s9-docs-now packet also appends to ledger.md. The lead should check that both appended entries survive when the commits are staged.",
+   "The DEC-37 and WS08-S8 rows in the depth register are still to be added by the lead.",
+   "These are docs-only edits, so no regression test applies. Verification was additions-only (40+1 lines, 0 deletions) and the line-ending check: ledger.md has 5301 CRLF out of 5301 LF, owner-rulings has 29 out of 29, so both files remain pure CRLF."
+  ]
+ }
+]

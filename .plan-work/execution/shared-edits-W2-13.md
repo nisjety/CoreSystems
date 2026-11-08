@@ -1,0 +1,6 @@
+## WS20-S3
+shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: at line ~7038 the InferRequest literal lacks the field `image_parts` (E0063, pre-existing, present in the HEAD copy of this file and not from this slice). Add the field with the value the proto contract expects, so `cargo test -q -p model-gateway --lib cron_fires_path` can build and run. Not determined by me.
+
+## WS20-S3
+shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts (optional, to satisfy the CLAUDE.md action-contract rule): add near the schedule-related inputs `const scheduleFiresListInput = z.object({ scheduleId: z.string().trim().min(1).max(200), limit: z.number().int().min(1).max(100).optional() })`, and inside actionRegistry before `] as const satisfies readonly ActionDescriptor[]`: `{ id: 'schedule.fires.list', label: 'List schedule fires', description: 'List the most recent fires of one of your schedules, with their status, outcome and the thread that holds the answer. Schedule creator or org admin only.', ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true, inputSchema: scheduleFiresListInput, outputSchema: envelopeStatusOutput }`. Check action-registry.test.ts and the catalog-manifest/model-eligibility tests afterwards; outputSchema is a status shape, so pick a list output if the lead prefers.
+

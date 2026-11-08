@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+// Vendored from /Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/proto/model_plane/v1/browser.proto
+// Quarry only consumes BrowserBroker — we vendor the wire schema to keep Quarry buildable
+// in isolation. It is a hand-maintained SUBSET of the upstream file: every field here must
+// exist upstream with the same number and type. scripts/tests/browser-grant-contract.test.mjs
+// checks that.
+
+package model_plane.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service BrowserBroker {
+  rpc AcquireGrant(AcquireGrantRequest) returns (AcquireGrantResponse);
+  rpc RevokeGrant(RevokeGrantRequest) returns (RevokeGrantResponse);
+  rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
+  rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
+}
+
+message AcquireGrantRequest {
+  string session_key = 1;
+  string mode = 2;
+  string org_id = 3;
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
+}
+
+message AcquireGrantResponse {
+  string grant_id = 1;
+  string endpoint = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
+
+  // WS7.K (R-6: field 20 is the web-policy snapshot). See WebPolicy below.
+  WebPolicy web_policy = 20;
+}
+
+// The org web-policy snapshot the broker stored on a grant (WS7.K). The broker
+// derives it from the verified principal's `web_policy` claim, never from a
+// request field, and a derived run grant may only tighten its parent's. It has
+// the claim's content: the version, the issuer's revision, the capability
+// modes, the robots and proxy ceilings and the domain rules. Unset means the
+// grant carries no snapshot, which is no grant layer.
+message WebPolicy {
+  uint32 v = 1;
+  string rev = 2;
+  map<string, string> caps = 3;
+  string robots_max = 4;
+  string proxy_max = 5;
+  repeated string domains_allow = 6;
+  repeated string domains_deny = 7;
+}
+
+message RevokeGrantRequest {
+  string grant_id = 1;
+  string reason = 2;
+}
+
+message RevokeGrantResponse {
+  bool revoked = 1;
+}
+
+message BrowserHealthRequest {}
+
+message BrowserHealthResponse {
+  string status = 1;
+}
+
+message ValidateGrantRequest {
+  string grant_id = 1;
+}
+
+message ValidateGrantResponse {
+  string grant_id = 1;
+  bool active = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  // Canonical broker-owned policy. Consumers reject missing or non-canonical
+  // policy rather than falling back to a caller-supplied allow-list.
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
+
+  // WS7.K (R-6: field 20): the grant's web-policy snapshot. Unset from a broker
+  // that predates it, which Quarry reads as no grant layer.
+  WebPolicy web_policy = 20;
+
+  // Same values as the upstream contract: "session" / "run" / "sensitive_approval", the
+  // user the grant was issued to, and whether it is a Zero Data Retention grant.
+  string kind = 10;
+  string owner_id = 11;
+  bool zdr = 12;
+
+  // Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+  // 45-49 are reserved for follow-ons). An upper bound a run under this grant
+  // may spend, which can only tighten: a consumer takes the smaller of the
+  // claim and what its own request or default gives, never the larger. Zero
+  // means no bound on that dimension; all zero and an empty source means no
+  // claim. budget_source is "request", "org_default" or "entitlement" and is
+  // required exactly when some dimension is set.
+  int64 budget_micro_usd = 40;
+  int32 budget_max_steps = 41;
+  int32 budget_max_runtime_s = 42;
+  string budget_source = 43;
+  // Stamped by the broker when the claim is stored; a request that sets it
+  // is refused.
+  int64 budget_minted_at_unix = 44;
+
+  // Navigation policy (WS8.B; field numbers 50-59 are the broker's human-browse
+  // block of R-6). "" or "allowlist": allowed_domains is the exact host list.
+  // "open_web": allowed_domains is empty and denied_domains is the deny list.
+  string policy_mode = 50;
+  repeated string denied_domains = 51;
+  google.protobuf.Timestamp absolute_expires_at = 52;
+  string resource_id = 53;
+}

@@ -1,0 +1,1262 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.human-assist.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.human-assist.test.tsx
+new file mode 100644
+index 000000000..e68634f48
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.human-assist.test.tsx	
+@@ -0,0 +1,152 @@
++// @vitest-environment jsdom
++
++/**
++ * EP-1 S2: the card a help request shows. The agent met a sign-in, CAPTCHA, consent or firewall wall
++ * and asks the person to clear it. The card names the wall and the host from the approval record,
++ * offers Take over (the live panel's control call, with the epoch the projection shows) only when the
++ * turn's browser can be taken, and always offers Skip this site, which declines the request.
++ */
++
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import type { Approval } from '@/shared/api/orchestration-client'
++import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { ApprovalRequests } from './ChatMessages'
++
++function setLocale(locale: 'no' | 'en') {
++  window.localStorage.setItem(localeStorageKey, locale)
++}
++
++function helpRequest(assistKind: string, host = 'example.com'): Approval {
++  return {
++    id: 'approval-help-1',
++    kind: 'APPROVAL_KIND_TOOL_CALL',
++    cause: {
++      code: 'browser_human_assist',
++      tool: 'browser.observe',
++      scopeOptions: ['once'],
++      stepUpRequired: false,
++      assistKind,
++      assistOrigin: 'agent',
++      host,
++    },
++  }
++}
++
++const bound: ChatRunBrowserControl = { sessionId: 'qrun_1', controlMode: 'agent_control', controlEpoch: 3 }
++
++function show(
++  approvals: Approval[],
++  options: {
++    onDecide?: (approvalId: string, decision: string) => void
++    control?: ChatRunBrowserControl
++    onTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
++  } = {},
++) {
++  render(() => (
++    <I18nProvider>
++      <ApprovalRequests
++        approvals={approvals}
++        onDecide={options.onDecide ?? (() => {})}
++        browserControl={options.control}
++        onBrowserTakeOver={options.onTakeOver}
++      />
++    </I18nProvider>
++  ))
++}
++
++afterEach(() => {
++  cleanup()
++  try {
++    window.localStorage.clear()
++  } catch {
++    // ignore
++  }
++})
++
++describe('the help request card', () => {
++  it('renders Take over and Skip this site with the wall and the host from the record', () => {
++    setLocale('en')
++    show([helpRequest('login')], { control: bound, onTakeOver: vi.fn() })
++
++    expect(screen.getByText('The site asks you to sign in')).toBeTruthy()
++    expect(screen.getByText(/sign in on example\.com/)).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Take over' })).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Skip this site' })).toBeTruthy()
++    // A help request is not an ordinary approval: it offers no Approve or Reject.
++    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
++    expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull()
++  })
++
++  it('Take over calls the control action with the projection epoch', () => {
++    setLocale('en')
++    const onTakeOver = vi.fn()
++    const onDecide = vi.fn()
++    show([helpRequest('captcha')], { control: bound, onTakeOver, onDecide })
++
++    fireEvent.click(screen.getByRole('button', { name: 'Take over' }))
++    flush()
++
++    expect(onTakeOver).toHaveBeenCalledWith('qrun_1', 3)
++    expect(onDecide).not.toHaveBeenCalled()
++  })
++
++  it('Skip this site declines the request', () => {
++    setLocale('en')
++    const onDecide = vi.fn()
++    show([helpRequest('consent')], { control: bound, onTakeOver: vi.fn(), onDecide })
++
++    fireEvent.click(screen.getByRole('button', { name: 'Skip this site' }))
++    flush()
++
++    expect(onDecide).toHaveBeenCalledWith('approval-help-1', 'reject')
++  })
++
++  it('offers only Skip this site while the browser cannot be taken, and says so', () => {
++    setLocale('en')
++    show([helpRequest('waf')], { control: bound })
++
++    expect(screen.queryByRole('button', { name: 'Take over' })).toBeNull()
++    expect(screen.getByRole('button', { name: 'Skip this site' })).toBeTruthy()
++    expect(screen.getByText('You cannot take over this browser yet. Skip this site and the agent uses another source.')).toBeTruthy()
++  })
++
++  it('offers no Take over without a bound browser, even with the control action', () => {
++    setLocale('en')
++    show([helpRequest('login')], { onTakeOver: vi.fn() })
++
++    expect(screen.queryByRole('button', { name: 'Take over' })).toBeNull()
++  })
++
++  it('words the card in Norwegian', () => {
++    setLocale('no')
++    show([helpRequest('login')], { control: bound, onTakeOver: vi.fn() })
++
++    expect(screen.getByText('Nettstedet ber deg logge inn')).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Ta over' })).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Hopp over dette nettstedet' })).toBeTruthy()
++  })
++
++  it('keeps the takeover pause on the ordinary approval card', () => {
++    setLocale('en')
++    show([
++      {
++        id: 'approval-takeover-1',
++        kind: 'APPROVAL_KIND_TOOL_CALL',
++        cause: {
++          code: 'browser_human_assist',
++          scopeOptions: ['once'],
++          stepUpRequired: false,
++          assistKind: 'user_takeover',
++          assistOrigin: 'person',
++        },
++      },
++    ], { control: bound, onTakeOver: vi.fn() })
++
++    expect(screen.getByText('The browser is with you')).toBeTruthy()
++    expect(screen.queryByRole('button', { name: 'Skip this site' })).toBeNull()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index a92f533c5..dc74231a9 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -149,7 +149,14 @@ import { streamActivityLabel, type StreamActivity, type Translator } from '@/fea
+ import { narrate } from '@/shared/activity/narration'
+ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+ import { translateApiError, useI18n } from '@/shared/i18n'
+-import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
++import {
++  approvalHeadline,
++  approvalReason,
++  browserAssistActionLabel,
++  browserAssistKindOf,
++  browserAssistNoTakeOverLine,
++} from '@/shared/approvals/approval-copy'
++import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
+ import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
+ import {
+   APPROVAL_REDIRECT_ENABLED,
+@@ -2260,9 +2267,61 @@ export function BrowserSiteConsentCard(props: {
+   )
+ }
+ 
++/**
++ * EP-1 S2: the agent asks the person to clear a wall on the page (a sign-in, a human check, a
++ * consent choice, a firewall). The words and the host come from the approval's cause, the record
++ * the server keeps, never from text on the page. Take over flips the browser to the person through
++ * the same control call the live panel uses, compare-and-set on the epoch the projection shows; it is
++ * offered only when the turn's browser is bound and the owner may take it (`onTakeOver` present).
++ * Skip this site declines the request: the run closes the page and looks elsewhere.
++ */
++export function BrowserHumanAssistCard(props: {
++  approval: Approval
++  control?: ChatRunBrowserControl
++  onTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
++  onSkip: () => void
++}) {
++  const i18n = useI18n()
++  const control = () => (props.onTakeOver ? props.control : undefined)
++  return (
++    <div class="verevon-chat-approval" role="group" aria-label={approvalHeadline(props.approval, i18n)}>
++      <div class="verevon-chat-approval__head">
++        <span class="verevon-chat-approval__badge">{i18n.tr('Hjelp', 'Help')}</span>
++        <span class="verevon-chat-approval__kind">{approvalHeadline(props.approval, i18n)}</span>
++      </div>
++      <Show when={approvalReason(props.approval, i18n)}>
++        {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
++      </Show>
++      <Show when={!control()}>
++        <p class="verevon-chat-approval__detail">{browserAssistNoTakeOverLine(i18n)}</p>
++      </Show>
++      <div class="verevon-chat-approval__actions">
++        <Show when={control()}>
++          {(bound) => (
++            <button
++              type="button"
++              class="verevon-chat-approval__approve"
++              onClick={() => props.onTakeOver?.(bound().sessionId, bound().controlEpoch)}
++            >
++              {browserAssistActionLabel('take_over', i18n)}
++            </button>
++          )}
++        </Show>
++        <button type="button" class="verevon-chat-approval__reject" onClick={() => props.onSkip()}>
++          {browserAssistActionLabel('skip', i18n)}
++        </button>
++      </div>
++    </div>
++  )
++}
++
+ export function ApprovalRequests(props: {
+   approvals: Approval[]
+   onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
++  /** The turn's browser, as the person may address it (EP-1 S1); a help card offers Take over with it. */
++  browserControl?: ChatRunBrowserControl
++  /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
++  onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+ }) {
+   const i18n = useI18n()
+   // An approval whose cause asks for a fresh password confirmation before it is granted (build
+@@ -2352,6 +2411,17 @@ export function ApprovalRequests(props: {
+     <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
+       <For each={props.approvals}>
+         {(approval) => (
++          <Show
++            when={!browserAssistKindOf(approval.cause)}
++            fallback={
++              <BrowserHumanAssistCard
++                approval={approval}
++                control={props.browserControl}
++                onTakeOver={props.onBrowserTakeOver}
++                onSkip={() => props.onDecide(approval.id, 'reject')}
++              />
++            }
++          >
+           <Show
+             when={cardModel(approval)}
+             fallback={
+@@ -2462,6 +2532,7 @@ export function ApprovalRequests(props: {
+               />
+             )}
+           </Show>
++          </Show>
+         )}
+       </For>
+     </div>
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts b/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts
+index 5d4e6e2a0..6c1b4bea2 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts	
+@@ -4,11 +4,16 @@ import { fileURLToPath } from 'node:url'
+ import { describe, expect, it } from 'vitest'
+ import {
+   APPROVAL_CAUSE_CODES,
++  BROWSER_ASSIST_KINDS,
+   approvalFallbackLine,
+   approvalHeadline,
+   approvalKindLabel,
+   approvalReason,
+   browserApprovalStatusLabel,
++  browserAssistActionLabel,
++  browserAssistAttentionLine,
++  browserAssistKindOf,
++  browserAssistNoTakeOverLine,
+   browserRiskLabel,
+   causeCodeOf,
+   type ApprovalCause,
+@@ -95,6 +100,75 @@ describe('the copy for every cause code', () => {
+   })
+ })
+ 
++describe('a help request the agent raised on a wall (EP-1 S2)', () => {
++  const help = (assistKind: string, host?: string) => ({
++    cause: cause('browser_human_assist', { assistKind, assistOrigin: 'agent', host }),
++  })
++
++  it('words every assist kind in Norwegian and in English, each with its own headline', () => {
++    const headlines = new Set<string>()
++    for (const kind of BROWSER_ASSIST_KINDS) {
++      for (const read of [approvalHeadline, approvalReason] as const) {
++        const norwegian = read(help(kind, 'example.com'), no)
++        const english = read(help(kind, 'example.com'), en)
++        expect(norwegian, `${kind} nb`).toBeTruthy()
++        expect(english, `${kind} en`).toBeTruthy()
++        expect(norwegian, `${kind} nb differs from en`).not.toBe(english)
++      }
++      headlines.add(approvalHeadline(help(kind), en))
++      expect(browserAssistKindOf(help(kind).cause)).toBe(kind)
++    }
++    headlines.add(approvalHeadline({ cause: cause('browser_human_assist') }, en))
++    expect(headlines.size).toBe(BROWSER_ASSIST_KINDS.length + 1)
++  })
++
++  it('names the host from the approval record, and reads without one', () => {
++    expect(approvalReason(help('login', 'example.com'), en)).toBe(
++      'The site asks you to sign in on example.com. Take over, sign in, then give back. Signing in through another site is not supported yet.',
++    )
++    expect(approvalReason(help('login', 'example.com'), no)).toContain('example.com')
++    for (const kind of BROWSER_ASSIST_KINDS) {
++      expect(approvalReason(help(kind, 'example.com'), en), kind).toContain('example.com')
++      expect(approvalReason(help(kind, '  '), en), kind).not.toContain('undefined')
++      expect(approvalReason(help(kind), no), kind).toMatch(/^Nettstedet/)
++    }
++  })
++
++  it('says a sign-in through another site is not supported yet', () => {
++    expect(approvalReason(help('login'), en)).toContain('Signing in through another site is not supported yet.')
++    expect(approvalReason(help('login'), no)).toContain('Innlogging via et annet nettsted støttes ikke ennå.')
++  })
++
++  it('reads a takeover, a person-raised pause or an unknown wall as the takeover copy', () => {
++    const takeover = 'You have control of the browser. Press Give back when you are done.'
++    for (const odd of [
++      cause('browser_human_assist', { assistKind: 'login', assistOrigin: 'person' }),
++      cause('browser_human_assist', { assistKind: 'rate_limit', assistOrigin: 'agent' }),
++      cause('browser_human_assist', { assistKind: 'user_takeover', assistOrigin: 'person' }),
++    ]) {
++      expect(browserAssistKindOf(odd)).toBeUndefined()
++      expect(approvalReason({ cause: odd }, en)).toBe(takeover)
++    }
++    expect(browserAssistKindOf(cause('provider_write', { assistKind: 'login', assistOrigin: 'agent' }))).toBeUndefined()
++  })
++
++  it('labels Take over and Skip this site in both languages', () => {
++    expect(browserAssistActionLabel('take_over', en)).toBe('Take over')
++    expect(browserAssistActionLabel('take_over', no)).toBe('Ta over')
++    expect(browserAssistActionLabel('skip', en)).toBe('Skip this site')
++    expect(browserAssistActionLabel('skip', no)).toBe('Hopp over dette nettstedet')
++    expect(browserAssistNoTakeOverLine(en)).not.toBe(browserAssistNoTakeOverLine(no))
++  })
++
++  it('keeps the attention and push text free of any host', () => {
++    expect(browserAssistAttentionLine(en)).toBe('Verevon needs you in the browser')
++    expect(browserAssistAttentionLine(no)).toBe('Verevon trenger deg i nettleseren')
++    for (const line of [browserAssistAttentionLine(en), browserAssistAttentionLine(no)]) {
++      expect(line).not.toMatch(/example\.com|\.[a-z]{2,}\b/)
++    }
++  })
++})
++
+ describe('an approval with no cause', () => {
+   it('says that something waits and never shows its kind', () => {
+     const approval = { detail: undefined, cause: undefined }
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts b/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts
+index 541b6ea0e..58dc85671 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts	
+@@ -43,6 +43,25 @@ export type ApprovalCause = {
+   ruleId?: string
+   scopeOptions: string[]
+   stepUpRequired: boolean
++  /**
++   * A `browser_human_assist` pause only (EP-1): which wall the page showed (`login`, `captcha`,
++   * `consent`, `waf`) or `user_takeover`, who started it (`agent` or `person`), and the host of
++   * the session the run holds. The host is the server's record, never text from the page.
++   */
++  assistKind?: string
++  assistOrigin?: string
++  host?: string
++}
++
++/** The walls the agent may ask the person for help with (EP-1 S2, D4). */
++export const BROWSER_ASSIST_KINDS = ['login', 'captcha', 'consent', 'waf'] as const
++
++export type BrowserAssistKind = (typeof BROWSER_ASSIST_KINDS)[number]
++
++/** The wall a help request names, `undefined` for a takeover or a cause that is not a help request. */
++export function browserAssistKindOf(cause: ApprovalCause | undefined): BrowserAssistKind | undefined {
++  if (cause?.code !== 'browser_human_assist' || cause.assistOrigin !== 'agent') return undefined
++  return BROWSER_ASSIST_KINDS.find((kind) => kind === cause.assistKind)
+ }
+ 
+ /** A code from the wire as one of the closed set; anything else is `unclassified_gate`. */
+@@ -103,6 +122,86 @@ export function browserApprovalStatusLabel(
+ 
+ type CauseCopy = { headline: string; reason: string }
+ 
++// The words of a help request (EP-1 S2), one entry per wall. The host is the approval record's, so a
++// page cannot name another site here. A sign-in that leaves the run's sites ends in the browser's
++// own refusal (D9), so the sign-in card says that such a sign-in is not supported yet.
++const BROWSER_ASSIST_COPY: Record<
++  BrowserAssistKind,
++  (i18n: ApprovalCopyI18n, host: string | undefined) => CauseCopy
++> = {
++  login: (i18n, host) => ({
++    headline: i18n.tr('Nettstedet ber deg logge inn', 'The site asks you to sign in'),
++    reason: host
++      ? i18n.tr(
++          `Nettstedet ber deg logge inn på ${host}. Ta over, logg inn, og gi tilbake. Innlogging via et annet nettsted støttes ikke ennå.`,
++          `The site asks you to sign in on ${host}. Take over, sign in, then give back. Signing in through another site is not supported yet.`,
++        )
++      : i18n.tr(
++          'Nettstedet ber deg logge inn. Ta over, logg inn, og gi tilbake. Innlogging via et annet nettsted støttes ikke ennå.',
++          'The site asks you to sign in. Take over, sign in, then give back. Signing in through another site is not supported yet.',
++        ),
++  }),
++  captcha: (i18n, host) => ({
++    headline: i18n.tr('Nettstedet ber om en menneskelig sjekk', 'The site asks for a human check'),
++    reason: host
++      ? i18n.tr(
++          `${host} viser en sjekk som bare et menneske kan svare på. Ta over, svar på den, og gi tilbake.`,
++          `${host} shows a check only a person can answer. Take over, answer it, then give back.`,
++        )
++      : i18n.tr(
++          'Nettstedet viser en sjekk som bare et menneske kan svare på. Ta over, svar på den, og gi tilbake.',
++          'The site shows a check only a person can answer. Take over, answer it, then give back.',
++        ),
++  }),
++  consent: (i18n, host) => ({
++    headline: i18n.tr('Nettstedet ber om et samtykkevalg', 'The site asks for a consent choice'),
++    reason: host
++      ? i18n.tr(
++          `${host} ber deg velge hva det får lagre. Ta over, velg selv, og gi tilbake.`,
++          `${host} asks you to choose what it may store. Take over, make your choice, then give back.`,
++        )
++      : i18n.tr(
++          'Nettstedet ber deg velge hva det får lagre. Ta over, velg selv, og gi tilbake.',
++          'The site asks you to choose what it may store. Take over, make your choice, then give back.',
++        ),
++  }),
++  waf: (i18n, host) => ({
++    headline: i18n.tr('Nettstedet stoppet den automatiske nettleseren', 'The site stopped the automated browser'),
++    reason: host
++      ? i18n.tr(
++          `${host} slipper bare inn en person. Ta over, fortsett selv, og gi tilbake.`,
++          `${host} only lets a person through. Take over, continue by hand, then give back.`,
++        )
++      : i18n.tr(
++          'Nettstedet slipper bare inn en person. Ta over, fortsett selv, og gi tilbake.',
++          'The site only lets a person through. Take over, continue by hand, then give back.',
++        ),
++  }),
++}
++
++/** The two answers a help request offers: take the browser, or let the agent leave the site. */
++export function browserAssistActionLabel(action: 'take_over' | 'skip', i18n: ApprovalCopyI18n): string {
++  return action === 'take_over'
++    ? i18n.tr('Ta over', 'Take over')
++    : i18n.tr('Hopp over dette nettstedet', 'Skip this site')
++}
++
++/** What a help request says where the person cannot take the browser yet (EP-1 D1). */
++export function browserAssistNoTakeOverLine(i18n: ApprovalCopyI18n): string {
++  return i18n.tr(
++    'Du kan ikke ta over denne nettleseren ennå. Hopp over nettstedet, så bruker agenten en annen kilde.',
++    'You cannot take over this browser yet. Skip this site and the agent uses another source.',
++  )
++}
++
++/**
++ * The attention rail label and Web Push text of a help request. It names no site: push text can
++ * show on a lock screen, so the host stays on the card the person opens.
++ */
++export function browserAssistAttentionLine(i18n: ApprovalCopyI18n): string {
++  return i18n.tr('Verevon trenger deg i nettleseren', 'Verevon needs you in the browser')
++}
++
+ // Total over the closed set: adding a code to `APPROVAL_CAUSE_CODES` without words here does not
+ // compile, and the test pins the set to the contract file.
+ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCause) => CauseCopy> = {
+@@ -171,14 +270,19 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
+       'Chat mode approves writes to connected services automatically. This is a record, not a choice you have to make.',
+     ),
+   }),
+-  // EP-1: the person took the agent's browser. The approval is the give-back, not a risk decision.
+-  browser_human_assist: (i18n) => ({
+-    headline: i18n.tr('Nettleseren er hos deg', 'The browser is with you'),
+-    reason: i18n.tr(
+-      'Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.',
+-      'You have control of the browser. Press Give back when you are done.',
+-    ),
+-  }),
++  // EP-1: the person took the agent's browser (the approval is the give-back, not a risk decision),
++  // or the agent asks the person to clear a wall on the page (S2), in words for that wall.
++  browser_human_assist: (i18n, cause) => {
++    const kind = browserAssistKindOf(cause)
++    if (kind) return BROWSER_ASSIST_COPY[kind](i18n, cause.host?.trim() || undefined)
++    return {
++      headline: i18n.tr('Nettleseren er hos deg', 'The browser is with you'),
++      reason: i18n.tr(
++        'Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.',
++        'You have control of the browser. Press Give back when you are done.',
++      ),
++    }
++  },
+   unclassified_gate: (i18n) => ({
+     headline: i18n.tr('Agenten venter på godkjenning', 'The agent is waiting for approval'),
+     reason: i18n.tr(
+diff --git a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs
+index 5bb2e5a3b..5f7705c94 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
+@@ -12,7 +12,7 @@
+ //! org-core itself: org-core's resolve scope is held by the browser-broker principal alone, so the
+ //! refusal the broker returns is the only site answer this loop sees.
+ 
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::sync::{Mutex, OnceLock, PoisonError};
+ use std::time::Duration;
+ 
+@@ -27,7 +27,7 @@ use tracing::warn;
+ 
+ use crate::quarry_agent::{
+     AgentAction, AgentClientError, AgentConstraints, QuarryAgentClient, RunControl, StartRunParams,
+-    StepParams, WireObservation, WireSnapshotTarget,
++    StepParams, WireChallenge, WireObservation, WireSnapshotTarget,
+ };
+ use crate::state::StateStore;
+ use crate::tool_bridge::ValidatedBrowserGrant;
+@@ -144,6 +144,46 @@ pub(crate) const TAKEN_OVER: Refusal = Refusal {
+     code: "browser_user_has_control",
+     message: "The person is using the browser. Wait for them to give it back.",
+ };
++/// The person chose not to help with a wall on the page ("Skip this site", EP-1 S2), so the session
++/// was closed. Final for this site: the model looks elsewhere instead of asking again.
++pub(crate) const HELP_DECLINED: Refusal = Refusal {
++    code: "browser_help_declined",
++    message: "The person chose not to help with this site, so the browser session was closed. Use another source.",
++};
++/// The page shows a wall a person can clear by hand (EP-1 S2), one refusal per assist kind so the
++/// loop can tell which wall it was. The model does not read these: the loop pauses the run for the
++/// person, or tells the model [`BLOCKED`] when it cannot pause. The kinds are the closed
++/// `assist_kind` words of `mp_contracts::approval_cause::ASSIST_KINDS`.
++static HELP_NEEDED: [(&str, Refusal); 4] = [
++    (
++        "login",
++        Refusal {
++            code: "browser_help_needed",
++            message: "The site asks for a sign-in.",
++        },
++    ),
++    (
++        "captcha",
++        Refusal {
++            code: "browser_help_needed",
++            message: "The site asks for a human check.",
++        },
++    ),
++    (
++        "consent",
++        Refusal {
++            code: "browser_help_needed",
++            message: "The site asks for a consent choice.",
++        },
++    ),
++    (
++        "waf",
++        Refusal {
++            code: "browser_help_needed",
++            message: "The site's firewall stopped the automated browser.",
++        },
++    ),
++];
+ 
+ /// The switch that pauses a Do run on a browser call the person's takeover refused (EP-1 S1).
+ /// Default off: the model then reads the [`TAKEN_OVER`] refusal, as it does with the switch on for
+@@ -263,6 +303,161 @@ fn is_held_for_person(run_id: &str) -> bool {
+         .contains(run_id)
+ }
+ 
++/// The switch that lets a Do run ask the person for help when its page shows a sign-in, CAPTCHA,
++/// consent or WAF wall Quarry could not clear (EP-1 S2). Default off: the model then reads
++/// [`BLOCKED`], as it always did. Only Quarry's challenge signal raises a request (D4): the model has
++/// no tool to ask for help, so page text cannot steer it into sending the person to a page.
++const HUMAN_ASSIST_ENV: &str = "EXECUTION_BROWSER_HUMAN_ASSIST";
++
++/// The most help requests one run raises. A page that keeps showing a wall cannot keep the run
++/// waiting: the request after these is [`BLOCKED`].
++pub(crate) const MAX_HELP_REQUESTS_PER_RUN: u32 = 2;
++
++#[cfg(test)]
++thread_local! {
++    /// A test's override of the help switch. `#[tokio::test]` runs its future on the test's own
++    /// thread, so the override cannot leak into a parallel test the way a process-wide variable would.
++    static HUMAN_ASSIST_OVERRIDE: std::cell::Cell<Option<bool>> =
++        const { std::cell::Cell::new(None) };
++}
++
++/// Whether a wall on the page asks the person for help, read once per process through the strict
++/// parser.
++#[must_use]
++pub(crate) fn human_assist_enabled() -> bool {
++    #[cfg(test)]
++    if let Some(forced) = HUMAN_ASSIST_OVERRIDE.with(std::cell::Cell::get) {
++        return forced;
++    }
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| {
++        mp_contracts::loop_fold::switch_from(std::env::var(HUMAN_ASSIST_ENV).ok().as_deref())
++    })
++}
++
++/// The assist kind a challenge asks a person for, `None` when only [`BLOCKED`] fits: a strong wall
++/// of a kind a person can clear by hand, with no recovery left for Quarry to try. A rate limit, a
++/// denial, a paywall or a regional block is not something the person can sign their way through.
++fn assist_kind_of(challenge: &WireChallenge) -> Option<&'static str> {
++    use crate::browser_agent::{ChallengeKind, ChallengeRecovery};
++    let challenge = crate::quarry_agent::challenge_from_wire(challenge);
++    if !challenge.is_strong() || challenge.recovery == ChallengeRecovery::Available {
++        return None;
++    }
++    match challenge.kind {
++        ChallengeKind::Login => Some("login"),
++        ChallengeKind::Captcha => Some("captcha"),
++        ChallengeKind::Consent => Some("consent"),
++        ChallengeKind::Waf => Some("waf"),
++        ChallengeKind::RateLimit
++        | ChallengeKind::AccessDenied
++        | ChallengeKind::Paywall
++        | ChallengeKind::GeoBlocked
++        | ChallengeKind::Unknown => None,
++    }
++}
++
++/// The refusal a wall on the page becomes: a help request with the switch on and a kind a person
++/// can clear, [`BLOCKED`] otherwise.
++fn challenge_refusal(challenge: &WireChallenge, assist: bool) -> Refusal {
++    if !assist {
++        return BLOCKED;
++    }
++    assist_kind_of(challenge)
++        .and_then(|kind| HELP_NEEDED.iter().find(|(known, _)| *known == kind))
++        .map_or(BLOCKED, |(_, refusal)| *refusal)
++}
++
++/// The assist kind of a help refusal, `None` for every other refusal.
++fn help_kind_of(refusal: Refusal) -> Option<&'static str> {
++    HELP_NEEDED
++        .iter()
++        .find(|(_, known)| *known == refusal)
++        .map(|(kind, _)| *kind)
++}
++
++/// The assist kind of a failed browser call's text, `None` unless the page asked for help. The loop
++/// reads it to pause the run; it never shows the text to the model.
++#[must_use]
++pub(crate) fn help_kind(error: &str) -> Option<&'static str> {
++    HELP_NEEDED
++        .iter()
++        .find(|(_, refusal)| refusal.text() == error)
++        .map(|(kind, _)| *kind)
++}
++
++/// What one run has asked of the person (EP-1 S2): how many help requests it raised, and the kind of
++/// the one it waits on. Kept beside [`held_runs`] for the same reason: it outlives the paused
++/// request, and it ends with the run.
++#[derive(Debug, Default, Clone, Copy)]
++struct RunHelp {
++    raised: u32,
++    pending: Option<&'static str>,
++}
++
++fn run_help() -> &'static Mutex<HashMap<String, RunHelp>> {
++    static HELP: OnceLock<Mutex<HashMap<String, RunHelp>>> = OnceLock::new();
++    HELP.get_or_init(Mutex::default)
++}
++
++/// Records a help request of `run_id` for `kind`, unless the run has raised
++/// [`MAX_HELP_REQUESTS_PER_RUN`] already. False means the loop must not pause.
++#[must_use]
++pub(crate) fn raise_help(run_id: &str, kind: &'static str) -> bool {
++    let mut help = run_help().lock().unwrap_or_else(PoisonError::into_inner);
++    let entry = help.entry(run_id.to_owned()).or_default();
++    if entry.raised >= MAX_HELP_REQUESTS_PER_RUN {
++        return false;
++    }
++    entry.raised += 1;
++    entry.pending = Some(kind);
++    true
++}
++
++/// The kind of the help request `run_id` waits on, `None` when it waits on none. The pause's cause
++/// reads it: a help request is the agent's, any other browser pause is the person's takeover.
++#[must_use]
++pub(crate) fn pending_help_kind(run_id: &str) -> Option<&'static str> {
++    run_help()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .get(run_id)
++        .and_then(|help| help.pending)
++}
++
++/// Ends the wait of `run_id`'s help request, if it has one, and says which kind it was. The count
++/// stays: a request once raised counts against the run's cap.
++fn take_pending_help(run_id: &str) -> Option<&'static str> {
++    run_help()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .get_mut(run_id)
++        .and_then(|help| help.pending.take())
++}
++
++/// Forgets what `run_id` asked of the person, once the run ends.
++fn forget_help(run_id: &str) {
++    run_help()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .remove(run_id);
++}
++
++/// Ends the session of a run whose person declined to help with its site ("Skip this site", EP-1
++/// S2) and returns what the model reads. The page the person was asked about is closed, so the model
++/// cannot keep the person waiting on it.
++pub(crate) async fn decline_help(
++    dispatch: &BrowserDispatch<'_>,
++    quarry: Option<&QuarryAgentClient>,
++) -> Refusal {
++    take_pending_help(dispatch.run_id);
++    end_hold(dispatch.run_id);
++    if let Some(session) = dispatch.state.take_browser_session(dispatch.run_id) {
++        end_session(&session, dispatch, quarry, "the person declined to help").await;
++    }
++    HELP_DECLINED
++}
++
+ /// The ids of one open page, held in [`StateStore`] for its run. None of them reaches the model.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct BrowserSession {
+@@ -636,8 +831,8 @@ fn wrap_untrusted(json: &str) -> String {
+ /// Renders one observation for the model, wrapped and capped. References are dropped from the end
+ /// until the rendering fits; the address, title and counts always remain.
+ fn page_view(host: &str, observation: &WireObservation) -> Result<String, Refusal> {
+-    if observation.challenge.is_some() {
+-        return Err(BLOCKED);
++    if let Some(challenge) = &observation.challenge {
++        return Err(challenge_refusal(challenge, human_assist_enabled()));
+     }
+     let (snapshot_id, generation, targets) = match &observation.snapshot {
+         Some(snapshot) => (
+@@ -759,6 +954,17 @@ async fn open_with(
+     {
+         return Err(TAKEN_OVER);
+     }
++    // EP-1 S2: the open a help request paused on runs again once the person has helped. The person
++    // signed in on the page this run keeps, so the run looks at that page again: a new Quarry run
++    // would start from an empty profile and lose what the person did.
++    if take_pending_help(dispatch.run_id).is_some()
++        && dispatch
++            .state
++            .browser_session(dispatch.run_id)
++            .is_some_and(|session| session.host == target.host)
++    {
++        return observe(dispatch, quarry).await;
++    }
+     if let Some(previous) = dispatch.state.take_browser_session(dispatch.run_id) {
+         end_session(&previous, dispatch, Some(quarry), "replaced by a new page").await;
+     }
+@@ -791,6 +997,9 @@ async fn open_with(
+             }
+             Ok(view)
+         }
++        // The page asks for a person (EP-1 S2): `establish` kept the session for them, so nothing it
++        // acquired is released here.
++        Err(refusal) if help_kind_of(refusal).is_some() => Err(refusal),
+         Err(refusal) => {
+             let (run_id, _lease_id) = match &partial.run {
+                 Some((run_id, lease_id)) => (Some(run_id.as_str()), Some(lease_id.as_str())),
+@@ -863,17 +1072,29 @@ async fn establish(
+     if !within_fence(&observation.url, &fence) {
+         return Err(OUTSIDE_FENCE);
+     }
+-    let view = page_view(&target.host, &observation)?;
+-    Ok((
+-        BrowserSession {
+-            grant_id: partial.grant_id.clone(),
+-            quarry_run_id: started.run_id,
+-            lease_id: started.lease_id,
+-            host: target.host.clone(),
+-            fence,
+-        },
+-        view,
+-    ))
++    let view = page_view(&target.host, &observation);
++    let session = BrowserSession {
++        grant_id: partial.grant_id.clone(),
++        quarry_run_id: started.run_id,
++        lease_id: started.lease_id,
++        host: target.host.clone(),
++        fence,
++    };
++    match view {
++        Ok(view) => Ok((session, view)),
++        Err(refusal) => {
++            // A wall the person may clear (EP-1 S2) keeps the page: the run pauses on it for them.
++            if help_kind_of(refusal).is_some() {
++                if let Some(replaced) = dispatch
++                    .state
++                    .replace_browser_session(dispatch.run_id, session)
++                {
++                    end_session(&replaced, dispatch, Some(quarry), "replaced by a new page").await;
++                }
++            }
++            Err(refusal)
++        }
++    }
+ }
+ 
+ /// `browser.observe`: read the page the run has open now. A page that has left its fence ends the
+@@ -882,6 +1103,9 @@ pub(crate) async fn observe(
+     dispatch: &BrowserDispatch<'_>,
+     quarry: &QuarryAgentClient,
+ ) -> Result<String, Refusal> {
++    // Looking again is what a help request waits for (EP-1 S2), so the wait ends here; a later open
++    // then navigates as usual.
++    take_pending_help(dispatch.run_id);
+     let session = dispatch
+         .state
+         .browser_session(dispatch.run_id)
+@@ -941,6 +1165,7 @@ pub(crate) async fn release_run(
+     run_id: &str,
+ ) {
+     end_hold(run_id);
++    forget_help(run_id);
+     let Some(session) = state.take_browser_session(run_id) else {
+         return;
+     };
+@@ -1483,6 +1708,301 @@ mod tests {
+         assert!(!within_fence("about:blank", &fence));
+     }
+ 
++    // ---- EP-1 S2: the agent asks the person for help with a wall on the page ----
++
++    /// Holds the help switch at a fixed value for the current test thread, then restores it.
++    struct HumanAssistSwitch;
++
++    impl HumanAssistSwitch {
++        fn set(on: bool) -> Self {
++            HUMAN_ASSIST_OVERRIDE.with(|cell| cell.set(Some(on)));
++            Self
++        }
++    }
++
++    impl Drop for HumanAssistSwitch {
++        fn drop(&mut self) {
++            HUMAN_ASSIST_OVERRIDE.with(|cell| cell.set(None));
++        }
++    }
++
++    /// A `ChallengeSignal` with the words a test chose.
++    fn wall(kind: &str, strength: &str, recovery: &str) -> WireChallenge {
++        serde_json::from_value(json!({
++            "kind": kind,
++            "confidence": 0.9,
++            "strength": strength,
++            "recovery": recovery
++        }))
++        .expect("a challenge signal")
++    }
++
++    /// Quarry's answer for a page behind a wall.
++    fn challenged(kind: &str, strength: &str, recovery: &str) -> serde_json::Value {
++        let mut page = observation("https://example.com/login");
++        page["challenge"] = json!({
++            "kind": kind,
++            "confidence": 0.9,
++            "strength": strength,
++            "recovery": recovery
++        });
++        page
++    }
++
++    /// Mounts a run whose navigation answers `first` and whose every later step answers `later`.
++    async fn mount_walled(server: &MockServer, first: serde_json::Value, later: serde_json::Value) {
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs"))
++            .respond_with(envelope(
++                json!({ "run_id": "run-q1", "lease_id": "lease-q1" }),
++            ))
++            .mount(server)
++            .await;
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs/run-q1/step"))
++            .respond_with(envelope(first))
++            .up_to_n_times(1)
++            .mount(server)
++            .await;
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs/run-q1/step"))
++            .respond_with(envelope(later))
++            .mount(server)
++            .await;
++        Mock::given(method("DELETE"))
++            .and(path("/v1/agent/runs/run-q1"))
++            .respond_with(ResponseTemplate::new(200))
++            .mount(server)
++            .await;
++    }
++
++    #[tokio::test]
++    async fn strong_login_challenge_raises_human_assist_when_switch_on() {
++        let _switch = HumanAssistSwitch::set(true);
++        let server = MockServer::start().await;
++        mount_walled(
++            &server,
++            challenged("login", "strong", "exhausted"),
++            observation("https://example.com/"),
++        )
++        .await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++
++        let refusal = open(
++            &dispatch(&state, &broker),
++            &quarry(&server),
++            "https://example.com/",
++        )
++        .await
++        .expect_err("the page shows a sign-in wall");
++
++        assert_eq!(refusal.code, "browser_help_needed");
++        assert_eq!(help_kind(&refusal.text()), Some("login"));
++        assert!(
++            state.browser_session("run-1").is_some(),
++            "the page is kept for the person"
++        );
++        assert!(revoked(&broker).is_empty(), "nothing is released");
++    }
++
++    #[tokio::test]
++    async fn strong_captcha_raises_human_assist() {
++        let _switch = HumanAssistSwitch::set(true);
++        let server = MockServer::start().await;
++        mount_walled(
++            &server,
++            observation("https://example.com/"),
++            challenged("captcha", "strong", "exhausted"),
++        )
++        .await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        open(
++            &dispatch(&state, &broker),
++            &quarry(&server),
++            "https://example.com/",
++        )
++        .await
++        .expect("the page opens");
++
++        let refusal = observe(&dispatch(&state, &broker), &quarry(&server))
++            .await
++            .expect_err("the page now shows a CAPTCHA");
++
++        assert_eq!(help_kind(&refusal.text()), Some("captcha"));
++        assert!(state.browser_session("run-1").is_some());
++        assert!(revoked(&broker).is_empty());
++        // Quarry has no recovery to offer a consent or WAF wall either: each asks the person.
++        for kind in ["consent", "waf"] {
++            let refusal = challenge_refusal(&wall(kind, "strong", "not_applicable"), true);
++            assert_eq!(help_kind_of(refusal), Some(kind), "{kind}");
++        }
++    }
++
++    #[test]
++    fn rate_limit_and_paywall_stay_blocked() {
++        for kind in [
++            "rate_limit",
++            "access_denied",
++            "paywall",
++            "geo_blocked",
++            "unknown",
++            "a_kind_from_a_newer_quarry",
++        ] {
++            assert_eq!(
++                challenge_refusal(&wall(kind, "strong", "exhausted"), true),
++                BLOCKED,
++                "{kind}"
++            );
++        }
++        // A hint, an ordinary sign-in form, or a wall Quarry may still recover from asks no one.
++        for (strength, recovery) in [
++            ("weak", "exhausted"),
++            ("non_signal", "exhausted"),
++            ("strong", "available"),
++        ] {
++            assert_eq!(
++                challenge_refusal(&wall("login", strength, recovery), true),
++                BLOCKED,
++                "{strength} {recovery}"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn switch_off_keeps_blocked_refusal() {
++        let _switch = HumanAssistSwitch::set(false);
++        for (kind, _) in HELP_NEEDED {
++            assert_eq!(
++                challenge_refusal(&wall(kind, "strong", "exhausted"), false),
++                BLOCKED
++            );
++        }
++        let server = MockServer::start().await;
++        mount_walled(
++            &server,
++            challenged("login", "strong", "exhausted"),
++            observation("https://example.com/"),
++        )
++        .await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++
++        let refusal = open(
++            &dispatch(&state, &broker),
++            &quarry(&server),
++            "https://example.com/",
++        )
++        .await
++        .expect_err("the site blocks the browser");
++
++        assert_eq!(refusal, BLOCKED);
++        assert_eq!(help_kind(&refusal.text()), None);
++        assert!(state.browser_session("run-1").is_none());
++        assert_eq!(revoked(&broker), ["grant-1"], "released as before the switch");
++    }
++
++    #[test]
++    fn third_help_request_in_a_run_is_blocked() {
++        let run = "run-help-cap";
++        assert_eq!(MAX_HELP_REQUESTS_PER_RUN, 2);
++        assert!(raise_help(run, "login"));
++        assert_eq!(pending_help_kind(run), Some("login"));
++        assert_eq!(take_pending_help(run), Some("login"), "looking again ends the wait");
++        assert_eq!(pending_help_kind(run), None);
++        assert!(raise_help(run, "captcha"));
++        assert!(!raise_help(run, "consent"), "a third request in one run is refused");
++        assert_eq!(pending_help_kind(run), Some("captcha"));
++        forget_help(run);
++        assert!(raise_help(run, "login"), "a finished run's count is forgotten");
++        forget_help(run);
++    }
++
++    #[tokio::test]
++    async fn declined_help_closes_session_and_tells_model() {
++        let server = MockServer::start().await;
++        mount_quarry(&server, "https://example.com/", "https://example.com/").await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run = "run-help-declined";
++        let dispatch = BrowserDispatch {
++            state: &state,
++            broker: &broker,
++            bearer: "bearer-1",
++            org_id: "org-1",
++            run_id: run,
++        };
++        open(&dispatch, &quarry(&server), "https://example.com/")
++            .await
++            .expect("the page opens");
++        assert!(raise_help(run, "login"));
++        hold_for_person(run);
++
++        let refusal = decline_help(&dispatch, Some(&quarry(&server))).await;
++
++        assert_eq!(refusal, HELP_DECLINED);
++        assert_eq!(refusal.code, "browser_help_declined");
++        assert!(state.browser_session(run).is_none(), "the session is closed");
++        assert_eq!(revoked(&broker), ["grant-1"]);
++        assert_eq!(pending_help_kind(run), None);
++        assert!(!is_held_for_person(run), "the page is no longer kept");
++        assert!(!refusal.text().contains("example.com"), "names no site");
++        forget_help(run);
++    }
++
++    #[test]
++    fn assist_cause_carries_kind_origin_and_host_only() {
++        use mp_contracts::approval_cause::{CauseCode, ASSIST_KINDS};
++        use crate::runtime_loop::agent::approval_cause_for_pause;
++
++        let run = "run-help-cause";
++        let state = StateStore::new();
++        state.replace_browser_session(
++            run,
++            BrowserSession {
++                grant_id: "grant-1".to_owned(),
++                quarry_run_id: "run-q1".to_owned(),
++                lease_id: "lease-q1".to_owned(),
++                host: "example.com".to_owned(),
++                fence: vec!["example.com".to_owned()],
++            },
++        );
++        let takeover = approval_cause_for_pause(
++            &state,
++            CauseCode::BrowserHumanAssist,
++            run,
++            OBSERVE_TOOL,
++            "{}",
++        );
++        assert_eq!(
++            (takeover.assist_kind.as_str(), takeover.assist_origin.as_str()),
++            ("user_takeover", "person"),
++            "a pause with no help request is the person's takeover"
++        );
++
++        assert!(raise_help(run, "login"));
++        let help = approval_cause_for_pause(
++            &state,
++            CauseCode::BrowserHumanAssist,
++            run,
++            OBSERVE_TOOL,
++            "{}",
++        );
++        assert_eq!(help.code, "browser_human_assist");
++        assert_eq!(
++            (help.assist_kind.as_str(), help.assist_origin.as_str(), help.host.as_str()),
++            ("login", "agent", "example.com"),
++            "the host is the session's, never a page's"
++        );
++        let other = approval_cause_for_pause(&state, CauseCode::ProviderWrite, run, "send_email", "{}");
++        assert!(other.assist_kind.is_empty() && other.assist_origin.is_empty() && other.host.is_empty());
++        forget_help(run);
++        for (kind, _) in HELP_NEEDED {
++            assert!(ASSIST_KINDS.contains(&kind), "{kind} is a closed assist kind");
++        }
++    }
++
+     // ---- EP-1 S1: the person takes the browser and gives it back ----
+ 
+     /// Quarry's whole-run takeover refusal (`admission.rs user_took_over`).
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index ad5d59a48..f4b052472 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -4742,6 +4742,67 @@ async fn run_rounds(
+                 _ => outcome,
+             };
+ 
++            // EP-1 S2: a page that shows a sign-in, CAPTCHA, consent or WAF wall pauses the run for the
++            // person (switch on; only the switch makes the page refusal a help request), at most twice a
++            // run. The approval is the help, and the call runs again after it. A call that cannot pause
++            // tells the model the site blocked it, as before the switch: a released call (its approval
++            // is spent), a round another pause already holds, a delegated child, a run that keeps no
++            // state, or a run at its cap. A person who declined help with this call is not asked again:
++            // the session closes and the model reads that.
++            let outcome = match crate::browser_session::help_kind(&outcome.error) {
++                Some(kind) => {
++                    let can_pause = crate::browser_session::human_assist_enabled()
++                        && ctx.depth == 0
++                        && !zdr
++                        && !ctx.route.is_waived()
++                        && pending_pause.is_none()
++                        && !ctx.release.as_ref().is_some_and(|release| {
++                            release.covers(&step_id, &call.name, &call.arguments_json)
++                        });
++                    if can_pause
++                        && declined_earlier_in_run(ctx, &call.name, &call.arguments_json).await
++                    {
++                        let declined = match ctx.browser_bearer {
++                            Some(bearer) => {
++                                let quarry =
++                                    crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
++                                crate::browser_session::decline_help(
++                                    &crate::browser_session::BrowserDispatch {
++                                        state: ctx.state,
++                                        broker: crate::browser_session::production_broker(),
++                                        bearer,
++                                        org_id: &req.org_id,
++                                        run_id: &req.run_id,
++                                    },
++                                    quarry.as_ref(),
++                                )
++                                .await
++                            }
++                            None => crate::browser_session::HELP_DECLINED,
++                        };
++                        runtime_loop::StepOutcome {
++                            error: declined.text(),
++                            ..outcome
++                        }
++                    } else if can_pause && crate::browser_session::raise_help(&req.run_id, kind) {
++                        paused_index = Some(index);
++                        pending_pause = Some(PendingPause {
++                            step_id,
++                            name: call.name.clone(),
++                            arguments_json: call.arguments_json.clone(),
++                            cause: CauseCode::BrowserHumanAssist,
++                        });
++                        continue;
++                    } else {
++                        runtime_loop::StepOutcome {
++                            error: crate::browser_session::BLOCKED.text(),
++                            ..outcome
++                        }
++                    }
++                }
++                None => outcome,
++            };
++
+             // A scheduled run is unattended: a gated call is withheld and recorded, and the model
+             // is told so, instead of pausing for an approval no one can give (WS20 S6). The gated
+             // call never ran, so nothing is undone.
+@@ -4986,8 +5047,12 @@ async fn run_rounds(
+             // run on it; and the run's events say the browser is with the person.
+             if pending.cause == CauseCode::BrowserHumanAssist {
+                 crate::browser_session::hold_for_person(&req.run_id);
+-                let epoch = taken_over_epoch(ctx).await;
+-                publish_browser_takeover(ctx, true, epoch).await;
++                // A help request (EP-1 S2) waits for the person to take the browser: Quarry's control
++                // has not moved yet, so no takeover is published for it.
++                if crate::browser_session::pending_help_kind(&req.run_id).is_none() {
++                    let epoch = taken_over_epoch(ctx).await;
++                    publish_browser_takeover(ctx, true, epoch).await;
++                }
+             }
+             // Built outside the loop, which alone holds the tally: a pause is an
+             // invocation that spent rounds, and the continuation starts its own tally.
+@@ -8419,8 +8484,10 @@ async fn declined_earlier_in_run(
+ 
+ /// The cause a pause is stored with (WS21-S5b). A browser act is stored under the risk category its
+ /// own input reads as, so the approval shows that category for the call it is for. A takeover pause
+-/// (EP-1 S1) names the host of the session the run holds, never one the page states.
+-fn approval_cause_for_pause(
++/// (EP-1 S1) names the host of the session the run holds, never one the page states. A help request
++/// the agent raised (EP-1 S2) states the wall the page showed; any other browser pause is the person's
++/// takeover.
++pub(crate) fn approval_cause_for_pause(
+     state: &crate::state::StateStore,
+     cause: CauseCode,
+     run_id: &str,
+@@ -8432,12 +8499,20 @@ fn approval_cause_for_pause(
+             .browser_session(run_id)
+             .map(|session| session.host)
+             .unwrap_or_default();
++        let (assist_kind, assist_origin) = crate::browser_session::pending_help_kind(run_id)
++            .map_or(
++                (
++                    approval_cause::ASSIST_KIND_USER_TAKEOVER,
++                    approval_cause::ASSIST_ORIGIN_PERSON,
++                ),
++                |kind| (kind, approval_cause::ASSIST_ORIGIN_AGENT),
++            );
+         return approval_cause::for_browser_assist(
+             run_id,
+             tool_name,
+             tool_input,
+-            approval_cause::ASSIST_KIND_USER_TAKEOVER,
+-            approval_cause::ASSIST_ORIGIN_PERSON,
++            assist_kind,
++            assist_origin,
+             &host,
+         );
+     }

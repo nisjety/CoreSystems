@@ -1,0 +1,1443 @@
+diff --git a/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs b/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs
+index 87ba71dd2..38e874a74 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs	
+@@ -2019,4 +2019,153 @@ mod tests {
+         assert_eq!(legacy.reason, explicit.reason);
+         assert_eq!(legacy.effect_id, explicit.effect_id);
+     }
++
++    // ---- an approval the person edited (EP-10-S5) ----
++    //
++    // A cold approval's edit replaces the retained descriptor's input in session-core, so the
++    // worker needs no change: it parses and runs whatever input the descriptor holds. These pin
++    // that the edited input is what runs and what the write attestation is bound to.
++
++    /// A mail send's descriptor as session-core leaves it after the person's edit: the edited
++    /// input, and the fingerprint of the edited call.
++    const EDITED_MAIL_DESCRIPTOR: &str = r#"{
++        "version": 1,
++        "run_id": "run-1",
++        "org_id": "org-1",
++        "user_id": "user-1",
++        "step_id": "step-1",
++        "action_kind": "tool_call",
++        "tool_name": "execute_provider_action",
++        "input": {
++            "connection_id": "conn-1",
++            "operation": "gmail.send",
++            "params": {},
++            "body": {"to": ["alice@example.com"], "subject": "New subject", "bodyText": "the edited body", "threadId": "thread-1"}
++        },
++        "permission_mode": "ask",
++        "action_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
++    }"#;
++
++    /// The body the model drafted, before the edit.
++    fn drafted_mail_body() -> Value {
++        serde_json::json!({
++            "to": ["alice@example.com"],
++            "subject": "Old subject",
++            "bodyText": "the drafted body",
++            "bodyHtml": "<p>the drafted body</p>",
++            "threadId": "thread-1",
++        })
++    }
++
++    fn edited_mail_input() -> ProviderActionInput {
++        let descriptor = parse_descriptor(EDITED_MAIL_DESCRIPTOR).expect("descriptor");
++        match parse_resumable_action(&descriptor).expect("a provider action") {
++            ResumableAction::ProviderAction(input) => input,
++            other => panic!("expected ProviderAction, got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn cold_delivery_runs_the_edited_input() {
++        let input = edited_mail_input();
++        assert_eq!(input.connection_id, "conn-1");
++        assert_eq!(input.operation, "gmail.send");
++        assert_eq!(input.body["subject"], "New subject");
++        assert_eq!(input.body["bodyText"], "the edited body");
++        assert!(input.body.get("bodyHtml").is_none(), "the dropped formatted body stays dropped");
++        assert_eq!(input.body["threadId"], "thread-1", "the threading the draft had is kept");
++        assert_ne!(input.body, drafted_mail_body());
++    }
++
++    #[tokio::test]
++    async fn cold_delivery_attests_the_edited_payload() {
++        use base64::Engine as _;
++        use wiremock::matchers::{method, path};
++        use wiremock::{Mock, MockServer, ResponseTemplate};
++
++        let auth = MockServer::start().await;
++        for token_path in ["/api/ingestion/internal-token", "/api/ingestion/token-exchange"] {
++            Mock::given(method("POST"))
++                .and(path(token_path))
++                .respond_with(
++                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "test-token"})),
++                )
++                .mount(&auth)
++                .await;
++        }
++        let integration = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path("/api/v1/connections/conn-1"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(
++                serde_json::json!({"data": {"connection": {"providerKey": "google"}}}),
++            ))
++            .mount(&integration)
++            .await;
++        Mock::given(method("POST"))
++            .and(path("/api/v1/connections/conn-1/actions"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(
++                serde_json::json!({"success": true, "data": {"action": {"result": {"id": "msg-1"}}}}),
++            ))
++            .mount(&integration)
++            .await;
++        let signer = crate::attestation::Signer::new([7u8; 32], "test-key-1").expect("test signer");
++        let client = IntegrationActionsClient::new_for_test(
++            &auth.uri(),
++            &integration.uri(),
++            Some(std::sync::Arc::new(signer)),
++        );
++
++        // Exactly what process_delivery hands the client for a provider action.
++        let input = edited_mail_input();
++        let approval_id = "appr_edited";
++        let _ = client
++            .execute_action(
++                "org-1",
++                &input.connection_id,
++                &input.operation,
++                input.params.clone(),
++                input.body.clone(),
++                "user-1",
++                Some(approval_id),
++                None,
++            )
++            .await;
++
++        let requests = integration.received_requests().await.expect("request recording is on");
++        let sent: Value = requests
++            .iter()
++            .find(|request| request.url.path() == "/api/v1/connections/conn-1/actions")
++            .and_then(|request| serde_json::from_slice(&request.body).ok())
++            .expect("the write was sent");
++        assert_eq!(sent["body"]["subject"], "New subject", "the edited mail is what is sent");
++        assert_eq!(sent["body"]["bodyText"], "the edited body");
++        let token = sent["writeAttestation"].as_str().expect("a write is attested");
++        let claims_segment = token.split('.').nth(1).expect("a three-segment JWS");
++        let claims: Value = serde_json::from_slice(
++            &base64::engine::general_purpose::URL_SAFE_NO_PAD
++                .decode(claims_segment)
++                .expect("base64url claims"),
++        )
++        .expect("JSON claims");
++        assert_eq!(claims["approval_id"], approval_id);
++
++        // The digest of the body actually sent (with the approval reference the client adds)
++        // is the attested one, and it is not the digest of the draft.
++        let digest_of = |body: &Value| {
++            let mut body = body.clone();
++            body["approvalId"] = Value::String(approval_id.to_owned());
++            crate::attestation::payload_sha256(
++                "org-1",
++                "conn-1",
++                "google",
++                "gmail.send",
++                &input.params,
++                &body,
++            )
++            .expect("digest")
++        };
++        assert_eq!(claims["payload_sha256"], digest_of(&input.body));
++        assert_eq!(claims["payload_sha256"], digest_of(&sent["body"]));
++        assert_ne!(claims["payload_sha256"], digest_of(&drafted_mail_body()));
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs
+index 65acfcf2e..3d888c5a8 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs	
+@@ -1709,7 +1709,11 @@ async fn execute_step_inner(
+                     result_handles::handle_envelope(&handle_id, label, &screened.output)
+                 })
+         });
+-    let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
++    let mut outcome = StepOutcome::completed(with_edit_note(
++        parked.unwrap_or(rendered),
++        tool_name,
++        release.filter(|_| released),
++    ));
+     outcome.compaction_triggered = compaction_triggered;
+     outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
+         && screened.provenance.is_audit_worthy())
+@@ -1717,6 +1721,35 @@ async fn execute_step_inner(
+     outcome
+ }
+ 
++/// The result of a provider write the person edited before approving it (EP-10-S5, D8), with the
++/// note that says so first: the field names only, from the release the resume boundary built,
++/// never from the model's own arguments. The note sits outside the provenance-labelled result, as
++/// the executor's own words. Every other result is returned as it is.
++fn with_edit_note(
++    output: String,
++    tool_name: &str,
++    release: Option<&resume::ApprovedRelease>,
++) -> String {
++    match release.and_then(resume::ApprovedRelease::edit) {
++        Some(edit) if tool_name == EXECUTE_PROVIDER_ACTION_TOOL => {
++            format!("{}\n{output}", edit.sentence())
++        }
++        _ => output,
++    }
++}
++
++/// What a provider write's step record adds for an edited call (EP-10-S5): ` edited=<names>`
++/// when the result opens with the edit note [`with_edit_note`] wrote, else nothing. Field names
++/// only; the persisted record keeps no value of the edit.
++pub(crate) fn edit_step_note(output: &str) -> String {
++    output
++        .lines()
++        .next()
++        .and_then(resume::EditNote::from_sentence)
++        .map(|edit| edit.step_note())
++        .unwrap_or_default()
++}
++
+ /// Run a `subagent.*` call as a REAL nested agent loop through the dispatch
+ /// capability the agent driver supplies.
+ ///
+@@ -6162,3 +6195,69 @@ mod space_overlay_tests {
+         assert_eq!(recorded, execution);
+     }
+ }
++
++#[cfg(test)]
++mod edit_note_tests {
++    //! EP-10-S5: the released result of a provider write the person edited says so, by field
++    //! name, and its step record keeps the names and nothing of the values.
++    use super::*;
++
++    const SEND: &str = r#"{"connection_id":"conn-1","operation":"gmail.send","body":{"to":["a@example.com"],"subject":"New","bodyText":"edited"}}"#;
++    const RESULT: &str = "Executed gmail.send. Result:\n{\"id\":\"msg-1\"}";
++
++    fn release(edit: Option<resume::EditNote>) -> resume::ApprovedRelease {
++        let gate = crate::permission::RunGate::with_gate(
++            crate::capability_policy::ToolClassGate::Off,
++            "org-1",
++            "run-1",
++        );
++        resume::ApprovedRelease::new(gate, "s2.tool_1_approved", EXECUTE_PROVIDER_ACTION_TOOL, SEND)
++            .expect("a provider write is releasable")
++            .with_edit(edit)
++    }
++
++    fn subject_and_body() -> resume::EditNote {
++        let sentence = "The person edited subject, body before approving; the sent version differs \
++                        from your draft. Do not quote your draft as what was sent.";
++        resume::EditNote::from_sentence(sentence).expect("a sentence the note builds")
++    }
++
++    #[test]
++    fn an_edited_release_opens_its_result_with_the_field_names() {
++        let noted = release(Some(subject_and_body()));
++        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
++        let (first, rest) = output.split_once('\n').expect("the note is a line of its own");
++        assert_eq!(first, subject_and_body().sentence());
++        assert_eq!(rest, RESULT, "the provider's result follows unchanged");
++        assert!(!output.contains("New") && !output.contains("edited\""), "names only, never values");
++        // The verdict line a write's step record keeps stays the last line.
++        assert_eq!(output.lines().last(), RESULT.lines().last());
++    }
++
++    #[test]
++    fn an_unedited_release_and_every_other_call_keep_their_result() {
++        let plain = release(None);
++        let noted = release(Some(subject_and_body()));
++        assert_eq!(
++            with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&plain)),
++            RESULT
++        );
++        assert_eq!(with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, None), RESULT);
++        assert_eq!(with_edit_note(RESULT.to_owned(), "shell", Some(&noted)), RESULT);
++    }
++
++    #[test]
++    fn the_step_record_keeps_the_edited_names_and_nothing_else() {
++        let noted = release(Some(subject_and_body()));
++        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
++        assert_eq!(edit_step_note(&output), " edited=subject,body_text");
++        let unnamed = release(Some(resume::EditNote::unnamed()));
++        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&unnamed));
++        assert_eq!(edit_step_note(&output), " edited=unnamed");
++        // A result with no note adds nothing, so a write's record is byte-identical to before.
++        assert_eq!(edit_step_note(RESULT), "");
++        assert_eq!(edit_step_note(""), "");
++        // A line that only resembles the note is not taken for one.
++        assert_eq!(edit_step_note("The person edited subject before approving.\nx"), "");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs
+index 1064f0257..09773927d 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs	
+@@ -124,6 +124,214 @@ pub(crate) fn ask_resume_enabled() -> bool {
+     )
+ }
+ 
++/// The environment switch for running a call the person edited before approving it (EP-10-S5).
++/// The same name session-core and the model-gateway read for the edit itself. Read strictly: only
++/// the literal `true` enables it.
++pub(crate) const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
++
++#[cfg(test)]
++thread_local! {
++    /// A test's override of the approval edit switch (see `TEST_CONTINUE`).
++    static TEST_APPROVAL_EDIT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
++}
++
++/// Holds the approval edit switch at a fixed value for the current test thread, then restores it.
++#[cfg(test)]
++pub(crate) struct ApprovalEditSwitch;
++
++#[cfg(test)]
++impl ApprovalEditSwitch {
++    pub(crate) fn set(on: bool) -> Self {
++        TEST_APPROVAL_EDIT.with(|cell| cell.set(Some(on)));
++        Self
++    }
++}
++
++#[cfg(test)]
++impl Drop for ApprovalEditSwitch {
++    fn drop(&mut self) {
++        TEST_APPROVAL_EDIT.with(|cell| cell.set(None));
++    }
++}
++
++/// Whether `APPROVAL_EDIT_ENABLED` is on in this process (the one strict parser,
++/// `mp_contracts::loop_fold::switch_from`). Default off: a revised approval then restores and
++/// reports exactly as before (its in-place restore falls back, and no edit note is added).
++pub(crate) fn approval_edit_enabled() -> bool {
++    #[cfg(test)]
++    if let Some(forced) = TEST_APPROVAL_EDIT.with(std::cell::Cell::get) {
++        return forced;
++    }
++    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
++}
++
++/// What the model is told about a call the person edited before approving it (EP-10-S5, D8):
++/// the names of the fields they changed, never the values. Built only by the resume boundary,
++/// from the consumed approval and the fold's draft, never from the model's arguments.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct EditNote {
++    /// The fields that differ from the draft, in the fixed order `to`, `subject`, `body_text`
++    /// (`mp_contracts::approval_edit`'s names). Empty when no draft was at hand to compare with
++    /// (a stage-1 segment restores no fold): the note then says the call was edited, unnamed.
++    fields: Vec<&'static str>,
++}
++
++/// The words the model reads for each field name.
++const EDIT_FIELD_WORDS: [(&str, &str); 3] = [
++    (mp_contracts::approval_edit::FIELD_TO, "recipients"),
++    (mp_contracts::approval_edit::FIELD_SUBJECT, "subject"),
++    (mp_contracts::approval_edit::FIELD_BODY_TEXT, "body"),
++];
++
++/// What the step record keeps when the edited fields are not known.
++const EDIT_FIELDS_UNNAMED: &str = "unnamed";
++
++impl EditNote {
++    /// An edit whose fields are not known (no draft to compare with).
++    pub(crate) const fn unnamed() -> Self {
++        Self { fields: Vec::new() }
++    }
++
++    /// The fields that differ from the draft.
++    #[cfg(test)] // read by the tests only: production reads the sentence and the step note
++    pub(crate) fn fields(&self) -> &[&'static str] {
++        &self.fields
++    }
++
++    /// The sentence the model reads ahead of the released call's result.
++    pub(crate) fn sentence(&self) -> String {
++        let words: Vec<&str> = EDIT_FIELD_WORDS
++            .iter()
++            .filter(|(field, _)| self.fields.contains(field))
++            .map(|(_, word)| *word)
++            .collect();
++        let what = if words.is_empty() {
++            "this call".to_owned()
++        } else {
++            words.join(", ")
++        };
++        format!(
++            "The person edited {what} before approving; the sent version differs from your draft. \
++             Do not quote your draft as what was sent."
++        )
++    }
++
++    /// The suffix the step record keeps: ` edited=<names>`, field names only.
++    pub(crate) fn step_note(&self) -> String {
++        if self.fields.is_empty() {
++            return format!(" edited={EDIT_FIELDS_UNNAMED}");
++        }
++        format!(" edited={}", self.fields.join(","))
++    }
++
++    /// The note whose [`EditNote::sentence`] is exactly `line`, or `None`. Only the notes this
++    /// module can build are recognised (every subset of the three fields, and the unnamed one),
++    /// so a line that merely resembles one is never taken for it.
++    pub(crate) fn from_sentence(line: &str) -> Option<Self> {
++        let names: Vec<&'static str> = EDIT_FIELD_WORDS.iter().map(|(field, _)| *field).collect();
++        (0..1_u8 << names.len())
++            .map(|mask| Self {
++                fields: names
++                    .iter()
++                    .enumerate()
++                    .filter(|(index, _)| mask & (1 << index) != 0)
++                    .map(|(_, field)| *field)
++                    .collect(),
++            })
++            .find(|note| note.sentence() == line)
++    }
++}
++
++/// The mail body keys an edit may touch (`mp_contracts::approval_edit::apply_edit`); every other
++/// key of the body is the draft's.
++const EDITABLE_BODY_KEYS: [&str; 4] = ["to", "subject", "bodyText", "bodyHtml"];
++
++/// The fields a person's edit changed, when the edited call stays inside what an edit may change
++/// (EP-10-S5, D1 and D2): the same tool (`execute_provider_action`), the same connection, the same
++/// operation (a mail send), every key but `body` unchanged, and in `body` only `to`, `subject` and
++/// `bodyText` changed (`bodyHtml` may only be dropped, and only with a text edit). `None` for
++/// anything else, including an edit that changed nothing: the restore then falls back.
++///
++/// This is the executor's own check of the narrowing session-core's edit contract already made;
++/// it never widens what the person approved, it only names it.
++pub(crate) fn edited_mail_fields(
++    tool_name: &str,
++    drafted_input: &str,
++    edited_input: &str,
++) -> Option<Vec<&'static str>> {
++    use mp_contracts::approval_edit::{FIELD_BODY_TEXT, FIELD_SUBJECT, FIELD_TO};
++    use mp_contracts::provider_writes::{is_mail_send, mail_recipients};
++    use serde_json::Value;
++
++    if tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL {
++        return None;
++    }
++    let drafted: Value = serde_json::from_str(drafted_input).ok()?;
++    let edited: Value = serde_json::from_str(edited_input).ok()?;
++    let (drafted, edited) = (drafted.as_object()?, edited.as_object()?);
++    let text = |object: &serde_json::Map<String, Value>, key: &str| {
++        object
++            .get(key)
++            .and_then(Value::as_str)
++            .map(str::to_owned)
++            .filter(|value| !value.trim().is_empty())
++    };
++    // An edit may not retarget: the connection and the operation are the draft's.
++    let connection = text(drafted, "connection_id")?;
++    let operation = text(drafted, "operation")?;
++    if text(edited, "connection_id")? != connection
++        || text(edited, "operation")? != operation
++        || !is_mail_send(&operation)
++    {
++        return None;
++    }
++    // Every key but the body is the draft's, and no key is added or dropped.
++    if drafted.len() != edited.len()
++        || drafted
++            .iter()
++            .any(|(key, value)| key != "body" && edited.get(key) != Some(value))
++    {
++        return None;
++    }
++    let (Some(Value::Object(draft_body)), Some(Value::Object(edit_body))) =
++        (drafted.get("body"), edited.get("body"))
++    else {
++        return None;
++    };
++    let frozen_key_changed = draft_body.keys().chain(edit_body.keys()).any(|key| {
++        !EDITABLE_BODY_KEYS.contains(&key.as_str()) && draft_body.get(key) != edit_body.get(key)
++    });
++    if frozen_key_changed {
++        return None;
++    }
++    let subject = |body: &serde_json::Map<String, Value>| {
++        body.get("subject")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .trim()
++            .to_owned()
++    };
++    let mut fields = Vec::new();
++    if mail_recipients(draft_body.get("to")) != mail_recipients(edit_body.get("to")) {
++        fields.push(FIELD_TO);
++    }
++    if subject(draft_body) != subject(edit_body) {
++        fields.push(FIELD_SUBJECT);
++    }
++    if draft_body.get("bodyText") != edit_body.get("bodyText") {
++        fields.push(FIELD_BODY_TEXT);
++    }
++    // The formatted body may only go, and only when the text was edited (it would no longer
++    // match the text); it is never added or changed.
++    match (draft_body.get("bodyHtml"), edit_body.get("bodyHtml")) {
++        (_, None) if fields.contains(&FIELD_BODY_TEXT) => {}
++        (None, None) => {}
++        (Some(drafted_html), Some(edited_html)) if drafted_html == edited_html => {}
++        _ => return None,
++    }
++    (!fields.is_empty()).then_some(fields)
++}
++
+ /// Why a release could not be built.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum ReleaseRefusal {
+@@ -165,6 +373,9 @@ pub(crate) struct ApprovedRelease {
+     tool_name: String,
+     class: EffectClass,
+     args_digest: String,
++    /// Set when the person edited the call before approving it (EP-10-S5); the released call's
++    /// result then says so. It never changes what the release covers.
++    edit: Option<EditNote>,
+ }
+ 
+ impl ApprovedRelease {
+@@ -194,9 +405,21 @@ impl ApprovedRelease {
+             tool_name: tool_name.to_owned(),
+             class: effect::effect_class_of(tool_name, tool_input),
+             args_digest,
++            edit: None,
+         })
+     }
+ 
++    /// The same release, with the person's edit of the call recorded (or cleared with `None`).
++    #[must_use]
++    pub(crate) fn with_edit(self, edit: Option<EditNote>) -> Self {
++        Self { edit, ..self }
++    }
++
++    /// The person's edit of the released call, when there was one.
++    pub(crate) fn edit(&self) -> Option<&EditNote> {
++        self.edit.as_ref()
++    }
++
+     /// Whether this release covers the call: the same step, the same tool and
+     /// the same arguments. A second call of the same tool, or the same step with
+     /// changed arguments, is not covered and gates as before. Arguments that are not
+@@ -930,6 +1153,27 @@ pub(crate) struct Consumed {
+     pub effective: Authority,
+     /// The segment this continuation is (the paused step's segment plus one).
+     pub segment: u32,
++    /// How many times the person edited the call before granting it (EP-10-S5); 0 when
++    /// `tool_input_json` is the call the model drafted.
++    pub revision: u32,
++    /// The fingerprint of the call as the model drafted it, set only with `revision > 0`. A
++    /// digest: the fold's pending pause names this one, not the edited call's.
++    pub original_action_fingerprint: String,
++}
++
++impl Consumed {
++    /// Whether this approval is a revised one the executor may run as edited: the person edited
++    /// it, session-core says which draft it replaced, and `APPROVAL_EDIT_ENABLED` is on. With
++    /// the switch off a revised approval is treated as before (its in-place restore falls back).
++    pub(crate) fn edited(&self) -> bool {
++        self.revision > 0 && !self.original_action_fingerprint.is_empty() && approval_edit_enabled()
++    }
++
++    /// The note a stage-1 segment's released call carries: there is no fold, so no draft to name
++    /// the fields from. `None` for a call the person did not edit, or with the switch off.
++    pub(crate) fn edit_note(&self) -> Option<EditNote> {
++        self.edited().then(EditNote::unnamed)
++    }
+ }
+ 
+ impl std::fmt::Debug for Consumed {
+@@ -940,6 +1184,7 @@ impl std::fmt::Debug for Consumed {
+             .field("tool_name", &self.tool_name)
+             .field("step_id", &self.step_id)
+             .field("segment", &self.segment)
++            .field("revision", &self.revision)
+             .field("mode", &self.mode)
+             .field("snapshot_digest", &self.snapshot_digest)
+             .field("tools", &self.tools.len())
+@@ -1058,6 +1303,9 @@ pub(crate) struct Restored {
+     pub claimed_seq: u64,
+     /// The segment the resumed loop writes under.
+     pub segment: u32,
++    /// The person's edit of the approved call, named against the fold's draft (EP-10-S5).
++    /// `None` for a call the model drafted.
++    pub edit: Option<EditNote>,
+ }
+ 
+ impl Restored {
+@@ -1087,6 +1335,7 @@ impl std::fmt::Debug for Restored {
+             .field("attempted_retrievals", &self.attempted_retrievals.len())
+             .field("claimed_seq", &self.claimed_seq)
+             .field("segment", &self.segment)
++            .field("edit", &self.edit)
+             .finish()
+     }
+ }
+@@ -1156,6 +1405,8 @@ struct Checked {
+     pending: usize,
+     /// For each call, the index of its completed entry.
+     completed: Vec<Option<usize>>,
++    /// The person's edit of the pending call, named against the fold's draft (EP-10-S5).
++    edit: Option<EditNote>,
+ }
+ 
+ /// The pure checks of a claimed fold against the consumed approval, before the ledger is
+@@ -1171,10 +1422,13 @@ struct Checked {
+ /// 8. the claimed authority digest is the fold authority's;
+ /// 9. the fold authority is no wider than the snapshot's (REFUSE);
+ /// 10. the fold's pending pause is this approval's: pause reference, step and tool, a
+-///     fingerprint that is present and, when the resume states one, equal;
++///     fingerprint that is present and, when the resume states one, equal; for a call the
++///     person edited (`Consumed::edited`), also equal to the draft's fingerprint;
+ /// 11. the open round is 1 to 64 calls and exactly one is the approved call, with the same
+ ///     tool and the same arguments digest (the consumed descriptor has no fingerprint, so
+-///     the identity rests on pause reference, step, tool and digest);
++///     the identity rests on pause reference, step, tool and digest); for a call the person
++///     edited, the digest is not compared and the edit must stay inside the edit contract
++///     instead ([`edited_mail_fields`]: same tool, connection and operation);
+ /// 12. every completed entry belongs to exactly one call, found by step id, or for a call
+ ///     refused before dispatch by its unique provider id; none belongs to the pending call;
+ /// 13. a call with no step id has its outcome;
+@@ -1218,10 +1472,13 @@ fn check_fold(
+         return refuse(Refusal::AuthorityWidened);
+     }
+ 
+-    // 10: the pause is this approval's.
++    // 10: the pause is this approval's. A call the person edited (EP-10-S5) still answers the
++    // pause the model drafted, so the fold's fingerprint is held against the draft's, which
++    // session-core kept when the edit replaced it.
+     let Some(pending) = &fold.pending else {
+         return fallback(F::PendingMismatch);
+     };
++    let edited = consumed.edited();
+     if pending.kind != PauseKind::Approval
+         || consumed.step_id.is_empty()
+         || pending.pause_ref != format!("{run_id}:{}", consumed.step_id)
+@@ -1229,6 +1486,7 @@ fn check_fold(
+         || pending.call != consumed.tool_name
+         || pending.action_fingerprint.is_empty()
+         || (!resume_fingerprint.is_empty() && resume_fingerprint != pending.action_fingerprint)
++        || (edited && pending.action_fingerprint != consumed.original_action_fingerprint)
+     {
+         return fallback(F::PendingMismatch);
+     }
+@@ -1250,13 +1508,24 @@ fn check_fold(
+     };
+     let fold_digest = effect::args_digest_of(&call.arguments_json);
+     let consumed_digest = effect::args_digest_of(&consumed.tool_input_json);
+-    if call.name != consumed.tool_name
+-        || call.arguments_json.is_empty()
+-        || fold_digest.is_none()
+-        || fold_digest != consumed_digest
+-    {
++    if call.name != consumed.tool_name || call.arguments_json.is_empty() || fold_digest.is_none() {
+         return fallback(F::PendingMismatch);
+     }
++    // The digest equality is relaxed for this one call only when the person edited it: the
++    // edited call must then stay inside what an edit may change (same tool, connection and
++    // operation, only the mail fields), and the fields it changed are named for the model.
++    let edit = if edited {
++        let Some(fields) =
++            edited_mail_fields(&call.name, &call.arguments_json, &consumed.tool_input_json)
++        else {
++            return fallback(F::PendingMismatch);
++        };
++        Some(EditNote { fields })
++    } else if fold_digest != consumed_digest {
++        return fallback(F::PendingMismatch);
++    } else {
++        None
++    };
+ 
+     // 12: every outcome belongs to one call.
+     let mut completed: Vec<Option<usize>> = vec![None; round.calls.len()];
+@@ -1313,6 +1582,7 @@ fn check_fold(
+     Ok(Checked {
+         pending: pending_index,
+         completed,
++        edit,
+     })
+ }
+ 
+@@ -1468,6 +1738,7 @@ fn reconcile(
+         attempted_retrievals: fold.attempted_retrievals.iter().cloned().collect(),
+         claimed_seq: claimed.seq,
+         segment: consumed.segment,
++        edit: checked.edit.clone(),
+     })
+ }
+ 
+@@ -2402,6 +2673,8 @@ mod tests {
+             snapshot_digest: authority.digest(),
+             effective: authority.clone(),
+             segment: 2,
++            revision: 0,
++            original_action_fingerprint: String::new(),
+         }
+     }
+ 
+@@ -3993,4 +4266,273 @@ mod tests {
+         .await;
+         assert_eq!(refusal_of(result), Refusal::ContinuationAlreadyConsumed);
+     }
++
++    // ---- an approval the person edited (EP-10-S5) ----
++
++    const PROVIDER_ACTION: &str = "execute_provider_action";
++    /// The fold's pending fingerprint: the draft's, which session-core keeps as the original.
++    const DRAFT_FINGERPRINT: &str = "fp-1";
++
++    /// The mail send the model drafted, as the fold keeps it.
++    fn drafted_mail() -> serde_json::Value {
++        serde_json::json!({
++            "connection_id": "conn-1",
++            "operation": "gmail.send",
++            "params": {},
++            "body": {
++                "to": ["alice@example.com"],
++                "subject": "Old subject",
++                "bodyText": "the drafted body",
++                "bodyHtml": "<p>the drafted body</p>",
++                "threadId": "thread-1",
++            },
++        })
++    }
++
++    /// The draft after the person's edit, as `apply_edit` builds it: a changed subject and body,
++    /// and the formatted copy dropped with the text edit.
++    fn edited_mail() -> serde_json::Value {
++        let mut edited = drafted_mail();
++        edited["body"]["subject"] = "New subject".into();
++        edited["body"]["bodyText"] = "the edited body".into();
++        edited["body"]
++            .as_object_mut()
++            .expect("an object body")
++            .remove("bodyHtml");
++        edited
++    }
++
++    /// The pause fold with a mail send as its pending call, drafted as `drafted_mail`.
++    fn mail_pause_fold() -> LoopFoldV1 {
++        let mut fold = pause_fold();
++        let round = round_mut(&mut fold);
++        round.calls[1].name = PROVIDER_ACTION.to_owned();
++        round.calls[1].arguments_json = drafted_mail().to_string();
++        let pending = fold.pending.as_mut().expect("the pause fold has a pending pause");
++        pending.call = PROVIDER_ACTION.to_owned();
++        pending.action_fingerprint = DRAFT_FINGERPRINT.to_owned();
++        fold
++    }
++
++    /// The consume of the mail send: `input` as the retained descriptor holds it, with the
++    /// revision session-core reports and the draft's fingerprint when it is a revision.
++    fn consumed_mail(input: &serde_json::Value, revision: u32) -> Consumed {
++        Consumed {
++            tool_name: PROVIDER_ACTION.to_owned(),
++            tool_input_json: input.to_string(),
++            revision,
++            original_action_fingerprint: if revision > 0 {
++                DRAFT_FINGERPRINT.to_owned()
++            } else {
++                String::new()
++            },
++            ..consumed()
++        }
++    }
++
++    fn restore_mail(consumed: &Consumed) -> Result<Restored, RestoreOrRefuse> {
++        restore_of(&claimed_of(mail_pause_fold()), consumed, &Ledger::new())
++    }
++
++    #[test]
++    fn the_approval_edit_switch_follows_the_environment_unless_a_test_forces_it() {
++        {
++            let _on = ApprovalEditSwitch::set(true);
++            assert!(approval_edit_enabled());
++        }
++        {
++            let _off = ApprovalEditSwitch::set(false);
++            assert!(!approval_edit_enabled());
++        }
++        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
++        assert_eq!(
++            approval_edit_enabled(),
++            mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
++        );
++    }
++
++    #[test]
++    fn an_edited_approval_restores_in_place_with_the_edited_call_and_names_the_fields() {
++        let _on = ApprovalEditSwitch::set(true);
++        let restored = restore_mail(&consumed_mail(&edited_mail(), 1)).expect("restores in place");
++        assert!(restored.is_consistent());
++        // The released call is the edited one, never the fold's draft.
++        assert_eq!(restored.response.tool_calls[1].name, PROVIDER_ACTION);
++        assert_eq!(restored.response.tool_calls[1].arguments_json, edited_mail().to_string());
++        assert_eq!(
++            restored.slots[1],
++            SeedSlot::Release {
++                step_id: RELEASE_ID.to_owned()
++            }
++        );
++        let edit = restored.edit.expect("the edit is named against the draft");
++        assert_eq!(edit.fields(), ["subject", "body_text"]);
++        // Every other call of the round is exactly as an unedited restore leaves it.
++        assert_eq!(restored.response.tool_calls[0].arguments_json, r#"{"query":"stale"}"#);
++    }
++
++    #[test]
++    fn an_unedited_mail_send_restores_with_no_edit_note() {
++        let _on = ApprovalEditSwitch::set(true);
++        let restored = restore_mail(&consumed_mail(&drafted_mail(), 0)).expect("restores");
++        assert_eq!(restored.edit, None);
++    }
++
++    #[test]
++    fn an_edited_approval_falls_back_when_the_switch_is_off() {
++        let _off = ApprovalEditSwitch::set(false);
++        assert_eq!(
++            fallback_of(restore_mail(&consumed_mail(&edited_mail(), 1))),
++            RestoreFailure::PendingMismatch,
++            "with the switch off a revised approval falls back exactly as before"
++        );
++        assert_eq!(consumed_mail(&edited_mail(), 1).edit_note(), None);
++    }
++
++    #[test]
++    fn a_changed_call_with_no_revision_is_never_relaxed() {
++        let _on = ApprovalEditSwitch::set(true);
++        // revision 0: session-core says the call is the draft, so a different call is a mismatch.
++        assert_eq!(
++            fallback_of(restore_mail(&consumed_mail(&edited_mail(), 0))),
++            RestoreFailure::PendingMismatch
++        );
++        // A revision with no original fingerprint is not an edit the loop can match.
++        let mut no_original = consumed_mail(&edited_mail(), 1);
++        no_original.original_action_fingerprint = String::new();
++        assert!(!no_original.edited());
++        assert_eq!(fallback_of(restore_mail(&no_original)), RestoreFailure::PendingMismatch);
++    }
++
++    #[test]
++    fn an_edited_approval_must_answer_the_drafts_own_pause() {
++        let _on = ApprovalEditSwitch::set(true);
++        // The original session-core kept is another draft's: not this pause.
++        let mut other_draft = consumed_mail(&edited_mail(), 1);
++        other_draft.original_action_fingerprint = "fp-other".to_owned();
++        assert_eq!(fallback_of(restore_mail(&other_draft)), RestoreFailure::PendingMismatch);
++        // A resume that states a fingerprint states the draft's (the pause's own), never the
++        // edited call's.
++        let claimed = claimed_of(mail_pause_fold());
++        let edited = consumed_mail(&edited_mail(), 1);
++        assert!(restore(&claimed, &edited, RUN, DRAFT_FINGERPRINT, RELEASE_ID, &Ledger::new(), PROMPT).is_ok());
++        assert_eq!(
++            fallback_of(restore(&claimed, &edited, RUN, "fp-edited", RELEASE_ID, &Ledger::new(), PROMPT)),
++            RestoreFailure::PendingMismatch
++        );
++    }
++
++    #[test]
++    fn an_edited_approval_cannot_change_connection_operation_or_anything_but_the_mail_fields() {
++        let _on = ApprovalEditSwitch::set(true);
++        let retargets: [(&str, fn(&mut serde_json::Value)); 8] = [
++            ("another connection", |v| v["connection_id"] = "conn-2".into()),
++            ("another operation", |v| v["operation"] = "mail.send".into()),
++            ("not a mail send", |v| v["operation"] = "slack.message.send".into()),
++            ("changed params", |v| v["params"] = serde_json::json!({"userId": "me"})),
++            ("an added top-level key", |v| v["approvalId"] = "appr-forged".into()),
++            ("a changed thread", |v| v["body"]["threadId"] = "thread-2".into()),
++            ("an added body key", |v| v["body"]["cc"] = serde_json::json!(["eve@example.com"])),
++            ("a changed formatted body", |v| v["body"]["bodyHtml"] = "<p>other</p>".into()),
++        ];
++        for (label, retarget) in retargets {
++            let mut input = edited_mail();
++            retarget(&mut input);
++            assert_eq!(
++                fallback_of(restore_mail(&consumed_mail(&input, 1))),
++                RestoreFailure::PendingMismatch,
++                "{label}: an edit may not change it"
++            );
++        }
++    }
++
++    #[test]
++    fn an_edited_approval_of_another_tool_is_not_relaxed() {
++        let _on = ApprovalEditSwitch::set(true);
++        // The pause fold's own pending call (delete_records) under a revised consume.
++        let mut consumed = consumed();
++        consumed.tool_input_json = r#"{"table":"fresh"}"#.to_owned();
++        consumed.revision = 1;
++        consumed.original_action_fingerprint = "fp-1".to_owned();
++        assert!(consumed.edited());
++        assert_eq!(
++            fallback_of(restore_of(&claimed_of(pause_fold()), &consumed, &Ledger::new())),
++            RestoreFailure::PendingMismatch
++        );
++    }
++
++    #[test]
++    fn edited_mail_fields_names_only_what_the_person_changed() {
++        let drafted = drafted_mail();
++        let fields = |edited: &serde_json::Value| {
++            edited_mail_fields(PROVIDER_ACTION, &drafted.to_string(), &edited.to_string())
++        };
++        // A recipient edit keeps the formatted body.
++        let mut to_only = drafted.clone();
++        to_only["body"]["to"] = serde_json::json!(["alice@example.com", "bob@example.com"]);
++        assert_eq!(fields(&to_only), Some(vec!["to"]));
++        // A subject that differs only by surrounding space is not an edit of it.
++        let mut spaced = drafted.clone();
++        spaced["body"]["subject"] = "  Old subject ".into();
++        assert_eq!(fields(&spaced), None, "nothing changed");
++        assert_eq!(fields(&drafted), None, "nothing changed");
++        assert_eq!(fields(&edited_mail()), Some(vec!["subject", "body_text"]));
++        // The formatted body goes only with a text edit.
++        let mut html_dropped = to_only.clone();
++        html_dropped["body"].as_object_mut().unwrap().remove("bodyHtml");
++        assert_eq!(fields(&html_dropped), None);
++        // Another tool, or input that is not JSON, is never an edit.
++        assert_eq!(
++            edited_mail_fields("delete_records", &drafted.to_string(), &edited_mail().to_string()),
++            None
++        );
++        assert_eq!(edited_mail_fields(PROVIDER_ACTION, "not json", &edited_mail().to_string()), None);
++    }
++
++    #[test]
++    fn the_edit_note_names_fields_never_values() {
++        let named = EditNote {
++            fields: vec!["subject", "body_text"],
++        };
++        assert_eq!(
++            named.sentence(),
++            "The person edited subject, body before approving; the sent version differs from \
++             your draft. Do not quote your draft as what was sent."
++        );
++        assert_eq!(named.step_note(), " edited=subject,body_text");
++        let unnamed = EditNote::unnamed();
++        assert!(unnamed.sentence().starts_with("The person edited this call before approving;"));
++        assert_eq!(unnamed.step_note(), " edited=unnamed");
++        // Every note this module can build is recognised from its sentence, and nothing else is.
++        for note in [named, unnamed, EditNote { fields: vec!["to"] }] {
++            assert_eq!(EditNote::from_sentence(&note.sentence()), Some(note));
++        }
++        assert_eq!(EditNote::from_sentence("The person edited the database."), None);
++        assert_eq!(EditNote::from_sentence(""), None);
++    }
++
++    #[test]
++    fn a_stage_one_segment_carries_an_unnamed_note_only_when_edited_and_switched_on() {
++        let revised = consumed_mail(&edited_mail(), 1);
++        {
++            let _on = ApprovalEditSwitch::set(true);
++            assert_eq!(revised.edit_note(), Some(EditNote::unnamed()));
++            assert_eq!(consumed_mail(&drafted_mail(), 0).edit_note(), None);
++        }
++        let _off = ApprovalEditSwitch::set(false);
++        assert_eq!(revised.edit_note(), None);
++    }
++
++    #[test]
++    fn an_edit_note_never_changes_what_a_release_covers() {
++        let input = edited_mail().to_string();
++        let plain = ApprovedRelease::new(gate_off(), RELEASE_ID, PROVIDER_ACTION, &input).unwrap();
++        let noted = plain.clone().with_edit(Some(EditNote::unnamed()));
++        assert_eq!(noted.edit(), Some(&EditNote::unnamed()));
++        assert_eq!(plain.edit(), None);
++        assert!(noted.covers(RELEASE_ID, PROVIDER_ACTION, &input));
++        assert!(!noted.covers(RELEASE_ID, PROVIDER_ACTION, &drafted_mail().to_string()));
++        assert_eq!(noted.ledger_entry(RUN, "personal", false), plain.ledger_entry(RUN, "personal", false));
++        assert_eq!(noted.with_edit(None), plain);
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs
+index 9d780eb6c..b81b92f8c 100644
+--- a/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs	
++++ b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs	
+@@ -878,6 +878,11 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
+             mp_contracts::loop_fold::LOOP_PARKING_ENV.to_owned(),
+             "the park form of /continue (WS03 S8-A S8-7; read once in sse.rs continue_run through loop_parking_enabled; the gateway accepts the shape, it writes nothing)",
+         ),
++        (
++            "execution-core",
++            const_str(&read(EXECUTOR_RESUME), "APPROVAL_EDIT_ENV"),
++            "the in-place restore of an approval the person edited, and the edit note (EP-10-S5; execution-core deploys before session-core takes edits)",
++        ),
+         (
+             "session-core",
+             const_str(&read(SESSION_CHECKPOINT), "ENABLED_ENV"),
+@@ -7680,3 +7685,221 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
+         "subscription_run_end_event does not withdraw the retry",
+     );
+ }
++
++// ---- an approval the person edited (EP-10-S5) ------------------------------------------
++//
++// session-core keeps the draft's fingerprint when a person edits a paused call, and the
++// executor restores the paused loop with the edited call. The relaxation is one digest
++// equality for one call, so these guards hold its edges: it is reached only through the switch,
++// only for a revision session-core reported, against the draft's own pause, and the edited call
++// keeps the draft's tool, connection and operation.
++
++/// The restore relaxes the pending call's digest only for an edited approval, and holds the
++/// pause against the draft's fingerprint; the released call is the consumed one; session-core
++/// matches the draft's fingerprint only for a revised descriptor.
++fn edited_restore_violations(executor_resume: &str, session_approvals: &str) -> Vec<String> {
++    let mut violations = Vec::new();
++    let code = Code::new(executor_resume).without_tests();
++    match code.fn_body("check_fold") {
++        None => violations.push("resume.rs has no check_fold".into()),
++        Some(body) => {
++            if !body.contains("let edited = consumed.edited();") {
++                violations.push("check_fold does not decide `edited` from Consumed::edited alone".into());
++            }
++            if !body.contains("(edited && pending.action_fingerprint != consumed.original_action_fingerprint)") {
++                violations.push("check_fold does not hold an edited approval to the draft's own pause fingerprint".into());
++            }
++            if !body.contains("if fold_digest != consumed_digest {") {
++                violations.push("check_fold no longer compares the digests of an unedited call".into());
++            }
++            let relaxed = Regex::new(r"(?s)let edit = if edited \{.*?edited_mail_fields\(.*?\} else if fold_digest != consumed_digest \{")
++                .expect("pattern");
++            if !relaxed.is_match(&body) {
++                violations.push("check_fold skips the digest equality outside `if edited`, or without edited_mail_fields".into());
++            }
++        }
++    }
++    match code.fn_body("reconcile") {
++        Some(body) if body.contains("consumed.tool_input_json.clone()") && body.contains("edit: checked.edit.clone()") => {}
++        _ => violations.push("reconcile does not release the consumed (edited) call with the checked edit".into()),
++    }
++    let approvals = Code::new(session_approvals).without_tests();
++    let consume_sql = Regex::new(r#"const CONSUME_APPROVAL_SQL: &str = (?s)"(.*?)";"#)
++        .expect("pattern")
++        .captures(&approvals.text)
++        .map(|captured| captured[1].to_owned())
++        .unwrap_or_default();
++    let original = Regex::new(r"(?s)OR \(d\.revision > 0 AND d\.original_action_fingerprint = \$5\)")
++        .expect("pattern");
++    if !original.is_match(&consume_sql) || consume_sql.matches("original_action_fingerprint").count() != 1 {
++        violations.push("the consume SQL matches the draft's fingerprint other than only for a revised descriptor".into());
++    }
++    violations
++}
++
++/// The edited call keeps the draft's tool, connection and operation, and changes only the mail
++/// fields an edit may change.
++fn edit_retarget_violations(executor_resume: &str) -> Vec<String> {
++    let mut violations = Vec::new();
++    let code = Code::new(executor_resume).without_tests();
++    let Some(body) = code.fn_body("edited_mail_fields") else {
++        return vec!["resume.rs has no edited_mail_fields".into()];
++    };
++    for (needle, what) in [
++        ("tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL", "the tool"),
++        ("text(edited, \"connection_id\")? != connection", "the connection"),
++        ("text(edited, \"operation\")? != operation", "the operation"),
++        ("!is_mail_send(&operation)", "the mail send"),
++        ("key != \"body\" && edited.get(key) != Some(value)", "every key but the body"),
++        ("EDITABLE_BODY_KEYS.contains(", "the editable body keys"),
++    ] {
++        if !body.contains(needle) {
++            violations.push(format!("edited_mail_fields no longer pins {what} (`{needle}`)"));
++        }
++    }
++    // The mail body's own keys are camelCase, which `quoted` does not read.
++    let keys = |list: &str| -> BTreeSet<String> {
++        Regex::new(r#""([A-Za-z]+)""#)
++            .expect("pattern")
++            .captures_iter(list)
++            .map(|captured| captured[1].to_owned())
++            .collect()
++    };
++    match Regex::new(r#"const EDITABLE_BODY_KEYS: \[&str; \d+\] = \[([^\]]*)\];"#)
++        .expect("pattern")
++        .captures(&code.text)
++    {
++        Some(found) if keys(&found[1]) == keys(r#""to", "subject", "bodyText", "bodyHtml""#) => {}
++        _ => violations.push("EDITABLE_BODY_KEYS is not exactly the edit contract's to, subject, bodyText, bodyHtml".into()),
++    }
++    violations
++}
++
++/// The edit relaxation is reached through `APPROVAL_EDIT_ENABLED`, read by the strict parser in
++/// one place, and only for a revision session-core reported with the draft's fingerprint.
++fn edit_switch_violations(executor_resume: &str) -> Vec<String> {
++    let mut violations = Vec::new();
++    let code = Code::new(executor_resume).without_tests();
++    if const_str(executor_resume, "APPROVAL_EDIT_ENV") != "APPROVAL_EDIT_ENABLED" {
++        violations.push("APPROVAL_EDIT_ENV is not APPROVAL_EDIT_ENABLED".into());
++    }
++    match code.fn_body("approval_edit_enabled") {
++        Some(body)
++            if body.contains("mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV)") => {}
++        _ => violations.push("approval_edit_enabled does not read APPROVAL_EDIT_ENV through switch_from".into()),
++    }
++    if code.text.matches("APPROVAL_EDIT_ENV").count() != 2 {
++        violations.push("APPROVAL_EDIT_ENV is named outside its const and approval_edit_enabled".into());
++    }
++    match code.fn_body("edited") {
++        Some(body)
++            if body.contains("self.revision > 0")
++                && body.contains("!self.original_action_fingerprint.is_empty()")
++                && body.contains("&& approval_edit_enabled()") => {}
++        _ => violations.push("Consumed::edited is not revision, original fingerprint and the switch together".into()),
++    }
++    // Every call of the reader, not counting its own declaration.
++    let readers = Regex::new(r"(\bfn\s+)?\bapproval_edit_enabled\s*\(\)")
++        .expect("pattern")
++        .captures_iter(&code.text)
++        .filter(|captured| captured.get(1).is_none())
++        .count();
++    if readers != 1 {
++        violations.push(format!(
++            "resume.rs calls approval_edit_enabled() {readers} times: only Consumed::edited reads it"
++        ));
++    }
++    violations
++}
++
++#[test]
++fn edited_approval_restores_in_place_with_the_edited_call() {
++    let resume = read(EXECUTOR_RESUME);
++    let approvals = read(SESSION_APPROVALS);
++    assert_green(&edited_restore_violations(&resume, &approvals));
++    // The relaxation spread to an unedited call.
++    must_flag(
++        edited_restore_violations(
++            &mutate_in(&resume, "fn check_fold(", "if fold_digest != consumed_digest {", "if false {"),
++            &approvals,
++        ),
++        "no longer compares the digests",
++    );
++    // The edited approval no longer answers the draft's own pause.
++    must_flag(
++        edited_restore_violations(
++            &mutate_in(
++                &resume,
++                "fn check_fold(",
++                "|| (edited && pending.action_fingerprint != consumed.original_action_fingerprint)",
++                "",
++            ),
++            &approvals,
++        ),
++        "draft's own pause fingerprint",
++    );
++    // session-core matches the draft's fingerprint for any descriptor.
++    must_flag(
++        edited_restore_violations(
++            &resume,
++            &mutate_in(
++                &approvals,
++                "const CONSUME_APPROVAL_SQL",
++                "(d.revision > 0 AND d.original_action_fingerprint = $5)",
++                "d.original_action_fingerprint = $5",
++            ),
++        ),
++        "only for a revised descriptor",
++    );
++}
++
++#[test]
++fn edited_approval_cannot_change_connection_or_operation() {
++    let resume = read(EXECUTOR_RESUME);
++    assert_green(&edit_retarget_violations(&resume));
++    for (from, what) in [
++        ("text(edited, \"connection_id\")? != connection", "the connection"),
++        ("text(edited, \"operation\")? != operation", "the operation"),
++        ("tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL", "the tool"),
++    ] {
++        must_flag(
++            edit_retarget_violations(&mutate_in(&resume, "fn edited_mail_fields(", from, "false")),
++            what,
++        );
++    }
++    must_flag(
++        edit_retarget_violations(&mutate_in(
++            &resume,
++            "const EDITABLE_BODY_KEYS",
++            "\"bodyHtml\"]",
++            "\"bodyHtml\", \"threadId\"]",
++        )),
++        "EDITABLE_BODY_KEYS",
++    );
++}
++
++#[test]
++fn edited_approval_falls_back_when_the_switch_is_off() {
++    let resume = read(EXECUTOR_RESUME);
++    assert_green(&edit_switch_violations(&resume));
++    // The switch dropped from the decision: an edit would be run with it off.
++    must_flag(
++        edit_switch_violations(&mutate_in(&resume, "fn edited(", "approval_edit_enabled()", "true")),
++        "Consumed::edited is not",
++    );
++    // A lenient read of the switch.
++    must_flag(
++        edit_switch_violations(&mutate_in(
++            &resume,
++            "fn approval_edit_enabled(",
++            "mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())",
++            "std::env::var(APPROVAL_EDIT_ENV).is_ok()",
++        )),
++        "through switch_from",
++    );
++    // A second reader of the switch beside Consumed::edited.
++    must_flag(
++        edit_switch_violations(&format!("{resume}\nfn rogue() -> bool {{ approval_edit_enabled() }}\n")),
++        "only Consumed::edited reads it",
++    );
++}
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs
+index 162a31454..5a53b1f8c 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
+@@ -2054,6 +2054,12 @@ pub struct ConsumedCall {
+     /// The offered tools and authority the approval was raised under, as the
+     /// retained snapshot's JSON (empty when none was retained).
+     pub offered_json: String,
++    /// How many times the person edited the call before granting it (EP-10-S5); 0 when the
++    /// call is the one the model drafted.
++    pub revision: u32,
++    /// The fingerprint of the call as first drafted, set only when `revision > 0`. A digest:
++    /// the loop matches its fold's pending fingerprint against it.
++    pub original_action_fingerprint: String,
+ }
+ 
+ /// The outcome of [`consume_approval`].
+@@ -2298,6 +2304,10 @@ async fn consume_approval_with(
+ // side of `mp_contracts::durable_gate::refuse_unless_persistent_class`; the caller's
+ // token is checked before this runs, but the stored class is what the run actually
+ // is, and a waived token has `zdr = false`.
++//
++// An edited approval (EP-10-S5, `revision > 0`) also matches the fingerprint of the call as
++// first drafted: the paused loop only knows the draft's, and the grant that replaced it was the
++// person's own act. An unedited row has no original, so it matches its own fingerprint only.
+ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
+      SET consumed_at = now(), consumed_claim_hash = $6 \
+      FROM runs AS r \
+@@ -2309,7 +2319,8 @@ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
+        AND (a.expires_at IS NULL OR a.expires_at > now()) \
+        AND EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
+                    WHERE d.approval_id = a.id \
+-                     AND ($5 = '' OR d.action_fingerprint = $5)) \
++                     AND ($5 = '' OR d.action_fingerprint = $5 \
++                          OR (d.revision > 0 AND d.original_action_fingerprint = $5))) \
+      RETURNING a.id";
+ 
+ /// Renew the managed terminalization obligation of the run whose approval a
+@@ -2352,6 +2363,8 @@ async fn renew_recovery_deadline(
+ /// Read and decrypt the retained descriptor of an approval the caller holds the
+ /// claim on, and return the call it authorised. The descriptor is the only
+ /// source of what an approval authorised; nothing a client sends names the call.
++/// The revision columns (EP-10-S5) come back with it, so the loop can tell an edited
++/// call from the model's draft without being sent the draft.
+ async fn read_consumed_call(
+     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+     id: &str,
+@@ -2359,8 +2372,9 @@ async fn read_consumed_call(
+     run_id: &str,
+     user_id: &str,
+ ) -> Result<Option<ConsumedCall>> {
+-    let row: Option<(String,)> = sqlx::query_as(
+-        "SELECT ciphertext FROM approval_continuation_descriptors \
++    let row: Option<(String, i16, Option<String>)> = sqlx::query_as(
++        "SELECT ciphertext, revision, original_action_fingerprint \
++         FROM approval_continuation_descriptors \
+          WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND user_id = $4",
+     )
+     .bind(id)
+@@ -2369,9 +2383,10 @@ async fn read_consumed_call(
+     .bind(user_id)
+     .fetch_optional(&mut **transaction)
+     .await?;
+-    let Some((ciphertext,)) = row else {
++    let Some((ciphertext, revision, original)) = row else {
+         return Ok(None);
+     };
++    let (revision, original_action_fingerprint) = consumed_revision(revision, original);
+     let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
+     let descriptor: JsonValue = serde_json::from_str(&plaintext)
+         .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
+@@ -2389,9 +2404,24 @@ async fn read_consumed_call(
+         tool_name,
+         tool_input_json: serde_json::to_string(&input)?,
+         offered_json,
++        revision,
++        original_action_fingerprint,
+     }))
+ }
+ 
++/// The revision a consume reports. A row the column CHECK should have kept out (a negative
++/// revision) reads as unedited, and an original fingerprint is reported only with a revision:
++/// a loop that is told "edited" always has the draft's fingerprint to match, and one that is
++/// not told so never matches against an original.
++fn consumed_revision(revision: i16, original: Option<String>) -> (u32, String) {
++    match (u32::try_from(revision), original) {
++        (Ok(revision), Some(original)) if revision > 0 && !original.is_empty() => {
++            (revision, original)
++        }
++        _ => (0, String::new()),
++    }
++}
++
+ const DECIDE_APPROVAL_SQL: &str =
+     "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
+      metadata = jsonb_set(CASE WHEN $3 IN ('denied', 'timed_out') \
+@@ -7184,6 +7214,30 @@ mod approval_edit_tests {
+         }
+         assert_eq!(MAX_APPROVAL_REVISIONS, 3, "the column CHECK and the code agree");
+     }
++
++    // EP-10-S5: a consume says "edited" only with the draft's fingerprint to match.
++    #[test]
++    fn consume_reports_a_revision_only_together_with_its_original_fingerprint() {
++        let original = "a".repeat(64);
++        assert_eq!(consumed_revision(1, Some(original.clone())), (1, original.clone()));
++        assert_eq!(consumed_revision(3, Some(original.clone())), (3, original.clone()));
++        assert_eq!(consumed_revision(0, None), (0, String::new()), "an unedited call");
++        assert_eq!(consumed_revision(0, Some(original.clone())), (0, String::new()));
++        assert_eq!(consumed_revision(1, None), (0, String::new()), "no original, no revision");
++        assert_eq!(consumed_revision(1, Some(String::new())), (0, String::new()));
++        assert_eq!(consumed_revision(-1, Some(original)), (0, String::new()));
++    }
++
++    #[test]
++    fn consume_accepts_the_drafted_fingerprint_only_for_a_revised_descriptor() {
++        let sql = CONSUME_APPROVAL_SQL;
++        assert!(sql.contains("$5 = '' OR d.action_fingerprint = $5"));
++        assert!(
++            sql.contains("OR (d.revision > 0 AND d.original_action_fingerprint = $5)"),
++            "the original matches only a revised descriptor"
++        );
++        assert_eq!(sql.matches("original_action_fingerprint").count(), 1);
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -7269,6 +7323,16 @@ mod approval_edit_db_tests {
+     }
+ 
+     async fn pending(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
++        pending_in_mode(pool, seed, descriptor, "").await
++    }
++
++    /// A pending approval in `mode` (`""` cold, `"loop"` loop-owned).
++    async fn pending_in_mode(
++        pool: &Pool,
++        seed: &Seed,
++        descriptor: Option<&JsonValue>,
++        mode: &str,
++    ) -> String {
+         let id = format!("appr_{}", mp_ids::new_ulid());
+         let input = descriptor.map_or_else(String::new, |d| d["input"].to_string());
+         let metadata = serde_json::json!({
+@@ -7294,7 +7358,7 @@ mod approval_edit_db_tests {
+             &metadata,
+             descriptor,
+             Some(Utc::now() + chrono::Duration::minutes(5)),
+-            "",
++            mode,
+         )
+         .await
+         .expect("request approval")
+@@ -7761,4 +7825,88 @@ mod approval_edit_db_tests {
+         .expect("count");
+         assert_eq!(left, 0, "the edited descriptor goes with its approval and run");
+     }
++
++    // EP-10-S5: the loop that paused knows the draft's fingerprint only. A consume of an edited,
++    // loop-owned approval matches it as well as the edited one, and hands back the edited call
++    // with its revision and the draft's fingerprint.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn consume_an_edited_approval_returns_the_edited_call_its_revision_and_the_original() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "consume-edit", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
++        let write = edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
++            .await
++            .expect("edited grant");
++        assert!(write.loop_owned && write.delivery_id.is_none());
++        let (edited, _, _, _) = stored(&pool, &id).await;
++
++        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
++            .await
++            .unwrap()
++            .expect("the draft's fingerprint matches an edited approval");
++        assert!(won.consumed);
++        let call = won.call.expect("the claim holder gets the call");
++        assert_eq!(call.revision, 1);
++        assert_eq!(call.original_action_fingerprint, original);
++        let input: JsonValue = serde_json::from_str(&call.tool_input_json).expect("json");
++        assert_eq!(input["body"]["subject"], "New subject", "the edited call, never the draft");
++        assert_eq!(input["connection_id"], "conn-1");
++        assert_ne!(edited, original);
++
++        // The same claim replaying gets the same revision back.
++        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
++            .await
++            .unwrap()
++            .unwrap();
++        let again = replay.call.expect("a same-claim replay gets the call");
++        assert_eq!((again.revision, again.original_action_fingerprint), (1, original));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn consume_an_edited_approval_accepts_the_current_fingerprint_and_refuses_another() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "consume-fp", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
++        edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
++            .await
++            .expect("edited grant");
++        let (edited, _, _, _) = stored(&pool, &id).await;
++        assert_eq!(
++            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &"b".repeat(64), "a")
++                .await
++                .unwrap(),
++            Err(ConsumeRefusal::FingerprintMismatch),
++            "a third call's fingerprint is refused and leaves the approval unconsumed"
++        );
++        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &edited, "a")
++            .await
++            .unwrap()
++            .expect("the edited fingerprint matches too");
++        assert!(won.consumed);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn consume_an_unedited_approval_reports_revision_zero() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "consume-plain", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending_in_mode(&pool, &seed, Some(&descriptor), "loop").await;
++        decide_approval(&pool, &id, &seed.org, Some(&seed.user), "granted", &seed.user, "ok")
++            .await
++            .expect("plain grant");
++        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, &original, "a")
++            .await
++            .unwrap()
++            .unwrap();
++        let call = won.call.expect("the call");
++        assert_eq!((call.revision, call.original_action_fingerprint.as_str()), (0, ""));
++    }
+ }

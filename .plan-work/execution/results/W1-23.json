@@ -1,0 +1,1597 @@
+{
+ "batchId": "W1-23",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS07-S9",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/learning.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/learning-client.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/learning-client.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/LearningSection.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/LearningSection.test.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/product-learning.spec.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib (in apps/Model Plane/rust)",
+     "outcome": "Exit 101. Exactly 3 errors, E0609 no field learning_client on type AppState, at http_routes.rs:10539, 10600 and 10643. Nothing else reported. Not fixed here: state.rs is a shared file. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/mg-check-before.txt"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+     "outcome": "Exit 0. Bin unit tests: 740 passed, 0 failed, 1 ignored. continue_error_vocabulary 7 passed. sse_relay_no_allowlist 3 passed. ssrf_forward_not_fetch 1 passed. Same counts as the first report. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/gw-test-rerun.txt"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/learning-client.test.ts src/features/settings/components/LearningSection.test.tsx",
+     "outcome": "2 files, 22 tests passed, 0 failed."
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/actions/admission-contract.test.ts src/shared/actions/catalog-manifest.test.ts (VEREVON_UPDATE_GOLDEN unset)",
+     "outcome": "11 failed. Admission 5: TypeError reading 'access' of the missing learning rows. Catalog 6: 'Action catalog has no model access row for: learning.accept_skill'. Same as the reviewer. Blocked on the shared model-access.ts rows."
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/actions src/features/settings src/shared/api/skills src/shared/api/memory-client.test.ts src/features/chat/lib/chat-route-ownership.test.ts",
+     "outcome": "26 files: 24 passed, 2 failed. 282 tests: 271 passed, 11 failed. All 11 failures are the admission and catalog rows in the previous entry."
+    },
+    {
+     "command": "pnpm exec tsc -b (the typecheck script)",
+     "outcome": "35 errors, same count as the first report. One is model-access.ts TS2739, listing learning.accept_skill, learning.reject_skill and learning.undo as missing. None are in this slice's own files. Log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/tsc-rerun.txt"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "Exit 1: 87 passed, 22 failed. All 22 are in files this slice did not touch (quarry-runtime retrieve-v1 and rerank-v1 copies, retrieval-engine-rs rerank-v1 goldens, usage-ledger-rs envelope pin, auth-core and model-gateway quarry-token pin copies, mp-contracts and model-gateway zdr-posture pin copies). Every agent-action-admission row is ok today: golden, pin, four copies, four consumers. Logs: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/zdr-sync-baseline.out and zdr-sync-baseline.err"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib and the offline_downstreams_contract integration target",
+     "outcome": "Not run. The lib does not compile until the shared state.rs edit lands (same errors as the first row). Static check instead: state.rs at HEAD has 18 client fields matching the test filter, the test asserts 17, so that test already fails before this slice (message_search_client came from commit eed681a2f, WS17-S3)."
+    },
+    {
+     "command": "VEREVON_UPDATE_GOLDEN=1 admission-contract regen",
+     "outcome": "Not run on purpose: it writes the shared golden. The lead runs it after model-access.ts lands."
+    },
+    {
+     "command": "pnpm exec playwright test tests/e2e/product-learning.spec.ts",
+     "outcome": "Not run: it needs the dockerized stack and a signed-in account."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF; clean against HEAD): (a) in the mp_contracts::model_plane::v1 use list, after the line '    inference_core_client::InferenceCoreClient,' add '    learning_governance_service_client::LearningGovernanceServiceClient,'. (b) in struct AppState, after '    pub message_search_client: MessageSearchClient<Channel>,' add the doc line /// Session Core LearningGovernance service on the same endpoint as session_client (WS07-S9). and '    pub learning_client: LearningGovernanceServiceClient<Channel>,'. (c) in AppState::new(), after '            message_search_client: MessageSearchClient::new(session_channel.clone()),' add '            learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),' (session_channel is still unmoved there). (d) in from_env, directly after the 'let message_search_client = MessageSearchClient::new(Self::lazy_channel(' block (it ends with '        )?);'), add 'let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(' with the same three string arguments (SESSION_CORE_URL, SESSION_CORE_ADDR, http://localhost:9091) and closing as that block. (e) in BOTH from_env branches, after each '            state.message_search_client = message_search_client;' add '            state.learning_client = learning_client;'.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs (CRLF): in the mp_contracts::model_plane::v1 import list, after '    inference_core_client::InferenceCoreClient,' add '    learning_governance_service_client::LearningGovernanceServiceClient,', and after '    memory_service_client::MemoryServiceClient,' add '    message_search_client::MessageSearchClient,'. In offline_state(), after '    state.session_client = SessionCoreClient::new(offline_channel());' add '    state.message_search_client = MessageSearchClient::new(offline_channel());' and '    state.learning_client = LearningGovernanceServiceClient::new(offline_channel());'. Needed because the contract test requires every AppState client field to be replaced here; message_search_client is already missing at HEAD.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/offline_downstreams_contract.rs (CRLF): in one_call_per_client!, after '            call!(state, session_client.create_thread),' add '            call!(state, message_search_client.search_messages),' and '            call!(state, learning_client.list_learning_ledger),'. Line 94: the 17 in assert_eq!(answers.len(), 17, ...) becomes 19. Line 97: 'all seventeen answered' becomes 'all nineteen answered'. Line 172, the line reading '        17,': becomes '        19,' (the field count). HEAD is 18 fields against the hard-coded 17, so this test already fails; after this change the count is 19.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (LF): after the row for memory.remember (line 199, exempt('human_identity_or_security', 'external_write')) add three rows at the same two-space indent and in the same syntax: learning.accept_skill with exempt('agent_cannot_self_govern', 'context_write'); learning.reject_skill with exempt('agent_cannot_self_govern', 'context_write'); learning.undo with exempt('agent_cannot_self_govern', 'destructive'). Quote the ids the way the neighbouring rows do. The ids match action-registry.ts lines 2633, 2644 and 2655.",
+    "After items 1-4, from C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3 run VEREVON_UPDATE_GOLDEN=1 pnpm exec vitest run src/shared/actions/admission-contract.test.ts. It rewrites src/shared/api/contracts/agent-action-admission.json (LF). In the same change: (a) copy those bytes to apps/Model Plane/api/contracts/agent-action-admission.json; (b) rewrite its pin apps/Model Plane/api/contracts/agent-action-admission.json.sha256 as sha256sum -b output (one line, same shape as today: digest, space, asterisk, file name); (c) change the digest in row 157 of scripts/tests/zdr-contract-sync.test.sh (the GOLDENS row; the reviewer's item 3 did not list it); (d) copy the same bytes to apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json and apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json. Today all five files (SPA copy, canonical golden and the three copies) are 919b31f8..., and no test hard-codes that digest (git grep).",
+    "Verify after items 1-5 (lead): in apps/Model Plane/rust run CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib (must be clean), then cargo test -q -p model-gateway --lib, cargo test -p model-gateway --test offline_downstreams_contract and cargo test -q -p execution-core --test agent_action_admission_contract. From the repo root run bash scripts/tests/zdr-contract-sync.test.sh: the admission rows must be ok and the failure count must stay at 22 with none of them admission rows. From apps/Frontend Plane/verevonv3 run pnpm exec vitest run src/shared/actions (0 failures) and pnpm exec tsc -b (34 errors, none in this slice).",
+    "Live proof and e2e (lead; not run here): rebuild session-core and capability-core (migration 0064 applies on boot), model-gateway and the gateway image from this worktree, with no new switch. Then run pnpm exec playwright test tests/e2e/product-learning.spec.ts against the running stack, and drive accept, undo and the admin copy on the S7 rig, capturing learning-inbox.png."
+   ],
+   "deviations": [
+    "No new deviations this round. First-report deviations stand: the model-gateway learning handlers reference state.learning_client (handed back); ZDR is refused before the hop in model-gateway decide and undo; proposals come from GET /api/v1/skills, enriched from the ledger; memory undo uses DELETE /api/v1/memory/{id}; org copies start disabled; SkillsSection hides proposed and rejected rows from the org list."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/offline_downstreams_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerated by the admission test)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/agent-action-admission.json (canonical golden) and its .sha256 pin",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (GOLDENS digest, line 157)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs (shared, lead applies): add `learning_client: LearningGovernanceServiceClient<Channel>` to AppState, built in AppState::new() and from_env (both branches) on the session-core channel, as the implementer's lead_todo item 1 describes. Why: `cargo check -p model-gateway --lib` exits 101 with 3x E0609 'no field learning_client on type AppState' at http_routes.rs:10539, 10600 and 10643 (reproduced). The slice's owned http_routes.rs does not compile without it.",
+     "apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs and tests/offline_downstreams_contract.rs (shared, lead applies with the state.rs edit): replace message_search_client and learning_client in offline_state(), add both calls to one_call_per_client!, and raise the count 17 -> 19 (lead_todo items 2-3). Why: the contract test requires every AppState client field to be covered, so it fails once learning_client lands. It already fails at HEAD over message_search_client.",
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (shared, lead applies): add model-access rows for learning.accept_skill, learning.reject_skill and learning.undo. Why: `vitest run src/shared/actions/admission-contract.test.ts src/shared/actions/catalog-manifest.test.ts` fails 11 tests (reproduced), e.g. 'Action catalog has no model access row for: learning.accept_skill', and tsc reports TS2739. The three actions this slice added to action-registry.ts break the catalog.",
+     "Admission golden regen (lead, after model-access.ts): run VEREVON_UPDATE_GOLDEN=1 for admission-contract.test.ts, then copy the bytes to the canonical apps/Model Plane/api/contracts/agent-action-admission.json, its .sha256 pin, the GOLDENS digest row in scripts/tests/zdr-contract-sync.test.sh, and the capability-core, execution-core and model-gateway fixture copies (lead_todo item 5). Why: otherwise the cross-plane admission contract drifts and the sync check fails on admission rows."
+    ],
+    "dod_gaps": [
+     "Playwright tests/e2e/product-learning.spec.ts (accept, undo, reject, admin promotion) has not been run. It needs the dockerized stack and a signed-in account.",
+     "No live proof: rebuild session-core, capability-core, model-gateway and the gateway image from this worktree, drive accept, reject, undo and the admin copy on the S7 rig, and capture screenshots or video (learning-inbox.png).",
+     "model-gateway lib tests and the offline_downstreams_contract target cannot run until the state.rs hand-back lands. The handler bodies in http_routes.rs have never been type-checked past the missing field."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Already failing before this slice: offline_downstreams_contract.rs asserts 17 gRPC client fields, but state.rs has 18 at HEAD (message_search_client from commit eed681a2f, WS17-S3) and the offline helper replaces only 17. Static count only, since the integration target cannot build until the lib compiles. Lead_todo items 2 and 3 fix it together with learning_client (19)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "scripts/tests/zdr-contract-sync.test.sh exits 1 at baseline (87 passed, 22 failed), all 22 outside this slice's files. Do not read its exit code as this slice's result. After the regen the admission rows must be ok and the failing set must not change."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The admission change has a fourth place the reviewer's list omitted: the GOLDENS digest row at line 157 of scripts/tests/zdr-contract-sync.test.sh. Updating only the copies and the pin would still fail the sync check."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The http_routes.rs handler bodies are masked from rustc because their receiver is the errored state.learning_client. I checked RPC names, request fields, response fields and helper signatures by hand against sessions.proto (LearningGovernanceService at lines 278-291, messages at 1755-1845). The first real compile after the hand-back is the gate; any new error there sits in an owned file and comes back to me."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Side-effect classes: context_write for accept and reject, destructive for undo, following the exempt-row convention in model-access.ts. owner_effect is used only for rows with an owner executor (tickets.create). The owner may choose otherwise; any change needs the same regen."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Carried over: no live proof and no Playwright run. Accept, reject, undo and the admin copy are unproven against a rebuilt stack."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "rustc has never type-checked the model-gateway learning handlers (list_learning_ledger, decide_learning_proposal, undo_learning_entry in http_routes.rs), because their receiver state.learning_client errors first. Proto field names and RPC shapes are checked only by hand, so the first compile after the state.rs edit is the real gate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The model-gateway /v1/learning/* routes have no unit test: ZDR refusal before the hop in decide and undo, the strict accept/reject parse, the session_learning_error mapping and the owner taken from claims are all untested."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "LearningSection calls the REST client directly (decideLearningProposal, undoLearningEntry, deleteMemory), not the registered typed actions learning.accept_skill, reject_skill and undo. The actions exist and are dispatched, but the UI does not go through them. The plan says 'actions first'; this matches how MemorySection is built, but the owner may want the UI routed through the action executor."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The admin 'Copy to the organization' button goes through createSkill with scope 'org' and promoted_from, on the generic POST /api/v1/skills route. It is admin-gated in the gateway (can_author_skills), and capability-core checks visibility (registry_apis.go:325-341). There is no typed action for the promotion and no frontend test covering canPromote or handlePromote."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "offline_downstreams_contract already fails at HEAD: it asserts 17 client fields, but state.rs has 18 since WS17-S3 added message_search_client. This predates the slice and is fixed together with the learning_client hand-back."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "SkillsSection.tsx is CRLF in the working copy (386/386 lines) while the HEAD blob is LF. git diff --stat shows only +62 lines, so EOL normalization absorbs it, but the working file was rewritten with CRLF."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway learning.rs handlers return a bare-string error ({\"error\": \"skill_id is required\"}) for a blank id, but the typed {error:{code,message}} envelope for an invalid decision. The error shape is inconsistent within one router."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads src/shared/api/learning-client.test.ts src/features/settings/components/LearningSection.test.tsx",
+      "outcome": "2 files, 22 tests passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+      "outcome": "All pass: 740 passed/0 failed/1 ignored (bin), 7, 3 and 1 passed in the integration targets.",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/shared/actions/admission-contract.test.ts src/shared/actions/catalog-manifest.test.ts",
+      "outcome": "11 failed. Admission tests: TypeError reading 'access' of undefined (missing learning.* rows). Catalog tests: 'Action catalog has no model access row for: learning.accept_skill'. Caused by the missing rows in the shared model-access.ts, which this slice does not own.",
+      "passed": false
+     },
+     {
+      "command": "CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib (apps/Model Plane/rust)",
+      "outcome": "Fails: 3 errors E0609, no field `learning_client` on type `AppState`. http_routes.rs (owned) uses it, but the field must be added to the shared state.rs.",
+      "passed": false
+     },
+     {
+      "command": "Playwright tests/e2e/product-learning.spec.ts",
+      "outcome": "Not run: needs the dockerized stack and a signed-in account, and docker is forbidden.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "audit"
+   ],
+   "notes": "Reviewer round for WS07-S9. None of the three required fixes lives in a file this slice owns: state.rs, model-access.ts and the admission golden are shared. I applied none of them. I verified every anchor against the current files and reproduced every reviewed failure, and no owned file changed this round, so files_changed is the first report's list. I found two gaps the reviewer did not list. (1) The offline downstream contract test already fails at HEAD: it asserts 17 gRPC client fields, state.rs has 18 (message_search_client from WS17-S3), and the offline helper replaces only 17. So the state.rs hand-back must also carry the helper, the macro and the count (lead_todo 2 and 3), or that integration test fails after the lead applies state.rs. (2) The sync script pins the admission golden digest in its GOLDENS row (line 157); the reviewer's item 3 names the pin and the copies but not that row. Git state: state.rs, model-access.ts, the offline test files, the admission golden, its pin, the copies and zdr-contract-sync.test.sh are all clean against HEAD, so the hand-backs apply as written. Line endings: state.rs and both offline test files are CRLF (1010, 84 and 183 CRLF lines); model-access.ts, the admission JSON files, their pin and zdr-contract-sync.test.sh are LF. Keep each file's style. Current slice state: ten tracked files modified (M) and six new files untracked (??); nothing staged or committed. Builds used the worktree default target directories with CARGO_INCREMENTAL=0 and no CARGO_TARGET_DIR. No docker, no copies of the workspace, no commits, no VEREVON_UPDATE_GOLDEN run."
+  },
+  {
+   "id": "WS04-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/scripts/verify-replica-run-control.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "bash -n apps/Model Plane/scripts/verify-replica-run-control.sh",
+     "outcome": "ok (syntax only; shellcheck is not installed)"
+    },
+    {
+     "command": "env -u MP_PROOF_BEARER bash apps/Model Plane/scripts/verify-replica-run-control.sh",
+     "outcome": "exit 1 with the bearer message before any docker call; the script itself was not run live"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh (repo root)",
+     "outcome": "exit 1: 87 passed, 22 failed. The 22 are golden and pin checks in Data Plane, Ingestion Plane and Control Plane fixtures and in Model Plane vendored .sha256 pins for zdr-posture-matrix.json. None of those files is modified in the worktree, so this slice did not cause them."
+    },
+    {
+     "command": "git apply --check on patch A (ws04-s9-a-compose-add-shared-turn-record.patch) against the live docker-compose.yml",
+     "outcome": "applies cleanly; nothing was applied"
+    },
+    {
+     "command": "git apply --check on patch B (ws04-s9-b-compose-flip-after-live-proof.patch) on a scratch copy with patch A applied",
+     "outcome": "applies cleanly"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "started in background (chain b6xcqjs46); NOT complete when reported, no result read. Log: scratchpad baseline/model-gateway-lib.log. No pass is claimed."
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "queued behind the model-gateway run in the same background chain; NOT complete, no result. Log: scratchpad baseline/session-core-bin.log"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p mp-events -p mp-contracts --all-targets",
+     "outcome": "queued in the same chain; NOT complete, no result. Log: scratchpad baseline/mp-events-mp-contracts.log"
+    },
+    {
+     "command": "cargo fmt --all -- --check",
+     "outcome": "queued in the same chain; NOT complete, no result. Log: scratchpad baseline/fmt-check.log"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "1. Apply patch A now: git apply \"C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws04-s9-a-compose-add-shared-turn-record.patch\" from the worktree root. Shared-edit apps/Model Plane/deploy/docker-compose.yml, exact lines after the MODEL_GATEWAY_SEND_RECEIPTS line: '# WS04-S5: the shared turn record (ids only, best effort in Redis) lets a rating reach the replica' / '# that streamed the turn. Off by default; only the literal `true` turns it on. A rating the shared' / '# record cannot find degrades to run-only skill attribution.' / '      MODEL_GATEWAY_SHARED_TURN_RECORD: ${MODEL_GATEWAY_SHARED_TURN_RECORD:-false}'. It applies alongside the other slice's uncommitted browser-broker edit.",
+    "2. Set the executable bit in git: git update-index --chmod=+x \"apps/Model Plane/scripts/verify-replica-run-control.sh\" (Windows writes no mode bit; verify-durable-layer.sh is executable).",
+    "3. Shared-edit apps/Model Plane/docs/decisions/ledger.md: append '## 2026-10-26 - WS04-S9 evidence script written; no run-control switch flipped (WS04-S9)' with status 'built, not flipped; the four run-control switches flip only after the live proof'. Name the evidence file the flip gate uses, the switches not flipped and why (RUN_CONTROL_BUS: self-test and NATS live tests not run; DURABLE_PLAN_GRANT: migration 0050 never run against Postgres; SHARED_TURN_RECORD: no live proof; SEND_RECEIPTS: no live proof of 0052 or the persist-first path; SHARED_IDEMPOTENCY: stays off, needs its own duplicate-send proof), and that the 2026-10-21 /readyz statement is corrected: /readyz reports 'ok run_control=<status>' now.",
+    "4. Shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: replace row 26 with '| Plan mode / approvals ❌ | **Grants durable behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT` (off)** | session-core `threads` grant columns (migration 0050), read through `ThreadAutonomy.GetThreadGrant`; `coordinator.rs` (PlanModeStore: the in-memory grant half is the flag-off path), `approvals.rs` (ApprovalStore) |' and insert after it: '| Run control across replicas (Stop, queue, probe) | **Built, switch off (`MODEL_GATEWAY_RUN_CONTROL_BUS`)** | model-gateway `run_control.rs`, `cancel_registry.rs`, `queued_input.rs`; transport NATS `mp.v1.runctl.>` |'. Row 70 stays as it is.",
+    "5. Shared-edit apps/Model Plane/docs/ZDR.md: append to the section 2 table, after the 'Browser-side copy after an org turns ZDR on' row: '| **Run control: Stop, queue, plan grant, shared turn record** | ZDR turns never register a run-control listener, so a Stop for a ZDR request id is a 404 and nothing reaches the bus (`zdr_turn_registers_no_run_control_listener`). Queue text reaches the bus only after `require_non_zdr_durable_mutation` refuses ZDR and waived tokens (`invoke_queue_input` is in the durable-mutation inventory). Shared Redis keys hold ids only, identity-scoped. | Built behind default-off switches, source-verified. Cross-replica behaviour is unproven until the WS04-S9 evidence file exists. |'.",
+    "6. Shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: append a section '## Replica-safe run control (WS04), 2026-10-26' with a table (Item | State | Evidence): Stop, queue and probe across replicas (S1-S3): source-verified, switch off, no live proof; durable plan grant (S4): source-verified, switch off, migration 0050 never run against Postgres per the ledger; shared turn record (S5): source-verified, switch off, no live proof, switch line added with default false; durable send receipts (S6): source-verified, switch off, migration 0052 and persist-first path not live-proven; shared idempotency (S7): source-verified, stays off, needs its own two-replica proof; two-replica evidence (S9): script written, not run, evidence file is the flip gate.",
+    "7. Live proof, lead-run, in this order: (a) deploy the NATS ACL (nats.conf), recreate model-nats, then run the five #[ignore] tests in rust/services/model-gateway/tests/run_control_nats_live.rs with NATS_URL; (b) run scripts/verify-durable-layer.sh (0050 stage) and the session-core DB harness for migration 0052; (c) start the two-replica stack with MODEL_GATEWAY_RUN_CONTROL_BUS, MODEL_GATEWAY_DURABLE_PLAN_GRANT, MODEL_GATEWAY_SHARED_TURN_RECORD and MODEL_GATEWAY_SEND_RECEIPTS exported as true (MODEL_PLANE_REPLICAS=2 per deploy/docker-compose.replicas.yml); (d) MP_PROOF_BEARER=<proof user bearer> bash \"apps/Model Plane/scripts/verify-replica-run-control.sh\", setting PROOF_TOOL_PROMPT and PROOF_PLAN_PROMPT if the defaults do not drive a tool round or a plan on the proof stack; (e) only on PASS, git apply patch B (ws04-s9-b-compose-flip-after-live-proof.patch in the same scratchpad folder), which flips the four switches to true.",
+    "8. Clean-up, after patch B and after the owner decides whether the switch is retired (depth finding 3). One change: remove the in-memory grant half of PlanModeStore in coordinator.rs (grants map, GrantEntry, record_grant, take_approved_plan, peek_approved_plan, granted_rung, grant_expires_at, plant_grant_for_test and their tests) and its callers in grpc.rs (record_grant on transient SetRunMode failure), http_routes.rs (record_grant near line 8270; grant_expires_at near 8294 and 8297) and sse.rs (granted_rung and peek_approved_plan near 9448-9459, take_approved_plan near 9605, granted_rung near 9808, and the tests near 12462-20204). Land after the uncommitted edits in grpc.rs, http_routes.rs, tool_loop.rs and session-core orchestration_store.rs by other slices are committed.",
+    "9. The baseline cargo chain (background task b6xcqjs46) was still running when this was reported. Read the four logs in the scratchpad baseline folder for their 'exit' lines and test totals before claiming any pass; re-run any command that did not finish."
+   ],
+   "deviations": [
+    "No run-control switch was flipped. The owner order requires an evidence file or a recorded live proof, and none exists in docs/compliance/evidence for any of the four switches.",
+    "coordinator.rs was not edited. The grant half is the flag-off path, so removing it now would change off-behaviour; the clean-up is deferred to after the live proof (see depth_findings).",
+    "The flip and the SHARED_TURN_RECORD line are delivered as patch files in the scratchpad rather than repo edits, because docker-compose.yml is a shared file and currently carries another slice's uncommitted browser-broker edit.",
+    "The plan cites capability-ownership-matrix rows 19, 26 and 70 for this slice. In the current file row 70 is 'Real OS isolation'; no run-control row exists. The proposed row text is in lead_todo and row 70 is not edited.",
+    "model-gateway tests run with --lib (the Windows rule) instead of the plan's --all-targets; session-core uses --bin session-core per the same rule."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (clean-up callers, post-proof)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (clean-up callers, post-proof; also has another slice's uncommitted edits)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (clean-up callers and tests, post-proof)",
+    "apps/Model Plane/deploy/docker-compose.yml (patch A now, patch B after the live proof; shared, has another slice's uncommitted edit)",
+    "apps/Model Plane/docs/decisions/ledger.md (shared)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md (shared)",
+    "apps/Model Plane/docs/ZDR.md (shared)",
+    "apps/Model Plane/MODEL_PLANE_STATUS.md (shared)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: deploy the NATS ACL, run the five #[ignore] tests in tests/run_control_nats_live.rs, run verify-durable-layer.sh (0050) and the session-core DB harness (0052), then run verify-replica-run-control.sh on a two-replica stack with the four switches on. Its PASS evidence file is the gate for the flip.",
+     "Apply compose patch A now (SHARED_TURN_RECORD line, default false). Apply patch B (flip the four switches) only after a PASS evidence file exists. docker-compose.yml is a shared file.",
+     "Shared doc edits are lead-applied: ledger, capability-ownership-matrix rows 26 and the new run-control row, ZDR.md section 2, MODEL_PLANE_STATUS.md.",
+     "Set the executable bit in git: git update-index --chmod=+x apps/Model Plane/scripts/verify-replica-run-control.sh.",
+     "Remove the PlanModeStore grant half in coordinator.rs and its callers in grpc.rs, http_routes.rs and sse.rs after the flip, and only once the owner decides to retire the DURABLE_PLAN_GRANT switch.",
+     "The cargo gates cannot go green yet: model-gateway (learning_client E0609 in http_routes.rs) and mp-contracts (SANDBOX_NOTE_OPENING E0425) fail to compile because of other slices' uncommitted edits, and fmt --check fails workspace-wide."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "The decisions ledger (2026-10-23 WS04-S4 entry) records that with MODEL_GATEWAY_DURABLE_PLAN_GRANT off, gRPC ExitPlanMode does not compare the caller's session_id with the run's thread, so a grant can be planted on another thread; this is open since WS14-S2a and I did not re-verify the off-path code in this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The clean-up of the in-memory grant half conflicts with the plan's rollback (flag off = in-memory grants); the owner must decide whether MODEL_GATEWAY_DURABLE_PLAN_GRANT is retired before the half is removed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P1",
+     "text": "Post-proof scope of the PlanModeStore grant-half removal: coordinator.rs grants map and methods, callers in grpc.rs, http_routes.rs and sse.rs, and tests; not written here because those files are not owned by this slice."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "verify-replica-run-control.sh has not been run; the lead runs it on a two-replica stack with the NATS ACL and the four switches exported as true, and its PASS evidence file is the gate for patch B."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Migrations 0050 (durable plan grant) and 0052 (client message id) have not run against Postgres per the ledger; the lead runs scripts/verify-durable-layer.sh (0050 stage) and the session-core DB harness before the flip."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The five #[ignore] NATS live tests in tests/run_control_nats_live.rs have not run against a broker (the no-responders mapping on async-nats 0.49.1 is unverified); they run before the RUN_CONTROL_BUS flip."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Switches not flipped and why: MODEL_GATEWAY_RUN_CONTROL_BUS (self-test and NATS live tests not run); MODEL_GATEWAY_DURABLE_PLAN_GRANT (migration 0050 never run); MODEL_GATEWAY_SHARED_TURN_RECORD (no live proof, compose line added with default false by patch A); MODEL_GATEWAY_SEND_RECEIPTS (no live proof of 0052 or the persist-first path); MODEL_GATEWAY_SHARED_IDEMPOTENCY (stays off, has no compose line, needs its own duplicate-send proof per the S7 row). No evidence file exists for any of them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Case 2 needs PROOF_TOOL_PROMPT to drive a tool round and case 3 needs PROOF_PLAN_PROMPT to produce plan_proposed; whether they pass depends on the model and tools on the proof stack."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan's evidence line 'rung in gateway log (add info line)' is not implemented; the script checks the thread row and the RUN_PLAN_MODE_EXITED event instead, and an info line needs an sse.rs edit outside this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr-contract-sync.test.sh reports 22 failing pin and fixture checks (Data Plane, Ingestion Plane, Control Plane, and Model Plane zdr-posture-matrix.json .sha256 pins in mp-contracts and model-gateway fixtures); none of those files is modified in the worktree and the owner must re-pin them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan cites rows e_zdr_token_queue_input_refused and e_zdr_token_plan_grant_refused in the ZDR posture matrix; I did not verify that these rows exist in api/contracts/zdr-posture-matrix.json."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Other slices have uncommitted edits in this worktree (docker-compose.yml browser-broker block, model-gateway grpc.rs, http_routes.rs and tool_loop.rs, session-core orchestration_store.rs, capability-core registry_apis.go); the flip and the clean-up must wait for them to land, and the cargo baseline compiled against that state."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan row says 'against MODEL_PLANE_REPLICAS=1' but the five cases need two replicas (the overlay says MODEL_PLANE_REPLICAS=2); the script assumes two replicas, A on 8080 and B on 28080."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan cites matrix rows 19, 26 and 70 for this slice; row 70 is now 'Real OS isolation' and no run-control row exists, so the lead applies the proposed row text instead."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "verify-replica-run-control.sh has been checked with bash -n and the bearer guard only (shellcheck is not installed); the lead sets the executable bit in git and reviews the script before the live run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No deploy overlay sets the four run-control switches (grep over deploy/*.yml), so the base compose default is what every stack inherits; the lead confirms the effective values with docker compose config before patch B (lead-run)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Per the 2026-10-23 ledger entry, gRPC ExitPlanMode on the flag-off in-memory grant path does not check the caller's session_id against the run's thread, so a grant can be planted on another thread. This is still open and is not addressed by this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The owner order asked for the coordinator.rs clean-up as a separate change. Only its scope was delivered, because the in-memory grant half is the live path while the switch is off, so removing it now would change off-behaviour. The owner must decide whether to retire MODEL_GATEWAY_DURABLE_PLAN_GRANT before the removal."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "verify-replica-run-control.sh has only been syntax-checked and its bearer guard tested. No evidence file docs/compliance/evidence/live-proof-ws04-replica-run-control-*.txt exists, so none of the four switches may flip yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Migrations 0050 and 0052 and the five NATS live tests in run_control_nats_live.rs have not run against real Postgres or NATS."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Case 3 checks threads.granted_plan_id after the Do run on B has finished. If the durable grant is consumed or cleared when the Do run takes it, the check fails on a correct system. Check the row before starting the Do run, or confirm that the grant persists."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Cases 2 and 3 depend on the proof model calling a tool (tool_call frame) and proposing a plan (plan_proposed). The default prompts may not drive either on the proof stack."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan's evidence line 'rung in gateway log (add info line)' is not implemented. The script checks the thread row and the RUN_PLAN_MODE_EXITED event instead."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr-contract-sync.test.sh has 22 pre-existing pin and golden failures in files this slice did not touch. They need re-pinning by the owner."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The script passes the bearer as a curl -H argument, so it shows in the host's process list while curl runs. Use a curl config file or a header file (-H @file) to keep it out of argv."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan row cites capability-ownership-matrix row 70, which is now 'Real OS isolation'. The lead applies the proposed new run-control row instead."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib (CARGO_INCREMENTAL=0, fresh target C:/dev/mp-target-s9test)",
+      "outcome": "FAIL compile: 3x E0609 no field learning_client on AppState (http_routes.rs:10536, 10597, 10640). http_routes.rs is another slice's uncommitted edit, not this slice. No tests ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core",
+      "outcome": "ok: 627 passed, 0 failed, 225 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p mp-events -p mp-contracts --all-targets",
+      "outcome": "FAIL compile: mp-contracts attachments.rs:172 E0425 cannot find value SANDBOX_NOTE_OPENING. attachments.rs is modified by another slice, not this one. No tests ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo fmt --all -- --check",
+      "outcome": "FAIL exit 1: workspace-wide diffs in mp-content-safety, mp-contracts, execution-core, model-gateway etc. coordinator.rs is unmodified (git shows no change), so none are from this slice.",
+      "passed": false
+     },
+     {
+      "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+      "outcome": "FAIL exit 1: 87 passed, 22 failed. These are golden and pin mismatches or missing goldens in Data Plane, Ingestion Plane, Control Plane fixtures and Model Plane zdr-posture-matrix .sha256 vendored copies. None are files this slice owns or changed.",
+      "passed": false
+     },
+     {
+      "command": "bash -n verify-replica-run-control.sh",
+      "outcome": "syntax ok",
+      "passed": true
+     },
+     {
+      "command": "env -u MP_PROOF_BEARER bash 'apps/Model Plane/scripts/verify-replica-run-control.sh'",
+      "outcome": "exit 1 at line 35 with the MP_PROOF_BEARER message, before any docker call. The live run needs a two-replica stack with NATS ACL and a bearer, so it could not run. Not a pass.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "WS04-S9 is partial. Built in the worktree: scripts/verify-replica-run-control.sh (new, LF line endings), which records five cases (Stop via the other replica; queue via the other replica; plan approve on A with a Do run on B; kill -9 of the owner; NATS stopped to 503) and writes docs/compliance/evidence/live-proof-ws04-replica-run-control-<date>.txt, the evidence file the flip gate looks for. It has not been run live: it needs a two-replica stack with the NATS ACL, the four switches exported as true, and MP_PROOF_BEARER. Two compose patches are in the scratchpad and are NOT applied: patch A (safe to apply now) adds MODEL_GATEWAY_SHARED_TURN_RECORD with default false; patch B (only after the live proof) flips MODEL_GATEWAY_RUN_CONTROL_BUS, MODEL_GATEWAY_SEND_RECEIPTS, MODEL_GATEWAY_DURABLE_PLAN_GRANT and MODEL_GATEWAY_SHARED_TURN_RECORD to true. No run-control switch default is on in code or compose in the repo, and MODEL_GATEWAY_SHARED_IDEMPOTENCY is not flipped. coordinator.rs is unchanged: the in-memory grant half is the live path with the switch off, and its callers are in grpc.rs, http_routes.rs and sse.rs, which this slice does not own, so the clean-up is a post-proof change with its scope listed below rather than a self-contained edit. The shared docs (ledger, capability-ownership-matrix, ZDR.md, MODEL_PLANE_STATUS.md) are not edited; the exact text is in lead_todo. The cargo baseline chain was still running when I reported; I claim no pass for it, and the logs may be incomplete."
+  },
+  {
+   "id": "WS02-S12",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\orchestration_store.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "rustfmt --check --edition 2021 orchestration_store.rs (in session-core/src)",
+     "outcome": "The new region (from the TODO_RECITATION_ENV doc comment to just before the Approvals banner) has no rustfmt hunks. The file is not rustfmt-clean at HEAD either (1797 lines of pre-existing drift); I did not reformat it."
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core recitation",
+     "outcome": "Started in the background (task bdh4v0y5r). It was still compiling when I stopped, the log was empty and no EXIT line was written. No pass or fail result exists, so the unit tests are NOT verified. Re-run this command first."
+    }
+   ],
+   "db_tests_written": [
+    "a_recitation_lists_the_owners_plan_in_ordinal_order_and_nobody_elses (ignored; run with --ignored --test-threads=1 and DATABASE_URL to a scratch Postgres whose name contains test)"
+   ],
+   "lead_todo": [
+    "Run the unit tests first: cd \"apps/Model Plane/rust\" and CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core recitation. Expect 5 passing and 1 ignored (the DB test). Also run CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core orchestration_store to confirm the existing scan tests still pass.",
+    "DB test (lead runs through the harness, not me): DATABASE_URL=<scratch Postgres whose name contains test> cargo test -p session-core --bin session-core a_recitation_lists_the_owners_plan -- --ignored --test-threads=1. It exercises list_todos_by_plan and get_plan, which have never run against Postgres.",
+    "Consumer wiring, not in this slice (needs other files): (1) add a session-core RPC that returns recite_plan_todos output for a plan. The proto file is apps/Model Plane/proto/model_plane/v1/orchestration.proto (or sessions.proto); the tag must come from plan section 4.3, and section 4.3 reserves nothing for this. Mirror the existing list_todos handler, which calls authorize_operation(orchestration:read) and authorize_thread_owner. (2) In model-gateway prompt_context.rs, add the returned block with out.add(PromptTier::Volatile, ...) beside the Volatile adds around lines 381-389, and keep it empty when the RPC returns nothing. Gateway file is not mine.",
+    "Env wiring (shared file, lead applies): set SESSION_CORE_TODO_RECITATION_ENABLED on the session-core service in apps/Model Plane/deploy/docker-compose.yml, default unset or false. Do not set it to true until the consumer and a live proof exist.",
+    "Optional ledger line (apps/Model Plane/docs/decisions/ledger.md, shared): record that todo recitation is built behind SESSION_CORE_TODO_RECITATION_ENABLED, default off, with no consumer yet, and that the producer gate is open.",
+    "Commit only after the lead has seen the test run; this agent did not commit, stage, push or touch other files."
+   ],
+   "deviations": [
+    "Added an owner check, recite_plan_todos_with, and an owner-scoped entry point beyond the row's plain list_todos_by_plan call, because list_todos_by_plan has no tenant predicate.",
+    "The switch name follows the session-core convention SESSION_CORE_<FEATURE>_ENABLED; the batch file did not name one.",
+    "No consumer was built; the row's deliverable (the Volatile-tier block) needs files outside this slice's ownership."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto (or sessions.proto): additive RPC for the recitation, tag per plan section 4.3",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs: handler calling recite_plan_todos behind authorize_operation and authorize_thread_owner",
+    "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs: out.add(PromptTier::Volatile, ...) with the returned block, beside the Volatile adds around lines 381-389",
+    "apps/Model Plane/deploy/docker-compose.yml: SESSION_CORE_TODO_RECITATION_ENABLED on the session-core service, default off",
+    "apps/Model Plane/docs/decisions/ledger.md: optional entry for this switch and the open producer gate"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The ignored DB test a_recitation_lists_the_owners_plan_in_ordinal_order_and_nobody_elses has not run against a scratch Postgres. It is the first test to exercise get_plan plus list_todos_by_plan against a real database.",
+     "The row's actual deliverable, a todo block in the Volatile prompt tier, needs files this slice does not own: a session-core RPC (proto tag per section 4.3, which reserves none), an orchestration_grpc handler, and the model-gateway prompt_context.rs Volatile add. Until those exist the switch has no effect.",
+     "SESSION_CORE_TODO_RECITATION_ENABLED is not set in deploy/docker-compose.yml (shared file). It defaults off, so nothing is needed until there is a consumer.",
+     "No live proof exists. The plan gate ('needs a model-facing todo producer') is still open."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Plan gate unresolved: the row says 'not scheduled, needs a producer'. No model-facing todo producer exists (WS14, WS24 or a WS03 todo source would supply one). The owner ordered the build anyway, so the gate stays open; do not switch the flag on until a producer exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Authority: list_todos_by_plan (orchestration_store.rs, pub fn) filters by plan_id only, with no org or user predicate. Any future exposure must go through recite_plan_todos, which checks ownership with get_plan first; never expose list_todos_by_plan directly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No cap on the recited block: every todo is included and nothing bounds the Volatile tier's size. Add a count or token budget before the switch is turned on (WS02 S6 has a history budget to copy)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "RPC shape not decided: the house pattern is thread-scoped (ListTodos uses authorize_thread_owner plus list_todos_by_thread ordered by created_at), but the recitation is plan-scoped in ordinal order. The lead must choose one at the RPC design."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ZDR: the block carries todo text into the model prompt and is not persisted by this code. Any consumer that logs, stores in run metadata, or writes to audit must treat it as content; the plan's ZDR clause for S12 is 'none', so confirm this once a consumer exists."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No live proof of the consumer path, and the DB test has not run. The switch-on path has no test that proves a block reaches the Volatile tier."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "orchestration_store.rs is not rustfmt-clean at HEAD (1797 lines of pre-existing drift). My region is clean; I did not reformat the rest of the file."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The header text 'Plan todos, as recorded (data, not instructions):' is an untested prompt wording; review it when the consumer lands."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Plan gate is open: no model-facing todo producer exists (WS14, WS24 or a WS03 todo source), so SESSION_CORE_TODO_RECITATION_ENABLED must stay off until a producer and a consumer land."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "recite_plan_todos puts no limit on the number of todos or tokens, so a large plan could flood the Volatile tier. Add a budget before the switch is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "list_todos_by_plan (orchestration_store.rs:619) has no org or user predicate. Any RPC exposure must go through recite_plan_todos, whose get_plan owner check is correct but has only been proved in an ignored DB test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves that a switched-on recitation reaches the Volatile tier end to end. The consumer path does not exist yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ZDR: the recited block carries todo content into the prompt. Any future consumer that logs it or persists it in run metadata or audit must apply the ZDR rules, even though S12's ZDR clause is 'none'."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "RPC scope is not decided. Recitation is plan-scoped and ordered by ordinal; the existing ListTodos is thread-scoped and checked with authorize_thread_owner. The lead picks one when designing the RPC."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The header wording 'Plan todos, as recorded (data, not instructions):' has not been reviewed as prompt text; check it when the consumer is wired."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core recitation",
+      "outcome": "Compiled. 5 passed, 0 failed, 1 ignored (the DB test).",
+      "passed": true
+     },
+     {
+      "command": "CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core orchestration_store",
+      "outcome": "Compiled. 30 passed, 0 failed, 36 ignored (DB tests).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Added to orchestration_store.rs, above the first test module and after list_todos_by_plan (the file is CRLF; the insertion is additive: 237 insertions, 0 deletions per git diff --stat). Switch: SESSION_CORE_TODO_RECITATION_ENABLED, read with the literal-true parser (todo_recitation_from), default off. With the switch off, recite_plan_todos returns Ok(None) before any query, so no behaviour changes anywhere. New public functions: todo_recitation_enabled, render_todo_recitation (renders header plus one line per todo, ordinal order given, each todo collapsed to one line), recite_plan_todos(pool, org_id, user_id, plan_id). recite_plan_todos checks plan org and user with the existing get_plan before list_todos_by_plan, because list_todos_by_plan filters by plan_id only. Unit tests: switch literal parse, empty plan gives None, order and format, one-line collapse, switch-off path with a lazy pool that would fail on use. Nothing calls recite_plan_todos yet, so the switch is inert; the file-level allow(dead_code) covers that. The row's deliverable (the block placed in the Volatile tier) needs consumer code outside this slice. Owner ordered the build; the plan's gate (no model-facing todo producer) is unresolved and stays open."
+  },
+  {
+   "id": "WS04-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.queue-controls.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run --pool=threads src/features/chat/components/ChatMessages.queue-controls.test.tsx src/features/chat/components/ComposerTrays.test.tsx src/features/chat/components/mid-run-input.test.ts src/features/chat/components/ChatPanels.test.tsx (in apps/Frontend Plane/verevonv3)",
+     "outcome": "4 files, 118 tests passed, 0 failed, on the final state. The new file has 15 tests, including an exact innerHTML check that the tray markup is unchanged with the switch off. The default forks pool timed out starting a worker on this host, so the threads pool was used."
+    },
+    {
+     "command": "pnpm exec eslint src/features/chat/components/ChatMessages.tsx src/features/chat/components/ChatMessages.queue-controls.test.tsx",
+     "outcome": "0 errors. ChatMessages.tsx has 10 warnings, all pre-existing (lines 656 to 3273), none inside the new code at about lines 2229 to 2358. The test file is clean."
+    },
+    {
+     "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+     "outcome": "exit 1 with 35 errors, none under features/chat or in ChatMessages*. The errors are in quarry-client.ts, RemoteSupportPage.tsx and schedule-contract.test.ts (pre-existing), and one in src/shared/actions/model-access.ts from another session's concurrent edit that appeared during this run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Stage and commit only ChatMessages.tsx and ChatMessages.queue-controls.test.tsx. Other uncommitted edits in the same folder (ChatPage.tsx, chat-media-markdown.tsx, use-chat-controller.ts, the untracked chat-media-markdown.citation-href.test.tsx) and src/shared/actions/model-access.ts belong to other sessions and were not touched here.",
+    "Keep VITE_CHAT_QUEUE_RETRACT unset in every env file, compose file and CI job. Do not set it to true until the needs_other_files items are in and the owner has recorded the ledger reversal.",
+    "Owner decision to record before the switch goes on: reverse the 2026-08-24 'persist before deliver' entry in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md (about line 2207). Also decide the Edit semantics.",
+    "Apply only after the owner op and the withdrawn marker are live. shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx: add to the component props type `onEditQueuedInput?: (entry: QueuedInput, text: string) => void` and `onRetractQueuedInput?: (entry: QueuedInput) => void`. Replace the queue Match line `<Match when={queue()}>{(tray) => <QueuedInputStrip entries={tray().entries} />}</Match>` with `<Match when={queue()}>{(tray) => <QueuedInputStrip entries={tray().entries} onEdit={props.onEditQueuedInput} onRetract={props.onRetractQueuedInput} />}</Match>`."
+   ],
+   "deviations": [
+    "Built only the front-end half. The owner op, the session-core withdrawn marker, the BFF route and the action contract live in files outside this slice's ownership, so they are listed in needs_other_files.",
+    "Built now although DEC-07's default and the plan's S8 row gate it on the WS17 withdrawn marker and an explicit ledger reversal. The owner order of 2026-10-26 overrides the schedule. The gate is recorded as an open item in depth_findings, not resolved here.",
+    "Chose the switch name VITE_CHAT_QUEUE_RETRACT because the batch left the flag field empty.",
+    "Edit and Remove are restricted to accepted, pending entries that have a client message id. This is stricter than 'strip Edit/Remove': delivered, resent, refused and not-yet-accepted entries stay read-only.",
+    "Edit is defined only as a callback (entry, text). Its behaviour (retract then re-queue under a new id, or move the text back to the composer) is left to the parent and is an owner decision."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/queued_input.rs: add retract(request_id, org_id, user_id, client_message_id) on QueuedInputRegistry, returning Retracted, AlreadyDelivered or NotFound, under the same lock as enqueue_checked and drain_receipted.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: retract route beside invoke_queue_input, refused by require_non_zdr_durable_mutation.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_control.rs: retract op for the cross-replica path. The owner replica answers, and no text goes on the bus.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs: withdrawn marker RPC for the owner to call, and every transcript, context and search reader filtering withdrawn rows (WS17 message versions).",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto: add-only withdrawn field and RPC, tag per the plan's section 4.3 (integrator).",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/: new withdrawn-marker migration after 0067 with its revert/ file (number assigned by the integrator).",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts: action contract for retract, before any UI call (CLAUDE.md). The queue operation is chatQueueInvocationInput.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs: dispatcher for the retract contract.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs: BFF pass-through for retract, and its route registration.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: retract client that maps the three outcomes.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: retract and edit handlers. A retracted entry must leave state.queuedInputs and queuedSendContext before settleQueuedInputsAtRunEnd can resend it.",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx: pass the two handlers into QueuedInputStrip (exact lines in lead_todo)."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The owner op retract(client_message_id) returning Retracted, AlreadyDelivered or NotFound (model-gateway queued_input.rs, http_routes.rs, run_control.rs) is not built. Those files are outside this slice's ownership, so the lead must schedule them.",
+     "The WS17 withdrawn marker is not built: the session-core column or migration, the RPC, the add-only proto field, and a filter in every reader. It needs integrator-assigned proto tag and migration numbers.",
+     "The action contract (action-registry.ts), the dispatcher, the BFF route, chat-client and the use-chat-controller retract/edit handlers are not built. The ComposerTrays shared-edit is in the implementer's lead_todo.",
+     "Owner decision: record the ledger reversal of the 2026-08-24 'persist before deliver' entry, and decide the Edit semantics, before VITE_CHAT_QUEUE_RETRACT is turned on.",
+     "Live proof once the owner op lands: queue on replica A, retract via replica B, check the row is withdrawn in psql and missing from ListConversation, and check that a retract after delivery returns AlreadyDelivered."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The owner gate is unresolved. DEC-07 and the S8 row hold retract and edit until an explicit ledger reversal of 'persist before deliver' (ledger.md, 2026-08-24 entry, about line 2207) and the WS17 withdrawn marker. The owner order of 2026-10-26 says build now behind a default-off switch, so the switch must stay off until the reversal is recorded and the marker exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A retract without the withdrawn marker is unsafe. WS04-S6 writes the message on accept, and session-core has no withdrawn column or reader filter, so a retracted message would stay visible to ListConversation, load_thread_messages and context assembly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Crash ordering. If the owner drops the message from its queue and dies before session-core marks the row withdrawn, the row stays live for a message the agent never read, and a run-end resend under the same client message id would answer a retracted message. The mark must come first, and the queue entry is released only after it is acknowledged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Run-end race in the SPA. settleQueuedInputsAtRunEnd resends each accepted pending entry the run did not take, so a retracted entry must leave state.queuedInputs and queuedSendContext before the run ends. This needs a controller test."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Edit semantics are undefined. The strip reports (entry, text) and leaves the choice to the parent: retract then re-queue under a new client message id (the transcript then holds a withdrawn row and a live row), or move the text back into the composer. The owner must decide before the controller is wired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Authority. The owner's retract must be scoped by request id, org and user, as enqueue_checked is, so Retracted, AlreadyDelivered and NotFound give no oracle over another user's client message ids. ZDR and waived tokens must be refused by require_non_zdr_durable_mutation, and the new session-core mutation needs its ZDR inventory row and zdr-posture-matrix row (plan note N7)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Owed when the owner op lands: rebuilt model-gateway and session-core; queue a message on replica A, retract it via replica B, confirm the messages row is marked withdrawn (psql) and absent from the next run's ListConversation; confirm a retract after delivery returns AlreadyDelivered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The owner-op unit tests the row names are not written, because the op does not exist. The front-end tests cover gating and callbacks only. Nothing covers the controller's Retracted, AlreadyDelivered and NotFound transitions."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No visual check yet of Edit and Remove inside a queued item at phone width. The action row carries a 12px top margin inside the item, and the edit box class is shared with the user-message editor. Needs a screenshot on a second dev server, since :5173 is the main checkout."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Concurrent edits. During this run another session changed ChatPage.tsx, chat-media-markdown.tsx and use-chat-controller.ts, added chat-media-markdown.citation-href.test.tsx, and changed src/shared/actions/model-access.ts. The lead must stage only this slice's two files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Pre-existing: the strip's state labels 'levert til agenten', 'ikke levert' and 'venter' are Norwegian-only and bypass i18n.tr. Left unchanged, since they are outside this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-07 and the S8 row gate retract and edit on an explicit ledger reversal of persist-before-deliver and on the WS17 withdrawn marker. Neither exists, so VITE_CHAT_QUEUE_RETRACT must stay unset everywhere. A grep found it in no env, compose or CI file."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Retract without a withdrawn marker is unsafe. WS04-S6 persists the message on accept, so a retracted message would stay in ListConversation, load_thread_messages and context assembly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Crash ordering in the future owner op. Session-core must mark the row withdrawn before the owner drops the queue entry, or a crash leaves a live row for a message the agent never read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SPA run-end race. settleQueuedInputsAtRunEnd resends accepted pending entries, so a retracted entry must leave state.queuedInputs and queuedSendContext first. This needs a controller test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The owner retract must be scoped by request id, org and user, as enqueue_checked is, to avoid an id oracle. It must also be refused by require_non_zdr_durable_mutation, with ZDR inventory and posture-matrix rows (N7)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There are no tests for the controller's Retracted, AlreadyDelivered and NotFound transitions or for the owner op, because neither exists yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "If the entry turns delivered while the edit box is open, the controls unmount and the draft is silently discarded. The person gets no notice, and no test covers this."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No visual check yet of Edit and Remove in a queued item at phone width. It needs a second dev server, since :5173 is the main checkout."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The strip's pre-existing state labels ('levert til agenten', 'ikke levert', 'venter') bypass i18n.tr."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads (queue-controls, ComposerTrays, mid-run-input, ChatPanels tests)",
+      "outcome": "4 files passed, 118 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec eslint ChatMessages.tsx ChatMessages.queue-controls.test.tsx",
+      "outcome": "0 errors, 10 warnings (solid/reactivity, e.g. lines 3176, 3274, outside the new code)",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+      "outcome": "35 errors, none under features/chat. Matches the implementer's count. They are not from this slice.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "data-loss",
+    "audit"
+   ],
+   "notes": "Built the front-end half of WS04-S8 in ChatMessages.tsx behind VITE_CHAT_QUEUE_RETRACT, a new switch that is unset by default and enables only on the literal 'true'. QueuedInputStrip takes optional onEdit(entry, text) and onRetract(entry) handlers. Edit and Remove render only for an entry that is accepted, pending and has a client message id, and only when its handler is passed. With the switch off the markup is unchanged (asserted by an exact innerHTML test). The owner op retract(client_message_id) and the WS17 withdrawn marker do not exist. They sit in model-gateway, session-core and the BFF, none of which this slice owns, so the status is partial. Nothing is wired to a live call yet: ComposerTrays and the controller pass no handlers, so the controls stay hidden even with the switch on. Stop and send (client-only) is outside this slice and was not built. The switch must stay off until the owner op, the withdrawn marker with every reader filter, the controller retract path and the ledger reversal of persist-before-deliver are all in place."
+  },
+  {
+   "id": "WS09-S4",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/delta-coalescer.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/shared/api/delta-coalescer.test.ts src/shared/api/chat-client.test.ts src/features/chat/components/use-chat-controller.resume-replay.test.ts (switch unset, final run)",
+     "outcome": "3 files, 159 tests passed; delta-coalescer.test.ts is 17 of 17"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/delta-coalescer.test.ts src/shared/api/chat-client.test.ts src/shared/api/chat-event-contract.test.ts src/features/chat/components/use-chat-controller.resume-replay.test.ts",
+     "outcome": "4 files, 166 tests passed after moving the batching out of dispatchEvent (the contract test failed on the first version)"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api src/features/chat (switch unset, last full run)",
+     "outcome": "1954 of 1955 tests passed; two files failed: src/shared/api/quarry-client.test.ts does not load (unresolved @quarry/client, file not touched); use-chat-controller.snapshot-throttle.test.ts 'leaves the newest tokens out of storage inside the window' hit the 30 s timeout under machine load and passes alone (21 of 21)"
+    },
+    {
+     "command": "VITE_CHAT_DELTA_FRAME_BATCH=true pnpm exec vitest run src/features/chat (switch on, diagnostic only)",
+     "outcome": "9 failed, 1414 passed: use-chat-controller.resume-replay.test.ts line 227 (trailing chunk held for its frame); 8 in use-chat-controller.snapshot-throttle.test.ts (lifecycle flushes, two ZDR write counts, per-delta Trace count); chat-client.test.ts and use-chat-controller.f12.test.ts pass with the switch on"
+    },
+    {
+     "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+     "outcome": "exit 1 with 35 error lines, none in the touched files: quarry-client.ts 21, RemoteSupportPage.tsx 12, schedule-contract.test.ts 1, shared/actions/model-access.ts 1 (another slice's concurrent learning actions)"
+    },
+    {
+     "command": "pnpm exec eslint src/shared/api/delta-coalescer.ts src/shared/api/delta-coalescer.test.ts src/shared/api/chat-client.ts",
+     "outcome": "exit 0"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Keep VITE_CHAT_DELTA_FRAME_BATCH unset in every .env, compose and CI file; this slice sets it nowhere and the switch defaults off in code.",
+    "Run tests/e2e/chat-transcript-performance.spec.ts three times with the switch unset and three times with VITE_CHAT_DELTA_FRAME_BATCH=true on a rebuilt frontend or the second dev server (pnpm dev --port 5174 --strictPort with LOCAL_E2E_BASE_URL=http://localhost:5174), keep the JSON as before and after evidence, and record the Chromium version.",
+    "Capture a Stop mid-stream with the switch on and confirm the answer text received before Stop is in the transcript.",
+    "Record WS09-S4 in the plan's Build ledger as code built, switch off, live proof pending. No shared files were named for this slice, so none were edited and no shared-edit lines are issued."
+   ],
+   "deviations": [
+    "Batching is routed in dispatchFrame through a per-stream handler view (Object.create over the real handlers) instead of inside dispatchEvent's case 'chunk' and 'reasoning_delta'; dispatchEvent is unchanged from HEAD, which keeps the chat-event contract test and the switch-off path untouched.",
+    "The abort flush is a synchronous abort listener inside delta-coalescer.ts, registered per stream and removed on close, so text received before a Stop, a thread switch or an unmount is emitted inside controller.abort().",
+    "The 100 ms timer is armed beside every frame rather than only while the page is hidden; whichever of the frame or the timer runs first emits.",
+    "Two temporary instrumented copies of use-chat-controller.snapshot-throttle.test.ts were built with Python and deleted, and the new test file's citation frame was added with a Python edit instead of the Edit tool; the results were re-run and verified."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: needed before the switch can be enabled, to flush the frame batch before snapshotWriter.flush in the lifecycle triggers and to abort before the snapshot flush in onCleanup; not needed for the switch-off deliverable.",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.resume-replay.test.ts: when the switch is on, advance one frame before the trailing-chunk assertion at line 227.",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.snapshot-throttle.test.ts: the same frame-aware waits when the switch is on, and a longer test timeout or cached load()."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The row's trigger is still unmeasured. WS09-S1 has not shown more than one flush per frame, so D5 needs the owner's sign-off on a bursty-fixture count before the switch is turned on.",
+     "S1 performance spec (tests/e2e/chat-transcript-performance.spec.ts), before and after: three runs with VITE_CHAT_DELTA_FRAME_BATCH unset and three with it set to true, on a rebuilt frontend or a second dev server. This is lead work.",
+     "Live capture of a Stop mid-stream with the switch on, confirming the text received before Stop is in the transcript.",
+     "Build ledger entry: code built, switch off, live proof pending."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row trigger (WS09-S1 shows more than one flush per frame) is unmeasured: S1 counts setItem calls and frame gaps, not onMessage calls per frame, and its 25 ms stream fixture cannot show a burst inside one 16.7 ms frame, so the owner must sign D5 on a bursty-fixture count before the switch is turned on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Row evidence is not produced: the S1 spec before and after (switch unset and VITE_CHAT_DELTA_FRAME_BATCH=true, three runs each on a rebuilt frontend) and a Stop-mid-stream capture are lead work."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "With the switch on, two ZDR write-count assertions in use-chat-controller.snapshot-throttle.test.ts fail in full-file order (3 and 36 transcript writes where 0 are expected) yet pass when run alone; the writes pass through the guarded writeThreadSnapshot with the test's thread id, and it is not established whether the controller under test or a stale instance issued them, so this must be settled before any switch-on because it touches ZDR."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the switch on, the S3 lifecycle flushes (hidden page, pagehide, thread switch, unmount) write the snapshot before a coalesced run reaches turn.content, and onCleanup in use-chat-controller.ts sets disposed and flushes the snapshot before it aborts, so up to one frame of text can be missing from the local copy; the fix is a flush-all for live batches called from those triggers, plus reordering onCleanup, both outside this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "use-chat-controller.resume-replay.test.ts line 227 asserts a trailing chunk after microtask ticks only, which the switch defers to the next frame, and six more snapshot-throttle cases assert the same kind of immediate write, so those tests need a frame advance before their assertions when the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A handler that throws during a frame or timer flush escapes readSseStream's try/catch and surfaces as an uncaught error, whereas the unbatched path reports it through onError."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The resume onMessage guard isActiveThread() is read at emit time, so a streamGeneration bump without an abort of the previous signal (the send path near use-chat-controller.ts line 2700 bumps it without aborting) can drop up to one frame of old text; the writers of streamGeneration need an audit before the switch is enabled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The coalescer tests run against a stubbed frame queue, so real animation-frame cadence is proven only by the Stop-mid-stream capture the lead runs."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "use-chat-controller.snapshot-throttle.test.ts takes about 16 s alone and once hit the 30 s test timeout under machine load with the switch unset, so its per-test load() import needs a longer timeout or caching."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Two failures outside this slice: src/shared/api/quarry-client.test.ts cannot resolve '@quarry/client' in this worktree, and src/shared/actions/model-access.ts reports TS2739 for learning.accept_skill, learning.reject_skill and learning.undo, a mismatch with a concurrent WS07 edit to action-registry.ts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Browsers throttle timers in background tabs, so the 100 ms hidden-tab fallback can be slower than 100 ms once a tab has been hidden for a while."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "VITE_CHAT_DELTA_FRAME_BATCH is not declared in src/vite-env.d.ts; it type-checks through vite/client's index signature, as VITE_CHAT_RENDER_LEGACY does, so a declaration is optional."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the switch on, the lifecycle snapshot flushes in use-chat-controller.ts (hidden page, pagehide, thread switch) and the onCleanup ordering (snapshot flush before abort) can persist the local copy up to one frame behind the coalesced text. They need a flush-all hook and a reordered onCleanup, both outside this slice, before switch-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The implementer reports nine controller tests failing with the switch on: the resume-replay trailing-chunk assertion and eight snapshot-throttle cases, including two ZDR transcript-write counts that only fail in full-file order. The ZDR write-count failures must be explained before the switch can be turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A handler that throws inside a requestAnimationFrame or timer flush escapes readSseStream's try/catch and becomes an uncaught error instead of being reported through onError as on the unbatched path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The resume onMessage isActiveThread() guard is read when the batch emits, so a streamGeneration bump without an abort can drop up to one frame of old text. The writers of streamGeneration need an audit before switch-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "delta-coalescer.test.ts uses a stubbed frame queue, so real animation-frame cadence and the hidden-tab 100 ms fallback are proven only by the live capture."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "VITE_CHAT_DELTA_FRAME_BATCH is not declared in src/vite-env.d.ts. It type-checks through vite/client's index signature, like VITE_CHAT_RENDER_LEGACY."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads src/shared/api/delta-coalescer.test.ts src/shared/api/chat-client.test.ts src/features/chat/components/use-chat-controller.resume-replay.test.ts",
+      "outcome": "3 files passed, 159 tests passed, 0 failed (switch unset)",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec tsc -p tsconfig.app.json --noEmit, filtered for chat-client|delta-coalescer",
+      "outcome": "no errors in the touched files (filter matched nothing; the run was filtered so total errors were not counted here; the implementer reported 35 pre-existing errors in other files)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built WS09-S4 behind VITE_CHAT_DELTA_FRAME_BATCH, read per call with the strict parser (only the literal 'true' enables), default off. New delta-coalescer.ts merges consecutive text deltas of the same kind and request id once per animation frame, arms a 100 ms timer beside the frame, flushes before any non-delta frame, and flushes synchronously on the stream's abort signal; close() flushes at the end of each read. chat-client.ts: dispatchFrame routes chunk and reasoning_delta frames through a per-stream handler view (Object.create over the real handlers) and flushes before every other frame; streamChat and resumeStream close the batch after the read and before connection errors are reported. dispatchEvent is byte-identical to HEAD, and with the switch off the handler calls and their arguments are unchanged. Nothing is persisted or sent, so ZDR is untouched by construction. Evidence (S1 before/after spec, Stop-mid-stream capture) is not produced here and is lead work. The switch must stay off: the S4 trigger is unmeasured, and with the switch on nine existing controller tests fail (depth_findings). The worktree is shared with concurrent slices that modify use-chat-controller.ts and ChatMessages.tsx, so the switch-on results were taken against that shared tree. Two temporary instrumented copies of the S3 test were created under src/features/chat/components and deleted (verified absent). No commit, push, stash or reset."
+  },
+  {
+   "id": "WS09-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/styles/global.css",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/styles/global.test.js"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/styles/global.test.js (baseline, before any edit, default forks pool)",
+     "outcome": "2 passed (2)"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads src/styles/global.test.js (after adding the two containment tests, before the CSS rule)",
+     "outcome": "red as intended: 2 failed (the containment tests), 2 passed. The default forks pool had timed out starting its worker twice before this run, so threads was used"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads src/styles/global.test.js (after the CSS rule)",
+     "outcome": "4 passed (4)"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads src/styles/global.test.js src/features/chat/lib/chat-accessibility.test.ts src/features/chat/lib/workspace-rail-geometry.test.ts src/features/inbox/lib/inbox-viewport-layout.test.ts src/features/voice/voice-motion.test.ts (every suite that reads global.css)",
+     "outcome": "5 files passed, 33 tests passed"
+    },
+    {
+     "command": "pnpm exec eslint src/styles/global.test.js",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "node script in the scratchpad: postcss 8.5.26 from node_modules/.pnpm parses src/styles/global.css and walks the rules that mention data-chat-containment",
+     "outcome": "parsed; one root-level rule with content-visibility: auto and contain-intrinsic-size: auto 480px"
+    },
+    {
+     "command": "pnpm test (full)",
+     "outcome": "not run, see depth_findings: other slices have uncommitted edits in this worktree; only the suites that read global.css were run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: on the thread element whose opening tag carries class=\"verevon-chat-thread\" (about line 1027 in the current worktree, which other slices are editing; re-locate it by that class), add directly after the class line: data-chat-containment={import.meta.env.VITE_CHAT_CONTENT_CONTAINMENT === 'true' ? 'on' : undefined}",
+    "After the shared edit: pnpm exec vitest run --pool=threads src/styles/global.test.js (expect 4 passed) and pnpm typecheck. Then the live proof on a second dev server (pnpm dev --port 5174 --strictPort, restarted and hard-reloaded, since the browser caches global.css across restarts) with VITE_CHAT_CONTENT_CONTAINMENT=true versus unset: chat-transcript-performance.spec.ts on the 200-turn fixture, a scroll-up capture, Ctrl+F across skipped turns, the arrow-key walk, an a11y-tree snapshot, and the action and copy menus of a non-latest turn checked for clipping.",
+    "Owner sign-off on the D5 numeric trigger (C8) and the three-run WS09-S1 baseline in chat-perf-budget.json before the flag is set anywhere but a dev stack; leave VITE_CHAT_CONTENT_CONTAINMENT unset in every build and compose config until then.",
+    "Build ledger (lead): record WS09-S7 with switch VITE_CHAT_CONTENT_CONTAINMENT, unset = off (SPA build flag), source-verified by global.test.js (4 tests), live proof pending, D5 gate open. Rollback = delete the CSS rule, the ChatPage attribute and the two tests."
+   ],
+   "deviations": [
+    "The row says flag none and rollback = delete the rule. Per the owner note the slice is built behind its own default-off switch VITE_CHAT_CONTENT_CONTAINMENT (strict 'true'), carried as an attribute on .verevon-chat-thread that ChatPage must set (shared edit for the lead).",
+    "vitest was run with --pool=threads: the default forks pool timed out starting its worker in this session; the same files passed under threads.",
+    "The full pnpm test was not run (see depth_findings)."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (shared-edit only, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edit to ChatPage.tsx (lead): add data-chat-containment={import.meta.env.VITE_CHAT_CONTENT_CONTAINMENT === 'true' ? 'on' : undefined} on the div with class=\"verevon-chat-thread\" (currently around line 1030). Until then the rule is inert and the switch is not wired.",
+     "Live proof on a second dev server with VITE_CHAT_CONTENT_CONTAINMENT=true and with it unset: chat-transcript-performance.spec.ts on the 200-turn fixture, a scroll-up capture, Ctrl+F across skipped turns, the arrow-key walk, an a11y-tree snapshot, and a check that menus on non-latest turns are not clipped.",
+     "D5 gate: the three-run WS09-S1 baseline in chat-perf-budget.json and owner sign-off on the C8 numeric trigger. Keep the switch unset in every build and compose config until both exist.",
+     "Build ledger entry for WS09-S7 (switch VITE_CHAT_CONTENT_CONTAINMENT, unset = off, live proof pending, D5 open)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The D5 gate is unmeasured: the row says build only if WS09-S1 exceeds the C8 render budget (300-turn fixture after S2+S3: p95 frame gap while streaming <= 50 ms, DOM nodes <= 30,000, allTurnsMounted <= 1,500 ms, heap growth <= 150 MB), but the three-run S1 baseline in chat-perf-budget.json is still pending (ledger B01) and the numeric trigger needs owner sign-off, so the switch must stay unset until both exist."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The evidence the row names was not run: the S1 Playwright before and after on the 200-turn fixture with the switch on (no scroll jump, Ctrl+F across skipped turns, arrow-key walk, a11y tree) and a scroll-up capture; no dev server, Docker or live proof was run here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "content-visibility: auto implies paint containment, which clips absolutely positioned descendants that extend past the turn box; the .verevon-chat-menu__panel action menus (position: absolute, with a --down variant) inside non-latest turns could be cut at the article edge, so check them on a live stack before the switch is turned on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The two new tests read global.css text only; nothing yet proves that ChatPage sets data-chat-containment only when VITE_CHAT_CONTENT_CONTAINMENT is exactly 'true', so a ChatPage render test is needed once the shared edit lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The full pnpm test (353 vitest files plus the node gateway scripts) was not run: other slices have uncommitted edits in this worktree (ChatPage.tsx, chat-client.ts, transcript-window.ts and more), so a failure could not be attributed to this slice, and the machine had about 2.9 GB free RAM."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WS09-S10 depends on this slice and would also window the turns; if VITE_CHAT_VIRTUALIZE and this switch are both on, the turn articles must stay direct children of .verevon-chat-thread for the child selector to match, and S10's decision should recheck whether this rule is still needed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "contain-intrinsic-size falls back to 480px until a turn has rendered once, so a long unrendered turn can shift the scroll position when it first renders (tall-turn drift); the scroll-up capture in the live proof covers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The default vitest forks pool timed out starting its worker twice in this session ('Timeout waiting for worker to respond') at about 2.9 GB free RAM; --pool=threads ran the same files, so expect the same on this machine."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "An untracked directory apps/Frontend Plane/verevonv3/_tmp_75892_023abf7498529dacfdb92e00a042ba93 sits in the worktree; it is not from this slice and was left alone."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The D5 trigger has not been measured: the WS09-S1 baseline is still pending and the C8 numeric trigger needs owner sign-off, so the slice is built while its condition is still open."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The evidence the row names (S1 Playwright before and after, scroll-jump capture, Ctrl+F across skipped turns, arrow-key walk, a11y tree) has not been run with the switch on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "content-visibility: auto implies paint containment, so absolutely positioned .verevon-chat-menu__panel menus inside non-latest turns may be clipped at the article edge; check this live before the switch goes on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The rule uses a direct-child selector (.verevon-chat-thread > .verevon-chat-message). That matches the non-virtualized path, but on the VITE virtualize path each article is wrapped in a div with role=article, so the rule never matches there; WS09-S10 must decide whether to keep or retarget it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test yet proves that ChatPage sets data-chat-containment only when VITE_CHAT_CONTENT_CONTAINMENT is exactly 'true'; add a ChatPage render test once the shared edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "data-latest marks only the latest assistant turn, so a just-sent user turn (and the latest turn while no assistant reply exists) is still contained; this is harmless while it is on screen, but confirm the scroll-to-bottom behaviour is unaffected in the live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "contain-intrinsic-size: auto 480px can shift the scroll position when a tall turn renders for the first time on scroll-up; the scroll-up capture must cover this."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The full vitest run now shows 7 failing files and 12 failing tests: the tester's 5 files plus trust-data.test.ts and use-chat-controller.snapshot-throttle.test.ts. They come from other slices' uncommitted edits, none of them reads global.css, and they are not attributable to this slice; they still need to be triaged against HEAD."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads src/styles/global.test.js",
+      "outcome": "1 file passed, 4 tests passed (includes the 2 new containment tests)",
+      "passed": true
+     },
+     {
+      "command": "pnpm test (full suite, run as pnpm exec vitest run --pool=threads, twice)",
+      "outcome": "5 files failed, 365 passed (370). 11 tests failed, 4221 passed. The failing files are scripts/check-bundle-budget.test.mjs, SupportPage.test.tsx, admission-contract.test.ts (5 tests), catalog-manifest.test.ts (6 tests) and quarry-client.test.ts. The catalog-manifest and admission-contract failures are 'Action catalog has no model access row for: learning.accept_skill', which comes from another slice's uncommitted action-registry edit. None of the failing files read global.css. I did not re-run these against HEAD to prove they pre-date the slice.",
+      "passed": true
+     },
+     {
+      "command": "git diff review of src/styles/global.css and global.test.js",
+      "outcome": "The slice adds only 9 CSS lines and 18 test lines. content-visibility sits solely under .verevon-chat-thread[data-chat-containment=\"on\"] > .verevon-chat-message:not([data-latest]), so with the switch unset the CSS is inert.",
+      "passed": true
+     },
+     {
+      "command": "Compile check of touched modules",
+      "outcome": "Only CSS and a JS test file changed. The test file loaded and ran under vitest, and there is no Rust, Go or TypeScript compile unit to check.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "WS09-S7 is built behind VITE_CHAT_CONTENT_CONTAINMENT (strict 'true' literal; unset = off). global.css gets one rule, .verevon-chat-thread[data-chat-containment=\"on\"] > .verevon-chat-message:not([data-latest]) with content-visibility: auto and contain-intrinsic-size: auto 480px, placed after the .verevon-chat-thread gap rule; the latest assistant turn is never contained. global.test.js gets a rule-presence test and a guard test that every content-visibility declaration sits under the attribute. Both files keep CRLF; git diff shows only the added lines (+9 CSS, +18 test). The slice persists nothing, so no ZDR surface. The DOM is unchanged while the attribute is absent, and the rule is inert until the lead applies the ChatPage shared edit (lead_todo). The D5 trigger (WS09-S1 exceeds the render budget) is unmeasured; the owner ordered the build now, so it is recorded as an open decision, not resolved. Not run: Playwright, dev servers, Docker, full pnpm test. No compose or env default was changed."
+  },
+  {
+   "id": "WS09-S10",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\transcript-window.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\transcript-window.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPage.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/chat/lib/transcript-window.test.ts (in apps/Frontend Plane/verevonv3)",
+     "outcome": "1 file, 14 tests passed on the default pool. The first attempt timed out starting the forks worker; the immediate retry passed."
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads src/features/chat src/shared/api/orchestration-client.test.ts",
+     "outcome": "97 files, 1463 tests passed. The run includes other slices' uncommitted edits in ChatMessages.tsx and chat-media-markdown.tsx and two untracked test files in this shared worktree; those passed as well."
+    },
+    {
+     "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+     "outcome": "34 errors, none in the four files of this slice: RemoteSupportPage.tsx (12), quarry-client.ts (21), schedule-contract.test.ts (1). None of those files is touched by this slice."
+    },
+    {
+     "command": "pnpm exec eslint on transcript-window.ts, transcript-window.test.ts, ChatPage.tsx, use-chat-controller.ts",
+     "outcome": "0 errors. Two findings in ChatPage.tsx were fixed; ChatPage.tsx and both transcript-window files now show no warnings. use-chat-controller.ts keeps its solid/reactivity warnings on lines this slice did not change."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the four files of this slice on model-plane (two new, two modified). The worktree also holds other slices' uncommitted edits (ChatMessages.tsx, chat-media-markdown.tsx, ChatMessages.queue-controls.test.tsx, chat-media-markdown.citation-href.test.tsx); they are not mine and I did not stage them.",
+    "Live proof, not run: start a second dev server (pnpm dev --port 5174 --strictPort) with VITE_CHAT_VIRTUALIZE=true, run the S1 perf spec on the 300- and 1,000-turn fixtures with the switch on and off, attach the JSON and an accessibility-tree capture. The live run is the first run of the switch-on path.",
+    "Ledgers (shared, not edited here): add a WS09-S10 entry to the Build ledger in docs/plans/model-plane-chat-build-plan-2026-10-14.md and to apps/Model Plane/docs/decisions/ledger.md, stating the switch VITE_CHAT_VIRTUALIZE is default off, source-verified, live pending.",
+    "Keep VITE_CHAT_VIRTUALIZE unset in every build, Dockerfile and env file until the gates in depth_findings are met. Nothing in the repo sets it today."
+   ],
+   "deviations": [
+    "In-app find jump: the chat has no transcript find surface, so only the focus jump (focusTurn) is built, and the arrow walk is its only caller. The find UI itself is not built.",
+    "The extended Playwright cases (variable height, selection, screen-reader order, pill, live-follow) are not written; the spec file is outside this slice's owned files and is listed in needs_other_files.",
+    "Follow rule: hysteresis (disengage at 80 px, re-arm at 40 px) applies only with the switch on. With the switch off the controller keeps its old dist < 80 rule.",
+    "Switch-off refactor: the transcript rows moved into renderMessageRow (used by both paths) and the arrow guard moved into transcriptArrowStep. The switch-off DOM is the same by construction; no DOM snapshot was taken.",
+    "Accessibility wiring exists only with the switch on: role=feed on the thread, and on each mounted turn a wrapper with role=article, aria-setsize and aria-posinset.",
+    "No @tanstack/solid-virtual: the window is in-house, as the row says, so the Solid 2 rc and solid-virtual compatibility question does not arise.",
+    "Live evidence named in the row (S1 JSON on 300- and 1,000-turn fixtures, accessibility-tree capture) is not produced; it is a lead-run item."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\tests\\e2e\\chat-transcript-performance.spec.ts (the S1 spec; the extended S10 Playwright cases belong there)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: run the S1 perf spec on the 300- and 1,000-turn fixtures with VITE_CHAT_VIRTUALIZE=true and with it off, on a second dev server (port 5174), and attach the JSON and an accessibility-tree capture. The switch-on path of ChatPage has never run.",
+     "The extended Playwright cases (variable height, selection, screen-reader order, pill, live-follow) belong in tests/e2e/chat-transcript-performance.spec.ts, which this slice does not own.",
+     "Owner gate (D5 and the plan's condition): keep the switch off until S1 shows the budget still fails after S2, S3 and S7, and the owner decides whether in-app find is required.",
+     "Ledger entries for WS09-S10 (the plan's Build ledger and apps/Model Plane/docs/decisions/ledger.md), plus a commit of the four slice files only."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Gate: keep VITE_CHAT_VIRTUALIZE off until S1 numbers on the 300- and 1,000-turn fixtures show the budget still fails after S2, S3 and S7, and the owner signs the D5 numeric triggers."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Nothing runs the switch-on path of ChatPage (ResizeObserver measurement, spacers, focusin, arrow walk, role=feed and role=article) under Solid 2 rc; only the pure planner and the follow rule are unit-tested, so the first run of that path is the live one."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row's in-app find jump has no find surface to attach to: the chat has no transcript search, and browser find and text selection cannot reach unmounted turns. The owner must decide whether find is required before the switch goes on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Scroll anchoring while spacer heights move from estimate to measurement is unverified, so the row's no-scroll-jumps acceptance on three variable-height fixtures is not yet shown."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The extended Playwright cases (variable height, selection, screen-reader order, pill, live-follow) are not written; the spec file is outside this slice's owned files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The S7 containment rule targets .verevon-chat-thread > .verevon-chat-message, which stops matching when the window wraps each article in a div; with both switches on the containment silently does nothing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Wrapper articles nest the message article inside another article, and the feed holds non-article children (error alert, feedback notice), so a screen reader may announce each message twice; the accessibility tree must confirm the roles."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A turn that leaves the window remounts its MessageBlock and loses unfocused local state (open menus, expanded blocks, a text selection); a focused turn stays mounted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The viewport top is re-measured on scroll and on list, thread and turn resizes, but not when banners above the transcript change height (ThreadVisibilityBanners, the scheduled-runs panel); the 600 px overscan absorbs the error until the next scroll."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, the viewport is zero until the first ResizeObserver callback, so for one frame only the first turns and the tail are mounted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Switch-off equivalence rests on the existing chat suites, typecheck and lint, with no before-and-after DOM snapshot of the transcript after the renderMessageRow and transcriptArrowStep refactors."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Paging (WS09 S8 and S9) is not part of this slice, so every turn stays in memory; the window removes DOM cost only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "measuredTurnHeights is never pruned across threads; it holds numbers keyed by turn id for the life of the session."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "On this machine the default vitest forks pool timed out once starting a worker (cold start); the immediate retry and the threads pool both passed, so this is environmental."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No component test covers the switch-on path of ChatPage.tsx: ResizeObserver measurement, spacers, the focusin tracking, handleVirtualArrowKeys/focusTurn, and role=feed/article with aria-setsize/aria-posinset. Only the pure planner and the follow rule in transcript-window.ts are unit-tested."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Measure, re-plan, mount, measure is a feedback loop: each new measurement moves the mean estimate in resolveTurnHeights and shifts every unmeasured top. Convergence without visible scroll jumps on variable-height threads is unproven."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "focusedTurnId is set on focusin and never cleared on focusout. A turn the reader once focused therefore stays mounted after focus leaves the transcript, and focusTurn keeps it pinned too."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, each turn's DateDivider and MessageBlock sit inside a plain wrapper div rather than as direct children of the flex thread. The thread's row gap no longer separates the divider from its message, and the S7 '.verevon-chat-thread > .verevon-chat-message' containment selector stops matching."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each wrapper div role=article contains the message's own article. The feed also holds non-article children (the error alert and the feedback notice), so screen readers may announce each message twice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "measureViewport is not triggered when banners above the thread (ThreadVisibilityBanners, the scheduled panel) change height. Until the next scroll, only the 600 px overscan covers the error."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Switch-off equivalence after the renderMessageRow/transcriptArrowStep refactor rests on reading the code plus the existing chat suites. No DOM snapshot was taken. On reading it is equivalent: the same row JSX, role undefined, and setMessageListRef still called."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "measuredTurnHeights in ChatPage.tsx is never pruned across thread switches."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run src/features/chat/lib/transcript-window.test.ts",
+      "outcome": "1 file, 14 of 14 tests passed on the default pool (31s).",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/features/chat/lib/transcript-window.test.ts",
+      "outcome": "1 file, 14 of 14 tests passed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/features/chat",
+      "outcome": "96 files, 1423 of 1423 tests passed. This includes other slices' uncommitted edits in the shared worktree.",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+      "outcome": "35 errors, none in the four slice files: RemoteSupportPage.tsx (12), quarry-client.ts (21), schedule-contract.test.ts (1), model-access.ts (1). The model-access.ts error says the action map is missing learning.accept_skill, learning.reject_skill and learning.undo. That belongs to the learning slice's action-registry.ts edit, not to this slice. The implementer counted 34 errors, so this one appeared after their run.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "WS09-S10 built in wave mode behind VITE_CHAT_VIRTUALIZE, read strictly as the literal string true and default off. New src/features/chat/lib/transcript-window.ts holds the pure planner (turns on screen with overscan, the last 8, the streaming and focused turns; one spacer per skipped run sized so mounted turns keep their fully mounted positions), the measured-height resolver, and the follow rule (disengage at 80 px, re-arm at 40 px). ChatPage.tsx wires the window behind the switch: ResizeObserver heights keyed by turn id, the viewport from list and thread rects, focus tracking, and an index-based arrow walk. use-chat-controller.ts uses the hysteresis only with the switch on. ZDR: the slice persists nothing; the height map is in memory and holds numbers keyed by turn id. Not run: Docker, live stack, Playwright, cargo. The plan's S7 dependency is not a code dependency of this slice."
+  },
+  {
+   "id": "WS11-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\codexsubscription\\manager.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\codexsubscription\\manager_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\codexsubscription\\direct_request_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\provider\\effort.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "go vet ./internal/codexsubscription/... ./internal/api/... (in apps/Ingestion Plane/integration-corev2)",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "go test -v ./internal/codexsubscription/... (in apps/Ingestion Plane/integration-corev2)",
+     "outcome": "FAIL with 2 tests: TestDirectBodyGoldenRoles and TestAppServerUsageLimitWithoutAReadableResetIsUnknown (both outside the changed logic; see depth findings). PASS: TestDirectEffortMapping, TestDirectWideEffortReachesTheUpstreamOnlyWhenOn, TestManagerRejectsUnsupportedReasoningEffort, TestManagerAdmitsMediumAndXHighOnlyWhenTheWideSwitchIsOn (six subtests)."
+    },
+    {
+     "command": "go test ./internal/api/... (in apps/Ingestion Plane/integration-corev2), first run",
+     "outcome": "FAIL: TestSyncJobRouteClassesEnforcePersonalConnectionOwnership/get_rejects_a_cross-user_bearer, app.Test timeout 1000ms. Not rerun in isolation; no api file touched."
+    },
+    {
+     "command": "gofmt comparison with CR stripped, on manager.go, manager_test.go and direct_request_test.go",
+     "outcome": "clean"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 effort.rs (no write)",
+     "outcome": "5 hunks, equal to the 5 pre-existing hunks at HEAD; none in the new lines."
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib effort, first with the switch off, then with INFERENCE_CORE_CODEX_WIDE_EFFORT=true, then the full --lib run",
+     "outcome": "started in the background; results not read when this report was written. NOT confirmed."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit internal/config/config.go (Config struct, after the CodexSubscriptionQueueTimeout field, about line 120): CodexSubscriptionWideReasoningEffort bool",
+    "shared-edit internal/config/config.go (Config literal in the loader, after the CodexSubscriptionQueueTimeout entry, about line 364): CodexSubscriptionWideReasoningEffort: codexKnobs.wideReasoningEffort,",
+    "shared-edit internal/config/config.go (codexSubscriptionKnobs struct, before unparsed []string, about line 977): wideReasoningEffort bool",
+    "shared-edit internal/config/config.go (loadCodexSubscriptionKnobs, before return knobs, about line 989): knobs.wideReasoningEffort = strings.TrimSpace(os.Getenv(\"CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT\")) == \"true\"   (do not use strictEnvBool here: it uses ParseBool, which would switch on for \"1\")",
+    "shared-edit cmd/api/main.go (codexsubscription.Config literal, after the QueueTimeout line, about line 111): WideReasoningEffort: cfg.CodexSubscriptionWideReasoningEffort,",
+    "After the shared edits, check gofmt on config.go and main.go with CR stripped, since both files are CRLF.",
+    "Keep both switches off in every deploy until the owner decides Q7. The defaults in code are off, so the byte-identical check holds without any compose change.",
+    "If the owner enables it: deploy the broker first with CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT=true, then inference-core with INFERENCE_CORE_CODEX_WIDE_EFFORT=true. The reverse order gives a broker 400 on every medium or xhigh call. Set these in the compose or service environment only, never in integration-corev2/.env.",
+    "Live proof (lead-run, not done here): after the broker rebuild the broker log shows medium and xhigh; one Codex invoke each at medium and xhigh succeeds; with both switches off, medium and xhigh are rejected with the unchanged message.",
+    "Rerun in isolation, because the first runs overlapped with a heavy cargo build: go test ./internal/api/... and TestAppServerUsageLimitWithoutAReadableResetIsUnknown in internal/codexsubscription.",
+    "Read the three Rust logs listed in notes (switch off, switch on, full --lib) and record any failure in a file this slice did not touch.",
+    "Delete the scratch file C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\effort_head_copy.rs (a git show copy of HEAD effort.rs used only for the rustfmt comparison).",
+    "Commit (lead). Suggested subject: feat(codex-broker): medium and xhigh behind default-off switches (WS11-S9). Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>"
+   ],
+   "deviations": [
+    "Did not edit the existing TestDirectEffortMapping; added TestDirectWideEffortReachesTheUpstreamOnlyWhenOn beside it so the existing default expectations stay untouched.",
+    "Rewrote the Rust test clamp_picks_nearest_weaker to use the broker pair constant, and renamed every_codex_model_is_the_broker_pair to every_codex_model_is_the_broker_ladder, which reads the same switch; both no longer depend on the process environment being unset.",
+    "The plan row's flag field is empty; the switch names chosen are INFERENCE_CORE_CODEX_WIDE_EFFORT (Model Plane, read inside effort.rs) and CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT (broker, to be wired through config.go and cmd/api/main.go).",
+    "The broker reads no environment variables inside the codexsubscription package, so the switch is a Config field rather than an env read in manager.go."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\config\\config.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\cmd\\api\\main.go"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edits are still undone: internal/config/config.go and cmd/api/main.go must read CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT with a literal == \"true\" check and pass it into codexsubscription.Config.WideReasoningEffort. Until then the broker switch cannot be turned on, although it is safely off.",
+     "Q7 owner decision (DEC-36 defaults to defer). Keep both switches off in every deploy until the owner decides.",
+     "Live proof (lead, docker): rebuild the broker. With the switches off, medium and xhigh must be rejected with the unchanged message. With the broker switch on, then INFERENCE_CORE_CODEX_WIDE_EFFORT=true, one Codex invoke each at medium and xhigh must succeed. Deploy order is broker first.",
+     "Commit attribution: effort.rs also holds another slice's uncommitted cap_legacy_budget hunk, which fallback.rs uses. The lead must stage hunks per slice."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Q7 gate stays open: DEC-36 Q7 defaults to defer, while the owner order of 2026-10-26 builds the slice behind default-off switches; the owner must decide whether either switch goes on anywhere."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Deploy-order hazard: with INFERENCE_CORE_CODEX_WIDE_EFFORT=true and the broker switch off, every medium or xhigh Codex call receives a broker 400, and no capability handshake exists between the two planes."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The wide Codex levels are hard-coded in effort.rs (CODEX_WIDE_LEVELS) and accepted in manager.go (acceptsReasoningEffort) with no cross-service contract test, although CLAUDE.md asks that cross-service constants be runtime-asserted and mutation-tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The Codex catalogue still lists no effort levels (codex_subscription.rs list_models sets effort_levels to an empty vector at line 928), so the S6 composer cannot offer Maksimal or xhigh for Codex even with the switch on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Upstream acceptance of xhigh is unverified for each Codex model; the per-model Codex ladder is not determined, and the wide row applies to every Codex model."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Money and latency: medium and xhigh raise subscription token use and turn time, the broker default invocation timeout is 90 seconds and may cut xhigh turns, and none of this is measured."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The repo's strictEnvBool in config.go accepts ParseBool forms such as 1 and t, so the broker switch must be read with a literal comparison to true, as the shared-edit line specifies."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the config.go env read for CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT, because config.go is not an owned file, so the wiring stays untested until the lead applies it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Tests in codex_subscription.rs that route through effort::support(Family::Codex) read the Model Plane switch from the process environment and were not run with the switch on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestDirectBodyGoldenRoles (direct_request_test.go) fails on a pre-existing golden mismatch: the golden holds prompt_cache_key fixture-cache-key, while the test derives 2ad1f628-55f4-5653-bec6-98dde709bff6; it calls requestBody directly, bypassing the Manager, and the golden file is unmodified in git."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestAppServerUsageLimitWithoutAReadableResetIsUnknown (appserver_failure_test.go, not touched) failed its timing bound with a read not bounded at 36.7 seconds while cargo ran in parallel; it needs an isolated rerun."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "internal/api TestSyncJobRouteClassesEnforcePersonalConnectionOwnership/get_rejects_a_cross-user_bearer hit a 1000 ms app.Test timeout in one run; internal/api is untouched by this slice and needs an isolated rerun."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "No ledger entry records the Q7 switch decision, because apps/Model Plane/docs/decisions/ledger.md is not an owned file; the lead should add one when the owner decides."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "effort.rs already had 5 rustfmt hunks at HEAD outside this slice; the new lines are rustfmt-clean."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "All owned Go and Rust files are CRLF, so gofmt and rustfmt report line-ending noise; the Go check compared CR-stripped text."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "With INFERENCE_CORE_CODEX_WIDE_EFFORT=true, codex_subscription.rs every_level_clamps_into_low_or_high fails (Medium maps to \"medium\", the test expects \"low\"). The test is in a file this slice does not own, so it must be made switch-aware before the switch can go on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Q7 gate stays open: DEC-36 Q7 defaults to defer, and both switches (CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT and INFERENCE_CORE_CODEX_WIDE_EFFORT) default off and wait for the owner's decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Deploy-order hazard: if the Model Plane switch is on and the broker switch is off, every medium or xhigh Codex call fails with a broker 400. The two planes have no capability handshake."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No cross-service contract test ties CODEX_WIDE_LEVELS in effort.rs to acceptsReasoningEffort in manager.go."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The broker env wiring (config.go and cmd/api/main.go, shared edits in the implementer's lead_todo) is not applied. Once applied it needs a test that only the literal \"true\" enables it, not ParseBool forms such as \"1\"."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Whether upstream Codex accepts xhigh is unverified for each model, yet the wide row applies to every Codex model."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Money and latency: medium and xhigh increase subscription token use. The broker's default 90-second invocation timeout may cut xhigh turns, and none of this is measured."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestDirectBodyGoldenRoles fails before this slice: the golden expects prompt_cache_key \"fixture-cache-key\" while the test passes the derived UUID key. It is outside this slice, but the plan's test command stays red until it is fixed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Codex catalogue (codex_subscription.rs list_models) still advertises empty effort_levels, so the UI cannot offer medium or xhigh even with the switches on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "effort.rs carries another slice's uncommitted cap_legacy_budget hunk next to this slice's changes, so commits need per-hunk staging."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "go test ./internal/codexsubscription/... (integration-corev2)",
+      "outcome": "FAIL: only TestDirectBodyGoldenRoles fails. The golden file testdata/direct_body_roles.golden.json expects prompt_cache_key \"fixture-cache-key\", but the test passes promptCacheKey(request.ConnectionID, request.Model), which returns a UUID. Pre-existing: the golden is unmodified and HEAD's test has the identical requestBody call. TestAppServerUsageLimitWithoutAReadableResetIsUnknown failed once in the implementer's run and passed in all three of mine (flaky, not this slice).",
+      "passed": false
+     },
+     {
+      "command": "go test ./internal/codexsubscription/ -run (the slice's tests plus the usage-limit tests) -v",
+      "outcome": "PASS: TestDirectEffortMapping, TestDirectWideEffortReachesTheUpstreamOnlyWhenOn, TestManagerRejectsUnsupportedReasoningEffort, TestManagerAdmitsMediumAndXHighOnlyWhenTheWideSwitchIsOn, TestManagerRejectsUnsupportedServiceTier, and the three TestAppServerUsageLimit tests.",
+      "passed": true
+     },
+     {
+      "command": "go test ./internal/api/...",
+      "outcome": "ok (81s). The timeout the implementer saw on TestSyncJobRouteClassesEnforcePersonalConnectionOwnership did not reproduce.",
+      "passed": true
+     },
+     {
+      "command": "go vet ./internal/codexsubscription/... ./internal/api/...",
+      "outcome": "exit 0, no output",
+      "passed": true
+     },
+     {
+      "command": "CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib effort (switch off, then INFERENCE_CORE_CODEX_WIDE_EFFORT=true)",
+      "outcome": "45 passed, 0 failed in each mode",
+      "passed": true
+     },
+     {
+      "command": "CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib (full, which also compiles the crate)",
+      "outcome": "528 passed, 0 failed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money"
+   ],
+   "notes": "Built WS11-S9 behind two default-off switches. Broker: codexsubscription.Config.WideReasoningEffort (manager.go) admits medium and xhigh; with it off the rejection text is byte-identical to before (\"reasoningEffort must be low or high\"). Model Plane: effort.rs reads INFERENCE_CORE_CODEX_WIDE_EFFORT (literal true only); a wide Codex row ([low, medium, high, xhigh]) precedes the broker pair row and matches only while the switch is on, so with it off the row stays [low, high]. The broker switch is not read from the environment inside owned files, so it needs the shared edits in lead_todo. The Q7 gate is left open as the owner order requires. Status is partial: Go code and new Go tests pass; the Rust effort tests and full inference-core --lib run were started in the background and are not confirmed; internal/api was not rerun in isolation. Logs: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\cargo_effort_off.log, ...\\scratchpad\\cargo_effort_on.log, ...\\scratchpad\\cargo_lib_off.log and ...\\scratchpad\\ws11s9_go_test.log (same scratchpad folder). db_tests_written: none."
+  }
+ ]
+}

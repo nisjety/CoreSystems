@@ -1,0 +1,15 @@
+--- browser_session.rs	
++++ browser_session.rs	
+@@ -12,9 +12,10 @@
+ //! org-core itself: org-core's resolve scope is held by the browser-broker principal alone, so the
+ //! refusal the broker returns is the only site answer this loop sees.
+ 
+-use std::collections::HashSet;
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Mutex, OnceLock, PoisonError};
+-use std::time::Duration;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use mp_contracts::model_plane::v1::{
+     browser_broker_client::BrowserBrokerClient, orchestration_event, AcquireGrantRequest,

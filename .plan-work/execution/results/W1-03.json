@@ -1,0 +1,997 @@
+{
+ "batchId": "W1-03",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS01-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/zdr.rs",
+    "apps/Model Plane/rust/services/inference-core/src/config.rs",
+    "apps/Model Plane/rust/services/inference-core/src/metrics.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "apps/Model Plane/scripts/release-artifact.sh",
+    "apps/Model Plane/scripts/zdr-attestation-check.sh",
+    "apps/Model Plane/scripts/tests/release-runtime-partition-test.sh",
+    "apps/Model Plane/scripts/tests/release-contract-test.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib (CARGO_INCREMENTAL=0)",
+     "outcome": "487 passed, 0 failed (includes the new zdr.rs resolve_lenient tests, lapsed_attestation_refuses_zdr_but_boots, the openai.rs and anthropic.rs review_by_passes_while_running_stops_granting tests, and the metrics gauge test)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --test zdr_refusal_inventory --test connection_zdr_capabilities_contract --test fallback_test",
+     "outcome": "11, 14 and 1 tests passed"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/release-runtime-partition-test.sh and release-contract-test.sh",
+     "outcome": "NOT RUN to completion: both stop on Windows because the snapshot step needs O_NOFOLLOW, which Windows Python lacks. With a copy-only python3 shim the partition test ran a very long time and never finished. Only bash -n syntax checks were run on the edited tests."
+    },
+    {
+     "command": "scratchpad harness (outside the repo) that loads the new gate functions from release-artifact.sh and replays the ZDR cases of the partition test",
+     "outcome": "23 of 23 cases ok: OpenAI and Claude accept; boolean without attestation, forged or edited digest, lapsed, not yet effective, impossible date, review-by not after effective, wrong retention path, missing Anthropic endpoint/region/deployments, http endpoint and a bad boolean are rejected; the days-left report and the lapsed refusal of the operator check work"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "71 passed, 25 failed, all in files I did not touch (CR line endings on the zdr-refusals golden, missing Quarry and Data Plane vendored copies, pin mismatches). The failures were not compared against HEAD."
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/release-input-security-test.sh",
+     "outcome": "not run (same Windows O_NOFOLLOW limit); I changed no code it covers"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/ZDR.md: in Step 1 (`### Step 1: attest the Azure OpenAI path`), replace the whole paragraph that starts `**Known gap in the release gate.**` and ends `This is a follow-up, not part of this document's task.` with: `**Release gate.** `scripts/release-artifact.sh` (`validate_runtime_public_policy_files`) treats a ZDR claim as the legacy boolean set to true or any `AZURE_OPENAI_ZDR_*` / `AZURE_ANTHROPIC_ZDR_*` evidence field with a value. A claim is accepted only with passed compatibility gates, `ZDR_RETENTION_PATH=zdr-provider-route-attested`, the signed route variables (Azure OpenAI: endpoint, API version, region, chat and embedding deployments, provider order starting with azure, matching residency, no legacy aliases; Azure Anthropic: endpoint, region, deployments) and an attestation that is complete, has real dates, whose digest is recomputed from the five fields, and that is in force today. The provider API key must be in the secret runtime file. Check a policy before signing it with `bash \"apps/Model Plane/scripts/zdr-attestation-check.sh\" <runtime-public-policy.env>`; it prints the days left before each review-by date.`",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in Step 1 directly after the sentence ending `a per-turn ZDR chat succeeds.` add: `A lapsed attestation does not stop inference-core (DEC-33 D6): when `_ZDR_REVIEW_BY` has passed, or `_ZDR_EFFECTIVE_DATE` has not arrived, the surface boots without ZDR, ZDR turns refuse with the typed `zdr_unavailable`, `/api/v1/models` lacks the `zdr` feature on it, an ERROR is logged and `mp_inference_zdr_attestation_review_by_timestamp_seconds{surface}` keeps reporting the review-by day. A running process re-checks the date each time it advertises capabilities, so an attestation stops granting the day after its review-by date without a restart. An incomplete or mistyped attestation, a digest mismatch and `*_ZDR_CONFIRMED=true` with no evidence still abort boot.`",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in Step 2 (Anthropic) after the sentence ending `through the release path), for whoever holds an Anthropic ZDR agreement.` add: `The release gate now checks this surface too: it needs `AZURE_ANTHROPIC_ENDPOINT`, `AZURE_ANTHROPIC_REGION` and `AZURE_ANTHROPIC_DEPLOYMENTS` in the signed public policy and `AZURE_ANTHROPIC_API_KEY` in the secret runtime file.`",
+    "shared-edit CP/observability/rules (whichever of WS01-S1 / WS06-S0 creates it) alert group `zdr-attestation`: `ZdrAttestationReviewDue` warning with expr `min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() < 14 * 86400 and min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() >= 3 * 86400`; `ZdrAttestationReviewDue` critical with expr `min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() < 3 * 86400 and min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() >= -86400`; `ZdrAttestationLapsed` critical with expr `time() - min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) > 86400`. Needs a Prometheus job for inference-core :8082 and promtool firing and quiet tests.",
+    "Run on Linux or CI: `bash \"apps/Model Plane/scripts/tests/release-runtime-partition-test.sh\"`, `release-contract-test.sh`, `release-input-security-test.sh`, then `cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p inference-core --all-targets` (this host only ran --lib and three integration targets), then `bash scripts/tests/zdr-contract-sync.test.sh` and compare its failing set with HEAD (25 failures here are in files S5 did not touch).",
+    "Rebuild inference-core and run the lapsed-attestation boot proof described in depth_findings; then wire the alerts."
+   ],
+   "deviations": [
+    "Alerts ZdrAttestationReviewDue and ZdrAttestationLapsed are not written. No rules file is among my owned files, and WS01-S1 / WS06-S0 own `CP/observability/rules/`. The rule text is in lead_todo.",
+    "`MP/docs/ZDR.md` is a shared file, so its edit is handed back in lead_todo.",
+    "The plan names `resolve_lenient` returning `Ok(None)` plus a typed `NotInForce`. I return an enum `ZdrResolution` whose `NotInForce` variant carries the typed reason and the evidence-verified attestation, so the log and the gauge can still report the lapsed review-by date. `into_in_force()` gives the Option the config stores.",
+    "The release gate also refuses a lapsed or not-yet-effective attestation at build time, although the running service only stops granting ZDR. A candidate must not ship an already out-of-date claim. The gate has no clock override, so `--today` exists only on the operator subcommand.",
+    "The release gate now treats attestation fields with the boolean false as a ZDR claim, because inference-core grants ZDR from the attestation alone. This goes beyond the row's 'any field set or CONFIRMED true' only in making that explicit for the route and gates checks."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run release-runtime-partition-test.sh, release-contract-test.sh and release-input-security-test.sh on Linux or CI. They cannot run on Windows (O_NOFOLLOW), so the new gate cases (attestation block, Anthropic route, operator check) are not proven end to end.",
+     "Run bash scripts/tests/zdr-contract-sync.test.sh and compare its failing set with HEAD. The implementer reported 25 failures in files S5 did not touch; I did not compare them.",
+     "Docker boot proof of the plan's DoD: boot inference-core with a lapsed attestation and show the ERROR line in docker logs. Then show that /api/v1/models lacks the zdr feature, that a ZDR turn gets typed zdr_unavailable, and that the gauge appears on :8082/metrics.",
+     "Shared edits for the lead: the three apps/Model Plane/docs/ZDR.md edits (drop the 'known gap' paragraph, the lapse behaviour, the Anthropic gate) and the zdr-attestation alert group. The edit lines are in the implementer's lead_todo. The alert rules need a promtool firing and quiet test, and an inference-core :8082 scrape job, in whichever of WS01-S1 or WS06-S0 creates CP/observability/rules.",
+     "The plan DoD calls for ZdrAttestationReviewDue and ZdrAttestationLapsed alerts. They are not written. This is a handoff, not a defect, because no rules file is in S5's ownership set."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "release-runtime-partition-test.sh, release-contract-test.sh and release-input-security-test.sh were not run: Windows Python lacks O_NOFOLLOW, and even with a copy shim the walk of config-policy keys is too slow to finish. Run all three on Linux or CI before relying on the gate changes. The new fixtures (attestation block with computed digest; 6 ZDR keys plus the Anthropic keys in the test config policy) were only checked through a function-level harness."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Add the alerts. ZdrAttestationReviewDue: warn when `min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() < 14*86400`, critical when `< 3*86400`. ZdrAttestationLapsed: `time() - mp_inference_zdr_attestation_review_by_timestamp_seconds > 86400`. The gauge is the start of the review-by UTC day, and the attestation stops granting after that day. Put them in the rules file whichever of WS01-S1 and WS06-S0 creates `observability/rules/`, with promtool firing and quiet cases, and add the inference-core :8082 scrape if absent."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Boot proof: run inference-core with a lapsed attestation (review-by in the past, digest recomputed) and show via `docker logs` the ERROR line, that the service boots, that `/api/v1/models` lacks the `zdr` feature, and that a ZDR turn gets typed `zdr_unavailable`. Then show the gauge on :8082/metrics."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A not-yet-effective attestation boots as no ZDR and stays that way until restart, because the held attestation is dropped to None. An in-force attestation that lapses while running stops granting, but one that becomes effective later does not start granting. This is the strictly safer direction and matches DEC-33 D6."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Anthropic gate does not require provider-order or region==residency checks like the OpenAI branch, because the plan row lists only ENDPOINT/REGION/DEPLOYMENTS plus the key. Whether Foundry Claude needs the same route constraints is an owner call before S13 pass 2."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No automated test covers the boot-level `resolve_zdr` path in config.rs (env read, log, gauge). The pure classification is tested in zdr.rs, and the gauge render and the running-lapse capability check are tested in metrics.rs, openai.rs and anthropic.rs. An env-based test needs set_var and so serial execution."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "`ZdrAttestation::resolve` (strict) and `from_env` are no longer used by production code, only by tests and as public API. Remove them once nothing else needs strict boot behaviour."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "release-artifact.sh rollback artifacts carry their own older copy of the script, so the new gate applies only to candidates built with this script. An older rollback artifact whose policy has CONFIRMED=true with no attestation is unaffected here but would already fail inference-core boot."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The three release-*.sh tests were not run by the implementer or by me, because Windows Python has no O_NOFOLLOW. The release gate edits (validate_runtime_public_policy_files, validate_runtime_config, new check-zdr-attestation) are therefore proven only by function-level runs plus my direct run of the operator check. Run them on Linux or CI before relying on the gate."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The plan DoD, a dev-stack boot with a lapsed attestation (docker logs ERROR, /api/v1/models without the zdr feature, typed zdr_unavailable), is not done. It needs docker, so the lead closes it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "ZdrAttestationReviewDue (warn under 14 days, critical under 3) and ZdrAttestationLapsed alerts, plus an inference-core :8082 scrape job and promtool tests, are not written. Without them a lapse is visible only in logs and the gauge, so write them before relying on the lifecycle."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "capabilities() now reads the real clock through in_force_now. Fixtures in anthropic.rs (zdr_capability_tests, review_by 2027-06-01) and grpc/real_rules_tests.rs (review_by 2027-06-01) will start failing after 2027-06-01, because their attestations will no longer be in force and ZDR capability will disappear. Move those fixture dates far out, for example 2099, to avoid a time-bomb test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A NotYetEffective attestation is dropped to None at boot, so it never starts granting ZDR once its effective date arrives unless the process restarts. This is the safe direction. Document it in ZDR.md."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Anthropic gate checks only ENDPOINT, REGION, DEPLOYMENTS and the key, not provider order or residency as the OpenAI branch does. The plan row lists only those fields, but the owner should decide before S13 pass 2 whether Foundry Claude needs the same route constraints."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers config.rs resolve_zdr end to end (env read, ERROR log, gauge set). The pure classify, the gauge render and the in_force_now capability checks are tested separately."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ZdrAttestation::resolve (strict) and from_env are now used only by tests. Remove them when nothing needs strict boot behaviour. The canonical_digest doc comment in zdr.rs still says four fields, but it hashes five."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "validate_zdr_attestation says 'lapsed on <review_by>' although the attestation is still valid through that day. Say 'lapsed after' to match the gauge semantics."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Rollback artifacts carry their own older release-artifact.sh, so the new gate applies only to candidates built with this script."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "Built to the plan row, except that the two release tests and release-input-security could not run on this host, so the status is partial. inference-core: the attestation is split into evidence checks and an in-force window. New `ZdrAttestation::in_force(today)`, `in_force_now()` and `resolve_lenient()`. `resolve_lenient` returns `ZdrResolution::{Absent, InForce, NotInForce}`. A lapsed or not-yet-effective attestation boots and refuses ZDR, with an ERROR log that names the date. Incomplete fields, a digest mismatch, a field with a newline and a legacy boolean with no evidence stay fatal. The strict `validate`, `from_env` and `resolve` keep their behaviour, and their existing tests pass unchanged. `config.rs` now calls `resolve_lenient`, sets the gauge `mp_inference_zdr_attestation_review_by_timestamp_seconds{surface=azure_openai|azure_anthropic}` and logs. The gauge value is Unix seconds at 00:00 UTC of the review-by day, and it is reported even for a lapsed attestation. The openai and anthropic providers advertise `supports_zdr` through `in_force_now`, so a running process stops granting ZDR the day after its review-by date. No new `InferenceConfig` field, because test literals across files I do not own set the existing fields. Release gate in `release-artifact.sh`: any non-empty `*_ZDR_*` field, or `CONFIRMED=true`, now counts as a ZDR claim for Azure OpenAI and for Azure Anthropic. A claim needs passed gates, `zdr-provider-route-attested`, the full route (the existing OpenAI checks; ENDPOINT, REGION and DEPLOYMENTS for Anthropic, with an https endpoint) and an attestation that is complete, whose dates are real, whose digest is recomputed, and that is in force today. The runtime-config check requires the provider API key for either surface. The check lives inside `release-artifact.sh` because the signed artifact carries only that script and compose.sh. New subcommand `check-zdr-attestation <policy> [--today D]`. The new `scripts/zdr-attestation-check.sh` is a thin wrapper around it and prints the days left. Behaviour change: a public policy with `AZURE_OPENAI_ZDR_CONFIRMED=true` and no attestation is now rejected at build, matching the runtime boot failure. The partition-test ZDR fixtures were updated to carry a real attestation, and the tests gained the cases above."
+  },
+  {
+   "id": "WS01-S10",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/scripts/rollback-rehearsal.sh",
+    "apps/Model Plane/scripts/tests/rollback-rehearsal-test.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "bash 'apps/Model Plane/scripts/tests/rollback-rehearsal-test.sh'",
+     "outcome": "passed: 'rollback-rehearsal test: ok' (about 30-60 s on Windows Git Bash; stub docker and stub artifact runners, no daemon)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit docs/compliance/evidence/rollback-rehearsal-<date>.txt: not written by this slice. The script produces it in the S12 real run: `MODEL_PLANE_ARTIFACT_VERIFY_KEY=... MODEL_PLANE_RUNTIME_ENV_FILE=... MODEL_PLANE_ROLLBACK_RUNTIME_ENV_FILE=... bash 'apps/Model Plane/scripts/rollback-rehearsal.sh' --no-build <candidate-dir> <rollback-dir>`, on a host or window where the `model-plane` compose project is stopped. Commit the file it writes.",
+    "Optional documented dry run (no Docker): `bash 'apps/Model Plane/scripts/rollback-rehearsal.sh' --dry-run <candidate-dir> <rollback-dir>` once S12 artifacts exist.",
+    "Run `bash 'apps/Model Plane/scripts/tests/rollback-rehearsal-test.sh'` in the S11 ops-gates workflow (release-gates job) next to migration-expand-contract-test.sh."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "docs/compliance/evidence/rollback-rehearsal-<date>.txt is produced only by the S12 real run (needs docker, signing/verify key, a stopped model-plane stack); the lead must run it and commit the file.",
+     "Documented dry run against real S12 artifacts is not yet possible (artifacts do not exist yet).",
+     "No live proof that rollback session-core boots over the candidate-migrated database in a disposable Postgres."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The real run against Docker is unproven. Whether the rollback session-core image reaches the 'migrations applied' log line with the rollback artifact's runtime-public-policy.env plus the runtime env file via `docker run --env-file` depends on JWKS reachability from a plain bridge network, because auth::JwtVerifier::from_env runs before run_migrations in main.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "`docker run --env-file` and Compose dotenv parse quoting differently. If runtime-public-policy.env or the runtime env file carries quoted values, session-core may boot with wrong config. Check this on the first live run and, if it bites, render the env through `release-artifact.sh compose` instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The baseline (rollback) artifact is built in non-release mode, but `release-artifact.sh compose ... config` and `deploy` force release-mode verification (compose_artifact). The `compose <rollback> config` step may fail on a non-release baseline. The script records it as a failed step rather than skipping it, so S12 decides whether to sign the baseline in release mode."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no built-in synthetic seed. --seed-sql takes a file and the default is no seed, because table shapes belong to the migrations; add a committed fixture seed (threads, runs, outbox rows) once a real run shows which tables matter."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The strict-baseline check keys off the sqlx error text 'previously applied but is missing'; if the sqlx version changes its wording the strict phase reports exited-other. The DB test older_migrator_boots_only_with_ignore_missing guards the behaviour but not this string."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A --source-container dump assumes the compose defaults (user postgres, database session_core, local-socket trust); capability-core, cost-core and letta-bridge schemas are not rehearsed, only session-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`--start-stack` leaves the rollback stack running on the fixed `model-plane` project and the script has no teardown, because release-artifact.sh exposes no down command. The operator must stop it, and it can collide with the dev stack on the same host."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The real run against Docker is unproven. Whether the rollback session-core reaches the 'migrations applied' log line over a plain bridge network with `docker run --env-file` (JWKS/auth init runs before run_migrations) is only provable in the S12 run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "`docker run --env-file` does not strip quotes the way Compose dotenv does; if runtime-public-policy.env or the runtime env file carries quoted values, the strict/ignore boots may see wrong config. Check on the first live run and, if it bites, render the env through `release-artifact.sh compose`."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The rollback artifact is built non-release but `release-artifact.sh compose ... config` and `deploy` may force release-mode verification, so the 'compose <rollback> config' step may fail on a non-release baseline; the script records it as a failed step, so S12 must decide whether to sign the baseline in release mode."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No committed synthetic seed exists (--seed-sql takes a file, default none), so the 'schema-only dump plus synthetic seed' deliverable is only a hook until a fixture seed is committed; the test never exercises the --seed-sql or --source-container/--full-copy paths."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The strict-baseline check depends on the sqlx wording 'previously applied but is missing'; the stub test echoes that string itself, so a sqlx wording change would surface only as exited-other in the live run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "--start-stack leaves the rollback stack running under the fixed `model-plane` project with no teardown; it collides with a dev stack on the same host and the operator must stop it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The test file must be wired into the S11 ops-gates workflow (release-gates job) next to migration-expand-contract-test.sh; it takes about 75 s on Windows Git Bash."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Only the session-core schema is rehearsed; capability-core, cost-core and letta-bridge migrations are not, and --source-container assumes compose defaults (user postgres, database session_core)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Test line 171 (`grep -q \"docker network rm\" \"$CALLS\" || true`) asserts nothing; and the failed-verify flow does not assert cleanup ran."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss"
+   ],
+   "notes": "The new scripts/rollback-rehearsal.sh takes <candidate-artifact> <rollback-artifact>. Its guards run before any Docker call and do not depend on --dry-run. They refuse MODEL_PLANE_PRODUCTION=1, the same artifact twice, a malformed --date, an existing evidence file, --full-copy without --source-container or against a remote DOCKER_HOST, --start-stack without --no-build, and any artifact whose own configuration carries SESSION_CORE_MIGRATION_IGNORE_MISSING. It also refuses a contract migration with no revert file, and a running `model-plane` compose project, which has to be a second host or a stopped dev stack. --dry-run reads the two artifact trees, prints the migration plan and where the evidence would go, and neither verifies signatures nor calls Docker.\n\nA real run goes in this order:\n1. It verifies and restores both artifacts through their own release-artifact.sh. The candidate is verified in release mode; the rollback is verified as a plain signed artifact, because the baseline is built in non-release mode.\n2. It starts a disposable Postgres from the candidate's POSTGRES_RELEASE_IMAGE, on a private network with data on tmpfs and no published port. The password is generated at run time into a 0600 temp env file and never echoed.\n3. It builds the candidate schema from the candidate's own session-core migrations, or from a schema-only dump of --source-container (--full-copy copies the rows as well, local daemon only). --seed-sql adds synthetic rows. Each migration it applies is recorded in `_sqlx_migrations` with sqlx's checksum (SHA-384 of the file) and description.\n4. It runs the rollback artifact's session-core image against that database. The strict boot must refuse with \"previously applied but is missing\" when the candidate has migrations the rollback lacks, and must boot when the sets are equal.\n5. For a contract migration the script runs its `revert/*.down.sql` newest first and deletes its `_sqlx_migrations` row, then expects a strict boot. For additive-only extras it expects a boot with the switch set. Only that one container gets `SESSION_CORE_MIGRATION_IGNORE_MISSING=true`, as a literal `-e` argument. The test asserts the strict run does not carry it and that exactly one container does.\n6. It runs `compose <rollback> config`, optionally `deploy` of the rollback artifact (needs --no-build and --start-stack, and leaves the stack running), and `validate-deployability` of the candidate.\n7. It writes `docs/compliance/evidence/rollback-rehearsal-<date>.txt` (or --evidence-file) with names, revisions, manifest hashes, versions, counts and pass/fail only. The evidence file is also written when a run fails.\n\nThe test file sources the script, which has a main guard, for the pure helpers (`rollback_plan`, `sqlx_description`, `sqlx_checksum_hex`). It then runs the CLI against fixture artifact trees and a stub docker. Flows covered: additive extra with the switch, contract extra with scripted revert and no switch, equal sets booting strict, a strict boot that wrongly succeeds, a failing verify, and --start-stack.\n\nBoth files are LF, new and untracked. The slice owns no other file. No source revision, key or runtime value is read into any output."
+  },
+  {
+   "id": "WS12-S11",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/gates/size-ratchet.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/gates/baselines/file-size.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/test_size_ratchet.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/repo-gates.yml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/model-plane-rust-ci.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 -m unittest scripts/tests/test_size_ratchet.py (worktree root, after the final edits)",
+     "outcome": "Ran 15 tests, OK"
+    },
+    {
+     "command": "python3 scripts/gates/size-ratchet.py --init --ref HEAD",
+     "outcome": "baseline written from the committed tree at 2b2b6e906: 46 files over the 3,000-line cap, 46 ceilings"
+    },
+    {
+     "command": "python3 scripts/gates/size-ratchet.py --check --ref HEAD --base-ref origin/fix/ui-premium-restore",
+     "outcome": "exit 0; the base has no size baseline yet, so it is not compared (note printed); size ratchet ok: 46 files over the cap, 46 ceilings"
+    },
+    {
+     "command": "python3 scripts/gates/size-ratchet.py --check (working tree of this dirty worktree)",
+     "outcome": "not completed: per-file reads ran at about 170-250 KB/s and it had not finished after about ten minutes, so the process was stopped. Instead the 108 changed in-scope files were checked against the baseline: 7 baselined files exceed their ceilings through uncommitted edits (depth_findings)"
+    },
+    {
+     "command": "parse both workflow files with the yaml package found under rea-agents node_modules (read only)",
+     "outcome": "both parse; repo-gates has jobs buf-lint-ratchet-selftest, log-content, size-ratchet; model-plane-rust-ci has rust, session-core-receipts, clippy-count with if vars.MODEL_PLANE_CLIPPY_RATCHET == 'true'"
+    },
+    {
+     "command": "bash -n on the extracted run scripts of size-ratchet and clippy-count",
+     "outcome": "syntax ok"
+    },
+    {
+     "command": "jq -s clippy-count filter on a 6-line synthetic cargo JSON sample",
+     "outcome": "2, as expected"
+    },
+    {
+     "command": "python3 -m py_compile on size-ratchet.py and test_size_ratchet.py",
+     "outcome": "ok; no unused imports"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the five files: .github/workflows/model-plane-rust-ci.yml and .github/workflows/repo-gates.yml (modified); scripts/gates/size-ratchet.py, scripts/gates/baselines/file-size.json and scripts/tests/test_size_ratchet.py (new). WS12-S11 names no shared-file edits.",
+    "Before committing, settle the seven over-ceiling files in depth finding 1 (extract, or commit only clean hunks). The baseline is HEAD 2b2b6e906 by design, never the dirty tree.",
+    "Re-check the committed state on the integration branch before the first blocking run: python3 scripts/gates/size-ratchet.py --check --ref <integration branch>. If the integration branch's file set differs from HEAD and this is still the first introduction, delete scripts/gates/baselines/file-size.json and run --init --ref <that branch> before committing.",
+    "Push a throwaway branch from the committed tree and record two run URLs as the Appendix B N1 evidence: the size-ratchet step green, and a red proof with one appended line in apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs. Read the step log, since the job is advisory.",
+    "After three advisory runs, remove continue-on-error from the 'size ratchet' step in .github/workflows/repo-gates.yml.",
+    "Owner: keep MODEL_PLANE_CLIPPY_RATCHET unset (off). If the owner enables it, measure one run and set MODEL_PLANE_CLIPPY_WARNING_CEILING from that count; never raise it afterwards.",
+    "Owner (DEC-39 D2): name the maintainer and add CODEOWNERS entries for scripts/gates/ and .github/workflows/repo-gates.yml. The repo has no CODEOWNERS file yet, so no exact line can be given."
+   ],
+   "deviations": [
+    "Generated-code markers: added the OpenAPI Generator banner to the plan's list (@generated, Code generated, DO NOT EDIT). apps/Model Plane/api/sdk/python/model_plane_sdk/api/orchestration_api.py (3,590 lines) carries only that banner; without it a regeneration would need a ceiling raise.",
+    "Added --init (one-time baseline writer) and --ref (count a git ref). The row names only --update; --update lowers ceilings and never raises or adds.",
+    "--base-ref compares the rule constants (CAP, counted suffixes, generated names and markers, excluded directories) read from the base script, not only the baseline ceilings. A baseline-only comparison would let a PR raise CAP or add an excluded directory, which the row's 'a PR cannot relax it' rules out.",
+    "Clippy count ratchet: a separate clippy-count job in model-plane-rust-ci.yml, gated by vars.MODEL_PLANE_CLIPPY_RATCHET == 'true'. Its ceiling is the repo variable MODEL_PLANE_CLIPPY_WARNING_CEILING, not a file, because no clippy baseline file is among this slice's owned files.",
+    "Counted source suffixes (the row names none): .rs .go .ts .tsx .js .jsx .mjs .cjs .py .sh .css .sql. Proto files stay with the buf ratchet."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "CI evidence for Appendix B N1: a green size-ratchet run and a red proof run on a throwaway branch (append one line to apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs).",
+     "Baseline must be re-checked against the integration branch after WS01-S0 lands; --init --ref <branch> if the file set differs from HEAD 2b2b6e906 at first introduction.",
+     "Seven over-ceiling files in the dirty tree must be settled before commit/blocking phase.",
+     "DEC-39 D2 CODEOWNERS entry for scripts/gates/ and repo-gates.yml is not landed.",
+     "Owner decision on MODEL_PLANE_CLIPPY_RATCHET / MODEL_PLANE_CLIPPY_WARNING_CEILING repo variables (D11, off by default)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Seven baselined files already exceed their committed ceilings through uncommitted edits in this worktree: session-core grpc.rs +719, tool_loop.rs +142, e2e_invoke_chain_test.rs +49, spaces.rs +48, sse.rs +44, terminalization.rs +59, use-chat-controller.ts +4. They fail the gate once those hunks are committed unless extracted first; the lead must settle this before the blocking phase."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "There is no reviewed path for a legitimate ceiling raise: --update never raises and the base-ref check flags any raise. The owner must decide whether a deliberate exception exists and how it is recorded; until then hot files can only shrink, which the plan expects to hit WS03/WS04 first."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A moved or renamed baselined file escapes the base comparison: git mv into a gen/ directory or to an uncounted suffix drops the entry with no raise, so the check passes. Closing it needs rename or content matching against the base."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A brand-new hand-written over-cap file can opt out with a DO NOT EDIT or OpenAPI banner in its first 40 lines; only review catches it, and the repo has no CODEOWNERS file yet (DEC-39 D2 not landed)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "CI evidence is pending: a throwaway-branch run URL and a red proof (one appended line in apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs, which sits at its 26026 ceiling). The job is advisory, so the step result, not the job conclusion, carries the proof."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Working-tree mode opens every tracked file separately: about 63 MB in 5,379 files read at roughly 170-250 KB/s on this Windows host, so a local --check of this worktree did not finish in ten minutes. CI on Linux and --ref HEAD are fast; reading index blobs through cat-file would fix the local case."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The clippy ceiling is a repo variable outside git, so it is neither reviewable nor covered by the base-ref check. It is off by default; the owner should measure once, set MODEL_PLANE_CLIPPY_WARNING_CEILING, and only lower it afterwards."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The clippy-count job has not run (no cargo by rule), and its jq filter was tested only on a synthetic sample. The base-ref path is unit-tested in temp repos, not against a real base branch that carries a baseline."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Seven baselined files exceed their committed ceilings through uncommitted edits (session-core grpc.rs, tool_loop.rs, spaces.rs, sse.rs, use-chat-controller.ts, etc.); the lead must extract or commit only clean hunks before the gate is made blocking."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No reviewed path exists for a legitimate ceiling raise (--update never raises and --base-ref flags any raise); the owner must decide how a deliberate exception is recorded before WS03/WS04 hit hot files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A git mv of a baselined file into a gen/ directory or to an uncounted suffix drops its entry without a raise and passes the base comparison; rename detection is not implemented (documented in the script docstring)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A new hand-written over-cap file can opt out with a DO NOT EDIT or OpenAPI banner in its first 40 lines; only review catches it and no CODEOWNERS file exists yet (DEC-39 D2)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "No CI run URLs recorded yet: need a green run and a red proof (one appended line to execution-core runtime_loop/agent.rs, ceiling 26026); the step is continue-on-error so read the step log, and remove continue-on-error after three runs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Working-tree --check opens every tracked file individually and is very slow on this Windows host; reading index blobs via git cat-file would fix the local case (--ref and Linux CI are fast)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The clippy ceiling lives in a repo variable outside git, so it is not reviewable and not covered by the base-ref check; the job is off by default and the clippy-count job and its jq filter have not run against real cargo output."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS12-S11 file-size ratchet is built with every switch off (no runtime switch; the clippy job is skipped unless the repo variable is the literal \"true\"). scripts/gates/size-ratchet.py: --check (default), --update (lowers ceilings only, never raises or adds), --init (once), --ref (count a git ref, never the dirty tree), --base-ref (compares the baseline and the rule constants with the base branch, fails closed on an unknown base). The baseline has 46 entries from committed HEAD 2b2b6e906. Repo-gates gets a size-ratchet job (unit tests blocking; gate advisory via continue-on-error, as log-content). No proto, migration, ZDR surface or DB change. Nothing was committed, staged, pushed or stashed; no cargo, docker or live run. CI run URLs are not recorded yet (Appendix B N1 evidence, lead)."
+  },
+  {
+   "id": "WS09-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.ts",
+    "apps/Frontend Plane/verevonv3/src/app/chunk-recovery.test.ts",
+    "apps/Frontend Plane/verevonv3/src/app/shell/StaleBuildNotice.tsx",
+    "apps/Frontend Plane/verevonv3/src/app/shell/AppShell.tsx",
+    "apps/Frontend Plane/verevonv3/src/index.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/playwright.config.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/chunk-recovery.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run --pool=threads src/app/chunk-recovery.test.ts",
+     "outcome": "17 passed"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads use-chat-controller.resume-replay.test.ts use-chat-controller.snapshot-throttle.test.ts",
+     "outcome": "2 files, 39 tests passed (controller guard registration does not disturb them)"
+    },
+    {
+     "command": "pnpm exec tsc -b (filtered to files of this slice) and pnpm exec eslint on src/app, src/index.tsx, the spec and playwright.config.ts",
+     "outcome": "no diagnostics in this slice's files"
+    },
+    {
+     "command": "pnpm exec playwright test --project=chunk-recovery --list",
+     "outcome": "project resolves, 3 tests listed (not run)"
+    },
+    {
+     "command": "pnpm exec vite build (outDir in %TEMP%, deleted afterwards)",
+     "outcome": "FAILED: Rolldown cannot resolve @verevon/remote-core from RemoteSupportPage.tsx; the workspace package has not been built in this worktree (CI builds it first). Not caused by this slice."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Build the workspace dependency first (pnpm --filter @verevon/remote-core run build), then from apps/Frontend Plane/verevonv3: pnpm exec vite build; pnpm exec vite preview --port 5176 --strictPort; pnpm exec playwright test --project=chunk-recovery. The spec has never been run; confirm the AuthPage chunk filename pattern AuthPage-*.js and that a signed-out /login visit reaches the lazy AuthPage import without a backend.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx: import { registerReloadGuard } from '@/app/chunk-recovery' and in the component body onCleanup(registerReloadGuard(() => attachments().length > 0)), using the signal that holds attachments not yet sent.",
+    "Manual run on the production Docker image (docker buildx build --target production per verevonv3-ci.yml:215-223) with a new build deployed under an open tab, for the DoD evidence.",
+    "Optionally add VITE_CHUNK_RECOVERY_DISABLED?: string to src/vite-env.d.ts (not owned; the access type-checks today through the vite/client index signature)."
+   ],
+   "deviations": [
+    "The row names pending attachments in the controller guard; they live in DashboardComposer.tsx (not owned), so the controller guard covers streaming and composer text only and the attachment guard is handed back as a shared edit.",
+    "Controller guard is registered in the controller body with onCleanup (no onMount exists in that file under Solid 2).",
+    "The Playwright spec trips a real lazy-chunk failure (AuthPage chunk 404 on signed-out /login) instead of using the chat composer, so it needs no backend or sign-in; the dirty-composer case is covered by unit tests only."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead: apply shared-edit apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx: import { registerReloadGuard } from '@/app/chunk-recovery' and add onCleanup(registerReloadGuard(() => attachments().length > 0)) in the component body, using the signal that holds unsent attachments.",
+     "Lead: build @verevon/remote-core, then run pnpm exec vite build, pnpm exec vite preview --port 5176 --strictPort and pnpm exec playwright test --project=chunk-recovery. The spec has never been run. Confirm the AuthPage-*.js chunk filename pattern and that a signed-out /login reaches the lazy AuthPage import without a backend.",
+     "Lead: one manual run on the production Docker image (docker buildx build --target production) with a new build deployed under an open tab, as the row's evidence.",
+     "Optional shared edit: VITE_CHUNK_RECOVERY_DISABLED?: string in src/vite-env.d.ts."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Unsent composer attachments are not guarded until DashboardComposer registers its guard (see lead_todo); until then a stale-build reload can discard them, so keep the slice's behaviour switched on only after that edit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component test of StaleBuildNotice (render, Reload, Dismiss) and no controller-level test that the guard is registered while streaming or text is typed and removed on cleanup."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The Playwright spec and a real deploy-under-open-tab run are unproven: the production build could not be made in this worktree because @verevon/remote-core is not built."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Space composer should call registerReloadGuard too (plan: Space session registers later); the notice shows hard-coded Norwegian and English via i18n.tr and inline styles and could move to a global.css class when that file is in scope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Only the first failure of a given tab reloads; a user who dismisses the notice and keeps working will not be reloaded again until 30 s pass and another chunk fails, which is the intended loop guard but means a long-lived stale tab relies on that failure to retry."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Unsent composer attachments are not guarded until DashboardComposer registers its guard, so a stale-build reload can discard them. Apply that shared edit before relying on the recovery."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The Playwright spec and a real deploy-under-open-tab run are unproven. The spec assumes a signed-out /login reaches the lazy AuthPage import and that its chunk is named AuthPage-*.js."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component test of StaleBuildNotice (render, Reload, Dismiss), and no controller-level test that the guard is registered while streaming or text is typed and removed on cleanup."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Space composer should register its own reload guard later, as the plan notes. The notice uses inline styles and hard-coded copy through i18n.tr, which could move to a global.css class."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "After a dismissed notice, a long-lived stale tab is only retried by a later chunk failure after the 30 s window. This is the intended loop guard."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss"
+   ],
+   "notes": "Built: installChunkRecovery(reload?) listens for vite:preloadError. First failure: records Date.now() under sessionStorage verevon.chunk-reload.v1, preventDefault, reloads. A failure inside 30 s of that mark, a dirty guard, or an unreadable or unwritable sessionStorage shows the notice and leaves the event un-prevented so the failed import still rejects (storage failure means never reload on its own, to rule out loops). registerReloadGuard(fn) returns unregister; a throwing guard counts as dirty. staleBuildNotice is a Solid accessor, with dismissStaleBuildNotice. Switch VITE_CHUNK_RECOVERY_DISABLED: only the literal 'true' disables, default is on, per the plan. StaleBuildNotice (inline styles, since global.css is not owned) is mounted in AppShell; installChunkRecovery() is called in index.tsx before render. The controller registers a guard (streaming or non-empty composer text) with onCleanup. Playwright project chunk-recovery (CHUNK_E2E_BASE_URL default http://localhost:5176, no auth dependency) is excluded from the e2e project. The spec makes the AuthPage-*.js chunk 404 on a signed-out /login visit and asserts exactly 2 main-frame navigations, the notice, the dismiss button, and no reload when the marker is preset. Spec is untested live. vitest in this worktree: the default forks pool times out starting jsdom workers under load; use --pool=threads. AppShell.tsx stays CRLF; the other files are LF."
+  },
+  {
+   "id": "WS05-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/go/services/capability-core/migrations/0017_tool_policies.up.sql",
+    "apps/Model Plane/go/services/capability-core/migrations/0017_tool_policies.down.sql",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine_policy_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/authz/authz_test.go",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "go test ./... (capability-core, GOFLAGS unset)",
+     "outcome": "all packages pass, including policy (engine_policy_test.go: 22 relax/tighten cases, CanRelax, strict flag parser, EvaluateTool off/on/unreadable-store/gate-first), api (tool_policies_test.go: 24 refusal cases that never touch the registry, admin-scope vectors) and authz (new AuthorizeHTTP pins for the tool-policy routes)"
+    },
+    {
+     "command": "go vet ./... and go vet -tags integration ./internal/api ./internal/policy ./internal/authz (capability-core)",
+     "outcome": "clean; the integration test compiles"
+    },
+    {
+     "command": "cargo test -q --manifest-path apps/gateway/Cargo.toml --bins domains::mcp (verevonv3 BFF)",
+     "outcome": "4 passed (org-scope policy needs an admin, personal policy needs no role, member refused on set and revoke with no upstream call, route registration pin)"
+    },
+    {
+     "command": "cargo check -q -p model-gateway --lib",
+     "outcome": "passes with the new proxy routes"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib tool_policy_proxy",
+     "outcome": "NOT RUN: the lib test target does not compile because of 6 errors in files I did not touch (semantic_screening.rs, tool_loop.rs tests: missing field rule_ids on moderation::ScreeningOutcome, plus one E0046), left by another slice editing moderation.rs. No error is reported inside tool_policy_proxy_tests."
+    },
+    {
+     "command": "node scratchpad check_actions.mjs (Vite ssrLoadModule of action-registry.ts and model-eligibility.ts)",
+     "outcome": "17 of 17 checks pass: allow needs the 64-hex digest, ask/never refuse one, forged org/user fields refused, both new actions not model-executable, descriptions carry the ZDR and never-model clauses. This stands in for the vitest cases I added to action-registry.test.ts."
+    },
+    {
+     "command": "node_modules/.bin/vitest run src/shared/actions/action-registry.test.ts",
+     "outcome": "NOT RUN: vitest workers time out starting (60 s, 'Failed to start forks/threads worker') in this worktree on every file, so the new vitest cases in action-registry.test.ts are written but unexecuted"
+    },
+    {
+     "command": "tsc -p tsconfig.app.json --noEmit (verevonv3)",
+     "outcome": "no errors in action-registry.ts or its test; remaining errors are in unrelated files (RemoteSupportPage.tsx) and the known quarry-client ones"
+    },
+    {
+     "command": "pnpm lint; full cargo test --all-targets for apps/gateway",
+     "outcome": "not run (lint is known-dead per the verification notes; I ran only the mcp module tests of the gateway)"
+    }
+   ],
+   "db_tests_written": [
+    "cd 'apps/Model Plane/go/services/capability-core' && go test -tags integration ./internal/api -run 'TestToolPoliciesAgainstPostgres'"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/server/server.go (EvaluatePolicy, the last two statements): replace `result, err := s.policy.EvaluateCapability(ctx, capability, req.RunId, req.AgentId, orgID, req.Scope)` with `result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)` and `return s.policyResponse(req, orgID, capability, policy.Decide(result, binding), binding), nil` with `return s.policyResponse(req, orgID, capability, result, binding), nil`. EvaluateTool already applies Decide and the stored policies. Until this lands nothing consults a stored policy.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: after `pol := policy.New(reg).WithScopeResolver(scopeStore)` (about line 165) add `toolPolicies := api.NewToolPoliciesHandler(pool)` and `pol = pol.WithToolPolicies(toolPolicies, policy.ToolPolicyEnforcedFromLookup(os.Getenv))`; beside the other `Register(protectedMux)` calls (about line 272) add `toolPolicies.Register(protectedMux)`. NewToolPoliciesHandler takes the same *pgxpool.Pool the other handlers take.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (capability-core service environment, next to MCP_TOOL_OBSERVATION_ENABLED): `TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}` with a comment that off means stored policies are ignored.",
+    "shared-edit apps/Model Plane/proto/model_plane/v1/capabilities.proto: the EvaluatePolicyResponse policy_source comment should list tool_policy_never, tool_policy_ask and tool_policy_allow beside risk_level, approval_floor, tool_review and capability_gate (comment only; the Rust verifier compares the string and does not enumerate it).",
+    "optional shared-edit server.go effectiveToolPolicy / ResolveToolBindings: effective_policy still ignores stored policies (policy.EffectivePolicy has no user); the offer filter in execution-core will want the person's policies there once TOOL_POLICY_ENFORCED is on.",
+    "Re-run once the moderation slice's rule_ids breakage in model-gateway is fixed: cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib tool_policy_proxy (4 tests: identifier alphabet, forwarded method/path/body with the caller's bearer, ZDR writes not forwarded, injected ids refused).",
+    "Re-run vitest where workers start: cd 'apps/Frontend Plane/verevonv3' && vitest run src/shared/actions/action-registry.test.ts (three new cases at the end), plus pnpm lint/typecheck/test and cargo test --manifest-path apps/gateway/Cargo.toml --all-targets per the plan's row.",
+    "Rebuild capability-core (migration 0017 applies at boot; check that `\\d tool_policies` exists and `SELECT count(*) FROM capabilities WHERE policy_relaxable` equals the mcp_tool row count), model-gateway and the verevonv3 gateway; then the plan's live proof with TOOL_POLICY_ENFORCED=true: curl via the BFF as admin and as non-admin; three Do runs showing allow, ask pause and never denial with policy_source in the signed evidence; drift of an allowed tool demotes it to ask; audit rows in registry_audit_log (entity_kind tool_policy)."
+   ],
+   "deviations": [
+    "The plan puts pure Decide(cap, binding, policies, userID) in engine.go; the existing Decide(base, binding) signature is pinned by engine_class_test.go (not mine), so I kept it and added DecideWithPolicies(base, capEntry, binding, policies) plus Engine.EvaluateTool, which loads the policies itself and replaces the EvaluateCapability + Decide pair at the single call site in server.go.",
+    "The policy store is not a separate file: ToolPoliciesHandler in internal/api/tool_policies.go implements policy.ToolPolicySource (ActiveToolPolicies), so server and policy packages never import api.",
+    "policy_relaxable is a generated column instead of a column set by S2 code (S2 is already committed and does not set it; a generated column cannot drift).",
+    "The admin-scope shared-vector test lives in the api package (tool_policies_test.go) with the vectors listed; the Rust side of the shared vectors (ownership.rs tests) is not mine, see depth_findings.",
+    "The BFF approve route has no org-admin gate (the plan says org-admin gate on the BFF routes): gating it would lock out the owner of a user-scoped server, which capability-core allows. Org-scope policy writes are gated.",
+    "vitest could not be run (workers do not start in this worktree); the new action-registry.test.ts cases are unexecuted and the same assertions were checked with a Vite ssrLoadModule script instead."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+    "apps/Model Plane/rust/services/model-gateway/src/ownership.rs"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the integration test: cd 'apps/Model Plane/go/services/capability-core' && go test -tags integration ./internal/api -run TestToolPoliciesAgainstPostgres (docker, lead only).",
+     "Apply the lead_todo shared edits (server.go, cmd/main.go, deploy/docker-compose.yml, capabilities.proto comment), then rebuild capability-core, model-gateway and the verevonv3 gateway. Check that migration 0017 applies at boot and that count(policy_relaxable) equals the mcp_tool row count.",
+     "Live proof with TOOL_POLICY_ENFORCED=true: curl through the BFF as admin and as non-admin; three Do runs showing allow, an ask pause and a never denial, with policy_source in the signed evidence; drift demotes an allow to an ask; audit rows with entity_kind tool_policy in registry_audit_log.",
+     "Run the full pnpm lint, typecheck and test gate in the verevonv3 tree where lint works.",
+     "Write the ledger entry and the ownership-matrix row, and add the ZDR golden case and the Rust admin vectors."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "TestToolPoliciesAgainstPostgres (testcontainers Postgres) is written and compiles under -tags integration but was not run (docker is lead-only); it is the first execution of the 0017 migration, the generated policy_relaxable column, the upsert-in-place CTE and the active-key unique index against real SQL, so treat the migration as unproven until it passes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "TOOL_POLICY_ENFORCED cannot be switched on until the server.go and main.go edits in lead_todo land; until then the engine has no caller and the API only stores policies."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Admin scope names (admin, org:admin, *:admin) are the existing verifiedIsAdmin set; whether Control actually mints one of them for org admins is unconfirmed (the plan's own risk), so an org-scope write may be unreachable in a live deployment until checked."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Policy writes need capability:write on a user principal; whether the BFF-minted capability-core token for an ordinary person carries that scope (approveTool already depends on it) must be confirmed before a person can set a personal policy."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Add the same admin-scope vectors as a table in ownership.rs tests (and ideally one shared JSON fixture read by both the Go and Rust tests) so the two admin authorities cannot drift; today only the Go side pins the vectors."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR golden cases tool_policy_write_under_zdr_refused (api/contracts/zdr-posture-matrix.json plus the Rust fixture) and the zdr-contract-sync.test.sh run are not added; the refusal is covered by Go unit tests, the authz pin and the gateway ZDR test only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The ledger entry and the capability-ownership-matrix row for tool_policies (capability-core owns it, DEC-14) are not written; both files are outside this slice's ownership."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A policy is keyed by capability id: for a built-in capability with several tools (cap.command.shell etc.) a never or ask covers all of that capability's tools, and the per-tool granularity the plan implies only exists for MCP tools, whose rows are one tool per capability."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The allow validation reads capability_tools and writes tool_policies in separate statements; a re-approval between them stores an allow with a stale digest, which is safe (the engine demotes a digest mismatch to ask) but a guard on the digest inside setToolPolicySQL would make the 409 exact."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Plan row also asks PolicyDecisionsTotal to carry class and policy_source: done for every evaluation (recordDecision), but the two deny paths inside denyOnScope/denyOnGrant still emit the old attribute set."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No UI consumes tools.set_policy or mcp.approve_tool yet (the plan puts the contracts before any UI); the org-admin gate in the BFF is a defense in depth copy of capability-core's check."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new Go test files are LF while engine.go and authz_test.go are CRLF; action-registry.ts is LF and its test CRLF, each kept as found."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "TestToolPoliciesAgainstPostgres (-tags integration) compiles but needs docker, so it is unrun: migration 0017, the generated policy_relaxable column, the upsert-in-place CTE and the partial unique index have had no real-SQL execution. Confirm in that run that untyped parameters such as $6 and $9 in the INSERT...SELECT list resolve to text."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Nothing consults a stored policy until the lead lands the shared edits: server.go EvaluatePolicy must call EvaluateTool, and cmd/main.go must call NewToolPoliciesHandler, Register and WithToolPolicies(ToolPolicyEnforcedFromLookup). docker-compose.yml needs TOOL_POLICY_ENFORCED defaulting to false, and the capabilities.proto comment needs the three new policy_source values. TOOL_POLICY_ENFORCED cannot be switched on before then."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Org-scope writes depend on Control minting an admin, org:admin or *:admin scope, which is unconfirmed. Personal writes depend on the BFF-minted capability-core token carrying capability:write. Check both before the live proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The admin-scope vectors are pinned only on the Go side. Add the same table to ownership.rs tests, ideally as one shared JSON fixture, so the two admin authorities cannot drift."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR golden case tool_policy_write_under_zdr_refused (zdr-posture-matrix.json plus the Rust fixture) and the zdr-contract-sync run are not added. The refusal is covered by the Go unit and authz pins and by the gateway ZDR test only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-user allow, ask and never lookup uses req.GetUserId() from EvaluatePolicy, which is not verified in capability-core. This is acceptable only because the callers are trusted workloads (execution-core), so keep that caller set closed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A policy is keyed by capability id. For a built-in capability that carries several tools (for example cap.command.shell), a never or ask covers all of its tools. Per-tool granularity exists only for MCP tools, which have one tool per capability."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "checkRelaxable reads capability_tools and the upsert writes tool_policies in separate statements. A re-approval in between stores an allow with a stale digest. That is safe, because the engine demotes it to an ask, but a digest guard inside setToolPolicySQL would make the 409 exact."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The ledger entry and the capability-ownership-matrix row for tool_policies (capability-core owns it) are not written. Both files are outside this slice's ownership, so the lead should add them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "effective_policy and the offer filter (policy.EffectivePolicy, ResolveToolBindings) still ignore stored policies. The execution-core offer filter will want the person's policies once TOOL_POLICY_ENFORCED is on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "capabilities.policy_relaxable is a generated mirror of kind = 'mcp_tool' that no Go code reads; the engine reads Kind instead. That deviates from the plan's 'set in S2 code' but cannot drift. denyOnScope and denyOnGrant still emit the old metric attribute set, without class or policy_source."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Line endings are preserved: engine.go and authz_test.go stay CRLF, and engine.go shows +183/-6 in numstat, so there is no whole-file flip. The new Go test files are LF."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "auth",
+    "audit",
+    "zdr"
+   ],
+   "notes": "Built behind TOOL_POLICY_ENFORCED (default off, read strictly: only the literal 'true'). With it off the engine never loads a policy, so decisions are byte-identical to before. The engine, store, API, model-gateway proxy, BFF and action contracts all exist, but the two wiring edits in shared files (server.go, main.go) are lead_todo, so nothing reads the policies end to end until they land.\n\nSemantics as built: ask/never apply to every capability, built-in or MCP, from either scope, and the strictest in force wins (an org never beats a user allow; a user ask or never stands under an org allow). allow relaxes only the risk-level ask of an mcp_tool row (capability Kind == mcp_tool) whose floor is none and whose class is within the scope ceiling (user up to external_write, org up to destructive; owner_effect and unclassified never), and only when the policy's pinned_digest equals the row's pinned digest; an allow with a stale digest is read as an ask; an allow on a built-in or on a class the scope may not relax is ignored; a denial from the review state or the capability gate is never relaxed. A relaxed allow gets the constrained medium budget. policy_source and reason are tool_policy_never/ask/allow.\n\nMigration 0017 (the number section 4.4 reserves): tool_policies with the partial unique index on the active key, CHECKs (org scope value = org id, allow needs a 64-hex digest, reason length), and capabilities.policy_relaxable as a STORED GENERATED column (kind = 'mcp_tool'), so it is true exactly for mcp_tool rows with no writer able to set it; revert file included. The Go engine reads capEntry.Kind rather than that column (models.Capability has no field for it and models/ is not mine), so the column is today the operator-visible mirror of that rule.\n\nAPI: GET /api/v1/tool-policies?capability_id=, PUT and DELETE /api/v1/tool-policies/{capability_id}[?scope=]. Writes need capability:write, a person (not a workload), an explicit non-ZDR posture (tool_policy_write_under_zdr_refused, checked before the body is read), and for scope org an admin from the signed scopes via the existing verifiedIsAdmin (the Go twin of ownership.rs is_admin_claim; vectors pinned in the test). An allow is validated server-side against the tool's own registry row (approved, CanRelax, digest equals the pinned digest). Setting twice updates in place so the policy id survives; revoke keeps the row. Every write and revoke appends a registry_audit_log row (entity_kind tool_policy) carrying scope, capability, decision and digest, never the free-text reason.\n\nmodel-gateway: GET/PUT/DELETE /v1/tool-policies..., GET /v1/mcp/servers/:server_id/tools, POST .../tools/:tool/approve through proxy_to_capability_core (which already refuses non-GET under ZDR before forwarding; I added a PUT arm), with a registry-identifier check on every path segment so a decoded ../ cannot redirect the forwarded bearer. BFF mcp.rs: the same five routes, org-scope policy writes gated on is_org_admin; approve is deliberately NOT admin-gated at the BFF because the owner of a user-scoped server must be able to approve (capability-core decides owner or admin). Action contracts tools.set_policy and mcp.approve_tool (model plane, high risk, not model-executable)."
+  },
+  {
+   "id": "WS06-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Control Plane/org-core/internal/http/server.go",
+    "apps/Control Plane/org-core/internal/http/service_auth.go",
+    "apps/Control Plane/org-core/internal/org/service_enhanced.go",
+    "apps/Control Plane/org-core/internal/http/siem_handlers.go",
+    "apps/Control Plane/org-core/internal/http/siem_handlers_test.go",
+    "apps/Control Plane/org-core/internal/http/siem_destinations_contract_test.go",
+    "apps/Control Plane/org-core/internal/http/testdata/audit-core-org-core-siem.contract.json",
+    "apps/Control Plane/org-core/internal/http/testdata/audit-core-org-core-siem.contract.json.sha256",
+    "apps/Control Plane/org-core/internal/org/siem_destinations.go",
+    "apps/Control Plane/org-core/internal/org/siem_seal.go",
+    "apps/Control Plane/org-core/internal/org/siem_seal_test.go",
+    "apps/Control Plane/org-core/internal/org/siem_destinations_test.go",
+    "apps/Control Plane/org-core/internal/org/siem_destinations_postgres_test.go",
+    "apps/Control Plane/org-core/migrations/022_siem_destinations.up.sql",
+    "apps/Control Plane/org-core/migrations/022_siem_destinations.down.sql",
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Control Plane/scripts/validate-release-credentials.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go vet ./...",
+     "outcome": "clean"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -count=1 -v -run SIEM ./internal/org/ (seal round trip, wrong key, wrong key id, wrong org/destination binding, tamper, key parsing; URL/secret/filter validation; content-free audit payload; plan allowlist; validation-before-storage)",
+     "outcome": "pass (12 tests)"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && ORG_CORE_CONTRACT_COMPOSE_FILE=<scratch copy of docker-compose.yml with the proposed lines> go test -count=1 -v -run 'SIEM|AuditCore' ./internal/http/ (flag strictness, 404 when off for every route, member/viewer/stranger 403 with forged role headers, owner/admin ok, secret never in response or log, typed errors, strict bodies, exporter read gated to audit-core, updated_since parsing, scope table, scope-to-principal binding, golden pin, real-middleware replay of the golden, compose grant is exactly the reviewed one)",
+     "outcome": "pass (21 tests) against the scratch compose copy"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -count=1 -p 1 ./... with the same scratch compose override",
+     "outcome": "all packages ok except 5 internal/http tests from the earlier WS10-S2 slice (TestComposeInferenceCore..., TestComposeOrgCoreRegistryWithModelEntitlement..., TestInferenceCoreModelEntitlementRequests..., TestOnlyInferenceCoreAndModelGateway..., TestModelEntitlementRequestWithoutServiceHeadersIsRefused), which fail because docker-compose.yml lacks the inference-core principal (not my files)"
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -count=1 -run 'SIEM|AuditCore' ./internal/http/ against the REAL docker-compose.yml",
+     "outcome": "4 compose-dependent contract tests FAIL with 'no audit-core principal', by design until the lead applies the compose lines below (same state as the WS10-S2 contract); all other SIEM http tests pass"
+    },
+    {
+     "command": "bash -n run-control-plane.sh && bash -n validate-release-credentials.sh",
+     "outcome": "syntax ok"
+    }
+   ],
+   "db_tests_written": [
+    "TestControlLifecycleSIEMSecretIsStoredSealedAndAuditedWithoutContent",
+    "TestControlLifecycleSIEMAuditOutboxRetriesAFailedPublish",
+    "TestControlLifecycleSIEMAtMostThreeDestinationsPerOrganization",
+    "TestControlLifecycleSIEMRowLevelSecurityIsolatesOrganizations",
+    "TestControlLifecycleSIEMRevisionConflictAndPlanGate",
+    "TestControlLifecycleSIEMExporterReadsEnabledEntitledDestinationsWithTheirSecret",
+    "TestControlLifecycleSIEMEntitlementIsComputedOnlyWhenEnabled"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml (org-core ORG_CORE_SERVICE_CREDENTIALS, line ~540): in the verevon-gateway principal change scopes to [... ,\"org:erase:self\",\"org:deletion:self\",\"org:siem:manage:self\"]; append the principal {\"principal\":\"audit-core\",\"audience\":\"org-core\",\"token\":\"${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}\",\"scopes\":[\"org:siem:read:any\"]} as the last array element. Apply together with the rebuilt org-core image (an image that predates the scopes refuses the whole registry). A ready-made copy of the whole file with exactly these two edits is at C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\compose-with-siem.yml (diff it, do not copy it blindly).",
+    "shared-edit apps/Control Plane/docker-compose.yml (org-core environment block, beside ORG_CORE_SERVICE_CREDENTIALS): ORG_SIEM_DESTINATIONS_ENABLED: ${ORG_SIEM_DESTINATIONS_ENABLED:-0} ; ORG_CORE_SIEM_SEAL_KEY: ${ORG_CORE_SIEM_SEAL_KEY:-} ; ORG_CORE_SIEM_SEAL_KEY_ID: ${ORG_CORE_SIEM_SEAL_KEY_ID:-v1}. For S8 the audit-core side later presents AUDIT_ORG_CORE_SERVICE_TOKEN as its org-core token.",
+    "shared-edit apps/Control Plane/org-core/cmd/server/main.go (not in my ownership): inside the existing `if natsClient != nil { orgService.SetAuditPublisher(natsClient); go runGDPRAuditOutbox(...) }` block add `go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)`, and add after runGDPRAuditOutbox a function runSIEMAuditOutbox that is a copy of runGDPRAuditOutbox calling service.FlushSIEMAuditOutbox(ctx, 100) and logging 'org-core SIEM audit outbox ...'. Without it destination changes are committed with their audit row but the row is never published. It must run regardless of the flag so rows pending at disable time still drain.",
+    "Optional but recommended in the same main.go edit: when ORG_SIEM_DESTINATIONS_ENABLED is on, call orgcore.NewSIEMSealerFromEnv(os.Getenv) at boot and log.Fatalf on error, so a bad or missing seal key fails the start instead of the routes answering 503.",
+    "Run the Postgres tests through the lead's harness (needs CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID as .github/workflows/org-service.yml:74-110): cd \"apps/Control Plane/org-core\" && go test -v -p 1 -run 'TestControlLifecycleSIEM' ./internal/org/ ; then the full go test -v -p 1 ./... . These cover sealed storage, audit outbox flush/retry, RLS cross-tenant negatives, max-3 incl. 8 racing creates, revision conflict, plan gate, exporter read and the computed entitlement.",
+    "After the compose lines are applied, rerun go test -count=1 -p 1 ./internal/http/ with REQUIRE_CONTRACT=1: the four audit-core compose contract tests then pass without the override file.",
+    "Live proof (WS06-S7 DoD), after the image rebuild with the flag on and a seal key present (scripts/run-control-plane.sh generates ORG_CORE_SIEM_SEAL_KEY and AUDIT_ORG_CORE_SERVICE_TOKEN on first run): bash \"apps/Control Plane/scripts/run-control-plane.sh\" up -d --no-deps --build org-core with ORG_SIEM_DESTINATIONS_ENABLED=1; as an owner (signed gateway delegation, the gateway route is S6) POST /orgs/<org>/siem-destinations on an enterprise-plan org, as a member get 403, list as the audit-core principal via GET /internal/orgs/siem-destinations (200, secret present), gateway and billing-core get 403; psql shows siem_destinations.secret_ciphertext only; organization_siem_audit_outbox row published to audit-core. Flag off: every path 404.",
+    "Revert rehearsal: migrations/022_siem_destinations.down.sql drops both tables; drain organization_siem_audit_outbox first if the audit trail matters."
+   ],
+   "deviations": [
+    "Migration is 022_siem_destinations, not 021: 021_org_model_entitlements already exists (WS10-S2) and plan section 2.6 row 'org-core' assigns 022 to WS06.S7. The 021_* names in the slice's file list were not used.",
+    "The flag accepts exactly '1' or 'true' (anything else, including 'TRUE' or ' 1', is off). The plan row says =1 and the lead rules say literal 'true'; both are honoured.",
+    "The audit trail uses a new sibling outbox table (plan: verify else sibling table). Verified: organization_gdpr_audit_outbox pins subject to the erasure event and REVOKEs INSERT from org_core_app, so it cannot take a row written inside a WithOrgScope transaction.",
+    "run-isolated-control-container-e2e.sh was not edited: with the flag off its inline registry needs nothing, and the plan's reason for touching it (the new scopes) only matters once the flag is on in that harness.",
+    "types.go was not edited: SIEMExportEntitlementKey and PlanAllowsSIEMExport live in siem_destinations.go beside the rest of the feature.",
+    "org:siem:read:any is restricted to the principal named audit-core. If S8 gives the exporter its own principal name, siemExporterPrincipal in service_auth.go and the compose block change together."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/docker-compose.yml",
+    "apps/Control Plane/org-core/cmd/server/main.go"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Control Plane/docker-compose.yml: add org:siem:manage:self to the verevon-gateway scopes and append the audit-core principal (scope org:siem:read:any) to ORG_CORE_SERVICE_CREDENTIALS. The 7 SIEM compose-reading contract tests fail against the real compose file until then (they pass against the scratch copy). Apply it together with the rebuilt org-core image, because an image that predates a scope refuses the whole registry.",
+     "shared-edit docker-compose.yml org-core env: ORG_SIEM_DESTINATIONS_ENABLED (default 0), ORG_CORE_SIEM_SEAL_KEY and ORG_CORE_SIEM_SEAL_KEY_ID.",
+     "shared-edit apps/Control Plane/org-core/cmd/server/main.go: start a runSIEMAuditOutbox goroutine that calls FlushSIEMAuditOutbox, and fail the start on a bad seal key when the flag is on. Without it the per-change audit rows are stored but never published.",
+     "Postgres tests: the 7 TestControlLifecycleSIEM tests need the DB harness (CONTROL_LIFECYCLE_TEST_DATABASE_URL). They cover migration 022, the RLS and cap trigger running as org_core_app, the racing creates, the sealed-only storage and the outbox retry. Nothing has run against a real database.",
+     "Live proof (needs docker and the rebuilt image with the flag on): owner create, member 403, audit-core list with the secret, gateway 403, psql showing ciphertext only, the outbox row published, and 404 with the flag off.",
+     "Run the revert rehearsal of 022.down.sql."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing has run against a real Postgres or the rebuilt org-core image: the seven TestControlLifecycleSIEM tests compile and vet clean but are skipped without CONTROL_LIFECYCLE_TEST_DATABASE_URL, and the migration (trigger, RLS, grants as org_core_app) is untested live."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The audit outbox relay is not wired until main.go gets runSIEMAuditOutbox; until then destination changes write their audit row but it is never published, so the 'durable audit row per change' is stored but not delivered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the flag on and an invalid or missing ORG_CORE_SIEM_SEAL_KEY the server boots and every SIEM route answers 503 instead of failing the start; boot validation needs the main.go edit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "gdpr_hard_delete_organization (003) does not know organization_siem_audit_outbox (no FK, rows carry org_id, actor id and destination host), so erasure leaves those content-free rows behind; siem_destinations itself cascades. Decide whether erasure must purge or keep them and extend the erasure function in a later migration."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "GET /internal/orgs/siem-destinations is unpaginated and returns every enabled destination of every entitled org with its plaintext secret in one response; add a limit and cursor (or per-org reads) before org count grows, and consider a request-rate or metric on this route."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Sealing supports one key id at a time; a row sealed under an old key id is skipped (logged by id) by the exporter read. A rotation path (re-seal job or a key ring in ORG_CORE_SIEM_SEAL_KEY) is not built."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Plan gate: only create and switching a destination on require feature.siem_export; a destination left enabled after a plan lapse is dropped from the exporter read by the plan join, silently. Owner should confirm silent stop versus a visible state in the admin view (S6 UI)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The four compose-reading contract tests fail against the real docker-compose.yml until the lead applies the audit-core principal and gateway scope, exactly as the WS10-S2 contract tests currently fail for inference-core; the whole-module 'go test ./...' is red until both compose edits land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "event_filter is stored and validated (events/planes, 64 entries each) but nothing enforces its semantics yet; S8's exporter must apply it and its golden should gain a case with a non-empty filter delivered end to end."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "org:siem:read:any is pinned to a principal literally named audit-core (siemExporterPrincipal); if S8 wants a separate exporter principal, change the constant and the compose block together."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "run-isolated-control-container-e2e.sh still builds its own inline org-core registry without the SIEM scopes; extend it only when the isolated e2e should exercise the feature with the flag on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Migration 022 (cap trigger, RLS policies, org_core_app grants, outbox constraints) and all seven TestControlLifecycleSIEM tests have never run against a real Postgres; needed before the flag is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the lead wires runSIEMAuditOutbox in cmd/server/main.go, destination changes commit their audit row but it is never delivered to audit-core, so the 'durable audit row per change' is incomplete."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the flag on and a missing or invalid seal key, the server boots and every SIEM route answers 503 (it only logs). Boot validation in main.go should turn this into a startup failure."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "gdpr_hard_delete_organization (003) does not purge organization_siem_audit_outbox, which has no FK. Rows carrying org_id, actor id and destination host survive erasure; decide purge versus keep and extend the erasure function in a later migration."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "GET /internal/orgs/siem-destinations is unpaginated and returns every enabled destination of every entitled org with plaintext secrets in one response; add a limit and cursor before the org count grows."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "updated_since returns only rows that are currently enabled, so a destination that was disabled or deleted after the cursor never appears in an incremental read; S8's exporter must do a full refresh or this needs tombstones."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Sealing supports one key id at a time; a row sealed under an older id is skipped (logged by id) by the exporter read, and no re-seal or key-ring path exists."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A destination left enabled after a plan lapse is silently dropped from the exporter read by the plan join; confirm silent stop versus a visible state in the admin view (S6 UI)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "event_filter is stored and validated but its semantics are not enforced or tested end to end; S8's exporter and golden need a non-empty-filter delivery case."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Server.SetSIEMDestinations is only called from tests (NewServer sets s.siem directly), so it is a test-only seam in production code."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "org:siem:read:any is pinned to a principal literally named audit-core (siemExporterPrincipal); if S8 gives the exporter its own principal, change the constant and the compose block together."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "policy",
+    "audit"
+   ],
+   "notes": "Built: migration 022 (siem_destinations with RLS, org_core_app grants, kind/url/ciphertext checks, revision, a trigger capping 3 per org; sibling table organization_siem_audit_outbox because the GDPR outbox pins its subject and withholds INSERT from org_core_app, so it is not generic); AES-256-GCM sealer bound by AAD to org+destination+key id (internal/org/siem_seal.go); service, validation (https only, no userinfo/fragment, no private/loopback/link-local/CGNAT/ULA/mapped literal, no numeric host spellings), repository with create/update/delete each writing its audit outbox row in the same scoped transaction under the org lifecycle advisory lock, exporter read (unscoped pool, enabled + entitled orgs only, secret unsealed, bad-key rows skipped and logged by id), FlushSIEMAuditOutbox; handlers owner/admin by membership table (forwarded role ignored), 402 plan_upgrade_required on create or switching on for a non-enterprise plan (turning off, editing and deleting never gated), PATCH needs expected_revision (409); scopes org:siem:manage:self (gateway, :self) and org:siem:read:any (pinned to principal audit-core in validateServiceCredential; placed before the generic one-segment internal read so org:read:any cannot open it); computed feature.siem_export appended to entitlements only when the feature is enabled; all five routes registered behind a 404 gate while ORG_SIEM_DESTINATIONS_ENABLED is off (internal path is always registered so it cannot fall through to /orgs/:orgId). Golden + sha256 pin vendored for the S8 client. Scripts: AUDIT_ORG_CORE_SERVICE_TOKEN minted, ORG_CORE_SIEM_SEAL_KEY (base64 of 32 bytes) and key id persisted, release preflight checks the token and (only when the flag is on) the seal key. No file was committed, staged or reverted; no docker was run."
+  }
+ ]
+}

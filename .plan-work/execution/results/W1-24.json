@@ -1,0 +1,582 @@
+{
+ "batchId": "W1-24",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS07-S10",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/sessionreview/cost_controls_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/learning/eval/fixture.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/learning/eval/replay.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/learning/eval/eval_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/learning/eval/live_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/learning/eval/testdata/seeded/ (20 new case files)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/verify-learning-governance.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/AGENT_QUALITY_PLAN_2026-07-29.md"
+   ],
+   "tests_run": [
+    {
+     "command": "go build ./... (apps/Model Plane/go/services/capability-core)",
+     "outcome": "ok"
+    },
+    {
+     "command": "go vet ./internal/sessionreview/ ./internal/learning/eval/ ; go vet -tags liveeval ./internal/learning/eval/ ; go vet ./cmd/",
+     "outcome": "ok"
+    },
+    {
+     "command": "go test -count=1 ./internal/learning/... ./internal/sessionreview/... ./internal/skillsink/... ./internal/llmreviewer/...",
+     "outcome": "ok (5 packages, including learning/eval)"
+    },
+    {
+     "command": "go test -count=1 -v -run 'CostControls|CostGate|WithoutCostControls' ./internal/sessionreview/",
+     "outcome": "11 tests PASS"
+    },
+    {
+     "command": "go test -count=1 -v ./internal/learning/eval/",
+     "outcome": "20 seeded cases PASS (one upstream case logged as covered by session-core, one gap logged), plus coverage, live-bounds, validate and Check tests PASS; each case replayed twice with identical results"
+    },
+    {
+     "command": "go test -count=1 -run 'LearningReview|Learning' ./cmd/",
+     "outcome": "ok"
+    },
+    {
+     "command": "bash \"apps/Model Plane/scripts/verify-learning-governance.sh\"",
+     "outcome": "21 checks passed, exit 0"
+    },
+    {
+     "command": "temporary liveeval test writing one evidence directory with writeEvidence, then bash scripts/eval-evidence.sh validate <that directory>; temp test file deleted afterwards",
+     "outcome": "eval evidence verified"
+    },
+    {
+     "command": "gofmt -l on the new eval files (after gofmt -w); gofmt -l on an LF copy of consumer.go",
+     "outcome": "clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "needs_other_files apps/Model Plane/go/services/capability-core/cmd/main.go: in startLearningConsumer, before the line `js, err := nc.JetStream()`, insert: `costControls, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv)` / `if costErr != nil {` / `slog.Error(\"learning-review consumer not started: cost controls misconfigured\", \"error\", costErr)` / `return` / `}` / `if costOn {` / `opts = append(opts, sessionreview.WithCostControls(costControls))` / `}`. Fail-closed on a malformed bound; the switch is read only as the literal true.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the capability-core environment, after the line `      LEARNING_REVIEW_ENABLED: ${LEARNING_REVIEW_ENABLED:-false}` (about line 1670), insert the comment `# Cost controls for the learning review (WS07-S10). Off unless the switch is exactly true; the bounds apply only then. With no counter store wired the day caps skip every review (budget_unavailable), so keep the switch false.` and the lines `      LEARNING_REVIEW_COST_CONTROLS: ${LEARNING_REVIEW_COST_CONTROLS:-false}`, `      LEARNING_REVIEW_MIN_USER_TURNS: ${LEARNING_REVIEW_MIN_USER_TURNS:-3}`, `      LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS: ${LEARNING_REVIEW_MAX_TRANSCRIPT_CHARS:-60000}`, `      LEARNING_REVIEW_MAX_PER_USER_PER_DAY: ${LEARNING_REVIEW_MAX_PER_USER_PER_DAY:-5}`, `      LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}`.",
+    "shared-edit apps/Model Plane/docs/ZDR.md: after the paragraph that ends `names this.` (about line 363), add a paragraph: `[live-only] The learning review's cost controls (WS07-S10) keep one counter per owner and one per organization for each UTC day, keyed by identifiers and holding only an integer, so they hold no content. A zero-retention envelope is refused before its transcript is read and is never counted. Session Core withholds zero-retention and waived runs before they are announced (learning_events.rs), so the review never receives them.`",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: row `| Memory index (`agent_memory`) | **session-core** | Postgres | — | — | ⚠️ vs letta-bridge (see §4.4) |` (line 59): change the Relay/Enforcement cell `—` to `memory_control::resolve decision gate (WS07-S1); capability-core writer gate pending WS07-S5`. Row G7 (line 135): change the last cell to `Producer built in capability-core sessionreview: owner, memory and org gates, then cost caps that fail closed until a counter store is wired (WS07-S10); learned skills are owner-scoped disabled proposals in session-core (WS07-S7)`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: append at the end of the file two entries. Entry 1 heading `## Memory control state and one decision gate (WS07-S1, 2026-10-26)`; body: The owner's memory is on, paused or off, stored on user_memory_controls beside the extraction watermark. A pause stops new memory without deleting anything: rows stay visible and deletable, and a resume moves the watermark forward, so nothing written while paused is mined later. off also hides the owner's rows. Org-owned rows stay readable while the owner is paused or off, and an organization that turns memory off suppresses them too. memory_control::resolve folds the owner's state, the organization policy and the ZDR posture into one decision with closed reasons, and every session-core reader and writer takes that decision instead of reading the state itself, because a second reader that checks the state alone is how a paused user is remembered anyway. The control tables hold state and counts only, never content. Status: implemented in part (the session-core gate is WS07-S1, partial; the capability-core memory writer waits on WS07-S5). Entry 2 heading `## Learned skills are owner-scoped disabled proposals (WS07-S7, 2026-10-26)`; body: The review never enables or shares a skill. It writes a proposed row with scope user and enabled false, owned by the user whose run it came from, and session-core forces that shape whatever the reviewer returns. The conflict key is (org, scope, owner, name), so one user's proposal cannot overwrite another's, and a conflict never re-enables a row an owner or admin disabled. Only the owner's accept makes a proposal usable; an organization copy is an admin's explicit promotion. Auto-accept stays off until live evidence from the seeded eval exists (WS07-S10). Why: the reviewer reads a customer conversation and its reply is untrusted model output, so only the owner can make a learned skill take effect; the review's spend is bounded per owner and per organization per day by the cost controls, which are off unless switched on and skip every review while no counter store is wired. Status: implemented in part (the proposal shape is WS07-S7, done; accept, reject and undo are WS07-S8 and S9, partial).",
+    "live run (lead, needs the owner's approval of the budget): from apps/Model Plane/go/services/capability-core run `LEARNING_REVIEW_MODEL=<pinned model> INFERENCE_CORE_ADDR=<host:port> LEARNING_EVAL_USD_PER_MTOK=<blended USD per million tokens> LEARNING_EVAL_SUITE_REVISION=<40-hex HEAD> LEARNING_EVAL_EVIDENCE_DIR=<new empty dir> go test -tags liveeval -count=1 -v -run TestLiveSeededCases ./internal/learning/eval/`. LEARNING_EVAL_MAX_USD defaults to 0.50 and cannot exceed it. Then run `bash \"apps/Model Plane/scripts/eval-evidence.sh\" validate <dir>` (use a /c/... style absolute path) and record the cost line the test logs (live spend in micro-USD).",
+    "counter store (not built in this slice; decide before enabling the caps): capability-core go.mod has no Redis client and this slice does not own go.mod. Choose the dependency (or a small RESP client) and implement sessionreview.ReviewBudget over REDIS_URL, then set CostControls.Budget in the wiring. Until then keep LEARNING_REVIEW_COST_CONTROLS=false; with it true every review is skipped as budget_unavailable.",
+    "after applying the cmd/main.go wiring and the compose lines, rebuild capability-core through the Model Plane compose recipe (scripts/compose.sh) and confirm the service starts with LEARNING_REVIEW_COST_CONTROLS unset (byte-identical review path) before any live proof."
+   ],
+   "deviations": [
+    "Added the switch LEARNING_REVIEW_COST_CONTROLS (strict literal true, default off) beyond the batch flag list, because every new switch must default off; its numeric bounds are read only when it is on, with the row's defaults 3, 60000, 5 and 100.",
+    "Exported API added to sessionreview: CostControls, ReviewBudget, WithCostControls, CostControlsFromLookup and ReviewRunCompleted; no existing exported signature changed.",
+    "The Redis counter store is not implemented or wired: CostControls.Budget is nil in production, so enabling the caps fails closed, and REDIS_URL is not read (the row says wiring not opened).",
+    "The cost gate is a TranscriptSource decorator inside handleRunCompleted, so caps are counted only for reviews that reach the model; the memory and org gates still run before any read.",
+    "The Space-origin fixture is an upstream case with no replay, and the live harness excludes upstream cases from the suite.",
+    "The cost paragraph of docs/AGENT_QUALITY_PLAN_2026-07-29.md is rewritten to the built state, replacing the first-draft sampling rule.",
+    "No DB tests written, no proto or migration change, no Rust change, and no edit to any shared file: those lines are in lead_todo."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live seeded run (TestLiveSeededCases, -tags liveeval, at most 0.50 USD, pinned LEARNING_REVIEW_MODEL) plus an eval-evidence.sh validate of its directory and the inference-core cost line: lead, needs the owner's approval of the budget",
+     "Rebuilt stack evidence: apply the cmd/main.go CostControlsFromLookup wiring and the compose lines, rebuild capability-core, and confirm a byte-identical review path with LEARNING_REVIEW_COST_CONTROLS unset",
+     "Shared-file edits handed back in lead_todo: docker-compose.yml caps, ZDR.md [live-only] paragraph, capability-ownership-matrix.md rows, and the 2 ledger.md entries the row requires",
+     "Redis ReviewBudget over REDIS_URL is not built (the row says wiring is not opened); needs a go.mod dependency decision before the caps can be switched on"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No counter store exists: the Redis-backed ReviewBudget and any REDIS_URL read are not built and capability-core go.mod has no Redis client, so with LEARNING_REVIEW_COST_CONTROLS=true every review is skipped as budget_unavailable."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The live seeded run (go test -tags liveeval, TestLiveSeededCases) has not run; it needs the owner's approval of the 0.50 USD budget, a pinned LEARNING_REVIEW_MODEL, a blended LEARNING_EVAL_USD_PER_MTOK price, LEARNING_EVAL_SUITE_REVISION and a new LEARNING_EVAL_EVIDENCE_DIR."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The live harness dials inference-core with an insecure client and no service credential by design, so it works only where inference-core accepts unauthenticated calls; a guarded stack needs the lead's credential path added first."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No PII screen runs before a proposal is written (learning.Screen is a no-op until WS26), so enabling the review for real organizations needs WS26 first; the pii-in-a-proposal case pins this gap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Space-origin control is upstream only: RUN_COMPLETED carries no origin, so capability-core cannot re-check it, and session-core's gate test memory_state_and_origin_gates_precede_the_outbox_insert was not run in this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "learning_review_skipped_total is not asserted by any test because the module has no OTel reader for tests, so its emission and reason label set are unverified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "countUserTurns counts blocks that start with USER after a blank line in the rendered transcript, so a message containing that marker inflates the count; an exact count needs a user-turn field on Transcript in transcript.go, which this slice does not own."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The caps are charged before the model call, so a call that then fails and is redelivered (up to MaxDeliver) is charged again, and the owner's slot is used even when the org cap then skips the review: conservative, but it can over-count."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "cmd/main.go does not call sessionreview.CostControlsFromLookup yet; until the lead applies the lead_todo wiring the controls cannot be switched on from the environment."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "LEARNING_REVIEW_COST_CONTROLS is a switch beyond the batch flag list; the owner or lead should confirm the name and its compose default of false before the batch commit."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner sign-off that auto-accept stays off until live S10 evidence exists (DEC-30, plan_external_notes) is still needed; no auto-accept code exists, so this is a process decision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The governance script proves gate order from source line numbers and the eval proves it through read and model counts; neither was mutation-tested, which wave mode defers."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "S10 depends on S7 to S9 and S8 and S9 are partial in the queue; the eval exercises the review path and sink shape built in S7, not S8 revisions or S9 decisions."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The durable-layer G7 proof (scripts/verify-durable-layer.sh) needs docker and was not run here; it remains a lead run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No ReviewBudget implementation exists, so with LEARNING_REVIEW_COST_CONTROLS=true every review is skipped as budget_unavailable. This fails closed as the row intends, but the caps cannot be used until a Redis counter is built."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "cmd/main.go does not call sessionreview.CostControlsFromLookup yet, so the switch has no effect from the environment until the lead applies the lead_todo wiring."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The live eval has not run. The row's done condition (a proposal on the recurring case and none on the controls, within budget, with validated evidence) is unproven against a real model."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The live harness dials inference-core with insecure credentials and no service token, so it works only against an unauthenticated inference-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In costGatedSource.reserve the owner counter is charged before the org cap is checked, and both are charged before the model call. An org-cap skip therefore still spends the owner's slot, and a failed call that is redelivered is charged again (over-counting only, never under)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "MaxTranscriptChars is compared with len(transcript.Text), which counts bytes, not characters. Non-ASCII (for example Norwegian) conversations hit the bound sooner than the name suggests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "countUserTurns counts the marker \"\\n\\nUSER: \" in the rendered text, so message content holding that marker inflates the count and can let a short conversation past MinUserTurns."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test asserts the learning_review_skipped_total metric or its reason labels."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "learning.Screen is still a no-op until WS26, so no PII screen runs before a proposal is written; the pii-in-a-proposal case pins this gap."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "LEARNING_REVIEW_COST_CONTROLS is a new master switch beyond the row's flag list. It defaults off and uses the strict literal-true parser; the lead should confirm its name."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "go build ./... (capability-core)",
+      "outcome": "ok, no output",
+      "passed": true
+     },
+     {
+      "command": "go vet ./internal/sessionreview/ ./internal/learning/... ./cmd/ ; go vet -tags liveeval ./internal/learning/eval/",
+      "outcome": "clean, no output",
+      "passed": true
+     },
+     {
+      "command": "go test -count=1 ./internal/learning/... ./internal/sessionreview/...",
+      "outcome": "ok: learning, learning/eval, sessionreview all pass",
+      "passed": true
+     },
+     {
+      "command": "bash apps/Model Plane/scripts/verify-learning-governance.sh",
+      "outcome": "21 checks passed, exit 0",
+      "passed": true
+     },
+     {
+      "command": "live mode (-tags liveeval) under LEARNING_EVAL_MAX_USD 0.50",
+      "outcome": "not run (needs provider access and budget; only compile-checked via go vet)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money",
+    "audit"
+   ],
+   "notes": "Built the cost controls and the seeded eval for WS07-S10 in wave mode. consumer.go gains a TranscriptSource decorator that runs after the transcript read and before the model call: per-run transcript bound, minimum user turns, per-owner and per-organization UTC-day caps, and fail-closed budget_unavailable when no counter is wired or it errors. Everything is behind a new switch LEARNING_REVIEW_COST_CONTROLS (strict literal true, default off); with it off the review path is unchanged apart from the skip counter learning_review_skipped_total and identical skip logs. The eval package replays 20 seeded cases through sessionreview.ReviewRunCompleted with fakes at the two boundaries; the live harness (build tag liveeval) and its evidence writer are compile- and format-checked but not run. Docs: the cost paragraph in AGENT_QUALITY_PLAN is rewritten to the built state. Not done here (lead): the live run, the counter store, the cmd/main.go wiring, and the shared-file lines in lead_todo. No DB, docker, proto, migration or Rust changes. Scratch evidence directory from the format check: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/evidence-format-check (may be deleted)."
+  },
+  {
+   "id": "WS08-S8",
+   "outcome": "ready-partial",
+   "status": "blocked",
+   "files_changed": [],
+   "tests_run": [
+    {
+     "command": "node --test \"apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs\"",
+     "outcome": "exit 1 at HEAD, before any edit by this run: 187 registry ids vs 176 dispatcher literals in handlers.rs; 11 registry ids have no dispatcher literal (approvals.decide, audit.create_siem_destination, audit.delete_siem_destination, audit.export_log, audit.update_siem_destination, audit.verify_chain, chat.answer_question, chat.execute_approved_plan, chat.run.continue, mcp.approve_tool, tools.set_policy). Pre-existing and not owned, so not fixed."
+    },
+    {
+     "command": "git status --short -- action-registry.ts doc_intel.rs (both owned paths)",
+     "outcome": "no output: both owned files are unchanged, with no partial edit from an earlier attempt."
+    },
+    {
+     "command": "grep -n -i \"tesseract|ocr|doc_intel|DEC-37\" docs/decisions/ledger.md docs/capability-ownership-matrix.md (Model Plane)",
+     "outcome": "no OCR, Tesseract or DEC-37 entry in the ledger. capability-ownership-matrix.md:21 places doc_intel.rs under P5 multimodal, backing the /v1/ai/documents gateway route."
+    },
+    {
+     "command": "grep -rIl -i tesseract \"apps/Ingestion Plane/imports-core\"",
+     "outcome": "no matches: local OCR does not exist in imports-core at HEAD."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Owner decision: the S8 gate form (WS25 registry key, or a default-off env switch) and the DEC-37 (OD18) ruling for OCR engine and caps. Record the ruling in apps/Model Plane/docs/decisions/ledger.md (append only); the ledger has no OCR or DEC-37 entry today.",
+    "Name the Data Plane owner for the durable reference route in documents-api-go and the Ingestion owner for local Tesseract in imports-core. Those agreements are the plan's stated gate.",
+    "Do not create a WS08-S8 .code record yet: no buildable code half exists inside this slice's files.",
+    "Before any S8 action id is registered, fix the red gateway action-surface gate (11 registry ids have no dispatcher at HEAD). Then dispatch one multi-plane slice that owns model-access.ts, handlers.rs and dispatchers.rs, and the regenerated admission golden (VEREVON_UPDATE_GOLDEN=1, then refresh the .sha256 and re-vendor).",
+    "Log the pre-existing red gate in the depth register: node --test apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs exits 1 at HEAD.",
+    "Keep reference OCR out of doc_intel.rs unless the owner rules for Azure egress of document bytes."
+   ],
+   "deviations": [
+    "Built no code and no switch. The row is an outline with external gates, and the two owned files cannot carry a registry action or an OCR route without cross-plane edits. This departs from the lead note's 'build it behind a default-off switch'.",
+    "Did not choose the switch form. The queue flag (per-org WS25 registry key, no environment switch) conflicts with the lead note (default-off strict-literal switch), so the owner must decide.",
+    "Did not register a durable reference action in action-registry.ts. The gateway scan would fail on the new id even when switched off, and the registry requires a backend and cross-plane golden edits.",
+    "Did not route reference OCR through doc_intel.rs. It is Azure egress and is not OCR by the plan's own note."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (one typed row per new action id)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerate, refresh the .sha256 pin, re-vendor the copies named by zdr-contract-sync.test.sh)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs and dispatchers.rs (match arm and named dispatcher per new action id)",
+    "apps/Data Plane v2/services/documents-api-go (durable reference route: binary upload, per-org content hash, delete cascade to derived chunks, ZDR refusal)",
+    "apps/Ingestion Plane/imports-core (local Tesseract OCR; app/chat_extract.py)",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto and the WS08-S5/S6 attachment work (RunAttachment reference fields; partial today)",
+    "apps/Model Plane/rust/crates/mp-contracts (only if the owner picks the WS25 registry key as the gate)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "DEC-37 (OD18) ruling on OCR engine and caps is not recorded; the plan row lists 'DEC-37 ruled' as a gate.",
+     "Data Plane (documents-api-go) and Ingestion (imports-core) owners have not agreed the durable reference route; the plan row lists this as a gate.",
+     "Gate form conflict: the slice flag says a per-org WS25 registry key with no environment switch, while the lead note asks for a default-off strict-literal switch. Only the owner can pick.",
+     "There is no live proof of ZDR refusal, per-org content hash isolation, or delete cascade; those need the cross-plane route first."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8 gate is external and unresolved: the durable route needs a Data Plane and Ingestion agreement, and the OCR engine and caps need the DEC-37 (OD18) ruling, and this run resolved neither."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8 flag conflicts: the queue says a per-org key in the WS25 registry with no environment switch, while the lead note says a default-off strict-literal switch; WS25-S7 is done, so the registry key is implementable by its owners."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Any new action id in action-registry.ts needs a model-access row, a gateway dispatcher arm, a regenerated and vendored admission golden, and a reachable backend, because the registry test says unbacked contracts must stay unregistered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "doc_intel.rs posts document bytes to an Azure Document Intelligence endpoint and backs the live /v1/ai/documents route, so reusing it for reference OCR would add external egress that the plan's local-Tesseract decision does not allow."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "imports-core has no Tesseract reference at HEAD, so the local OCR that S8 depends on does not exist yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "S8 depends on unfinished attachment work: WS08-S5, S6 and S7 are partial and WS08-S2, S3 and S4 are blocked-external, so RunAttachment-based reference attachments cannot run end to end."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "documents-api-go enforces ZDR on the single create path at documents.go:302-305, and docs/core-research/documents-api-go.md (point 7) reports a live bulk-path ZDR bypass that the source now fixes but no run in this pass re-proves, so the durable route must not inherit the bulk path without a live ZDR proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "S8 has no tests and the plan names none; the build needs per-org content-hash isolation, a delete cascade to derived chunks, a ZDR refusal at the route, and a typed refusal for scanned PDFs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "action-registry.ts hard-codes a 1,400,000-character max on chat.extract_document content_base64 (line 3300) where DEC-37 wants a server-declared cap, and changing it alters the admission golden hash, so the change is cross-plane."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway action-surface gate is red at HEAD: 11 registry ids (approvals.decide, audit.create_siem_destination, audit.delete_siem_destination, audit.export_log, audit.update_siem_destination, audit.verify_chain, chat.answer_question, chat.execute_approved_plan, chat.run.continue, mcp.approve_tool, tools.set_policy) have no dispatcher literal in handlers.rs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "WS08-S8 is an outline the plan marks 'Not scheduled', with no tests and no size, gated on the DEC-37 ruling and a Data Plane/Ingestion route agreement; nothing was built, and nothing can be until those gates close."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The slice flag (per-org WS25 registry opt-in, no env switch) conflicts with the lead's 'default-off strict-literal switch' note, and the owner must choose before any build."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "doc_intel.rs posts document bytes to Azure Document Intelligence, and the plan says it is layout extraction, not OCR; routing reference OCR through it would add external egress of content that the local-Tesseract default does not allow."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "imports-core has no Tesseract reference at HEAD (grep -rIl -i tesseract returned no matches), so the local OCR that S8 depends on does not exist."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Any new S8 action id in action-registry.ts needs cross-plane edits outside this slice's ownership: a model-access.ts row, a gateway handlers.rs/dispatchers.rs arm, and a regenerated admission golden with its .sha256 pin."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway action-surface gate is red at HEAD: node --test apps/gateway/scripts/action-surface-contract.test.mjs fails a deepStrictEqual between registry ids and dispatcher literals, the owned files are unchanged, so it is pre-existing; it must be fixed before any S8 id is registered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan names no tests for S8; a build needs per-org content-hash isolation, a delete cascade to derived chunks, a ZDR refusal at the route, and a typed refusal for scanned PDFs."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "slice test_commands (WS08-S8 entry in W1-24.json)",
+      "outcome": "The list is empty, so there is nothing to run.",
+      "passed": true
+     },
+     {
+      "command": "compile check of touched crates/modules",
+      "outcome": "Nothing to check: neither owned file (action-registry.ts, doc_intel.rs) appears in git status --short, and the implementer reports no files changed.",
+      "passed": true
+     },
+     {
+      "command": "git status --short review",
+      "outcome": "The only changes are in other slices' files: chat-nodes/index.ts, Model Plane docker-compose.yml, capability-core and gen protobuf files, execution-core and model-gateway Rust files, and untracked .plan-work/, audit-verify.exe and evaluate_policy_tool_policies_test.go. None is an owned file of WS08-S8, and none looks like output of this slice.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "WS08-S8 is an outline the plan defers. Its row has no code, no named tests, no size, and a DoD that needs external agreements: a Data Plane and Ingestion route, plus the DEC-37 (OD18) ruling on OCR engine and caps. I built nothing and changed no file. The two owned files cannot carry any part of it alone. (1) action-registry.ts: the gateway action-surface scan reads every single-quoted id: literal in the file (regex \\bid:\\s*'([^']+)'), so a new id fails that scan even behind a switch. A new action also needs a model-access.ts row (typed exhaustive), a gateway handlers.rs arm plus dispatcher, and a regenerated, vendored agent-action-admission.json with its .sha256 pin. The registry test says action contracts with no reachable backend must stay unregistered. (2) doc_intel.rs is the Azure Document Intelligence provider. It posts document bytes to an Azure endpoint, and it backs the live /v1/ai/documents route per the ownership matrix. The plan says it is not OCR and that OCR is local Tesseract in imports-core, which has no Tesseract at HEAD. A default-off switch in either file would have no consumer (dead code), or would open a new external egress path. Dependencies: WS25-S7 is done; WS08-S5, S6 and S7 are partial; WS08-S2, S3 and S4 are blocked-external. The batch asked for a default-off strict-literal switch, but the queue flag says a per-org WS25 registry key with no environment switch. I added neither and left that choice to the owner."
+  },
+  {
+   "id": "WS09-S6",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.recovery.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/features/chat/components/use-chat-controller.recovery.test.ts src/features/chat/components/use-chat-controller.plan-reload.test.ts (baseline, before edits)",
+     "outcome": "2 files, 20 tests passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat/components/use-chat-controller.recovery.test.ts src/features/chat/components/use-chat-controller.plan-reload.test.ts src/shared/api/chat-client.test.ts (final, after the last edit; the row's named commands plus chat-client.test.ts)",
+     "outcome": "3 files, 149 tests passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/shared/api (run before a comment-only edit in use-chat-controller.ts)",
+     "outcome": "146 files and 1963 tests passed; 1 file failed to load: src/shared/api/quarry-client.test.ts cannot resolve @quarry/client (file not touched, environment link)"
+    },
+    {
+     "command": "pnpm exec tsc --noEmit -p tsconfig.app.json",
+     "outcome": "34 errors, none in the touched files (quarry-client.ts 21, RemoteSupportPage.tsx 12, schedule-contract.test.ts 1; all untouched, pre-existing)"
+    },
+    {
+     "command": "pnpm exec eslint on the four touched files",
+     "outcome": "0 errors, 10 warnings, all solid/reactivity in use-chat-controller.ts at lines 457-4151, none in the changed range 1202-1260"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the four owned files only (no new files). Suggested message: 'feat(verevonv3): parallel cold-open thread load behind a default-off flag (WS09-S6)' with the Co-Authored-By line from the session reminder.",
+    "Live request accounting is not run here (no stack, no Playwright). On a second dev server (pnpm dev --port 5174 --strictPort in apps/Frontend Plane/verevonv3), run LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/chat-transcript-performance.spec.ts once with VITE_CHAT_PARALLEL_THREAD_LOAD unset and once with it set to true (restart the dev server between runs), and compare section D (requests.total, duplicateGetCount, sequentialWaves) for cold and warm opens. Attach the three JSON reports.",
+    "Do not set VITE_CHAT_PARALLEL_THREAD_LOAD=true in any environment until the owner signs D5 and the request budget is written into tests/e2e/chat-perf-budget.json (budget.requests, with headroom). Both are null today.",
+    "Plan doc (lead-owned, not edited here): add a Build ledger row for WS09-S6 saying built behind VITE_CHAT_PARALLEL_THREAD_LOAD (default off), unit tests green, live request accounting pending, gate open."
+   ],
+   "deviations": [
+    "The row says loadThread runs getThreadMessages beside listChatThreads. loadThread does not call listChatThreads (it reads the session by id with getChatThread), so the concurrent partner is getChatThread. The controller never calls listChatThreads; its callers are CoreSidebar, DashboardComposer, DashboardOverview and local-retention.",
+    "The row drops getChatThreadTranscript once ChatThreadSession.updatedAt is verified. updatedAt is verified (required field at chat-client.ts:818; history.rs:305 stamps the transcript with the same session's updated_at), but the row's premise that updatedAt is the transcript's only unique value is wrong: grounding, citations and artifacts come only from the transcript, and normalizeThreadMessages drops them. So the transcript is skipped only on a warm open (local snapshot has turns and the session is found); a cold open reads it, in parallel.",
+    "The row says the flag defaults on after proof. It ships default off (strict literal parser) per the owner order.",
+    "Cold open is one wave under the flag (transcript started beside the session), not the sequential waves in flag-off. The local snapshot read moved ahead of the session request in both modes; it is synchronous and no request changes.",
+    "Tests were added to the existing use-chat-controller.recovery.test.ts (new describe block) and chat-client.test.ts, not plan-reload.test.ts. No new files were created."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The S6 gate (D5: build only if the S1 cold-open request budget is missed) is still open. chat-perf-budget.json has no measured request numbers, so the owner has to sign D5 before the flag is switched on.",
+     "Live request accounting is owed: chat-transcript-performance.spec.ts section D (requests.total, duplicateGetCount, sequentialWaves), cold and warm, with the flag off and with it on, on a second dev server.",
+     "Owed: a 200-turn cold-open turn-array comparison, flag on vs off, on a rebuilt stack.",
+     "Build ledger row for WS09-S6 in the plan doc (lead-owned)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S6 gate is unresolved: tests/e2e/chat-perf-budget.json reports status unmeasured with requests.total, duplicateGetCount and sequentialWaves all null, and the S1 three-run baseline is still pending (ledger B01), so nobody can yet show the S1 request budget is missed; the flag must stay off until the owner signs D5."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Owed: the 200-turn cold-open turn arrays are not compared flag-on versus flag-off on a rebuilt stack; the unit tests compare a two-turn fixture only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Dropping the transcript on a cold device needs the messages payload to carry grounding, citations and artifacts; normalizeThreadMessages in chat-client.ts keeps none of them today, and changing it touches every getThreadMessages caller, so it needs its own gated decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A listCatThreads caller that joins an in-flight walk receives a listing that started before its own local write; reconcileLocalThreads spares local copies younger than RECONCILE_GRACE_MS (5 minutes), so the effect is a one-walk-stale list, but a write generation would remove it and is worth adding before the flag is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a warm open whose session read returns null (the transcript must still be read), nor a load superseded while its messages read rejects (the void catch guard)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A load superseded during the session and transcript wait still issues its messages read, one extra request on rapid thread switches; flag-off skips that read after the same check."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The controller tests mock listChatThreads outright, so the single-flight is exercised only in chat-client.test.ts with a mocked fetch; no browser run covers it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The shared afterEach in use-chat-controller.recovery.test.ts clears only localStorage while client storage also reads sessionStorage, so snapshots can leak between tests; the new describe block clears both."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In this worktree quarry-client.test.ts fails to load (unresolved @quarry/client) and tsc reports 34 errors in quarry-client.ts, RemoteSupportPage.tsx and schedule-contract.test.ts; all pre-existing and outside this slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The row's stretch (render the local snapshot before the network returns, behind hydratingThreadId) is not built; it was an own decision, off by default."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The D5 gate is unresolved: no S1 baseline shows the request budget is missed, so VITE_CHAT_PARALLEL_THREAD_LOAD must stay off until the owner signs D5 and the budget is recorded."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Neither the flag-on request reduction nor turn-array parity has been shown on a live stack; the unit tests cover a two-turn mocked fixture only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On a warm open under the flag, grounding, citations, artifacts and taskSteps come only from the local snapshot, so rich data another device added since the snapshot will not show until the transcript is read again. This trade-off needs owner acceptance before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "listChatThreads single-flight: a caller that joins an in-flight walk gets a listing that started before its own local write. The RECONCILE_GRACE_MS grace limits the effect, but a write generation would close it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a warm open whose session read returns null (the transcript must still be read sequentially), nor a superseded load whose prefetched messages read rejects."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Flag off is not strictly byte-identical in ordering: readChatThreadTranscript (synchronous storage read) now runs before the getChatThread await instead of after it. No request changes, and cachedUpdatedAt resolves to the same value, but a storage write landing during the session await would now be missed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "src/shared/chat-nodes/index.ts shows as modified in git status but is not in this slice's ownership set; it belongs to another slice and must not be staged with WS09-S6."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads recovery.test.ts plan-reload.test.ts (plus chat-client.test.ts)",
+      "outcome": "3 files passed, 149 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec tsc --noEmit -p tsconfig.app.json, filtered to use-chat-controller and chat-client",
+      "outcome": "no errors in the touched files (the implementer reported 34 pre-existing errors elsewhere, which I did not re-count)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built WS09-S6 behind VITE_CHAT_PARALLEL_THREAD_LOAD (exact 'true' via parallelThreadLoadEnabled in chat-client.ts, read at call time, default off). Flag off keeps the same request order (session, then transcript, then messages); only a synchronous local-snapshot read moved ahead of the session request. Flag on: the messages read starts with the session read; the transcript starts with them only when the local snapshot has no turns, and is skipped on a warm open once the session is found, with cachedUpdatedAt taken from the session when the messages read returns messages (the same value the transcript would carry; history.rs sets it from the same session). listChatThreads single-flights concurrent callers under the flag and returns each caller its own array. Turn arrays are equal flag-on and flag-off in the cold and warm fixture tests. ZDR: reads only; no write path changed. The flag stays off in every committed default. The gate (S1 request budget missed, owner sign-off on D5) is unresolved and the live proof is owed; see lead_todo and depth_findings."
+  }
+ ]
+}

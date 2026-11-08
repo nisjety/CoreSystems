@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+
+// Verified Outcome Foundation — the shared contract every domain that
+// executes a real-world side effect (tool calls, browser actions, provider
+// writes, memory promotion, human approval) converges on, instead of each
+// inventing its own ad hoc "did it work" shape. Types only: this file
+// defines the shared vocabulary; each domain still owns and persists its own
+// instances (Model Plane's session-core stores the approval-continuation
+// ones; a future Quarry/browser-receipt wiring would store its own in its
+// own database — no cross-plane table, per the platform's no-shared-DB
+// rule).
+//
+// First concrete producer: execution-core's approval_delivery_worker
+// (RecordApprovalContinuationOutcomeRequest.verification). Everything else —
+// postcondition verifiers, simulators, Quarry/browser-receipt adoption, the
+// Agent Quality OS metrics suite — is later, separately scoped work
+// (verevon-roadmap.md §3b, P1 items 2-6). Treat a VERIFIED_SUCCESS from this
+// first producer as a STRUCTURAL check (the provider/action boundary
+// returned an authoritative receipt id), not an independent postcondition
+// verification — the two are deliberately distinguished by `method` below so
+// a future real postcondition check is never confused with today's
+// mechanical one.
+
+// Independent judgment on whether a claimed outcome actually happened. This
+// is the whole point of the contract: a boundary *reporting* success
+// (`ExecutionReceipt.reported_success`) is a different claim from an
+// outcome being *verified* true, which is why the two are separate messages.
+enum VerificationStatus {
+  VERIFICATION_STATUS_UNSPECIFIED = 0;
+
+  // No verification could be performed or its result was inconclusive.
+  // Never treated as success by any caller.
+  VERIFICATION_STATUS_UNKNOWN = 1;
+
+  // Independently judged to have actually happened.
+  VERIFICATION_STATUS_VERIFIED_SUCCESS = 2;
+
+  // Independently judged to have NOT happened, or to have failed.
+  VERIFICATION_STATUS_VERIFIED_FAILURE = 3;
+
+  // Some but not all of the effect's expected consequences were confirmed
+  // (e.g. a multi-step provider action where only the first step verified).
+  VERIFICATION_STATUS_PARTIALLY_VERIFIED = 4;
+}
+
+// One side-effecting action attempted anywhere in Verevon. The generic
+// envelope a domain-specific "what did we do" record can carry alongside its
+// own existing fields, rather than inventing a parallel identity.
+message Effect {
+  // Stable id for this attempted effect, unique within its owning domain.
+  string effect_id = 1;
+
+  // Free-form but conventionally namespaced kind, e.g.
+  // "tool_call:book_shipment", "browser_action:click",
+  // "provider_action:pages.post". Not an enum: the set of effect kinds
+  // spans every domain and grows independently of this shared contract.
+  string kind = 2;
+
+  string org_id = 3;
+  string run_id = 4;
+
+  // Who or what attempted this effect: a user id, "model", or a service
+  // identity. Free text by design — domains differ in how they identify
+  // actors.
+  string actor = 5;
+
+  google.protobuf.Timestamp attempted_at = 6;
+}
+
+// What the effect's own boundary (provider API, browser, tool runtime)
+// reported back. This is the RAW, possibly-misleading claim — exactly the
+// kind of unverified "success" this whole contract exists to stop treating
+// as ground truth.
+message ExecutionReceipt {
+  string effect_id = 1;
+
+  // Whether the boundary itself claimed success. This is NOT verification —
+  // see VerificationResult for the independent judgment.
+  bool reported_success = 2;
+
+  // Authoritative id from the provider/action boundary, when one exists
+  // (e.g. a booking id, a post id, a provider message id). Absence of this
+  // on a claimed success is itself a signal handled by verification.
+  string provider_receipt_id = 3;
+
+  // Boundary-specific status string. Bounded and sanitized by the producer —
+  // never raw provider payload (mirrors approval_continuation_receipts'
+  // existing content-free design).
+  string raw_status = 4;
+
+  google.protobuf.Timestamp recorded_at = 5;
+}
+
+// The independent judgment on an effect's outcome. `method` names how the
+// judgment was reached so a mechanical check is never confused with a real
+// postcondition verification later.
+message VerificationResult {
+  string effect_id = 1;
+  VerificationStatus status = 2;
+
+  // How this judgment was reached. Today: "structural" (receipt-id
+  // presence/absence only). Future: "postcondition" (an independent check
+  // against the provider's own state) — see verevon-roadmap.md §3b P1 item 3.
+  string method = 3;
+
+  // Short, human-readable justification. Bounded, never raw provider
+  // payload.
+  string reason = 4;
+
+  google.protobuf.Timestamp verified_at = 5;
+}

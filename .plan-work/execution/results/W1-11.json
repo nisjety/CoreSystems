@@ -1,0 +1,692 @@
+{
+ "batchId": "W1-11",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS04-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/run_control_two_replica_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --test run_control_two_replica_test",
+     "outcome": "19 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib queued_input (includes queue_bus_message_is_never_built_for_zdr_or_waived_claims)",
+     "outcome": "19 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib -- run_control cancel_registry every_durable_mutation queue_bus_message readyz_reports a_durable_cancel",
+     "outcome": "38 passed (includes every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full)",
+     "outcome": "2191 passed, 0 failed, 4 ignored"
+    },
+    {
+     "command": "cargo check -q -p model-gateway --tests",
+     "outcome": "compiles, including the edited e2e_invoke_chain_test.rs (compile only, not run)"
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib (filtered to queued_input.rs and run_control.rs)",
+     "outcome": "one pedantic hit, fixed with a scoped allow; none remaining in my files"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "71 passed, 25 failed. The failures are drifted pins, missing vendored copies and CRLF-checked-out .sha256 copies in other planes and in zdr-refusals. I did not touch the matrix or its pin, so none of them come from this slice. The matrix .sha256 vendored-copy rows are among the 25."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: a correction entry for 2026-08-24 'persist before deliver' saying the code (invoke_queue_input) enqueues first and persists after, and stays that way through WS04-S3 (D3); the reorder is WS04-S6. Add that queue text crosses NATS core only after the ZDR/waived gate (queued_input::bus_message), and that a lost reply is retried once with the same op_id and surfaced as 503 run_control_unavailable.",
+    "shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256, the pin in scripts/tests/zdr-contract-sync.test.sh, the three vendored copies under mp-contracts, model-gateway and execution-core tests/fixtures, and the loader zdr-contract-schema.mjs if it needs the new shape): the enforcement row e_zdr_token_queue_input_refused, once the integrator decides the row shape for an operation refusal.",
+    "shared-edit apps/Model Plane/docs/ZDR.md and apps/Model Plane/MODEL_PLANE_STATUS.md at WS04-S9: queued text is never put on the bus for ZDR or waived tokens; queue and probe ops are on the same MODEL_GATEWAY_RUN_CONTROL_BUS switch. Also gateway_metrics.rs could take a queued_input_undelivered helper beside run_control_request (today sse.rs calls metrics::counter! directly, as other counters in sse.rs do).",
+    "Live proof (not run, needs the replicas stack with MODEL_GATEWAY_RUN_CONTROL_BUS=true, ACL deployed): stream with a tool loop on one replica, queue via the other; see the queued_input SSE on the owner, persisted:true, queued_input_undelivered_total for a leftover; resume on the other replica for a producer quiet more than 120 s still tails; run_control_requests_total{op=queue|probe,outcome=peer}.",
+    "Rebuild the model-gateway image before any live proof (code changed in http_routes.rs, sse.rs, queued_input.rs, run_control.rs)."
+   ],
+   "deviations": [
+    "The matrix enforcement row e_zdr_token_queue_input_refused is NOT added. Adding a row changes the golden's digest, which needs the pin in scripts/tests/zdr-contract-sync.test.sh, the vendored copies and pins under mp-contracts, model-gateway and execution-core tests/fixtures, and the loaders in other planes (zdr-contract-schema.mjs rejects unknown fields). None of those are mine. The row is also a different shape (an operation refused, not a bearer x route decision). The plan calls the name 'proposed; integrator aligns'. The guard the plan relies on is in place: the inventory test every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs stays green and queue_bus_message_is_never_built_for_zdr_or_waived_claims plus the two-replica ZDR/waived test cover it.",
+    "queued_input.rs: enqueue_for was removed (merged into enqueue_checked) rather than kept beside it, so there is no dead code. I therefore edited one call in tests/e2e_invoke_chain_test.rs (a test file that calls it) and one comment in sse.rs.",
+    "Resume tail timers in sse.rs moved from std::time::Instant to tokio::time::Instant (outside the literal 'replace producer_live' row) so the plan's 'probe keeps the resume tail alive past 120 s with fake clock' test is real and not vacuous.",
+    "The handler retries a timed-out queue request once with the same op_id (plan risk 3 'one safe retry via op_id'); worst case against a hung owner is two request timeouts before the 503."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256 pin in scripts/tests/zdr-contract-sync.test.sh and three vendored fixture copies) for the e_zdr_token_queue_input_refused row",
+    "apps/Model Plane/docs/decisions/ledger.md for the persist-order correction",
+    "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs only if a queued_input_undelivered helper is wanted instead of the direct metrics::counter! call"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof needs docker and the two-replica stack with MODEL_GATEWAY_RUN_CONTROL_BUS=true and the NATS ACL deployed: stream with a tool loop on A, queue via B, see the queued_input SSE on A, persisted:true, and queued_input_undelivered_total for a leftover.",
+     "Live proof: resume on B for a producer quiet more than 120 s still tails. Also run_control_requests_total{op=queue|probe,outcome=peer}.",
+     "The model-gateway image must be rebuilt before any live proof.",
+     "Matrix row e_zdr_token_queue_input_refused is absent. Enforcement rows are bearer x route decisions with no operation concept. Adding one needs the integrator to pick a shape, then a pin and vendored-copy update outside this slice's files.",
+     "Ledger entry for the persist-order correction (D3), and the ZDR.md and MODEL_PLANE_STATUS.md updates at S9. These are shared files, so the lead applies them (lead_todo from the implementer)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing here ran over real NATS: queue and probe on the real bus (no-responders mapping for a dead owner, the 750 ms timeout, request/reply inbox ACL for the queue payload up to 8 KiB) need the ignored live test and the two-replica stack before MODEL_GATEWAY_RUN_CONTROL_BUS is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Core NATS is at-most-once and the owner enqueues before it replies: a reply lost twice (original and the one retry) gives a 503 although the message may be queued on the owner and, the persist step being skipped, is never recorded; the client may resend it and the run could read it twice. WS04-S6 (client_message_id, persist-then-enqueue) is what closes this; do not flip the switch for production before it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A message over the bus is bounded at 8 KiB while the local bound is 2000 characters; a 2000-character message of 4-byte characters can exceed it and is answered as TooLong (413) with the character count even though it is within the character limit. Rare and safe, but the wording is slightly off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 'reply lost after the owner queued it' case is only simulated by sending the same op_id twice; the loopback hub cannot drop just the reply. A hub switch that delivers but swallows the reply would test the retry path in queue_input end to end."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the queued_input_undelivered_total counter value or the warn line in finish_stream_registrations (only the count returned by finish)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The probe is counted in run_control_requests_total{op=probe} once per 2 s per open resume tail; at high resume volume that series grows with tails, not with runs. Local probe hits are deliberately not counted."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Matrix row for the queue refusal (e_zdr_token_queue_input_refused) is not in the golden; the integrator needs to decide whether an operation-level refusal belongs in zdr-posture-matrix.json at all (its rows are bearer x route decisions) or in the model-gateway durable-mutation inventory only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cancel_registry.rs is_live_for doc still says another replica's producer is invisible and callers keep their inactivity fallback; it is now only true for the local method (ProducerLiveness adds the probe). The file is not in this slice's ownership."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The enforcement row e_zdr_token_queue_input_refused was not added to zdr-posture-matrix.json. The matrix schema is bearer x route to decision, with no operation-refusal shape, and a new row would change the digest and need pin and vendored-copy edits in unowned files. Coverage is the inventory test every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs plus queue_bus_message_is_never_built_for_zdr_or_waived_claims and the two-replica ZDR/waived test. The integrator should decide whether the row belongs in the golden at all."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Core NATS is at-most-once and the owner enqueues before it replies. If the reply is lost twice (original plus the one retry) the user gets a 503, although the owner may hold the message and it was never persisted, so a client resend could be read twice. WS04-S6 (client_message_id, persist then enqueue) closes this, so do not flip MODEL_GATEWAY_RUN_CONTROL_BUS in production before S6."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing ran over real NATS. The no-responders mapping for a dead owner, the 750 ms timeout, and the request/reply inbox ACL for a queue payload of up to 8 KiB are untested, so they need the ignored live test and the two-replica stack before the switch is turned on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test simulates a reply lost after the owner queued the message. The loopback hub cannot drop only the reply, so the retry-with-same-op_id branch in RunControl::queue_input is covered only by sending the same op_id twice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the queued_input_undelivered_total counter value or the warn line in finish_stream_registrations. Only the count returned by QueuedInputRegistry::finish is tested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A message over the bus is bounded at 8 KiB while the local bound is 2000 characters. A 2000-character message of 4-byte characters is answered TooLong (413) carrying its character count, although it is within the character limit. Rare and safe, but the wording is off."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Each open resume tail issues a probe (counted as run_control_requests_total{op=probe}) at most every 2 s, so that series grows with tails, not with runs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "queued_input.rs test comment around line 548 still names the removed enqueue_for. cancel_registry.rs is_live_for doc still says a peer's producer is invisible, which is no longer true now that ProducerLiveness probes. cancel_registry.rs is not in this slice's ownership."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "sse.rs calls metrics::counter!(\"queued_input_undelivered_total\") directly. gateway_metrics.rs could take a helper beside run_control_request if the lead wants one."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "tool_loop.rs and the other Model Plane, inference and Frontend diffs in git status belong to other slices and not to WS04-S3. The tool_loop.rs hunk (prompt_tiers: None) is outside this slice's ownership list, and it is not from this implementation."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "Built to the plan row with the bus switch off by default and unchanged behaviour with it off. 1) queued_input.rs: EnqueueOutcome is serde-capable (the retrieval scope goes over the wire as a string through a local module, because normalize.rs is not mine) and has a new ThreadMismatch arm. enqueue_checked merges thread_for and enqueue_for, so enqueue_for is gone. The mismatch check runs for the owning caller only; a stranger gets NoActiveStream. Bounded seen_ops (16, with the pending count answered) make a repeated op_id return the first answer and queue nothing. finish returns the number of undelivered messages. bus_message(claims, ...) is the only place text goes into a RunControlMsg and refuses ZDR and waived tokens again. 2) run_control.rs: the owner handler now answers Cancel, Queue and Probe. attach takes the QueuedInputRegistry. RunControl::queue_input is local-first, then the bus, with one retry on Timeout using the same op_id. ProducerLiveness is the local registry first, then a probe cached for 2 s. 3) http_routes.rs invoke_queue_input: gate, then bus_message, then queue_input. 409 for ThreadMismatch, the existing 404 with resend_as_new_turn for NoOwner or NoActiveStream, and 503 {queued:false, retryable:true, error:run_control_unavailable} with nothing persisted. Persist still follows enqueue (D3). The handler mints a server-side op_id per request. 4) sse.rs: one call-in change to attach; finish_stream_registrations counts queued_input_undelivered_total (via metrics::counter! directly, since gateway_metrics.rs is not owned) and logs a warn with the count only; invoke_resume_sse uses ProducerLiveness and the resume tail's timers moved from std::time::Instant to tokio::time::Instant so the 120 s window can be tested on a paused clock (behaviour is identical on a normal clock). 5) Tests: queue on B delivered via A's drain; Full(3), TooLong, Empty; foreign user, nobody-owns and non-token ids are the same 404; thread mismatch 409 from both replicas; duplicate op_id is one item across the bus; mute gives 503 and queues nothing; bus off gives the old 404; ZDR and waived callers put nothing on the bus (muted bus, owner queue stays empty); the probe keeps the resume tail past 130 s of virtual time and the tail closes after the owner finishes. Deviations: I did NOT edit zdr-posture-matrix.json or its .sha256 (see deviations)."
+  },
+  {
+   "id": "WS06-S9",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md (new, CRLF, ASCII)",
+    "apps/Model Plane/MODEL_PLANE_ROADMAP.md (Enterprise-next item 6 updated; CRLF kept; 8 insertions, 1 deletion)"
+   ],
+   "tests_run": [
+    {
+     "command": "node docs/compliance/evidence/tools/scan-egress.test.mjs",
+     "outcome": "exit 0, 34 pass, 0 fail (run before and after the edits)"
+    },
+    {
+     "command": "node docs/compliance/evidence/tools/scan-egress.mjs --strict --summary (worktree, before any shared edit)",
+     "outcome": "exit 1 with three problems that predate this slice: unclassified host a.b and credential-like PG_PASSWORD, both from the untracked .plan-work/ folder; AZURE_COST_CLIENT_SECRET (cost-core sync.go:142) claimed by no vendor"
+    },
+    {
+     "command": "scratch copy of scan-egress.mjs with the customer-siem-destination VENDORS block, --strict --summary",
+     "outcome": "vendors 58 to 59; the new vendor shows evidence=env-only; the same three strict problems and no new one"
+    },
+    {
+     "command": "scratch copy of subprocessors-from-code.md with the register row, scan-egress --verify-doc",
+     "outcome": "exit 0; baseline register also exit 0"
+    },
+    {
+     "command": "check-citations on scratch subprocessors-from-code.md (with row) vs original",
+     "outcome": "25 failures in both; the new row adds 2 citations and no failure (pre-existing drift)"
+    },
+    {
+     "command": "check-citations on scratch honest-limits.md (with L37-L40 bullets and basis rows) vs original",
+     "outcome": "23 failures in both; 9 new citations, all valid; no failure mentions L37-L40"
+    },
+    {
+     "command": "trust-data.test.ts (verevon-web, vitest)",
+     "outcome": "not run: it needs the trust-recipients block applied first (see lead_todo)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit docs/compliance/evidence/tools/scan-egress.mjs (LF): insert after the okta-oidc entry, before the line `  {` that opens the cloudflare-turnstile entry:\n  {\n    id: 'customer-siem-destination',\n    name: \"Customer-configured SIEM destination (audit export to the customer's own endpoint)\",\n    class: 'user-authorised',\n    role: 'customer-directed',\n    hosts: [],\n    gateEnv: ['AUDIT_SIEM_EXPORT_ENABLED', 'ORG_SIEM_DESTINATIONS_ENABLED'],\n    note: 'The URL is the one an organisation owner or admin configures, so no literal exists. Audit rows of that organisation leave for it only when the exporter and the destination are both switched on.',\n  },",
+    "shared-edit docs/compliance/evidence/subprocessors-from-code.md (CRLF): insert one line after the row that starts with | `crm-erp-import-sources` (the register is ordered by id):\n| `customer-siem-destination` | Customer-configured SIEM destination (audit export to the customer's own endpoint) | user-authorised; customer-directed | Audit rows of the customer's organisation, in chain order, to the URL its owner or admin configures, when the exporter and the destination are both switched on: the stored envelope fields (user id, role, plane, event, subject, resource id, outcome, request id, IP host, user agent, source producer and bus, details, hashes). The identifiers, the IP host and the user agent are personal data. | `AUDIT_SIEM_EXPORT_ENABLED` is read in the siem-exporter; `ORG_SIEM_DESTINATIONS_ENABLED` is read in org-core. Not read on the dev stack. Both default to 0 in the compose file. | Pack: no. Trust page: no. | EXCLUDED: the customer's own system, configured by the customer; disclose as a recipient class, not a sub-processor; counsel to confirm | `apps/Control Plane/audit-core/cmd/siem-exporter/main.go:56 @\"AUDIT_SIEM_EXPORT_ENABLED\"`<br>`apps/Control Plane/org-core/internal/http/siem_handlers.go:18 @\"ORG_SIEM_DESTINATIONS_ENABLED\"` |",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/verevon-web/src/components/trust/trust-recipients.ts (LF; NOT in the S9 notes, but trust-data.test.ts 'accounts for every vendor the scan finds' fails without it): insert after the crm-erp-import-sources entry (its closing `},` line) and before the discord-api entry:\n\t{\n\t\tid: \"customer-siem-destination\",\n\t\tstatus: \"excluded\",\n\t\treason: \"the customer's own SIEM, configured by the customer's owner or admin; the register classes the export as customer-directed, for counsel to confirm\",\n\t},",
+    "shared-edit apps/Model Plane/docs/ZDR.md:95 (CRLF): replace the whole row that starts with | **NATS / audit envelopes** with:\n| **NATS / audit envelopes** | ZDR-derived content not published to durable subjects | Built. `zdr: true` envelopes are suppressed by natsx. The audit chain and its SIEM export carry the audit envelope only. Producers keep `details` content-free by contract, and audit-core counts oversized or denied `details` keys without rejecting them (`audit_core_details_guard_total`). |",
+    "shared-edit docs/compliance/evidence/honest-limits.md (CRLF), part a: insert after the L35 bullet (the last bullet of section 7, before '## 8. What Verevon does not have'):\n- **L37. Audit rows are chained only where the chain is switched on, and the chain does not prove integrity against a database owner acting alone.** The chain is off unless `AUDIT_CHAIN_ENABLED` is set to `1`. Where it is on, the signing key sits outside the database, but the rows, their hashes and the attestations sit inside it. A database owner can rewrite rows and delete the attestations that cover them, and the rewritten chain then recomputes cleanly and is not reported as broken. Detection needs a signed head or checkpoint that covers the rewritten rows and is held outside the database, such as a SIEM copy or a customer export taken earlier.\n- **L38. Completeness is not proven.** The chain covers the audit rows that were stored. An event that was never published, or that the consumer dead-lettered, is not in the chain, and the chain does not show that it is missing.\n- **L39. Audit rows written before a chain was switched on are outside the chain, and they are never rewritten.** A verification report counts them and says that the chained part is verified, not the whole log.\n- **L40. A SIEM copy is a witness only for the rows it has received, and only where a customer has configured a destination.** The exporter is off unless `AUDIT_SIEM_EXPORT_ENABLED` is set to `1`. A destination that is disabled, failing or not configured proves nothing about the rows it did not receive.",
+    "shared-edit docs/compliance/evidence/honest-limits.md (CRLF), part b: insert after the '| L35 |' row of the section 10 basis table, one row per line:\n| L37 | The chain is off unless `AUDIT_CHAIN_ENABLED` is `1`; the signing key comes from the audit-core environment, not the database; the guard trigger is a guard rail, not a boundary. | `apps/Control Plane/audit-core/cmd/server/main.go:385 @\"chainEnabled := parseChainEnabled\"`<br>`apps/Control Plane/audit-core/cmd/server/main.go:298 @\"AUDIT_CHAIN_PRIVATE_KEY_BASE64\"`<br>`apps/Control Plane/audit-core/internal/store/migrations/007_audit_chain.sql:46 @\"Guard rail, not a security boundary\"` |\n| L38 | A clean verdict covers the rows the verifier read and anchors them to a signed attestation; it does not say the log is complete. | `apps/Control Plane/audit-core/internal/verifier/verifier.go:38 @\"the chain from its trust base to the head recomputes\"` |\n| L39 | Rows before activation are `legacy_unchained`; the chain migration does not backfill them, and the verifier reports them. | `apps/Control Plane/audit-core/internal/store/migrations/007_audit_chain.sql:3 @\"nothing is backfilled\"`<br>`apps/Control Plane/audit-core/internal/verifier/verifier.go:41 @\"and the org also has rows written\"` |\n| L40 | The exporter is off unless `AUDIT_SIEM_EXPORT_ENABLED` is `1`; the destination routes exist only when `ORG_SIEM_DESTINATIONS_ENABLED` is on; the exporter holds no signing key. | `apps/Control Plane/docker-compose.yml:905 @\"AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-0}\"`<br>`apps/Control Plane/audit-core/cmd/siem-exporter/main.go:4 @\"holds no ingest credential\"`<br>`apps/Control Plane/org-core/internal/http/siem_handlers.go:18 @\"ORG_SIEM_DESTINATIONS_ENABLED\"` |",
+    "shared-edit docs/compliance/evidence/trust-claims-pending-reverification.md (CRLF): append at the end of the file, after the last paragraph of section 6:\n**Chain status (2026-10-24).** The Control Plane audit chain (hash chain, signed head attestations, verifier, owner and admin compliance read, SIEM exporter) is in the source, inert or switched off by default (WS06 S0 to S8). That is not evidence that the audit trail is chained, verified or exported on any stack. Until the activation evidence for the claimed stack has been read (`apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md`, section 9), no public sentence may say the trail is tamper-evident, chained, verified or exported. The chain's limits are in `honest-limits.md`, L37 to L40. Re-read rows 36 to 41 under steps 1 to 5 above before any of them changes.",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md (CRLF): append this sentence to the end of the paragraph under the '## Enterprise readiness' heading (the paragraph that ends 'remain in Enterprise-next after the MVP gates.'):\n The Control Plane audit chain, verifier, compliance read and SIEM exporter are in the source, inert or switched off by default (WS06 S0 to S8). The operator runbook is `apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md`. Enterprise audit export and retention stay in Enterprise-next until activation evidence and an external witness exist.",
+    "After the shared edits: from a tree without the untracked .plan-work/ folder, run `node docs/compliance/evidence/tools/scan-egress.mjs --strict --summary`. The new vendor should show evidence=env-only, and the strict problems should be no more than the three that predate S9. Refresh the egress baseline as a new dated summary file (see needs_other_files).",
+    "After the shared edits: run the trust drift test with vitest (apps/Frontend Plane/verevonv3/apps/verevon-web/src/components/trust/trust-data.test.ts). Without the trust-recipients block the test 'accounts for every vendor the scan finds' fails. Also run check-citations on the two register files and compare the failure counts with the pre-change counts (25 for subprocessors-from-code.md, 23 for honest-limits.md).",
+    "Commit: the runbook (new file) and the roadmap change belong in the S9 commit. Apply the shared-edit lines in the commits that own those files, after the slices that touch them, because the plan says S9 is edited last. Counsel must confirm the register class and role of the SIEM destination (user-authorised, customer-directed, EXCLUDED).",
+    "S9 Definition-of-Done evidence: the wording above says 'built, inert or off by default' and makes no live claim. When the S2, S4 and S8 live captures exist, cite them in the runbook's evidence section and re-read trust rows 36 to 41 before any sentence broadens."
+   ],
+   "deviations": [
+    "Shared files were not edited, as the notes require; their exact lines are in lead_todo. The trust recipients file apps/Frontend Plane/verevonv3/apps/verevon-web/src/components/trust/trust-recipients.ts is not in the S9 notes, but trust-data.test.ts needs an entry for any vendor the scanner finds, so it is listed in needs_other_files.",
+    "The plan's S2 rollback note says the maintenance setting came with S3. The code shows it arrived with S2 (d4c9e2905, the Purge GUC at store.go:110-119), so the runbook's rollback floor is S2.",
+    "The register disposition for the SIEM destination is EXCLUDED (customer-directed, following the okta-oidc and slack-api precedent), not LISTED. The plan's wording 'subprocessor list' was read as the register file.",
+    "Honest-limit IDs are L37 to L40, the next free numbers. They go in section 7 and their basis rows in section 10.",
+    "The runbook describes the code as it stands, including its open gaps (section 10), rather than the planned behaviour."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/src/components/trust/trust-recipients.ts (needed by trust-data.test.ts; not in the S9 notes)",
+    "docs/compliance/evidence/egress-scan-summary-2026-10-01.txt (the plan says refresh the baseline; a new dated summary file is needed after the VENDORS block is applied)",
+    "apps/Control Plane/observability/rules/audit-core.rules.yml (runbook annotations on the chain and SIEM alerts; depth item 15)",
+    "apps/Control Plane/audit-core/.env.example (DRYRUN comment wording, lines 36 to 38; depth item 14)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "S2, S4 and S8 live captures (chain-on activation with a governed action, mutate-row-via-GUC verifier check, SIEM receiver capture) were not run; the runbook cites no live evidence and makes no activation claim, but the plan DoD 'evidence cites S2/S4/S8 captures' still needs the lead's docker run.",
+     "Shared-file edits are still outstanding for the lead: scan-egress.mjs VENDORS entry, subprocessors-from-code.md row, trust-recipients.ts entry (needed by trust-data.test.ts), ZDR.md:95 row, honest-limits.md L37-L40 plus basis rows, trust-claims-pending-reverification.md section 6, MODEL_PLANE_STATUS.md paragraph. Apply them last, then run scan-egress --strict from a tree without .plan-work/, the trust drift test, and check-citations failure counts (25 and 23 baselines).",
+     "Egress baseline refresh (new dated egress-scan-summary file) is not done; it depends on the VENDORS edit."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A head marked broken has no repair path: chain.go:132 is the only writer of state 'broken', no code path sets it back to 'ok', and a broken org gets no new attestations and no purge. An owner decision and a repair procedure are needed before the chain is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No key-rotation command exists. run-control-plane.sh mints the audit-chain pair only when a value is missing and persist_if_missing never overwrites (lines 126-131, 217-228), so rotation is a manual secret-store change; a half-present ledger yields a mismatched pair that stops boot when the chain or pruning is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The details guard only counts oversize and denied keys (chain.go:30-38 and 332-335) and never rejects. The SIEM export sends details to customer endpoints, so content a producer puts in details reaches the customer's SIEM and is kept for the retention window. Decide enforce or observe before AUDIT_SIEM_EXPORT_ENABLED is switched on in any environment."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The enterprise entitlement that DEC-35 proposes for SIEM export (feature.siem_export; ruling Q-7a1-15) is not built. The operator switch ORG_SIEM_DESTINATIONS_ENABLED is the only gate on destinations, and the commercial ruling is open."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof was run for WS06-S2, S4 or S8: no stack or docker in this slice. The lead must run the chain-on activation with a governed tool action, the mutate-row-via-GUC verifier check and the SIEM receiver capture before the S9 claims can cite them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "audit-verify reads a bare manifest object, but the compliance API returns it inside data (compliance.go manifest handler; cmd/audit-verify/main.go loadManifest). A saved envelope gives a weaker verdict without an error, and the comment at store/compliance.go:231-236 says a saved manifest feeds the CLI directly. Make the CLI accept the envelope, as it does for pages, and test it with the real envelope."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Manifests are signed (SignManifest with the VAM1 payload, key_id and signature), but no production code verifies the signature: VerifyPayload has no caller outside tests. audit-verify relies on the checkpoint, the attestation and the head claim instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The revert migrations 007 and 008 destroy chain evidence (chain columns, heads, attestations, checkpoints, incidents). They are run by hand with no guard. Consider refusing to run them while rows exist, and make the owner decision explicit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Rollback floor: a build from before WS06-S2 cannot purge once migration 007 is applied (guard trigger). Nothing enforces that floor in run-control-plane.sh or validate-release-credentials.sh. The plan's S2 rollback note names S3, but the maintenance setting arrived with S2 (d4c9e2905)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Several gates are red in the worktree before this slice: scan-egress --strict (untracked .plan-work/ notes add an unclassified host and PG_PASSWORD; AZURE_COST_CLIENT_SECRET at cost-core sync.go:142 is claimed by no vendor), check-citations on subprocessors-from-code.md (25 failures) and on honest-limits.md (23 failures). They cannot serve as S9 evidence until fixed; confirm the committed-tree result."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The egress class and role for the SIEM destination (user-authorised, customer-directed, EXCLUDED) is the engineer's reading. Counsel must confirm it; the register row and the trust-recipients entry depend on it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Switch parsing differs by service: audit-core and the exporter accept only 1, org-core accepts 1 or true, and the verifier turns off only for 0. Document the difference or unify it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each compliance page read writes one self-audit row into the same chain (compliance.go recordComplianceRead), so exporting N pages adds N rows, and the self-audit details carry filter values such as user_id. Confirm that this is intended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Control Plane/audit-core/.env.example lines 36 to 38: the AUDIT_CHAIN_PRUNE_DRYRUN comment reads as if a dry run deletes nothing at all. It deletes no chained row, but unchained rows and usage_events still age out under the retention window."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "observability/rules/audit-core.rules.yml has no runbook annotations on the chain and SIEM alerts, while the Model Plane rules link their runbooks. Link them to apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md (outside this slice)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "honest-limits.md L23 says only audit events age out by time. Once AUDIT_CHAIN_PRUNE_ENABLED=1, chained rows also age out, with checkpoints. Update L23 when pruning is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Counsel must confirm the register class for the SIEM destination (user-authorised, customer-directed, EXCLUDED) before the subprocessors row and trust-recipients entry are applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A head marked broken has no repair path (no code sets state back to ok, no new attestations, no purge); the runbook section 10 states it, but an owner decision and procedure are needed before AUDIT_CHAIN_ENABLED is set to 1 anywhere."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The details guard only counts oversize and denied keys and never rejects, while the SIEM export ships details to customer endpoints; decide enforce versus observe before AUDIT_SIEM_EXPORT_ENABLED is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "feature.siem_export entitlement (DEC-35, Q-7a1-15) is not built, so ORG_SIEM_DESTINATIONS_ENABLED is the only gate; the runbook says so, the commercial ruling is open."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live captures for WS06 S2, S4, S8 exist; the trust-claim and honest-limits text must stay at 'built, off by default' until they do."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "audit-verify reads a bare manifest object while the compliance API returns it under data; runbook section 3.3 gives a workaround, but the CLI should accept the envelope and have a test with the real envelope."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Manifest signatures are produced but no production code verifies them; audit-verify relies on checkpoint, attestation and head claim instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Revert migrations 007 and 008 destroy chain evidence and run by hand with no guard; consider refusing to run while chained rows exist."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Nothing enforces the rollback floor (no audit-core image below S2 once migration 007 is applied) in run-control-plane.sh or validate-release-credentials.sh; the plan's S2 rollback note names S3 but code shows the maintenance GUC arrived with S2."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "scan-egress --strict, check-citations on subprocessors-from-code.md (25 failures) and honest-limits.md (23 failures) are red before this slice (AZURE_COST_CLIENT_SECRET unclaimed, untracked .plan-work/ noise); confirm the committed-tree result before citing them as S9 evidence."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Switch parsing differs by service (audit-core and exporter accept only 1, org-core 1 or true, verifier turns off only for 0); runbook documents it, unifying would be safer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each compliance page read writes a self-audit row into the same chain, so exporting N pages adds N rows carrying filter values; confirm intended."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "audit-core/.env.example lines 36-38 AUDIT_CHAIN_PRUNE_DRYRUN comment implies a dry run deletes nothing, but unchained rows and usage_events still age out; reword."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "observability/rules/audit-core.rules.yml chain and SIEM alerts carry no runbook annotation; link them to AUDIT_CHAIN_RUNBOOK.md."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "honest-limits.md L23 (only audit events age out by time) must be updated when AUDIT_CHAIN_PRUNE_ENABLED is switched on."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "zdr"
+   ],
+   "notes": "Wrote the new runbook apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md (sections: what the chain proves and does not; switches; verifying, online and offline; reading a result; incident response; key rotation; purge dry run and enabling; rollback; SIEM export; evidence to keep; known gaps). Facts were checked against the code, not the plan: the runbook gives S2 as the rollback floor (the maintenance setting arrived with S2 commit d4c9e2905) and lists the gaps it cannot close. Updated Enterprise-next item 6 in MODEL_PLANE_ROADMAP.md: the chain, verifier, compliance read and exporter are described as source that is inert or off by default, with no claim of activation. The other five S9 files are shared and were NOT edited; the exact lines are in lead_todo. Each block was checked on a scratch copy (scanner, verify-doc, citation checker) without new failures. Nothing staged, committed or pushed. The live captures the S9 DoD cites (S2, S4, S8) were not run here."
+  },
+  {
+   "id": "WS08-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/chat-attachment-gates.spec.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/i18n/en.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/i18n/no.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm vitest run src/features/chat/lib/attachment-policy.test.ts src/shared/api/chat-client.test.ts src/features/chat/lib/prepare-chat-attachments.test.ts src/shared/i18n src/features/chat/components/chat-normalizers.wave2.test.ts",
+     "outcome": "6 files, 177 tests passed (before adding the attachments_not_sent presentation test)"
+    },
+    {
+     "command": "pnpm vitest run src/features/chat/lib/attachment-policy.test.ts",
+     "outcome": "12 tests passed"
+    },
+    {
+     "command": "pnpm vitest run src/features/dashboard/home src/features/chat src/shared/api",
+     "outcome": "2321 passed, 3 failed + 1 file failed to load, all in files I did not touch: zdr-refusals.test.ts (vendored golden pin and the new connector_read feature), chat-event-contract.test.ts (generated payload types), quarry-client.test.ts (cannot resolve @quarry/client)"
+    },
+    {
+     "command": "pnpm typecheck (filtered to my files)",
+     "outcome": "no errors in any file I touched; the command exits 1 on pre-existing errors in RemoteSupportPage.tsx and quarry-client.ts"
+    },
+    {
+     "command": "pnpm exec eslint on all touched src files plus the new e2e spec",
+     "outcome": "clean"
+    },
+    {
+     "command": "pnpm exec playwright test --list tests/e2e/chat-attachment-gates.spec.ts",
+     "outcome": "spec parses and lists 6 tests; NOT run (needs the live stack and sign-in)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/playwright.config.ts: line 58, change CHAT_WORKSPACE_SPECS to /chat-(?:workspace|voice-mode|transcript-performance|attachment-gates)\\.spec\\.ts/ so the spec runs in the 'chat' project against the local stack",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts: in streamAgUi (around line 677) build the body in try/catch the way streamChat now does, and on AttachmentsNotSentError call handlers.onError with the same message shape, or confirm the AG-UI route is unused for attachment turns",
+    "Evidence run per the plan: second Vite dev server over the worktree (:5173 is the main checkout), run 'pnpm test:e2e -- tests/e2e/chat-attachment-gates.spec.ts --project=chat' after the config edit, take screenshots of the six refusals and a network capture with no /api/v1/chat/stream request",
+    "Commit the new files attachment-policy.ts, attachment-policy.test.ts and chat-attachment-gates.spec.ts together with the edits"
+   ],
+   "deviations": [
+    "Subscription, Do and ZDR gates apply to images only, not to documents. Documents are read in the browser and inlined into the message text for every provider (inlineTextAttachments), so refusing them would break what works today. Test name a_subscription_turn_refuses_every_attachment is kept but asserts images refused and a document still passing; owner may overrule if the plan meant documents too.",
+    "ATTACHMENT_MAX_IMAGES is 1 (today's server analyses only the first image; S4 raises it), not S2's 4. ATTACHMENT_MAX_TOTAL_BYTES is 3,145,728 (S2's server default) because the client has no byte total today.",
+    "Allowed image types are png/jpeg/webp/gif (S2 list) and the picker accept now lists them instead of image/*, so svg/heic/avif are refused up front instead of failing at the provider.",
+    "Submit-time re-check skips connector-picked files (source set), whose text was extracted at pick time.",
+    "Added the attachments_not_sent presentation/translate test inside attachment-policy.test.ts rather than another file."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/playwright.config.ts (CHAT_WORKSPACE_SPECS regex does not match chat-attachment-gates.spec.ts, so it falls into the live-auth e2e project)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts (buildAgentRunInputBody/streamAgUi call buildChatWireBody, which can now throw AttachmentsNotSentError; streamAgUi does not catch it)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Playwright tests/e2e/chat-attachment-gates.spec.ts not run (needs live stack plus sign-in; also playwright.config.ts CHAT_WORKSPACE_SPECS regex does not match the new spec, so the lead must make the one-line shared edit)",
+     "Evidence run still owed: second Vite dev server over the worktree, screenshots of the six refusals, and a network capture showing no /api/v1/chat/stream request"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner to confirm images-only gating on the subscription/Do/ZDR routes: the plan row says refuse every attachment, but documents are inlined as message text and work on all three routes today; under ZDR the server refuses the wire attachments field only, so inlined document text in a temporary chat is allowed by this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr-refusals.test.ts extension (plan marks it live-only after WS01) not written, and that file already fails on the vendored golden drift (pin sha256 and the new connector_read feature) independent of this slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "S2 should make attachment-policy.ts constants server-declared (getAttachmentPolicy from /v1/models) and S4 should raise ATTACHMENT_MAX_IMAGES and add the model_no_vision reason; the single constants block is the seam."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Retry, edit and regenerate paths in use-chat-controller re-run toStreamAttachments on earlier user turns; a subscription thread whose history holds an image turn will now surface attachments_not_sent on retry instead of silently dropping the image, which is intended but unverified live."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Connector-picked files (attachConnectorFile) bypass the policy at pick time and are skipped at submit; add the check when connector images become possible."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component-level test of addFiles/submit refusal in DashboardComposer; coverage is the pure policy tests plus the unrun Playwright spec."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The gates apply to images only; documents are inlined as message text and still pass on the subscription, Do and ZDR routes. Under ZDR the server refuses only the wire attachments field, so inlined document text in a temporary chat is allowed. The plan row says 'every attachment' (test a_subscription_turn_refuses_every_attachment asserts images refused and a document passing), so the owner should confirm this reading before the behaviour counts as closed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ag-ui-client.ts buildAgentRunInputBody (line 261) calls buildChatWireBody without a catch, so an AttachmentsNotSentError from streamAgUi becomes a rejected promise instead of handlers.onError. The composer refuses these files first, so only the backstop path is affected; the lead should apply the shared edit handed back in the implementer's lead_todo."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No component-level test of addFiles or submit-time refusal in DashboardComposer. Coverage is the pure policy tests plus the unrun Playwright spec, and the Do and ZDR cases skip themselves if the toggles are disabled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The zdr-refusals.test.ts extension is not written. The plan marks it live-only after WS01. That file already fails on vendored-golden drift independent of this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Retry, edit and regenerate paths in use-chat-controller re-run toStreamAttachments on earlier user turns. A subscription thread whose history holds an image turn now surfaces attachments_not_sent on retry instead of silently dropping the image. This is intended but not verified live."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "S2 should make the attachment-policy.ts constants server-declared (ATTACHMENT_MAX_IMAGES is 1 today, not S2's 4). The constants block is the seam. S4 adds model_no_vision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Connector-picked files bypass the policy at pick time and are skipped at submit. Add the check when connector images become possible. A stale refusal notice in submitError also stays visible until the next action clears it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "attachment-policy.ts, chat-normalizers.ts and errors.ts now import the whole en and no dictionaries directly. This is fine functionally, but the bundle split of the i18n dictionaries is unchecked."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "zdr"
+   ],
+   "notes": "Built, no wire change, no switch. New pure policy module attachment-policy.ts: evaluateAttachment/evaluateAttachments (threads image count and byte total across files), constants in one place, ATTACHMENT_ACCEPT shared with the file input, localized per-file messages. The composer's addFiles refuses per file with a notice and never makes a chip or preview URL for a refused file, and submitComposer re-checks the draft (files added before the route, Do or Temporary chat changed), keeping the draft. chat-client.ts: the silent subscriptionBacked ? [] drop is replaced by a thrown AttachmentsNotSentError (code attachments_not_sent) from buildChatWireBody; streamChat catches it and reports it through handlers.onError, so the controller's existing settleServerFailure path words it and no request is made. streamFailurePresentation and translateApiError both have the new code, copy lives once in no.ts/en.ts. unsentAttachmentNames deleted (no callers). I did not touch zdr-refusals.test.ts (plan marks that extension live-only/after WS01; it also already fails for pre-existing golden drift). The Playwright spec could not be run here; it skips the Do and temporary-chat cases itself when those controls are disabled."
+  },
+  {
+   "id": "WS02-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib (CARGO_INCREMENTAL=0, cwd apps/Model Plane/rust)",
+     "outcome": "496 passed, 0 failed; includes the new anthropic tiered tests and the grpc plan-mapping test; the existing ZDR and four-breakpoint tests are unchanged and pass"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib anthropic",
+     "outcome": "70 passed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib the_round_names; ... --lib seed",
+     "outcome": "1 passed; 18 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib tool_loop",
+     "outcome": "205 passed"
+    },
+    {
+     "command": "cargo check -q --workspace --lib --tests",
+     "outcome": "no errors"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the inference-core environment block, beside INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING (~line 942), add: INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}",
+    "gateway wiring (needs sse.rs, not owned): add a trailing parameter `prompt_tiers: Option<mp_contracts::model_plane::v1::PromptTierPlan>` to tool_loop::run_tool_rounds_for_model (run_tool_rounds passes None), set it at the InferRequest literal in tool_loop.rs where `prompt_tiers: None` now is, and have sse.rs build the prompt with PromptContext::render_tiered and pass TieredPrompt::plan() mapped to {stable_messages, context_messages}; the tool loop only appends system notices at the END of decision_messages so the plan stays valid every round.",
+    "regenerate Go bindings for inference.proto (buf generate) so go/gen has PromptTierPlan; add the wire-parity golden for the new field if the lead wants one (none written here).",
+    "deploy order: inference-core first, then execution-core; staging proof = two consecutive Anthropic Do turns with a changed volatile block, cache_read_input_tokens covering Stable+Context, with the switch on."
+   ],
+   "deviations": [
+    "The gateway tool loop does NOT send a plan yet (prompt_tiers: None). The tiers are known only where sse.rs composes the prompt, and run_tool_rounds_for_model has a single caller in sse.rs and is pinned by context_recovery_contract.rs and zdr_posture.rs by name. Adding the parameter would have broken that unowned call site, so it is handed back to the lead.",
+    "System blocks are one per tier (joined with a blank line), not one per message: this keeps the system breakpoint count at 2."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (render_tiered is not called anywhere; the call at ~2598 to run_tool_rounds_for_model must pass the plan)",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the inference-core environment block, add INFERENCE_ANTHROPIC_TIERED_SYSTEM: ${INFERENCE_ANTHROPIC_TIERED_SYSTEM:-false}",
+     "Gateway wiring in sse.rs plus a plan parameter on tool_loop::run_tool_rounds_for_model (not owned by this slice)",
+     "Regenerate Go proto bindings (buf generate) for PromptTierPlan; optional wire-parity golden",
+     "Staging proof: deploy inference-core first then execution-core, switch on, two consecutive Anthropic Do turns with a changed volatile block show cache_read_input_tokens covering Stable+Context (S1 frames, S2 view)"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before INFERENCE_ANTHROPIC_TIERED_SYSTEM is switched on, check that cache writes are not paid each turn for a Context tier that changes often; the plan says S2 baseline decides ship."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gateway inline chat path sends no plan until sse.rs renders with render_tiered and run_tool_rounds_for_model carries the plan; today only the Do loop (execution-core) can benefit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No wire-parity golden (Rust or Go) for InferRequest.prompt_tiers and no buf breaking run (baseline.binpb empty); additivity proven only by tag inspection."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "anthropic_compaction_tests.rs was compiled and passed under the anthropic filter but no test covers tiered blocks combined with native compaction edits."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No e2e test through the execution-core loop asserts the plan reaches the InferRequest (only the pure prompt_tier_plan helper is unit-tested; the observed-messages harness does not capture the plan)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Phase 2 (moving volatile blocks to the message tail so they stop breaking the Conversation-tier prefix) remains undesigned (plan D6)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gateway half of the row is not wired: tool_loop.rs sends prompt_tiers: None because run_tool_rounds_for_model's only caller is in sse.rs (not owned), so the inline chat path gets no tiered blocks until sse.rs renders with render_tiered and passes TieredPrompt::plan() through a new trailing parameter; only the Do loop benefits today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before INFERENCE_ANTHROPIC_TIERED_SYSTEM is switched on, the S2 cache baseline must show Context-tier cache writes are not paid every turn for text that changes often (plan says S2 baseline decides ship)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No wire-parity golden (Rust or Go) for InferRequest.prompt_tiers and buf breaking is vacuous (empty baseline.binpb); additivity is proven only by tag inspection (new field 18 and new message, nothing else changed), and Go bindings under go/gen are not regenerated."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test combines tiered blocks with native compaction edits (anthropic_compaction_tests.rs compiles and passes under the anthropic filter but does not cover tiered system)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test through the execution-core loop asserts the plan reaches the InferRequest; only the pure prompt_tier_plan helper is unit-tested."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "System blocks are one per tier (messages joined with a blank line), not one per message; this keeps system breakpoints at 2 and total at most 4, which is a sound reading of the row but differs from a literal per-message reading."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Phase 2 (moving Volatile blocks to the message tail so they stop breaking the Conversation-tier prefix) remains undesigned (plan D6)."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Proto: InferRequest.prompt_tiers = 18, new message PromptTierPlan {stable_messages=1, context_messages=2}; additive only; no buf run (baseline.binpb is empty), the tag-diff is one new field at 18 and one new message. inference-core maps it to mp_contracts PromptTierPlan (default = none). Anthropic: INFERENCE_ANTHROPIC_TIERED_SYSTEM (strict parser, only \"true\", default off). When on, not ZDR, and the plan describes the request (counts within the message list, every counted message a system message), system becomes ordered blocks: Stable, Context, per-turn remainder (Volatile, never marked); apply_prompt_caching marks Stable and Context when the cumulative prefix clears the model minimum, so at most tools + 2 + last message = 4 breakpoints. ZDR gate is still the first statement of apply_prompt_caching, and a ZDR request never takes the tiered form (one plain system string). A plan that does not describe the request is ignored and the request is sent as today. With the switch off or no plan the body is byte-identical (tested). execution-core: the Do loop sends a plan read back from the round's messages (preamble = Stable 1; authored instructions = Context 1 only when messages[1] is that exact system text), None when the first message is not system. Counts only, no content logged. model-gateway tool_loop.rs: the InferRequest literal gets prompt_tiers: None."
+  }
+ ]
+}

@@ -1,0 +1,1717 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs
+index 5a4e1a919..278d9dfcb 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
+@@ -56,6 +56,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             post(update_cron).delete(delete_cron),
+         )
+         .route("/api/v1/cron/{cron_id}/fires", get(list_cron_fires))
++        .route("/api/v1/cron/{cron_id}/run", post(run_cron_now))
+         .route("/api/v1/capabilities", get(list_capabilities));
+     // EP-6 S8: with the switch off the builder routes do not exist, so the gateway answers
+     // exactly as it did before (the fallback 404).
+@@ -93,6 +94,15 @@ fn can_author_own_schedule(user: &AuthenticatedUser, schedule_creator_subject_id
+         || schedule_creator_subject_id.is_some_and(|id| id == user.user_id)
+ }
+ 
++/// Whether the caller may press Run now on THIS schedule (EP-6 S2, OD-1): its
++/// own creator only, with no admin short-circuit. Every fire runs under the
++/// creator's subject, so an admin pressing it would spend someone else's
++/// authority at a moment that person did not choose. Admins keep pause and
++/// delete, which only reduce authority. capability-core checks the same.
++fn can_run_schedule_now(user: &AuthenticatedUser, schedule_creator_subject_id: Option<&str>) -> bool {
++    schedule_creator_subject_id.is_some_and(|id| !id.is_empty() && id == user.user_id)
++}
++
+ /// A cron-create body naming an explicit `space_ref` — a Space Room, since
+ /// the chat-facing surface (`schedule-from-chat.ts`) never sends this field
+ /// and always resolves to the caller's own personal Space — still requires
+@@ -502,6 +512,71 @@ async fn list_cron_fires(
+     .into_response()
+ }
+ 
++/// Run now (EP-6 S2): one manual fire of the caller's own schedule. The
++/// schedule is read first so a non-creator, an org admin included, is refused
++/// here; only the client's `request_id` is forwarded, and capability-core
++/// re-checks the creator and asks Control before any task exists. While
++/// `CRON_RUN_NOW_ENABLED` is off upstream, the forwarded call answers 404.
++async fn run_cron_now(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Path(cron_id): Path<String>,
++    Json(body): Json<Value>,
++) -> impl IntoResponse {
++    let token = shared::model_token(&state, &user, &headers).await;
++    let capability = match shared::required_capability_token(&state, &user, &headers).await {
++        Ok(token) => token,
++        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
++    };
++    let schedule_url = format!(
++        "{}/v1/cron/{}",
++        state.model_gateway_url,
++        urlencoding::encode(&cron_id)
++    );
++    let (status, Json(schedule)) = shared::proxy_model_json_with_capability(
++        &state,
++        Method::GET,
++        &schedule_url,
++        None,
++        token.as_deref(),
++        Some(&capability),
++        &user,
++    )
++    .await;
++    if !status.is_success() {
++        return (status, Json(schedule)).into_response();
++    }
++    let creator = schedule.get("creator_subject_id").and_then(Value::as_str);
++    if !can_run_schedule_now(&user, creator) {
++        return (
++            StatusCode::FORBIDDEN,
++            Json(error(
++                "run_now_not_creator",
++                "Only this schedule's creator can run it now.",
++            )),
++        )
++            .into_response();
++    }
++    let request_id = body.get("request_id").cloned().unwrap_or(Value::Null);
++    let url = format!(
++        "{}/v1/cron/{}/run",
++        state.model_gateway_url,
++        urlencoding::encode(&cron_id)
++    );
++    shared::proxy_model_json_with_capability(
++        &state,
++        Method::POST,
++        &url,
++        Some(json!({ "request_id": request_id })),
++        token.as_deref(),
++        Some(&capability),
++        &user,
++    )
++    .await
++    .into_response()
++}
++
+ /// SCHEDULE_CONTRACT_ENABLED (DEC-16). Read strictly: only the literal `true`
+ /// lets a create carry a stored-consent contract to Control, so anything else
+ /// leaves schedules draft-only.
+@@ -1406,8 +1481,8 @@ async fn apply_agent_draft_preview(
+ mod tests {
+     use super::{
+         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
+-        can_author_own_schedule, cron_create_names_explicit_space, draft_from_request,
+-        parse_builder_definition, version_to_api, BuilderDefinition,
++        can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
++        draft_from_request, parse_builder_definition, version_to_api, BuilderDefinition,
+     };
+     use crate::middleware::AuthenticatedUser;
+     use axum::{body::Body, http::Request};
+@@ -1596,6 +1671,96 @@ mod tests {
+             .all(|request| request.url.path() != "/v1/cron/cron_1/fires"));
+     }
+ 
++    // run_cron_now (EP-6 S2) — the creator only, never an admin on someone
++    // else's schedule; only the request id travels on.
++
++    #[test]
++    fn run_cron_now_refuses_admin_who_is_not_creator() {
++        assert!(!can_run_schedule_now(&owner("admin-1"), Some("someone-else")));
++        assert!(!can_run_schedule_now(&owner("admin-1"), None));
++        assert!(!can_run_schedule_now(&member("user-1"), Some("user-2")));
++        assert!(!can_run_schedule_now(&member("user-1"), Some("")));
++        assert!(can_run_schedule_now(&member("user-1"), Some("user-1")));
++        assert!(can_run_schedule_now(&owner("admin-1"), Some("admin-1")));
++    }
++
++    async fn run_through_router(creator: &str) -> (axum::http::StatusCode, Value, MockServer) {
++        let (auth, user_core, model) = fires_test_servers(creator).await;
++        Mock::given(wm_method("POST"))
++            .and(wm_path("/v1/cron/cron_1/run"))
++            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"data": {
++                "fire_id": "cronfire_1", "fire_key": "manual:req-0123456789abcdef",
++                "task_id": "task_1", "status": "pending", "deduplicated": false
++            }})))
++            .mount(&model)
++            .await;
++        let state = fires_test_state(&auth, &user_core, &model);
++        let response = crate::build_router(state)
++            .oneshot(
++                Request::builder()
++                    .method("POST")
++                    .uri("/api/v1/cron/cron_1/run")
++                    .header("cookie", "better-auth.session_token=session-1")
++                    .header("content-type", "application/json")
++                    .header("x-verevon-org-id", "org-forged")
++                    .body(Body::from(
++                        json!({
++                            "request_id": "req-0123456789abcdef",
++                            "creator_subject_id": "user-2",
++                            "org_id": "org-forged"
++                        })
++                        .to_string(),
++                    ))
++                    .unwrap(),
++            )
++            .await
++            .unwrap();
++        let status = response.status();
++        let bytes = response.into_body().collect().await.unwrap().to_bytes();
++        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
++        (status, body, model)
++    }
++
++    fn run_requests(requests: &[wiremock::Request]) -> Vec<&wiremock::Request> {
++        requests
++            .iter()
++            .filter(|request| request.url.path() == "/v1/cron/cron_1/run")
++            .collect()
++    }
++
++    #[tokio::test]
++    async fn run_cron_now_forwards_for_creator() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let (status, body, model) = run_through_router("user-1").await;
++        assert!(status.is_success(), "{status}: {body}");
++        assert_eq!(body["data"]["fire_key"], "manual:req-0123456789abcdef");
++        let requests = model.received_requests().await.unwrap();
++        let runs = run_requests(&requests);
++        assert_eq!(runs.len(), 1);
++        // Only the request id travels on: a creator or org in the body is dropped.
++        let forwarded: Value = serde_json::from_slice(&runs[0].body).unwrap();
++        assert_eq!(forwarded, json!({"request_id": "req-0123456789abcdef"}));
++    }
++
++    #[tokio::test]
++    async fn run_cron_now_strips_forged_scope_headers() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let (_, _, model) = run_through_router("user-1").await;
++        let requests = model.received_requests().await.unwrap();
++        let runs = run_requests(&requests);
++        assert_eq!(runs.len(), 1);
++        assert!(runs[0].headers.get("x-verevon-org-id").is_none());
++    }
++
++    #[tokio::test]
++    async fn run_cron_now_refuses_a_member_who_did_not_create_the_schedule() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let (status, body, model) = run_through_router("user-2").await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["code"], "run_now_not_creator");
++        assert!(run_requests(&model.received_requests().await.unwrap()).is_empty());
++    }
++
+     // EP-6 S8 — the agent builder gate, the draft shape, and the preview persona.
+ 
+     fn org_agent(creator: Option<&str>) -> BuilderDefinition {
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 115b64cc3..25ae930ab 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -859,6 +859,25 @@ describe('action registry', () => {
+     })
+   })
+ 
++  it('registers Run now as a high-risk model-plane action the model can never press (EP-6-S2)', () => {
++    const action = getActionDescriptor('schedule.run_now')
++    expect(action).toMatchObject({ ownerPlane: 'model', risk: 'high', requiresApproval: false, reversible: false })
++    expect(isModelExecutableAction('schedule.run_now')).toBe(false)
++    // A model that could fire its own schedule on demand would spend the creator's stored authority.
++    expect(MODEL_ACCESS['schedule.run_now']).toMatchObject({ access: 'none', exemptReason: 'agent_cannot_self_govern' })
++
++    // The schedule and a client request id, nothing else: the creator and the org come from the session.
++    const requestId = '6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10'
++    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId }).success).toBe(true)
++    expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1' }).success).toBe(false)
++    for (const bad of ['short', 'has/slash-0123456789', 'x'.repeat(65)]) {
++      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId: bad }).success, bad).toBe(false)
++    }
++    for (const extra of ['creator_subject_id', 'orgId', 'task_template']) {
++      expect(action?.inputSchema.safeParse({ scheduleId: 'cron_1', requestId, [extra]: 'x' }).success, extra).toBe(false)
++    }
++  })
++
+   it('registers the agent installations read as a low-risk, ungated application contract the model cannot execute', () => {
+     const action = getActionDescriptor('agents.installations.list')
+     expect(action).toMatchObject({ ownerPlane: 'application', risk: 'low', requiresApproval: false, reversible: true })
+@@ -937,7 +956,8 @@ describe('action registry', () => {
+     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
+     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
+     // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
+-    expect(ids).toHaveLength(270)
++    // 271 after EP-6-S2 registered schedule.run_now.
++    expect(ids).toHaveLength(271)
+ 
+     const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
+     const first = ids.indexOf(spaceIds[0] as string)
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 48690703f..ddb2c34f0 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1866,6 +1866,15 @@ const scheduleFiresListInput = z
+   })
+   .strict()
+ 
++// Run now (EP-6-S2). The request id is generated once per press and reused on retry, so a retry
++// finds the first fire; capability-core accepts 16 to 64 letters, digits or hyphens.
++const scheduleRunNowInput = z
++  .object({
++    scheduleId: z.string().trim().min(1).max(200),
++    requestId: z.string().regex(/^[A-Za-z0-9-]{16,64}$/),
++  })
++  .strict()
++
+ // The agents landing's read of the org's definitions and the rooms each is installed in (EP-6-S5).
+ // Strict and empty: the organisation comes from the session, never from the caller.
+ const agentInstallationsListInput = z.object({}).strict()
+@@ -4379,6 +4388,17 @@ export const actionRegistry = [
+     inputSchema: scheduleFiresListInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'schedule.run_now',
++    label: 'Run schedule now',
++    description: 'Run one of your schedules once, now, under the approval it already holds. It goes through the same fresh authorization as a scheduled run, counts against the schedule\'s manual-run limits (one at a time, six an hour) and leaves the next scheduled run where it is. Schedule creator only.',
++    ownerPlane: 'model',
++    risk: 'high',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: scheduleRunNowInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'agents.installations.list',
+     label: 'List agent installations',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts
+index a9cb7208f..cc1d25f3a 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts	
+@@ -9,7 +9,7 @@ vi.mock('./http', async (importOriginal) => {
+ })
+ 
+ import { requestJson } from './http'
+-import { listCronSchedules, listScheduleFires } from './cron-client'
++import { listCronSchedules, listScheduleFires, runScheduleNow } from './cron-client'
+ 
+ const mockedRequest = vi.mocked(requestJson)
+ 
+@@ -31,6 +31,36 @@ describe('listCronSchedules', () => {
+   })
+ })
+ 
++describe('runScheduleNow', () => {
++  it('posts only the request id for one schedule and unwraps the data envelope', async () => {
++    const fire = {
++      fire_id: 'cronfire_1',
++      fire_key: 'manual:req-0123456789abcdef',
++      task_id: 'task_1',
++      status: 'pending',
++      deduplicated: false,
++    }
++    mockedRequest.mockResolvedValue({ data: fire })
++    await expect(runScheduleNow('org-1', 'cron 1', 'req-0123456789abcdef')).resolves.toEqual(fire)
++    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/cron%201/run', {
++      method: 'POST',
++      body: JSON.stringify({ request_id: 'req-0123456789abcdef' }),
++      headers: { 'x-verevon-org-id': 'org-1' },
++    })
++  })
++})
++
++describe('listCronSchedules features', () => {
++  it('passes the server feature flags and the last fire fields through', async () => {
++    const schedule = { id: 'cron_1', last_fire_status: 'paused', last_outcome: 'paused_failures' }
++    mockedRequest.mockResolvedValue({ schedules: [schedule], features: { run_now: true } })
++    await expect(listCronSchedules('org-1')).resolves.toEqual({
++      schedules: [schedule],
++      features: { run_now: true },
++    })
++  })
++})
++
+ describe('listScheduleFires', () => {
+   it('asks for the last five fires of one schedule and unwraps the data envelope', async () => {
+     const fire = { id: 'fire_1', status: 'completed', withheld_effects: 0 }
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts
+index 877889ef2..a9c0f914c 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts	
+@@ -49,18 +49,49 @@ export interface CronSchedule {
+   updated_at?: string
+   space_ref?: string
+   creator_subject_id?: string
++  /** The newest fire's status and closed outcome token, when the schedule has fired. */
++  last_fire_status?: string
++  last_outcome?: string
+ }
+ 
+-export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[] }> {
++/** Server capabilities the schedule list reports, so the UI never offers a missing route. */
++export interface CronFeatures {
++  run_now?: boolean
++}
++
++export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[]; features?: CronFeatures }> {
+   // capability-core serialises an empty Go slice as `"schedules": null`, so an
+   // org with no schedules yet answered with null and every caller that did
+   // `result.schedules.filter(...)` threw — the chat's "Planlagte kjøringer"
+   // panel showed "Kunne ikke laste" instead of "Ingen planlagte kjøringer".
+-  return requestJson<{ schedules: CronSchedule[] | null }>('/api/v1/cron', {
++  return requestJson<{ schedules: CronSchedule[] | null; features?: CronFeatures }>('/api/v1/cron', {
+     headers: { 'x-verevon-org-id': orgId },
+   }).then((result) => ({ ...result, schedules: result.schedules ?? [] }))
+ }
+ 
++/** The manual fire Run now made, or found again for a retried `requestId`. */
++export interface ScheduleRunNowResult {
++  fire_id: string
++  fire_key: string
++  task_id: string
++  status: string
++  deduplicated: boolean
++}
++
++/**
++ * Run one of the caller's own schedules now (EP-6-S2): one manual fire under
++ * the creator's existing approval, through the same Control fire check as a
++ * scheduled fire. `requestId` is generated once per press and reused on retry,
++ * so a retry returns the first fire instead of making a second one.
++ */
++export function runScheduleNow(orgId: string, cronId: string, requestId: string): Promise<ScheduleRunNowResult> {
++  return requestJson<{ data: ScheduleRunNowResult }>(`/api/v1/cron/${encodeURIComponent(cronId)}/run`, {
++    method: 'POST',
++    body: JSON.stringify({ request_id: requestId }),
++    headers: { 'x-verevon-org-id': orgId },
++  }).then((result) => result.data)
++}
++
+ /**
+  * Create a cron schedule. capability-core validates the cron expression and
+  * seeds next_fire_at, so an invalid expression returns 400. Org id is derived
+diff --git a/apps/Model Plane/go/services/capability-core/cmd/main.go b/apps/Model Plane/go/services/capability-core/cmd/main.go
+index 591befaa1..6e98daf83 100644
+--- a/apps/Model Plane/go/services/capability-core/cmd/main.go	
++++ b/apps/Model Plane/go/services/capability-core/cmd/main.go	
+@@ -345,11 +345,18 @@ func main() {
+ 	// consumer that actually fires the notification is wired below,
+ 	// independently, once NATS is available (see startRunWatchConsumer).
+ 	api.NewRunWatchersHandler(pool).Register(protectedMux)
++	// Built before the handler: Run now and the sweeper below share one Control fire authorizer.
++	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
+ 	cronHandler := api.NewCronHandler(pool)
+ 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+ 	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+ 	// WS20-S8: approval guards refuse a bare re-enable of a lapsed approval. Strict literal true; off by default.
+ 	cronHandler.WithContractGuards(os.Getenv("CRON_CONTRACT_GUARDS_ENABLED") == "true")
++	// EP-6-S2: Run now, a manual fire through the same fresh Control fire authorization.
++	// Strict literal true; off by default. Without the authorizer the route never exists.
++	if cronAuthErr == nil {
++		cronHandler.WithRunNow(pool, cronAuthorizer, os.Getenv("CRON_RUN_NOW_ENABLED") == "true")
++	}
+ 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
+ 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
+ 	} else {
+@@ -361,7 +368,6 @@ func main() {
+ 	// Cron sweeper: fires due cron_schedules — creates a task per fire, records
+ 	// cron_fires, and advances next_fire_at, single-flight across replicas via
+ 	// FOR UPDATE SKIP LOCKED. Opt out with CRON_SWEEPER_ENABLED=false.
+-	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
+ 	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
+ 		if cronAuthErr != nil {
+ 			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/cron_run_now_test.go b/apps/Model Plane/go/services/capability-core/internal/api/cron_run_now_test.go
+new file mode 100644
+index 000000000..61027b85a
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/cron_run_now_test.go	
+@@ -0,0 +1,296 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++
++	"github.com/triodelab/model-plane/pkg/authctx"
++	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
++	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
++)
++
++const runNowTestRequestID = "6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10"
++
++// runNowStubDB is the transaction pool a Run now request opens. Its one transaction
++// answers a schedule created by creator, or no schedule when creator is empty, and
++// accepts every write.
++type runNowStubDB struct{ creator string }
++
++func (db runNowStubDB) Begin(context.Context) (pgx.Tx, error) { return &runNowStubTx{creator: db.creator}, nil }
++
++type runNowStubTx struct {
++	pgx.Tx
++	creator string
++}
++
++func (tx *runNowStubTx) Commit(context.Context) error { return nil }
++
++func (tx *runNowStubTx) Rollback(context.Context) error { return nil }
++
++func (tx *runNowStubTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
++	return pgconn.CommandTag{}, nil
++}
++
++func (tx *runNowStubTx) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
++	switch {
++	case strings.Contains(sql, "FROM cron_schedules"):
++		return runNowStubRow(func(dest ...any) error {
++			if tx.creator == "" {
++				return pgx.ErrNoRows
++			}
++			for i, value := range []string{"sched-1", "org-1", "space-1", tx.creator, "sha256:" + strings.Repeat("a", 64), "0 9 * * *", "UTC"} {
++				*dest[i].(*string) = value
++			}
++			*dest[7].(*json.RawMessage) = json.RawMessage(`{"kind":"cron","title":"Nightly"}`)
++			return nil
++		})
++	case strings.Contains(sql, "count(*)"):
++		return runNowStubRow(func(dest ...any) error {
++			*dest[0].(*int), *dest[1].(*int) = 0, 0
++			return nil
++		})
++	default:
++		return runNowStubRow(func(...any) error { return pgx.ErrNoRows })
++	}
++}
++
++type runNowStubRow func(dest ...any) error
++
++func (row runNowStubRow) Scan(dest ...any) error { return row(dest...) }
++
++type allowingFireAuthorizer struct{ calls int }
++
++func (a *allowingFireAuthorizer) AuthorizeFire(context.Context, cron.FireIntent) error {
++	a.calls++
++	return nil
++}
++
++func runNowRequest(target, body, actor string) *http.Request {
++	request := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
++	return request.WithContext(authctx.ContextWithPrincipal(request.Context(), authctx.Principal{
++		OrganizationID: "org-1", ActorID: actor, PrincipalType: "user",
++	}))
++}
++
++func TestCronRunRoute404WhenOff(t *testing.T) {
++	body := `{"request_id":"` + runNowTestRequestID + `"}`
++	for name, handler := range map[string]*CronHandler{
++		"switch off":       NewCronHandler(unreachableDatabase{t}).WithRunNow(runNowStubDB{creator: "user-1"}, &allowingFireAuthorizer{}, false),
++		"no authorizer":    NewCronHandler(unreachableDatabase{t}).WithRunNow(runNowStubDB{creator: "user-1"}, nil, true),
++		"never configured": NewCronHandler(unreachableDatabase{t}),
++	} {
++		mux := http.NewServeMux()
++		handler.Register(mux)
++		recorder := httptest.NewRecorder()
++		mux.ServeHTTP(recorder, runNowRequest("/api/v1/cron/sched-1/run", body, "user-1"))
++		if recorder.Code != http.StatusNotFound {
++			t.Fatalf("%s: status %d, want 404", name, recorder.Code)
++		}
++	}
++}
++
++func TestCronRunRouteTypedErrors(t *testing.T) {
++	cases := []struct {
++		name     string
++		creator  string
++		actor    string
++		body     string
++		wantCode int
++		wantErr  string
++	}{
++		{name: "a member who did not create the schedule", creator: "user-2", actor: "user-1",
++			body: `{"request_id":"` + runNowTestRequestID + `"}`, wantCode: http.StatusForbidden, wantErr: "run_now_not_creator"},
++		{name: "a schedule outside the org", creator: "", actor: "user-1",
++			body: `{"request_id":"` + runNowTestRequestID + `"}`, wantCode: http.StatusNotFound, wantErr: "not_found"},
++		{name: "a request id that is not one", creator: "user-1", actor: "user-1",
++			body: `{"request_id":"x"}`, wantCode: http.StatusBadRequest, wantErr: "invalid_request_id"},
++		{name: "a body that is not JSON", creator: "user-1", actor: "user-1",
++			body: `request_id`, wantCode: http.StatusBadRequest, wantErr: "invalid_request"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			authorizer := &allowingFireAuthorizer{}
++			mux := http.NewServeMux()
++			NewCronHandler(unreachableDatabase{t}).WithRunNow(runNowStubDB{creator: tc.creator}, authorizer, true).Register(mux)
++			recorder := httptest.NewRecorder()
++			mux.ServeHTTP(recorder, runNowRequest("/api/v1/cron/sched-1/run", tc.body, tc.actor))
++			if recorder.Code != tc.wantCode {
++				t.Fatalf("status %d, want %d: %s", recorder.Code, tc.wantCode, recorder.Body.String())
++			}
++			var envelope struct {
++				Error struct {
++					Code    string         `json:"code"`
++					Message string         `json:"message"`
++					Details map[string]any `json:"details"`
++				} `json:"error"`
++			}
++			if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
++				t.Fatalf("decode %s: %v", recorder.Body.String(), err)
++			}
++			if envelope.Error.Code != tc.wantErr || envelope.Error.Message == "" || envelope.Error.Details == nil {
++				t.Fatalf("error envelope = %s, want code %s with a message and an object of details", recorder.Body.String(), tc.wantErr)
++			}
++			if authorizer.calls != 0 {
++				t.Fatalf("a refused press reached Control %d time(s)", authorizer.calls)
++			}
++		})
++	}
++
++	// Only POST makes a fire.
++	mux := http.NewServeMux()
++	NewCronHandler(unreachableDatabase{t}).WithRunNow(runNowStubDB{creator: "user-1"}, &allowingFireAuthorizer{}, true).Register(mux)
++	recorder := httptest.NewRecorder()
++	request := runNowRequest("/api/v1/cron/sched-1/run", "", "user-1")
++	request.Method = http.MethodGet
++	mux.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusNotFound {
++		t.Fatalf("GET of the run route: status %d, want 404", recorder.Code)
++	}
++}
++
++func TestCronRunRouteAcceptsTheCreator(t *testing.T) {
++	authorizer := &allowingFireAuthorizer{}
++	mux := http.NewServeMux()
++	NewCronHandler(unreachableDatabase{t}).WithRunNow(runNowStubDB{creator: "user-1"}, authorizer, true).Register(mux)
++	recorder := httptest.NewRecorder()
++	mux.ServeHTTP(recorder, runNowRequest("/api/v1/cron/sched-1/run", `{"request_id":"`+runNowTestRequestID+`"}`, "user-1"))
++	if recorder.Code != http.StatusAccepted {
++		t.Fatalf("status %d, want 202: %s", recorder.Code, recorder.Body.String())
++	}
++	var envelope struct {
++		Data cron.RunNowResult `json:"data"`
++	}
++	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
++		t.Fatal(err)
++	}
++	if envelope.Data.FireKey != "manual:"+runNowTestRequestID || envelope.Data.Status != "pending" ||
++		envelope.Data.Deduplicated || envelope.Data.FireID == "" || envelope.Data.TaskID == "" {
++		t.Fatalf("data = %+v", envelope.Data)
++	}
++	if authorizer.calls != 1 {
++		t.Fatalf("Control was asked %d time(s), want once", authorizer.calls)
++	}
++}
++
++// A ZDR principal never reaches the route: the router refuses every non-read request
++// from it before any handler runs, so Run now writes nothing under ZDR.
++func TestCronRunRefusedForZDRPrincipal(t *testing.T) {
++	request := httptest.NewRequest(http.MethodPost, "/api/v1/cron/sched-1/run", nil)
++	for name, principal := range map[string]authctx.Principal{
++		"zdr":                 {OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user", RetentionPolicyPresent: true, ZeroDataRetention: true, Scopes: []string{authz.WriteScope}},
++		"no retention policy": {OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user", Scopes: []string{authz.WriteScope}},
++	} {
++		if err := authz.AuthorizeHTTP(principal, request); err == nil {
++			t.Fatalf("%s: the router let a Run now through", name)
++		}
++	}
++}
++
++// listStubDB answers the schedule list with one row and records the arguments it was
++// asked with.
++type listStubDB struct {
++	unreachableDatabase
++	args []any
++	sql  string
++}
++
++func (db *listStubDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
++	db.sql, db.args = sql, args
++	return &scheduleListRows{}, nil
++}
++
++type scheduleListRows struct {
++	pgx.Rows
++	done bool
++}
++
++func (rows *scheduleListRows) Next() bool {
++	if rows.done {
++		return false
++	}
++	rows.done = true
++	return true
++}
++
++func (rows *scheduleListRows) Scan(dest ...any) error {
++	now := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
++	for i, value := range []string{"sched-1", "org-1", "Nightly", "", "0 9 * * *", "UTC"} {
++		*dest[i].(*string) = value
++	}
++	*dest[6].(*any) = map[string]any{"kind": "cron"}
++	*dest[7].(*bool) = false
++	*dest[10].(*time.Time) = now
++	*dest[11].(*time.Time) = now
++	*dest[12].(*string) = "space-1"
++	*dest[13].(*string) = "user-1"
++	*dest[14].(*string) = "paused"
++	*dest[15].(*string) = "paused_failures"
++	return nil
++}
++
++func (rows *scheduleListRows) Err() error { return nil }
++
++func (rows *scheduleListRows) Close() {}
++
++func listRequest(target string) *http.Request {
++	request := httptest.NewRequest(http.MethodGet, target, nil)
++	return request.WithContext(authctx.ContextWithPrincipal(request.Context(), authctx.Principal{
++		OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user",
++	}))
++}
++
++func TestCronListAddsLastOutcomeAndFeatures(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		db := &listStubDB{unreachableDatabase: unreachableDatabase{t}}
++		handler := NewCronHandler(db).WithRunNow(runNowStubDB{creator: "user-1"}, &allowingFireAuthorizer{}, enabled)
++		recorder := httptest.NewRecorder()
++		handler.listOrCreate(recorder, listRequest("/api/v1/cron"))
++		if recorder.Code != http.StatusOK {
++			t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
++		}
++		var body struct {
++			Schedules []map[string]any `json:"schedules"`
++			Features  map[string]bool  `json:"features"`
++		}
++		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
++			t.Fatal(err)
++		}
++		if body.Features["run_now"] != enabled {
++			t.Fatalf("features.run_now = %v, want %v", body.Features["run_now"], enabled)
++		}
++		if len(body.Schedules) != 1 || body.Schedules[0]["last_fire_status"] != "paused" ||
++			body.Schedules[0]["last_outcome"] != "paused_failures" {
++			t.Fatalf("schedules = %+v, want the last fire's status and outcome", body.Schedules)
++		}
++	}
++}
++
++func TestCronListCreatorSelfFilter(t *testing.T) {
++	cases := map[string]string{
++		"/api/v1/cron":                      "",
++		"/api/v1/cron?creator=self":         "user-1",
++		"/api/v1/cron?creator=someone-else": "",
++	}
++	for target, wantCreator := range cases {
++		db := &listStubDB{unreachableDatabase: unreachableDatabase{t}}
++		recorder := httptest.NewRecorder()
++		NewCronHandler(db).listOrCreate(recorder, listRequest(target))
++		if recorder.Code != http.StatusOK {
++			t.Fatalf("%s: status %d", target, recorder.Code)
++		}
++		if len(db.args) != 3 || db.args[0] != "org-1" || db.args[2] != wantCreator {
++			t.Fatalf("%s: list asked with %v, want creator %q", target, db.args, wantCreator)
++		}
++		if !strings.Contains(db.sql, "($3 = '' OR s.creator_subject_id = $3)") {
++			t.Fatalf("%s: the creator filter is missing from the list query", target)
++		}
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go b/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go
+index c9f19aa36..1910475ad 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go	
+@@ -1012,6 +1012,11 @@ type CronHandler struct {
+ 	// contractGuards is CRON_CONTRACT_GUARDS_ENABLED. On, a bare re-enable of a
+ 	// schedule whose approval has lapsed is refused (WS20-S8).
+ 	contractGuards bool
++	// runNow is CRON_RUN_NOW_ENABLED (EP-6-S2). Off, or without the fire authorizer and
++	// its transaction pool, POST /api/v1/cron/{id}/run does not exist.
++	runNow         bool
++	runNowDB       cron.RunNowDB
++	fireAuthorizer cron.FireAuthorizer
+ }
+ 
+ // NewCronHandler constructs the handler.
+@@ -1037,6 +1042,20 @@ func (h *CronHandler) WithContractGuards(enabled bool) *CronHandler {
+ 	return h
+ }
+ 
++// WithRunNow mounts Run now (EP-6-S2): a manual fire through the same fresh Control fire
++// authorization the sweeper uses. Only the literal "true" from CRON_RUN_NOW_ENABLED
++// turns it on.
++func (h *CronHandler) WithRunNow(db cron.RunNowDB, authorizer cron.FireAuthorizer, enabled bool) *CronHandler {
++	h.runNowDB = db
++	h.fireAuthorizer = authorizer
++	h.runNow = enabled
++	return h
++}
++
++func (h *CronHandler) runNowEnabled() bool {
++	return h.runNow && h.runNowDB != nil && h.fireAuthorizer != nil
++}
++
+ // createIntentFor builds the Control binding for one create. A template without
+ // an approval_contract yields the contract-free intent, so Control's v1 decision
+ // is still the only one accepted for it. A contract is parsed, window-checked
+@@ -1117,6 +1136,15 @@ func (h *CronHandler) Register(mux *http.ServeMux) {
+ 			h.listFires(w, r, scheduleID)
+ 			return
+ 		}
++		// Off, the path falls through to the routes below and is not found, as before.
++		if scheduleID, ok := strings.CutSuffix(id, "/run"); ok && h.runNowEnabled() {
++			if r.Method != http.MethodPost {
++				http.NotFound(w, r)
++				return
++			}
++			h.runNowFire(w, r, scheduleID)
++			return
++		}
+ 		switch r.Method {
+ 		case http.MethodGet:
+ 			h.get(w, r, id)
+@@ -1145,6 +1173,10 @@ type cronScheduleRow struct {
+ 	UpdatedAt    time.Time  `json:"updated_at"`
+ 	SpaceRef     string     `json:"space_ref"`
+ 	CreatorID    string     `json:"creator_subject_id"`
++	// LastFireStatus and LastOutcome are the newest fire's closed status and outcome
++	// tokens, set by the list only (EP-6-S2), so the hub can tell why a schedule paused.
++	LastFireStatus string `json:"last_fire_status,omitempty"`
++	LastOutcome    string `json:"last_outcome,omitempty"`
+ 	// SpaceDecisionToken is accepted only at creation and never stored or
+ 	// returned. Capability Core verifies it before extracting durable claims.
+ 	SpaceDecisionToken string `json:"space_schedule_create_decision,omitempty"`
+@@ -1164,14 +1196,29 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 		// room is not the other rooms' business, and an org-wide list is
+ 		// unreadable as soon as a second room exists.
+ 		spaceRef := strings.TrimSpace(r.URL.Query().Get("space_ref"))
++		// Optional `creator=self` narrows the list to the caller's own schedules
++		// (EP-6-S2, OD-7). Also a filter, never a grant: the creator compared is the
++		// verified actor, and any other value is no filter at all.
++		creator := ""
++		if r.URL.Query().Get("creator") == "self" {
++			creator = verifiedActorID(r)
++		}
+ 		rows, err := h.pool.Query(r.Context(), `
+-			SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
+-			       enabled, last_fire_at, next_fire_at, created_at, updated_at, space_ref, creator_subject_id
+-			FROM cron_schedules
+-			WHERE org_id=$1 AND deleted_at IS NULL
+-			  AND ($2 = '' OR space_ref = $2)
+-			ORDER BY name
+-		`, orgID, spaceRef)
++			SELECT s.id, s.org_id, s.name, s.description, s.schedule_expr, s.timezone, s.task_template,
++			       s.enabled, s.last_fire_at, s.next_fire_at, s.created_at, s.updated_at, s.space_ref, s.creator_subject_id,
++			       COALESCE(lf.status, ''), COALESCE(lf.outcome, '')
++			FROM cron_schedules AS s
++			LEFT JOIN LATERAL (
++				SELECT status, outcome FROM cron_fires
++				WHERE schedule_id = s.id
++				ORDER BY fired_at DESC, id DESC
++				LIMIT 1
++			) AS lf ON true
++			WHERE s.org_id=$1 AND s.deleted_at IS NULL
++			  AND ($2 = '' OR s.space_ref = $2)
++			  AND ($3 = '' OR s.creator_subject_id = $3)
++			ORDER BY s.name
++		`, orgID, spaceRef, creator)
+ 		if err != nil {
+ 			jsonErr(w, err.Error(), http.StatusInternalServerError)
+ 			return
+@@ -1182,13 +1229,19 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 			var s cronScheduleRow
+ 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
+ 				&s.Timezone, &s.TaskTemplate, &s.Enabled, &s.LastFireAt, &s.NextFireAt,
+-				&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID); err != nil {
++				&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID,
++				&s.LastFireStatus, &s.LastOutcome); err != nil {
+ 				jsonErr(w, err.Error(), http.StatusInternalServerError)
+ 				return
+ 			}
+ 			schedules = append(schedules, s)
+ 		}
+-		writeJSON(w, map[string]any{"schedules": schedules})
++		// features tells the hub which server capabilities are on, so it never offers a
++		// button whose route does not exist.
++		writeJSON(w, map[string]any{
++			"schedules": schedules,
++			"features":  map[string]bool{"run_now": h.runNowEnabled()},
++		})
+ 	case http.MethodPost:
+ 		var s cronScheduleRow
+ 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+@@ -1330,6 +1383,48 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
+ 	writeJSON(w, map[string]any{"data": fires})
+ }
+ 
++// runNowFire makes one manual fire of a schedule for its creator (EP-6-S2). The caller
++// supplies only a request id; the org and the actor are the verified principal's. A new
++// fire answers 202, a retried request id 200 with the fire it made first.
++func (h *CronHandler) runNowFire(w http.ResponseWriter, r *http.Request, scheduleID string) {
++	var body struct {
++		RequestID string `json:"request_id"`
++	}
++	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++		writeTypedError(w, http.StatusBadRequest, "invalid_request", "the body must be a JSON object with a request_id")
++		return
++	}
++	result, refusal, err := cron.RunNow(r.Context(), h.runNowDB, h.fireAuthorizer, cron.RunNowRequest{
++		OrgID: verifiedOrganizationID(r), ScheduleID: scheduleID,
++		ActorID: verifiedActorID(r), RequestID: body.RequestID,
++	}, time.Now().UTC())
++	if err != nil {
++		writeTypedError(w, http.StatusInternalServerError, "run_now_unavailable", "the schedule could not be run now")
++		return
++	}
++	if refusal != nil {
++		writeTypedError(w, refusal.HTTPStatus, refusal.Code, refusal.Message)
++		return
++	}
++	status := http.StatusAccepted
++	if result.Deduplicated {
++		status = http.StatusOK
++	}
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(status)
++	_ = json.NewEncoder(w).Encode(map[string]any{"data": result})
++}
++
++// writeTypedError writes the typed error envelope {error:{code,message,details}}. The
++// older cron routes keep jsonErr, whose shape their callers already read.
++func writeTypedError(w http.ResponseWriter, status int, code, message string) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(status)
++	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
++		"code": code, "message": message, "details": map[string]any{},
++	}})
++}
++
+ func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {
+ 	var s cronScheduleRow
+ 	err := h.pool.QueryRow(r.Context(), `
+diff --git a/apps/Model Plane/go/services/capability-core/internal/cron/run_now.go b/apps/Model Plane/go/services/capability-core/internal/cron/run_now.go
+new file mode 100644
+index 000000000..0c2f6eb08
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/cron/run_now.go	
+@@ -0,0 +1,189 @@
++package cron
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"log/slog"
++	"net/http"
++	"regexp"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// Run now (EP-6-S2) makes one manual fire of a schedule. It takes the path a cron slot
++// takes and no other: a fresh Control fire decision before the task exists, then
++// InsertFire, and the workflow dispatcher asks Control twice more before the Temporal
++// handoff. Nothing here starts a workflow.
++
++const (
++	// ManualFireKeyPrefix marks a fire made by Run now. The rest of the key is the
++	// caller's request id, which makes a retried request find its first fire.
++	ManualFireKeyPrefix = "manual:"
++	// runNowInFlightWindow is how long a pending or running manual fire blocks the next
++	// one (OD-9). An older fire no longer blocks, so a fire whose run was lost cannot
++	// keep the button refused for ever.
++	runNowInFlightWindow = 15 * time.Minute
++	// runNowHourlyLimit is the most manual fires of one schedule in a rolling hour (OD-9).
++	// Each fire costs inference, and the creator's stored authority is spent on demand.
++	runNowHourlyLimit = 6
++)
++
++// runNowRequestID is a client-generated id: a UUID in practice. The fire key carries it
++// to Control and Session Core, whose scheduled-run decision refuses a "/" in a fire key.
++var runNowRequestID = regexp.MustCompile(`^[A-Za-z0-9-]{16,64}$`)
++
++// RunNowDB opens the one transaction a manual fire is made in. *pgxpool.Pool satisfies it.
++type RunNowDB interface {
++	Begin(context.Context) (pgx.Tx, error)
++}
++
++// RunNowRequest is one press of Run now. ActorID is the verified caller, never a value
++// from the request body.
++type RunNowRequest struct {
++	OrgID      string
++	ScheduleID string
++	ActorID    string
++	RequestID  string
++}
++
++// RunNowResult is the manual fire a request made or, for a retried request id, found.
++type RunNowResult struct {
++	FireID       string `json:"fire_id"`
++	FireKey      string `json:"fire_key"`
++	TaskID       string `json:"task_id"`
++	Status       string `json:"status"`
++	Deduplicated bool   `json:"deduplicated"`
++}
++
++// RunNowRefusal is a typed refusal: the HTTP status and the closed code the hub shows
++// its copy for. Message is fixed text and never carries schedule content.
++type RunNowRefusal struct {
++	HTTPStatus int
++	Code       string
++	Message    string
++}
++
++func runNowRefused(status int, code, message string) *RunNowRefusal {
++	return &RunNowRefusal{HTTPStatus: status, Code: code, Message: message}
++}
++
++// RunNow makes one manual fire inside one transaction that holds the schedule's row
++// lock, so two presses are serialised and the sweeper skips the row for that tick. A
++// refusal is returned as a RunNowRefusal; an error means the store or the transaction
++// failed and nothing was written.
++//
++// Only the creator may press it (OD-1): every fire runs under the creator's subject, so
++// anyone else would spend that person's authority at a moment they did not choose. The
++// schedule's next_fire_at and last_fire_at are left alone: the cron slots fire as before.
++func RunNow(ctx context.Context, db RunNowDB, authorizer FireAuthorizer, req RunNowRequest, now time.Time) (RunNowResult, *RunNowRefusal, error) {
++	if !runNowRequestID.MatchString(req.RequestID) {
++		return RunNowResult{}, runNowRefused(http.StatusBadRequest, "invalid_request_id",
++			"request_id must be 16 to 64 letters, digits or hyphens"), nil
++	}
++	if authorizer == nil {
++		return RunNowResult{}, nil, fmt.Errorf("run now fire authorizer is not configured")
++	}
++	tx, err := db.Begin(ctx)
++	if err != nil {
++		return RunNowResult{}, nil, err
++	}
++	defer func() { _ = tx.Rollback(ctx) }()
++
++	var d DueSchedule
++	var expr, tz string
++	err = tx.QueryRow(ctx, `
++		SELECT id, org_id, space_ref, creator_subject_id, template_digest,
++		       schedule_expr, timezone, task_template
++		FROM cron_schedules
++		WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
++		FOR UPDATE
++	`, req.ScheduleID, req.OrgID).Scan(&d.ID, &d.OrgID, &d.SpaceRef, &d.SubjectID, &d.TemplateDigest,
++		&expr, &tz, &d.Template)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return RunNowResult{}, runNowRefused(http.StatusNotFound, "not_found", "schedule not found"), nil
++	}
++	if err != nil {
++		return RunNowResult{}, nil, err
++	}
++	if req.ActorID == "" || req.ActorID != d.SubjectID {
++		return RunNowResult{}, runNowRefused(http.StatusForbidden, "run_now_not_creator",
++			"only the schedule's creator can run it now"), nil
++	}
++	if ApprovalContractLapsed(d.Template, now) {
++		return RunNowResult{}, runNowRefused(http.StatusConflict, "approval_expired",
++			"the schedule's approval has expired; renew it before running it"), nil
++	}
++	if _, err := NextFrom(expr, tz, now); err != nil {
++		return RunNowResult{}, runNowRefused(http.StatusConflict, "invalid_schedule",
++			"the schedule's cron expression is invalid"), nil
++	}
++
++	fireKey := ManualFireKeyPrefix + req.RequestID
++	// A retried request finds the fire its first attempt made. The row lock serialises
++	// writers, so the non-unique (schedule_id, fire_key) index is enough.
++	existing := RunNowResult{FireKey: fireKey, Deduplicated: true}
++	err = tx.QueryRow(ctx, `
++		SELECT id, COALESCE(task_id, ''), status FROM cron_fires
++		WHERE schedule_id=$1 AND fire_key=$2
++		ORDER BY fired_at DESC, id DESC
++		LIMIT 1
++	`, d.ID, fireKey).Scan(&existing.FireID, &existing.TaskID, &existing.Status)
++	if err == nil {
++		return existing, nil, nil
++	}
++	if !errors.Is(err, pgx.ErrNoRows) {
++		return RunNowResult{}, nil, err
++	}
++
++	var inFlight, lastHour int
++	if err := tx.QueryRow(ctx, `
++		SELECT count(*) FILTER (WHERE status IN ('pending', 'running') AND fired_at > $3),
++		       count(*) FILTER (WHERE fired_at > $4)
++		FROM cron_fires
++		WHERE schedule_id=$1 AND fire_key LIKE $2
++	`, d.ID, ManualFireKeyPrefix+"%", now.Add(-runNowInFlightWindow), now.Add(-time.Hour)).Scan(&inFlight, &lastHour); err != nil {
++		return RunNowResult{}, nil, err
++	}
++	if inFlight > 0 {
++		return RunNowResult{}, runNowRefused(http.StatusConflict, "run_now_in_flight",
++			"a manual run of this schedule is still in progress"), nil
++	}
++	if lastHour >= runNowHourlyLimit {
++		return RunNowResult{}, runNowRefused(http.StatusTooManyRequests, "run_now_rate_limited",
++			"this schedule has been run manually too often in the last hour"), nil
++	}
++
++	// The row lock is held across this one Control call, as the sweeper holds its batch;
++	// the authorizer's HTTP client timeout bounds it.
++	if err := authorizer.AuthorizeFire(ctx, FireIntent{
++		OrgID: d.OrgID, SpaceRef: d.SpaceRef, SubjectID: d.SubjectID,
++		ScheduleID: d.ID, FireKey: fireKey, TemplateDigest: d.TemplateDigest,
++		IdempotencyKey: d.ID + ":" + fireKey,
++	}); err != nil {
++		slog.Warn("manual schedule fire refused by fresh authorization", "schedule", d.ID, "error", err)
++		// Unlike the sweeper, a refused manual fire does not disable the schedule: the
++		// refusal is about this press, not the next slot, which Control decides afresh.
++		if _, err := tx.Exec(ctx,
++			`INSERT INTO cron_fires (id, schedule_id, fired_at, status, error, fire_key) VALUES ($1,$2,$3,'failed',$4,$5)`,
++			"cronfire_"+uuid.New().String(), d.ID, now, "fresh schedule authorization failed", fireKey); err != nil {
++			return RunNowResult{}, nil, err
++		}
++		if err := tx.Commit(ctx); err != nil {
++			return RunNowResult{}, nil, err
++		}
++		return RunNowResult{}, runNowRefused(http.StatusForbidden, "fire_not_authorized",
++			"the schedule is not authorized to run now"), nil
++	}
++
++	fireID, taskID, err := InsertFire(ctx, tx, d, fireKey, now)
++	if err != nil {
++		return RunNowResult{}, nil, err
++	}
++	if err := tx.Commit(ctx); err != nil {
++		return RunNowResult{}, nil, err
++	}
++	return RunNowResult{FireID: fireID, FireKey: fireKey, TaskID: taskID, Status: "pending"}, nil, nil
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/cron/run_now_test.go b/apps/Model Plane/go/services/capability-core/internal/cron/run_now_test.go
+new file mode 100644
+index 000000000..6f7c7aa6f
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/cron/run_now_test.go	
+@@ -0,0 +1,280 @@
++package cron
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++)
++
++// runNowTx stands in for the one transaction a manual fire is made in. It answers the
++// schedule read, the request-id lookup and the manual-fire counts from its fields, and
++// records every write and whether the transaction committed.
++type runNowTx struct {
++	pgx.Tx
++	// template is the stored task template; nil means the schedule does not exist.
++	template  json.RawMessage
++	creator   string
++	expr      string
++	existing  *RunNowResult
++	inFlight  int
++	lastHour  int
++	execs     []recordedExec
++	committed bool
++}
++
++func (tx *runNowTx) Begin(context.Context) (pgx.Tx, error) { return tx, nil }
++
++func (tx *runNowTx) Commit(context.Context) error {
++	tx.committed = true
++	return nil
++}
++
++func (tx *runNowTx) Rollback(context.Context) error { return nil }
++
++func (tx *runNowTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
++	tx.execs = append(tx.execs, recordedExec{sql: sql, args: args})
++	return pgconn.CommandTag{}, nil
++}
++
++func (tx *runNowTx) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
++	switch {
++	case strings.Contains(sql, "FROM cron_schedules"):
++		return scanFunc(func(dest ...any) error {
++			if tx.template == nil {
++				return pgx.ErrNoRows
++			}
++			*dest[0].(*string) = "sched-1"
++			*dest[1].(*string) = "org-1"
++			*dest[2].(*string) = "space-1"
++			*dest[3].(*string) = tx.creator
++			*dest[4].(*string) = "sha256:" + strings.Repeat("a", 64)
++			*dest[5].(*string) = tx.expr
++			*dest[6].(*string) = "UTC"
++			*dest[7].(*json.RawMessage) = tx.template
++			return nil
++		})
++	case strings.Contains(sql, "count(*)"):
++		return scanFunc(func(dest ...any) error {
++			*dest[0].(*int) = tx.inFlight
++			*dest[1].(*int) = tx.lastHour
++			return nil
++		})
++	default:
++		return scanFunc(func(dest ...any) error {
++			if tx.existing == nil {
++				return pgx.ErrNoRows
++			}
++			*dest[0].(*string) = tx.existing.FireID
++			*dest[1].(*string) = tx.existing.TaskID
++			*dest[2].(*string) = tx.existing.Status
++			return nil
++		})
++	}
++}
++
++type scanFunc func(dest ...any) error
++
++func (f scanFunc) Scan(dest ...any) error { return f(dest...) }
++
++// recordingRunNowAuthorizer keeps the intent it was asked to authorise and answers err.
++type recordingRunNowAuthorizer struct {
++	intent FireIntent
++	calls  int
++	err    error
++}
++
++func (a *recordingRunNowAuthorizer) AuthorizeFire(_ context.Context, intent FireIntent) error {
++	a.calls++
++	a.intent = intent
++	return a.err
++}
++
++const runNowRequestIDForTest = "6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10"
++
++func runNowNow() time.Time { return time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC) }
++
++// liveRunNowTx is a schedule of user-1 with a live approval and nothing fired yet.
++func liveRunNowTx(t *testing.T) *runNowTx {
++	return &runNowTx{template: guardTemplate(t, runNowNow().Add(30*24*time.Hour)), creator: "user-1", expr: "0 9 * * *"}
++}
++
++func runNowAs(actor string) RunNowRequest {
++	return RunNowRequest{OrgID: "org-1", ScheduleID: "sched-1", ActorID: actor, RequestID: runNowRequestIDForTest}
++}
++
++func wantRefusal(t *testing.T, refusal *RunNowRefusal, err error, status int, code string) {
++	t.Helper()
++	if err != nil {
++		t.Fatalf("RunNow error: %v", err)
++	}
++	if refusal == nil || refusal.HTTPStatus != status || refusal.Code != code {
++		t.Fatalf("refusal = %+v, want %d %s", refusal, status, code)
++	}
++}
++
++func TestRunNowCreatesPendingFireWithManualKey(t *testing.T) {
++	tx := liveRunNowTx(t)
++	authorizer := &recordingRunNowAuthorizer{}
++	result, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs("user-1"), runNowNow())
++	if err != nil || refusal != nil {
++		t.Fatalf("RunNow: refusal=%+v err=%v", refusal, err)
++	}
++	wantKey := "manual:" + runNowRequestIDForTest
++	if result.FireKey != wantKey || result.Status != "pending" || result.Deduplicated ||
++		!strings.HasPrefix(result.FireID, "cronfire_") || !strings.HasPrefix(result.TaskID, "task_") {
++		t.Fatalf("result = %+v", result)
++	}
++	if authorizer.calls != 1 || authorizer.intent.FireKey != wantKey || authorizer.intent.SubjectID != "user-1" ||
++		authorizer.intent.IdempotencyKey != "sched-1:"+wantKey || authorizer.intent.ScheduleID != "sched-1" {
++		t.Fatalf("Control was asked for %+v (%d calls)", authorizer.intent, authorizer.calls)
++	}
++	if len(tx.execs) != 2 || !strings.Contains(tx.execs[0].sql, "INSERT INTO tasks") ||
++		!strings.Contains(tx.execs[1].sql, "'pending'") {
++		t.Fatalf("writes = %+v, want one task and one pending fire", tx.execs)
++	}
++	if got := tx.execs[1].args[4]; got != wantKey {
++		t.Fatalf("fire row key = %v, want %s", got, wantKey)
++	}
++	var config struct {
++		Intent FireIntent `json:"schedule_fire_intent"`
++	}
++	if err := json.Unmarshal(tx.execs[0].args[7].([]byte), &config); err != nil {
++		t.Fatal(err)
++	}
++	if config.Intent.FireKey != wantKey || config.Intent.SubjectID != "user-1" {
++		t.Fatalf("task carries intent %+v, want the manual key under the creator", config.Intent)
++	}
++	if !tx.committed {
++		t.Fatal("the manual fire was not committed")
++	}
++}
++
++func TestRunNowRefusesNonCreator(t *testing.T) {
++	for _, actor := range []string{"user-2", ""} {
++		tx := liveRunNowTx(t)
++		authorizer := &recordingRunNowAuthorizer{}
++		_, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs(actor), runNowNow())
++		wantRefusal(t, refusal, err, http.StatusForbidden, "run_now_not_creator")
++		if authorizer.calls != 0 || len(tx.execs) != 0 || tx.committed {
++			t.Fatalf("actor %q: a refused press reached Control or wrote: calls=%d writes=%+v", actor, authorizer.calls, tx.execs)
++		}
++	}
++}
++
++func TestRunNowRefusesUnknownSchedule(t *testing.T) {
++	tx := &runNowTx{}
++	_, refusal, err := RunNow(context.Background(), tx, &recordingRunNowAuthorizer{}, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusNotFound, "not_found")
++}
++
++func TestRunNowRefusesBadRequestIDBeforeTheStore(t *testing.T) {
++	for _, id := range []string{"", "short", "has/slash-0123456789", strings.Repeat("a", 65)} {
++		req := runNowAs("user-1")
++		req.RequestID = id
++		_, refusal, err := RunNow(context.Background(), nil, &recordingRunNowAuthorizer{}, req, runNowNow())
++		wantRefusal(t, refusal, err, http.StatusBadRequest, "invalid_request_id")
++	}
++}
++
++func TestRunNowRefusesLapsedApproval(t *testing.T) {
++	tx := liveRunNowTx(t)
++	tx.template = guardTemplate(t, runNowNow().Add(-time.Minute))
++	authorizer := &recordingRunNowAuthorizer{}
++	_, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusConflict, "approval_expired")
++	if authorizer.calls != 0 || len(tx.execs) != 0 {
++		t.Fatalf("a lapsed approval reached Control or wrote: calls=%d writes=%+v", authorizer.calls, tx.execs)
++	}
++}
++
++func TestRunNowRefusesInvalidExpression(t *testing.T) {
++	tx := liveRunNowTx(t)
++	tx.expr = "not a cron expression"
++	_, refusal, err := RunNow(context.Background(), tx, &recordingRunNowAuthorizer{}, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusConflict, "invalid_schedule")
++}
++
++func TestRunNowDeduplicatesSameRequestID(t *testing.T) {
++	tx := liveRunNowTx(t)
++	tx.existing = &RunNowResult{FireID: "cronfire_first", TaskID: "task_first", Status: "running"}
++	authorizer := &recordingRunNowAuthorizer{}
++	result, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs("user-1"), runNowNow())
++	if err != nil || refusal != nil {
++		t.Fatalf("RunNow: refusal=%+v err=%v", refusal, err)
++	}
++	if !result.Deduplicated || result.FireID != "cronfire_first" || result.TaskID != "task_first" ||
++		result.Status != "running" || result.FireKey != "manual:"+runNowRequestIDForTest {
++		t.Fatalf("result = %+v, want the first fire back", result)
++	}
++	if authorizer.calls != 0 || len(tx.execs) != 0 {
++		t.Fatalf("a retried request fired again: calls=%d writes=%+v", authorizer.calls, tx.execs)
++	}
++}
++
++func TestRunNowRefusesWhileManualFireInFlight(t *testing.T) {
++	tx := liveRunNowTx(t)
++	tx.inFlight = 1
++	authorizer := &recordingRunNowAuthorizer{}
++	_, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusConflict, "run_now_in_flight")
++	if authorizer.calls != 0 || len(tx.execs) != 0 {
++		t.Fatalf("an in-flight refusal reached Control or wrote: calls=%d writes=%+v", authorizer.calls, tx.execs)
++	}
++}
++
++func TestRunNowRateLimit(t *testing.T) {
++	tx := liveRunNowTx(t)
++	tx.lastHour = runNowHourlyLimit
++	_, refusal, err := RunNow(context.Background(), tx, &recordingRunNowAuthorizer{}, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusTooManyRequests, "run_now_rate_limited")
++
++	// One under the limit still fires.
++	tx = liveRunNowTx(t)
++	tx.lastHour = runNowHourlyLimit - 1
++	if _, refusal, err := RunNow(context.Background(), tx, &recordingRunNowAuthorizer{}, runNowAs("user-1"), runNowNow()); err != nil || refusal != nil {
++		t.Fatalf("fire under the limit: refusal=%+v err=%v", refusal, err)
++	}
++}
++
++func TestRunNowAuthorizerRefusalWritesFailedFireAndKeepsScheduleEnabled(t *testing.T) {
++	tx := liveRunNowTx(t)
++	authorizer := &recordingRunNowAuthorizer{err: errors.New("Control refused")}
++	_, refusal, err := RunNow(context.Background(), tx, authorizer, runNowAs("user-1"), runNowNow())
++	wantRefusal(t, refusal, err, http.StatusForbidden, "fire_not_authorized")
++	if len(tx.execs) != 1 {
++		t.Fatalf("writes = %+v, want one failed fire", tx.execs)
++	}
++	write := tx.execs[0]
++	if !strings.Contains(write.sql, "INSERT INTO cron_fires") || !strings.Contains(write.sql, "'failed'") ||
++		write.args[4] != "manual:"+runNowRequestIDForTest {
++		t.Fatalf("refusal wrote %+v, want a failed fire under the manual key", write)
++	}
++	for _, exec := range tx.execs {
++		if strings.Contains(exec.sql, "enabled=false") || strings.Contains(exec.sql, "INSERT INTO tasks") {
++			t.Fatalf("a refused manual fire disabled the schedule or made a task: %s", exec.sql)
++		}
++	}
++	if !tx.committed {
++		t.Fatal("the failed fire was not committed, so the refusal leaves no record")
++	}
++}
++
++func TestRunNowDoesNotMoveNextFireAt(t *testing.T) {
++	tx := liveRunNowTx(t)
++	if _, refusal, err := RunNow(context.Background(), tx, &recordingRunNowAuthorizer{}, runNowAs("user-1"), runNowNow()); err != nil || refusal != nil {
++		t.Fatalf("RunNow: refusal=%+v err=%v", refusal, err)
++	}
++	for _, exec := range tx.execs {
++		if strings.Contains(exec.sql, "cron_schedules") || strings.Contains(exec.sql, "next_fire_at") ||
++			strings.Contains(exec.sql, "last_fire_at") {
++			t.Fatalf("Run now wrote the schedule's slot bookkeeping: %s", exec.sql)
++		}
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go
+index 2b3021468..bc39e0bb1 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go	
+@@ -133,6 +133,25 @@ type dueSchedule struct {
+ 	nextFire       *time.Time
+ }
+ 
++// DueSchedule is the part of a schedule a fire is made from. The sweeper and Run now
++// (EP-6-S2) both hand it to InsertFire, so a manual fire writes the same task and fire
++// rows a cron slot does.
++type DueSchedule struct {
++	ID             string
++	OrgID          string
++	SpaceRef       string
++	SubjectID      string
++	TemplateDigest string
++	Template       json.RawMessage
++}
++
++func (d dueSchedule) fireView() DueSchedule {
++	return DueSchedule{
++		ID: d.id, OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
++		TemplateDigest: d.templateDigest, Template: d.template,
++	}
++}
++
+ // RunOnce scans due schedules and fires each exactly once. It returns the number
+ // of schedules whose task fired and committed. Schedules being initialized for the
+ // first time, or whose expression is invalid, do not count, and neither does a
+@@ -379,6 +398,18 @@ func taskConfigJSON(template []byte, intent *FireIntent) []byte {
+ // caller rolls the fire's savepoint back, so a failed fire leaves no task or pending
+ // row behind.
+ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time) error {
++	// The fire key is the schedule's slot. Session Core matches a scheduled run
++	// back to this fire through it (build plan WS20 S1).
++	_, _, err := InsertFire(ctx, tx, d.fireView(), d.nextFire.UTC().Format(time.RFC3339Nano), now)
++	return err
++}
++
++// InsertFire creates a task from the schedule's template and records a pending
++// cron_fires row under fireKey. The task carries the non-secret fire intent, so the
++// workflow dispatcher asks Control again before the Temporal handoff whatever made the
++// fire. It stops at the first failed statement and returns that error, because
++// Postgres rejects every later statement on the aborted transaction.
++func InsertFire(ctx context.Context, tx pgx.Tx, d DueSchedule, fireKey string, now time.Time) (fireID, taskID string, err error) {
+ 	var tpl struct {
+ 		Kind        string `json:"kind"`
+ 		Title       string `json:"title"`
+@@ -386,35 +417,34 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
+ 		Assignee    string `json:"assignee"`
+ 		Priority    int    `json:"priority"`
+ 	}
+-	_ = json.Unmarshal(d.template, &tpl)
++	_ = json.Unmarshal(d.Template, &tpl)
+ 	if tpl.Kind == "" {
+ 		tpl.Kind = "cron"
+ 	}
+ 	if tpl.Title == "" {
+ 		tpl.Title = "Scheduled task"
+ 	}
+-	taskID := "task_" + uuid.New().String()
+-	fireID := "cronfire_" + uuid.New().String()
+-	// The fire key is the schedule's slot. Session Core matches a scheduled run
+-	// back to this fire through it (build plan WS20 S1).
+-	fireKey := d.nextFire.UTC().Format(time.RFC3339Nano)
++	taskID = "task_" + uuid.New().String()
++	fireID = "cronfire_" + uuid.New().String()
+ 	_, terr := tx.Exec(ctx, `
+ 		INSERT INTO tasks (id, org_id, kind, title, description, assignee, status,
+ 		    priority, config_json, scheduled_at, created_at, updated_at)
+ 		VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)
+-	`, taskID, d.orgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
+-		taskConfigJSON(d.template, &FireIntent{
+-			OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
+-			ScheduleID: d.id, FireKey: d.nextFire.UTC().Format(time.RFC3339Nano),
+-			TemplateDigest: d.templateDigest, IdempotencyKey: d.id + ":" + d.nextFire.UTC().Format(time.RFC3339Nano),
++	`, taskID, d.OrgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
++		taskConfigJSON(d.Template, &FireIntent{
++			OrgID: d.OrgID, SpaceRef: d.SpaceRef, SubjectID: d.SubjectID,
++			ScheduleID: d.ID, FireKey: fireKey,
++			TemplateDigest: d.TemplateDigest, IdempotencyKey: d.ID + ":" + fireKey,
+ 		}), now)
+ 	if terr != nil {
+-		return terr
++		return "", "", terr
+ 	}
+-	_, err := tx.Exec(ctx,
++	if _, err := tx.Exec(ctx,
+ 		`INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)`,
+-		fireID, d.id, taskID, now, fireKey)
+-	return err
++		fireID, d.ID, taskID, now, fireKey); err != nil {
++		return "", "", err
++	}
++	return fireID, taskID, nil
+ }
+ 
+ // pauseNotice is one guard pause, noticed once its batch has committed.
+diff --git a/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go
+index b713b5d0d..fa6b86a51 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go	
+@@ -436,3 +436,57 @@ func TestLegacyPendingFiresBecomeUnknownAfterAnHour(t *testing.T) {
+ 		t.Fatalf("sweep cutoff = %v, want one hour before the batch", tx.execs[0].args[1])
+ 	}
+ }
++
++// A slot fire writes exactly what it wrote before InsertFire was extracted for Run now
++// (EP-6-S2): a created task carrying the slot's fire intent, then a pending fire under
++// the slot key, with the same arguments in the same order. Only the generated ids vary.
++func TestFireOneUnchangedAfterInsertFireExtract(t *testing.T) {
++	slot := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
++	now := slot.Add(2 * time.Second)
++	slotKey := slot.Format(time.RFC3339Nano)
++	template := json.RawMessage(`{"kind":"report","title":"Nightly","description":"summarise","assignee":"ops","priority":2}`)
++	tx := &guardBatchTx{}
++	if err := (&Sweeper{}).fireOne(context.Background(), tx, guardDue(template, slot), now); err != nil {
++		t.Fatalf("fireOne: %v", err)
++	}
++	if len(tx.execs) != 2 {
++		t.Fatalf("fireOne issued %d statements, want 2: %+v", len(tx.execs), tx.execs)
++	}
++	task, fire := tx.execs[0], tx.execs[1]
++	if !strings.Contains(task.sql, "INSERT INTO tasks") || !strings.Contains(task.sql, "VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)") {
++		t.Fatalf("task statement changed: %s", task.sql)
++	}
++	taskID, _ := task.args[0].(string)
++	if !strings.HasPrefix(taskID, "task_") || len(task.args) != 9 {
++		t.Fatalf("task arguments = %+v", task.args)
++	}
++	for i, want := range []any{"org-1", "report", "Nightly", "summarise", "ops", 2} {
++		if task.args[i+1] != want {
++			t.Fatalf("task argument %d = %v, want %v", i+1, task.args[i+1], want)
++		}
++	}
++	var config struct {
++		Intent FireIntent `json:"schedule_fire_intent"`
++	}
++	if err := json.Unmarshal(task.args[7].([]byte), &config); err != nil {
++		t.Fatal(err)
++	}
++	wantIntent := FireIntent{
++		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "sched-1",
++		FireKey: slotKey, TemplateDigest: "sha256:" + strings.Repeat("a", 64), IdempotencyKey: "sched-1:" + slotKey,
++	}
++	if config.Intent != wantIntent {
++		t.Fatalf("task intent = %+v, want %+v", config.Intent, wantIntent)
++	}
++	if task.args[8] != now {
++		t.Fatalf("task time = %v, want %v", task.args[8], now)
++	}
++	if fire.sql != `INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)` {
++		t.Fatalf("fire statement changed: %s", fire.sql)
++	}
++	fireID, _ := fire.args[0].(string)
++	if !strings.HasPrefix(fireID, "cronfire_") || fire.args[1] != "sched-1" || fire.args[2] != taskID ||
++		fire.args[3] != now || fire.args[4] != slotKey {
++		t.Fatalf("fire arguments = %+v", fire.args)
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_test.go b/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_test.go
+index 901e77e86..d8406d958 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_test.go	
+@@ -248,6 +248,47 @@ func TestWorkflowDispatchConsumesDecisionBeforeTemporalHandoff(t *testing.T) {
+ 	}
+ }
+ 
++// A Run now fire (EP-6-S2) is a task like any slot fire, so the dispatcher asks Control
++// for a fresh fire decision and a scheduled-run decision before the Temporal handoff,
++// and the run's system thread is keyed on the manual fire key.
++func TestDispatcherReauthorizesManualFire(t *testing.T) {
++	manualKey := cron.ManualFireKeyPrefix + "6f1c2a9e-0b7d-4c55-9a1e-3d2f8b7c6a10"
++	intent := cron.FireIntent{
++		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
++		FireKey:        manualKey,
++		IdempotencyKey: "schedule-1:" + manualKey,
++	}
++	config, intent := scheduledTaskConfig(t, map[string]any{
++		"workflow_input": map[string]any{"goal": "scheduled work", "policy": "execute"},
++	}, intent)
++	threadKey := "schedule/schedule-1/" + manualKey
++	authorizer := &recordingScheduledRunAuthorizer{preparation: cron.ScheduledRunPreparation{
++		Token: "one-fire-control-bearer", SystemThreadKey: threadKey,
++	}}
++	session := &recordingScheduledRunSession{response: &mpv1.PrepareScheduledRunThreadResponse{
++		ThreadId: "thread-manual-1", RunId: "task-1", OwnerId: "service:orchestrator-core",
++	}}
++	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer, scheduledRunSession: session}
++	prepared, err := dispatcher.reauthorizeScheduleFire(context.Background(), TaskRef{ID: "task-1", OrgID: "org-1"}, taskDetail{
++		config: config, scheduleID: "schedule-1",
++	})
++	if err != nil {
++		t.Fatalf("reauthorizeScheduleFire: %v", err)
++	}
++	if authorizer.calls != 1 || authorizer.intent != intent {
++		t.Fatalf("fresh fire decision asked for %+v (%d calls), want %+v", authorizer.intent, authorizer.calls, intent)
++	}
++	if authorizer.taskID != "task-1" {
++		t.Fatalf("scheduled-run decision was not asked for the task: %q", authorizer.taskID)
++	}
++	if session.request.GetFireKey() != manualKey || session.request.GetSystemThreadKey() != threadKey {
++		t.Fatalf("Session Core was asked for fire %q thread %q", session.request.GetFireKey(), session.request.GetSystemThreadKey())
++	}
++	if prepared == nil || prepared.fireKey != manualKey || prepared.threadID != "thread-manual-1" {
++		t.Fatalf("prepared handoff = %#v", prepared)
++	}
++}
++
+ func TestAttachScheduledRunInputCarriesOnlyNonSecretPreparationFacts(t *testing.T) {
+ 	req, err := dispatchPlan(
+ 		TaskRef{ID: "task-1", OrgID: "org-1"},
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 2529cc05e..49af2098f 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -580,6 +580,7 @@ fn proxy_routes() -> Router<AppState> {
+                 .delete(delete_cron_proxy),
+         )
+         .route("/v1/cron/:id/fires", get(list_cron_fires_proxy))
++        .route("/v1/cron/:id/run", post(run_cron_now_proxy))
+         // Memory
+         .route(
+             "/v1/memory",
+@@ -7250,6 +7251,9 @@ async fn delete_org_hook_proxy(
+ #[derive(Debug, Default, Deserialize)]
+ struct CronListQuery {
+     space_ref: Option<String>,
++    /// `self` narrows the list to the caller's own schedules (EP-6-S2). Any
++    /// other value is dropped, never forwarded.
++    creator: Option<String>,
+ }
+ 
+ /// Query for both process routes. `space_ref` and the two decision fields
+@@ -7613,12 +7617,22 @@ async fn list_cron_proxy(
+             Json(json!({ "error": "space_ref must be URL-safe" })),
+         ));
+     }
+-    let path = if space_ref.is_empty() {
+-        format!("cron?org_id={}", c.org_id)
++    let path = cron_list_path(&c.org_id, space_ref, query.creator.as_deref());
++    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
++}
++
++/// The upstream list path. Only the literal `creator=self` is forwarded:
++/// capability-core compares it to the verified actor, so it can only narrow.
++fn cron_list_path(org_id: &str, space_ref: &str, creator: Option<&str>) -> String {
++    let mut path = if space_ref.is_empty() {
++        format!("cron?org_id={org_id}")
+     } else {
+-        format!("cron?org_id={}&space_ref={space_ref}", c.org_id)
++        format!("cron?org_id={org_id}&space_ref={space_ref}")
+     };
+-    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
++    if creator == Some("self") {
++        path.push_str("&creator=self");
++    }
++    path
+ }
+ async fn create_cron_proxy(
+     State(s): State<AppState>,
+@@ -7701,6 +7715,76 @@ mod cron_fires_path_tests {
+     }
+ }
+ 
++/// Run now (EP-6-S2): one manual fire of a schedule. Only the caller's
++/// `request_id` is forwarded; capability-core checks the creator, asks Control
++/// for a fresh fire decision and answers 404 while `CRON_RUN_NOW_ENABLED` is off.
++async fn run_cron_now_proxy(
++    State(s): State<AppState>,
++    Extension(c): Extension<Claims>,
++    bearer: VerifiedCapabilityBearer,
++    Path(id): Path<String>,
++    Json(b): Json<Value>,
++) -> Result<Json<Value>, HttpJsonError> {
++    let path = cron_run_path(&id)?;
++    let body = json!({ "request_id": b.get("request_id").cloned().unwrap_or(Value::Null) });
++    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&body)).await
++}
++
++/// The upstream run path. The id is decoded from the request path, so an
++/// encoded `/` or `?` would otherwise address a different upstream route.
++fn cron_run_path(id: &str) -> Result<String, HttpJsonError> {
++    let url_safe = !id.is_empty()
++        && id != "."
++        && id != ".."
++        && id
++            .chars()
++            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
++    if !url_safe {
++        return Err((
++            StatusCode::BAD_REQUEST,
++            Json(json!({"error": {
++                "code": "invalid_cron_id",
++                "message": "cron id must be URL-safe",
++                "details": {}
++            }})),
++        ));
++    }
++    Ok(format!("cron/{id}/run"))
++}
++
++#[cfg(test)]
++mod cron_run_now_path_tests {
++    use super::{cron_list_path, cron_run_path};
++
++    #[test]
++    fn cron_run_path_forwards_only_the_id() {
++        assert_eq!(cron_run_path("cron_1").unwrap(), "cron/cron_1/run");
++        for bad in ["", ".", "..", "cron_1/fires", "cron_1?creator=x", "cron 1", "cron_1#x"] {
++            let (status, _) = cron_run_path(bad).unwrap_err();
++            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bad:?}");
++        }
++    }
++
++    #[test]
++    fn cron_list_forwards_only_creator_self() {
++        assert_eq!(cron_list_path("org-1", "", None), "cron?org_id=org-1");
++        assert_eq!(
++            cron_list_path("org-1", "", Some("self")),
++            "cron?org_id=org-1&creator=self"
++        );
++        assert_eq!(
++            cron_list_path("org-1", "space-1", Some("self")),
++            "cron?org_id=org-1&space_ref=space-1&creator=self"
++        );
++        for other in ["someone-else", "SELF", "self&org_id=org-2", ""] {
++            assert_eq!(
++                cron_list_path("org-1", "space-1", Some(other)),
++                "cron?org_id=org-1&space_ref=space-1"
++            );
++        }
++    }
++}
++
+ async fn list_memory_proxy(
+     State(s): State<AppState>,
+     Extension(c): Extension<Claims>,

@@ -1,0 +1,2361 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx
+index c58ca374e..e41f5ba68 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
+@@ -14,6 +14,14 @@ import { SectionHeader, SettingsButton } from '@/features/settings/components/se
+ import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
+ import { getSession } from '@/shared/session/session-store'
+ import { hasWorkspaceAdminAccess } from '@/shared/session/access'
++import {
++  findingsFor,
++  skillLintMessage,
++  skillLintRefusal,
++  skillLintWarnings,
++  type SkillLintFinding,
++} from '@/features/skills/skill-lint'
++import { SkillLintNotes } from '@/features/skills/components/SkillLintNotes'
+ 
+ /**
+  * Ferdigheter (skills) — org-dekkende ferdigheter agenten kan bruke i chat.
+@@ -62,6 +70,24 @@ export function SkillsSection() {
+   const [busySkillId, setBusySkillId] = createSignal<string | null>(null)
+   const [formError, setFormError] = createSignal<string | null>(null)
+   const [actionError, setActionError] = createSignal<string | null>(null)
++  // The skill lint (EP-11 S4): a refused create marks its fields; a create that went ahead with
++  // warnings says so in a soft note under the form.
++  const [formFindings, setFormFindings] = createSignal<SkillLintFinding[]>([])
++  const [formNote, setFormNote] = createSignal<string | null>(null)
++  const lintNotes = (field: string) => (
++    <SkillLintNotes
++      findings={findingsFor(formFindings(), field)}
++      errorClass="verevon-settings-status-message verevon-settings-status-message--error"
++      noteClass="verevon-settings-help"
++    />
++  )
++  const lintSummary = (findings: SkillLintFinding[]) =>
++    findings.map((finding) => skillLintMessage(finding.code, i18n.tr)).join(' ')
++  // A toggle or a promotion the lint refused names the rules it broke; any other failure reads as before.
++  const describeActionError = (err: unknown, fallback: { no: string; en: string }) => {
++    const refused = skillLintRefusal(err)
++    return refused.length > 0 ? lintSummary(refused) : translateApiError(err, i18n.tr, fallback)
++  }
+ 
+   // Proposals and declined learned skills are decided in the Læring inbox, never here.
+   const list = createMemo(() =>
+@@ -104,8 +130,10 @@ export function SkillsSection() {
+ 
+     setSubmitting(true)
+     setFormError(null)
++    setFormFindings([])
++    setFormNote(null)
+     try {
+-      await createSkill(id, {
++      const created = await createSkill(id, {
+         name: trimmedName,
+         description: description().trim() || undefined,
+         content: trimmedContent,
+@@ -114,9 +142,30 @@ export function SkillsSection() {
+         // A member with the member switch on creates a private skill of their own (EP-11 S1).
+         scope: isAdmin() ? undefined : 'user',
+       })
++      const warnings = skillLintWarnings(created)
++      if (warnings.length > 0) {
++        setFormNote(`${i18n.tr('Ferdigheten er opprettet.', 'The skill is created.')} ${lintSummary(warnings)}`)
++      }
+       resetForm()
+       await refetch()
+     } catch (err) {
++      const refused = skillLintRefusal(err)
++      if (refused.length > 0) {
++        setFormFindings(refused)
++        // A rule about a field this form does not show is named in the summary instead.
++        const unshown = refused.filter(
++          (finding) => !['name', 'description', 'content', 'trigger_keywords'].includes(finding.field),
++        )
++        setFormError(
++          [
++            i18n.tr('Ferdigheten ble ikke opprettet. Rett det som er merket.', 'The skill was not created. Fix what is marked.'),
++            lintSummary(unshown),
++          ]
++            .filter(Boolean)
++            .join(' '),
++        )
++        return
++      }
+       setFormError(
+         translateApiError(err, i18n.tr, { no: 'Kunne ikke opprette ferdigheten.', en: 'Could not create the skill.' }),
+       )
+@@ -152,7 +201,7 @@ export function SkillsSection() {
+       await refetch()
+     } catch (err) {
+       setActionError(
+-        translateApiError(err, i18n.tr, {
++        describeActionError(err, {
+           no: 'Kunne ikke kopiere ferdigheten til organisasjonen.',
+           en: 'Could not copy the skill to the organization.',
+         }),
+@@ -172,7 +221,7 @@ export function SkillsSection() {
+       await refetch()
+     } catch (err) {
+       setActionError(
+-        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere ferdigheten.', en: 'Could not update the skill.' }),
++        describeActionError(err, { no: 'Kunne ikke oppdatere ferdigheten.', en: 'Could not update the skill.' }),
+       )
+     } finally {
+       setBusySkillId(null)
+@@ -345,6 +394,7 @@ export function SkillsSection() {
+               />
+             </span>
+           </label>
++          {lintNotes('name')}
+ 
+           <label for="skill-description" class="verevon-settings-field">
+             <span class="verevon-settings-label">Beskrivelse (valgfritt)</span>
+@@ -358,6 +408,7 @@ export function SkillsSection() {
+               />
+             </span>
+           </label>
++          {lintNotes('description')}
+ 
+           <label for="skill-keywords" class="verevon-settings-field">
+             <span class="verevon-settings-label">Utløser-nøkkelord</span>
+@@ -374,6 +425,7 @@ export function SkillsSection() {
+               Ferdigheten injiseres i chat når en samtale treffer disse ordene.
+             </span>
+           </label>
++          {lintNotes('trigger_keywords')}
+ 
+           <label for="skill-content" class="verevon-settings-field">
+             <span class="verevon-settings-label">Innhold (markdown)</span>
+@@ -389,6 +441,7 @@ export function SkillsSection() {
+               />
+             </span>
+           </label>
++          {lintNotes('content')}
+ 
+           <p class="verevon-settings-help">
+             {i18n.tr(
+@@ -405,6 +458,14 @@ export function SkillsSection() {
+             )}
+           </Show>
+ 
++          <Show when={formNote()}>
++            {(note) => (
++              <p class="verevon-settings-help" role="status">
++                {note()}
++              </p>
++            )}
++          </Show>
++
+           <div>
+             <SettingsButton type="submit" variant="primary" settingsSize="sm" disabled={submitting()}>
+               <Show
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx
+index 71845853d..b5410bef3 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx	
+@@ -16,6 +16,7 @@ vi.mock('@/shared/api/skills-client', async (importOriginal) => {
+ })
+ 
+ import { createSkill } from '@/shared/api/skills-client'
++import { ApiError } from '@/shared/api/api-error'
+ import { SaveAsSkillDialog, suggestSkillName } from './SaveAsSkillDialog'
+ 
+ const mockedCreate = vi.mocked(createSkill)
+@@ -74,6 +75,40 @@ describe('SaveAsSkillDialog', () => {
+     expect(onClose).toHaveBeenCalled()
+     unmount()
+   })
++
++  // EP-11 S4: a lint refusal is shown next to the field it is about, and nothing closes.
++  it('shows_lint_refusal_next_to_the_field', async () => {
++    mockedCreate.mockRejectedValue(
++      new ApiError('The skill does not pass the skill lint.', 422, 'skill_lint_failed', {
++        details: { findings: [{ code: 'content_too_long', field: 'content', severity: 'error' }] },
++      }),
++    )
++    const { getByRole, getByLabelText, onClose, unmount } = renderDialog()
++    fireEvent.submit(getByRole('dialog'))
++    await waitFor(() => expect(getByRole('alert').textContent).toContain('Ferdigheten ble ikke lagret'))
++    const note = document.querySelector('[data-lint-code="content_too_long"]')
++    expect(note?.textContent).toContain('32 000')
++    // The note follows the content field, not another one.
++    expect(getByLabelText('Innhold').closest('label')?.nextElementSibling).toBe(note)
++    expect(onClose).not.toHaveBeenCalled()
++    unmount()
++  })
++
++  // A save that went ahead with warnings says so before the dialog closes.
++  it('keeps_open_with_lint_warnings_after_save', async () => {
++    mockedCreate.mockResolvedValue({
++      id: 'skill_new',
++      warnings: [{ code: 'transcript_shape', field: 'content', severity: 'warn' }],
++    } as unknown as { id: string })
++    const { getByRole, getByText, onSaved, onClose, unmount } = renderDialog()
++    fireEvent.submit(getByRole('dialog'))
++    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('skill_new'))
++    expect(getByRole('status').textContent).toContain('samtalelogg')
++    expect(onClose).not.toHaveBeenCalled()
++    fireEvent.click(getByText('Ferdig'))
++    expect(onClose).toHaveBeenCalled()
++    unmount()
++  })
+ })
+ 
+ describe('suggestSkillName', () => {
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx
+index a20b1c7bc..2e655aebe 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx	
+@@ -5,6 +5,14 @@ import { getActionDescriptor } from '@/shared/actions/action-registry'
+ import { createSkill } from '@/shared/api/skills-client'
+ import { getSession } from '@/shared/session/session-store'
+ import { translateApiError, useI18n } from '@/shared/i18n'
++import {
++  findingsFor,
++  skillLintMessage,
++  skillLintRefusal,
++  skillLintWarnings,
++  type SkillLintFinding,
++} from '@/features/skills/skill-lint'
++import { SkillLintNotes } from './SkillLintNotes'
+ 
+ /**
+  * Save as skill (EP-11 S1): one of the person's own answers, saved as a private skill of theirs.
+@@ -44,6 +52,17 @@ export function SaveAsSkillDialog(props: {
+   const [enabled, setEnabled] = createSignal(true)
+   const [submitting, setSubmitting] = createSignal(false)
+   const [errorMessage, setErrorMessage] = createSignal<string | null>(null)
++  // The skill lint's findings (EP-11 S4): a refusal's errors sit next to their fields; the
++  // warnings of a save that went ahead keep the dialog open as a soft note until it is closed.
++  const [lintFindings, setLintFindings] = createSignal<SkillLintFinding[]>([])
++  const [savedWarnings, setSavedWarnings] = createSignal<SkillLintFinding[] | null>(null)
++  const lintNotes = (field: string) => (
++    <SkillLintNotes
++      findings={findingsFor(lintFindings(), field)}
++      errorClass="verevon-schedule-dialog__error"
++      noteClass="verevon-schedule-dialog__note"
++    />
++  )
+ 
+   const close = () => {
+     if (!submitting()) props.onClose()
+@@ -86,6 +105,7 @@ export function SaveAsSkillDialog(props: {
+     }
+     setSubmitting(true)
+     setErrorMessage(null)
++    setLintFindings([])
+     try {
+       const created = await createSkill(orgId, {
+         name: input.name,
+@@ -95,8 +115,26 @@ export function SaveAsSkillDialog(props: {
+         scope: 'user',
+       })
+       props.onSaved?.(created.id)
++      const warnings = skillLintWarnings(created)
++      if (warnings.length > 0) {
++        setSavedWarnings(warnings)
++        return
++      }
+       props.onClose()
+     } catch (err) {
++      const refused = skillLintRefusal(err)
++      if (refused.length > 0) {
++        setLintFindings(refused)
++        // A rule about a field this dialog does not show is named in the summary instead.
++        const unshown = refused.filter((finding) => !['name', 'description', 'content'].includes(finding.field))
++        setErrorMessage(
++          [
++            i18n.tr('Ferdigheten ble ikke lagret. Rett det som er merket.', 'The skill was not saved. Fix what is marked.'),
++            ...unshown.map((finding) => skillLintMessage(finding.code, i18n.tr)),
++          ].join(' '),
++        )
++        return
++      }
+       setErrorMessage(
+         translateApiError(err, i18n.tr, {
+           no: 'Kunne ikke lagre ferdigheten.',
+@@ -146,6 +184,7 @@ export function SaveAsSkillDialog(props: {
+                 onInput={(event) => setName(event.currentTarget.value)}
+               />
+             </label>
++            {lintNotes('name')}
+ 
+             <label class="verevon-schedule-dialog__field">
+               <span>{i18n.tr('Beskrivelse (valgfritt)', 'Description (optional)')}</span>
+@@ -156,6 +195,7 @@ export function SaveAsSkillDialog(props: {
+                 onInput={(event) => setDescription(event.currentTarget.value)}
+               />
+             </label>
++            {lintNotes('description')}
+ 
+             <label class="verevon-schedule-dialog__field">
+               <span>{i18n.tr('Innhold', 'Content')}</span>
+@@ -168,6 +208,7 @@ export function SaveAsSkillDialog(props: {
+                 onInput={(event) => setBody(event.currentTarget.value)}
+               />
+             </label>
++            {lintNotes('content')}
+ 
+             <p class="verevon-schedule-dialog__note">
+               {i18n.tr(
+@@ -195,10 +236,30 @@ export function SaveAsSkillDialog(props: {
+               )}
+             </Show>
+ 
++            <Show when={savedWarnings()}>
++              {(warnings) => (
++                <p class="verevon-schedule-dialog__note" role="status">
++                  {i18n.tr('Ferdigheten er lagret.', 'The skill is saved.')}{' '}
++                  {warnings()
++                    .map((finding) => skillLintMessage(finding.code, i18n.tr))
++                    .join(' ')}
++                </p>
++              )}
++            </Show>
++
+             <footer>
+-              <button type="submit" class="verevon-schedule-dialog__submit" disabled={submitting()}>
+-                {submitting() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre ferdighet', 'Save skill')}
+-              </button>
++              <Show
++                when={savedWarnings() === null}
++                fallback={
++                  <button type="button" class="verevon-schedule-dialog__submit" onClick={() => props.onClose()}>
++                    {i18n.tr('Ferdig', 'Done')}
++                  </button>
++                }
++              >
++                <button type="submit" class="verevon-schedule-dialog__submit" disabled={submitting()}>
++                  {submitting() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre ferdighet', 'Save skill')}
++                </button>
++              </Show>
+             </footer>
+           </form>
+         </div>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLintNotes.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLintNotes.tsx
+new file mode 100644
+index 000000000..8c0b05707
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLintNotes.tsx	
+@@ -0,0 +1,20 @@
++import { For } from 'solid-js'
++import { useI18n } from '@/shared/i18n'
++import { skillLintMessage, type SkillLintFinding } from '@/features/skills/skill-lint'
++
++/**
++ * The skill lint findings for one field, shown next to it (EP-11 S4). An error is why the save
++ * was refused; a warning is a soft note on a skill that was saved.
++ */
++export function SkillLintNotes(props: { findings: SkillLintFinding[]; errorClass: string; noteClass: string }) {
++  const i18n = useI18n()
++  return (
++    <For each={props.findings}>
++      {(finding) => (
++        <p class={finding.severity === 'error' ? props.errorClass : props.noteClass} data-lint-code={finding.code}>
++          {skillLintMessage(finding.code, i18n.tr)}
++        </p>
++      )}
++    </For>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.test.ts b/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.test.ts
+new file mode 100644
+index 000000000..cf080cbcc
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.test.ts	
+@@ -0,0 +1,57 @@
++// EP-11 S4: the editor reads capability-core's skill lint findings, and only those.
++
++import { describe, expect, it } from 'vitest'
++import { ApiError } from '@/shared/api/api-error'
++import { findingsFor, skillLintMessage, skillLintRefusal, skillLintWarnings } from './skill-lint'
++
++const tr = (no: string) => no
++
++describe('skill lint findings', () => {
++  it('reads a refusal only from a skill_lint_failed error', () => {
++    const findings = [{ code: 'name_too_long', field: 'name', severity: 'error' }]
++    expect(skillLintRefusal(new ApiError('x', 422, 'skill_lint_failed', { details: { findings } }))).toEqual(findings)
++    expect(skillLintRefusal(new ApiError('x', 422, 'invalid_request', { details: { findings } }))).toEqual([])
++    expect(skillLintRefusal(new Error('x'))).toEqual([])
++  })
++
++  it('drops entries that are not findings', () => {
++    const body = {
++      id: 'skill_1',
++      warnings: [
++        { code: 'transcript_shape', field: 'content', severity: 'warn' },
++        { code: 'x', field: 'content', severity: 'fatal' },
++        'content_empty',
++        null,
++      ],
++    }
++    expect(skillLintWarnings(body)).toEqual([{ code: 'transcript_shape', field: 'content', severity: 'warn' }])
++    expect(skillLintWarnings({ id: 'skill_1' })).toEqual([])
++  })
++
++  it('groups findings by field and words every code', () => {
++    const findings = skillLintWarnings({
++      warnings: [
++        { code: 'description_missing', field: 'description', severity: 'warn' },
++        { code: 'content_exceeds_budget', field: 'content', severity: 'warn' },
++      ],
++    })
++    expect(findingsFor(findings, 'content').map((finding) => finding.code)).toEqual(['content_exceeds_budget'])
++    for (const code of [
++      'name_empty',
++      'name_too_long',
++      'name_charset',
++      'description_missing',
++      'description_too_long',
++      'content_empty',
++      'content_too_long',
++      'content_exceeds_budget',
++      'transcript_shape',
++      'trigger_keyword_count',
++      'trigger_keyword_too_long',
++      'tool_restriction_invalid',
++      'frontmatter_name_mismatch',
++    ]) {
++      expect(skillLintMessage(code, tr)).not.toBe(skillLintMessage('unknown_rule', tr))
++    }
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.ts b/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.ts
+new file mode 100644
+index 000000000..4dce4e2cc
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/skill-lint.ts	
+@@ -0,0 +1,97 @@
++import { ApiError } from '@/shared/api/api-error'
++
++/**
++ * The skill lint (EP-11 S4) as the editor shows it. capability-core refuses a write that breaks
++ * a rule with 422 `skill_lint_failed` and `details.findings`, and adds `warnings` to the body of
++ * a write that went ahead. A finding is a closed rule code and the field it is about, never the
++ * text, so the words the person reads are written here.
++ */
++export interface SkillLintFinding {
++  code: string
++  field: string
++  severity: 'error' | 'warn'
++}
++
++export const SKILL_LINT_FAILED = 'skill_lint_failed'
++
++type Translate = (noText: string, enText: string) => string
++
++function asFindings(value: unknown): SkillLintFinding[] {
++  if (!Array.isArray(value)) return []
++  return value.flatMap((entry) => {
++    if (!entry || typeof entry !== 'object') return []
++    const { code, field, severity } = entry as Record<string, unknown>
++    if (typeof code !== 'string' || typeof field !== 'string') return []
++    if (severity !== 'error' && severity !== 'warn') return []
++    return [{ code, field, severity }]
++  })
++}
++
++/** The findings of a write the lint refused; empty for any other failure. */
++export function skillLintRefusal(err: unknown): SkillLintFinding[] {
++  if (!(err instanceof ApiError) || err.code !== SKILL_LINT_FAILED) return []
++  return asFindings(err.details?.findings)
++}
++
++/** The findings a write that went ahead carried back; empty while the lint is off. */
++export function skillLintWarnings(body: unknown): SkillLintFinding[] {
++  if (!body || typeof body !== 'object') return []
++  return asFindings((body as { warnings?: unknown }).warnings)
++}
++
++/** The findings about one field, so each is shown next to it. */
++export function findingsFor(findings: SkillLintFinding[], field: string): SkillLintFinding[] {
++  return findings.filter((finding) => finding.field === field)
++}
++
++/** What a finding means to the person writing the skill. */
++export function skillLintMessage(code: string, tr: Translate): string {
++  switch (code) {
++    case 'name_empty':
++      return tr('Navnet kan ikke være tomt.', 'The name cannot be empty.')
++    case 'name_too_long':
++      return tr('Navnet kan ha høyst 64 tegn.', 'The name can have at most 64 characters.')
++    case 'name_charset':
++      return tr(
++        'Navnet kan ikke starte eller slutte med mellomrom eller ha kontrolltegn.',
++        'The name cannot start or end with a space or hold control characters.',
++      )
++    case 'description_missing':
++      return tr(
++        'En kort beskrivelse gjør ferdigheten lettere å finne igjen.',
++        'A short description makes the skill easier to find again.',
++      )
++    case 'description_too_long':
++      return tr('Beskrivelsen kan ha høyst 300 tegn.', 'The description can have at most 300 characters.')
++    case 'content_empty':
++      return tr('Innholdet kan ikke være tomt.', 'The content cannot be empty.')
++    case 'content_too_long':
++      return tr('Innholdet kan ha høyst 32 000 tegn.', 'The content can have at most 32,000 characters.')
++    case 'content_exceeds_budget':
++      return tr(
++        'Innhold over 8 000 tegn kuttes når ferdigheten brukes i en samtale.',
++        'Content over 8,000 characters is cut when the skill is used in a chat.',
++      )
++    case 'transcript_shape':
++      return tr(
++        'Dette ser ut som en samtalelogg. Skriv lærdommen, ikke loggen.',
++        'This looks like a chat log. Write the lesson, not the log.',
++      )
++    case 'trigger_keyword_count':
++      return tr('En ferdighet kan ha høyst 20 utløser-nøkkelord.', 'A skill can have at most 20 trigger keywords.')
++    case 'trigger_keyword_too_long':
++      return tr(
++        'Hvert utløser-nøkkelord kan ha høyst 40 tegn.',
++        'Each trigger keyword can have at most 40 characters.',
++      )
++    case 'tool_restriction_invalid':
++      return tr('Hver verktøybegrensning må være ett verktøynavn.', 'Each tool restriction must be one tool name.')
++    case 'frontmatter_name_mismatch':
++      return tr(
++        'Navnet i SKILL.md må være det samme som ferdighetens navn.',
++        'The name in SKILL.md must match the skill name.',
++      )
++    default:
++      return tr('Ferdigheten består ikke kontrollen.', 'The skill does not pass the check.')
++  }
++}
+diff --git a/apps/Model Plane/api/contracts/authored-behaviour-lint-golden.json b/apps/Model Plane/api/contracts/authored-behaviour-lint-golden.json
+new file mode 100644
+index 000000000..925599dee
+--- /dev/null
++++ b/apps/Model Plane/api/contracts/authored-behaviour-lint-golden.json	
+@@ -0,0 +1,35 @@
++{
++  "contract": "authored-behaviour-lint",
++  "version": 1,
++  "note": "Inputs and the codes each must produce, in rule order. A missing field is empty; frontmatter_name absent means no bundle. repeat replaces one text field (name, description or content) with text repeated count times.",
++  "cases": [
++    {"id": "clean", "input": {"name": "Weekly report", "description": "How to write the weekly report.", "content": "1. Pull the numbers.\n2. Write three bullets."}, "expect": []},
++    {"id": "everything_empty", "input": {}, "expect": ["name_empty", "description_missing", "content_empty"]},
++    {"id": "blank_name_is_only_empty", "input": {"name": "   ", "description": "d", "content": "c"}, "expect": ["name_empty"]},
++    {"id": "name_at_limit", "input": {"description": "d", "content": "c"}, "repeat": {"field": "name", "text": "a", "count": 64}, "expect": []},
++    {"id": "name_over_limit", "input": {"description": "d", "content": "c"}, "repeat": {"field": "name", "text": "a", "count": 65}, "expect": ["name_too_long"]},
++    {"id": "name_counts_characters_not_bytes", "input": {"description": "d", "content": "c"}, "repeat": {"field": "name", "text": "ø", "count": 64}, "expect": []},
++    {"id": "name_leading_space", "input": {"name": " Report", "description": "d", "content": "c"}, "expect": ["name_charset"]},
++    {"id": "name_control_character", "input": {"name": "Re\u0007port", "description": "d", "content": "c"}, "expect": ["name_charset"]},
++    {"id": "description_missing_is_a_warning", "input": {"name": "Report", "description": " ", "content": "c"}, "expect": ["description_missing"]},
++    {"id": "description_over_limit", "input": {"name": "Report", "content": "c"}, "repeat": {"field": "description", "text": "d", "count": 301}, "expect": ["description_too_long"]},
++    {"id": "content_blank", "input": {"name": "Report", "description": "d", "content": "  \n\t "}, "expect": ["content_empty"]},
++    {"id": "content_at_budget", "input": {"name": "Report", "description": "d"}, "repeat": {"field": "content", "text": "c", "count": 8000}, "expect": []},
++    {"id": "content_over_budget", "input": {"name": "Report", "description": "d"}, "repeat": {"field": "content", "text": "c", "count": 8001}, "expect": ["content_exceeds_budget"]},
++    {"id": "content_at_limit", "input": {"name": "Report", "description": "d"}, "repeat": {"field": "content", "text": "c", "count": 32000}, "expect": ["content_exceeds_budget"]},
++    {"id": "content_over_limit", "input": {"name": "Report", "description": "d"}, "repeat": {"field": "content", "text": "c", "count": 32001}, "expect": ["content_too_long"]},
++    {"id": "transcript_three_lines", "input": {"name": "Report", "description": "d", "content": "User: hi\nAssistant: hello\nUser: again"}, "expect": ["transcript_shape"]},
++    {"id": "transcript_two_lines", "input": {"name": "Report", "description": "d", "content": "User: hi\nAssistant: hello\nThe lesson: greet first."}, "expect": []},
++    {"id": "transcript_norwegian_and_indented", "input": {"name": "Report", "description": "d", "content": "Bruker: hei\n  Assistant: hallo\nBruker: igjen"}, "expect": ["transcript_shape"]},
++    {"id": "transcript_prefix_is_case_sensitive", "input": {"name": "Report", "description": "d", "content": "user: a\nuser: b\nuser: c"}, "expect": []},
++    {"id": "keywords_at_limit", "input": {"name": "Report", "description": "d", "content": "c", "trigger_keywords": ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18", "k19", "k20"]}, "expect": []},
++    {"id": "keywords_over_limit", "input": {"name": "Report", "description": "d", "content": "c", "trigger_keywords": ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13", "k14", "k15", "k16", "k17", "k18", "k19", "k20", "k21"]}, "expect": ["trigger_keyword_count"]},
++    {"id": "keyword_too_long_reported_once", "input": {"name": "Report", "description": "d", "content": "c", "trigger_keywords": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}, "expect": ["trigger_keyword_too_long"]},
++    {"id": "tool_names_plain", "input": {"name": "Report", "description": "d", "content": "c", "tool_restrictions": ["web_search", "mcp.files-read"]}, "expect": []},
++    {"id": "tool_wildcard", "input": {"name": "Report", "description": "d", "content": "c", "tool_restrictions": ["*"]}, "expect": ["tool_restriction_invalid"]},
++    {"id": "tool_with_space_and_empty", "input": {"name": "Report", "description": "d", "content": "c", "tool_restrictions": ["read file", ""]}, "expect": ["tool_restriction_invalid"]},
++    {"id": "frontmatter_matches_after_trim", "input": {"name": "Weekly report", "description": "d", "content": "c", "frontmatter_name": " Weekly report "}, "expect": []},
++    {"id": "frontmatter_mismatch", "input": {"name": "Weekly report", "description": "d", "content": "c", "frontmatter_name": "weekly-report"}, "expect": ["frontmatter_name_mismatch"]},
++    {"id": "errors_and_warnings_in_rule_order", "input": {"name": "Report ", "description": "", "content": "User: a\nAssistant: b\nUser: c", "trigger_keywords": ["k"], "tool_restrictions": ["a b"], "frontmatter_name": "Other"}, "expect": ["name_charset", "description_missing", "transcript_shape", "tool_restriction_invalid", "frontmatter_name_mismatch"]}
++  ]
++}
+diff --git a/apps/Model Plane/api/contracts/authored-behaviour-lint.json b/apps/Model Plane/api/contracts/authored-behaviour-lint.json
+new file mode 100644
+index 000000000..f5aec604b
+--- /dev/null
++++ b/apps/Model Plane/api/contracts/authored-behaviour-lint.json	
+@@ -0,0 +1,39 @@
++{
++  "contract": "authored-behaviour-lint",
++  "version": 1,
++  "description": "The one lint every skill write passes (EP-11 S4). session-core UpsertAgentSkill, capability-core POST/PATCH /api/v1/skills and the bundle SKILL.md check all run these rules. mp-contracts skill_lint and capability-core internal/skilllint implement them; both test against this file, its .sha256 pin and authored-behaviour-lint-golden.json.",
++  "mode": {
++    "env": "SKILL_LINT_MODE",
++    "values": ["off", "report", "enforce"],
++    "default": "off",
++    "unknown": "off",
++    "note": "off runs nothing; report counts findings (skill_lint_findings_total{code}) and writes; enforce refuses a write with any error-severity finding. Warnings never refuse."
++  },
++  "refusal": {
++    "http_status": 422,
++    "http_code": "skill_lint_failed",
++    "http_details_key": "findings",
++    "grpc_skip_reason_prefix": "skill_lint:",
++    "note": "HTTP answers {error:{code:skill_lint_failed,message,details:{findings:[{code,field,severity}]}}}; a report-mode 2xx body adds warnings:[{code,field,severity}]. The gRPC write answers skip_reason skill_lint:<code> of the first error. A finding names a rule and a field, never the text."
++  },
++  "length_unit": "unicode_scalar_values",
++  "whitespace": "unicode_white_space",
++  "transcript_prefixes": ["User:", "Assistant:", "Bruker:"],
++  "transcript_min_lines": 3,
++  "tool_name_pattern": "^[A-Za-z0-9_.-]+$",
++  "rules": [
++    {"code": "name_empty", "field": "name", "severity": "error", "limit": null, "rule": "the name is empty after trimming whitespace; the other name rules are then skipped"},
++    {"code": "name_too_long", "field": "name", "severity": "error", "limit": 64, "rule": "the name has more than limit characters"},
++    {"code": "name_charset", "field": "name", "severity": "error", "limit": null, "rule": "the name holds a control character or starts or ends with whitespace"},
++    {"code": "description_missing", "field": "description", "severity": "warn", "limit": null, "rule": "the description is empty after trimming whitespace"},
++    {"code": "description_too_long", "field": "description", "severity": "error", "limit": 300, "rule": "the description has more than limit characters"},
++    {"code": "content_empty", "field": "content", "severity": "error", "limit": null, "rule": "the content is empty after trimming whitespace"},
++    {"code": "content_too_long", "field": "content", "severity": "error", "limit": 32000, "rule": "the content has more than limit characters"},
++    {"code": "content_exceeds_budget", "field": "content", "severity": "warn", "limit": 8000, "rule": "the content has more than limit characters (SKILL_CONTEXT_BUDGET_CHARS) and at most the content_too_long limit: injection will cut it"},
++    {"code": "transcript_shape", "field": "content", "severity": "warn", "limit": 3, "rule": "at least limit lines start, after leading whitespace, with one of transcript_prefixes: a skill holds lessons, not logs"},
++    {"code": "trigger_keyword_count", "field": "trigger_keywords", "severity": "error", "limit": 20, "rule": "more than limit trigger keywords"},
++    {"code": "trigger_keyword_too_long", "field": "trigger_keywords", "severity": "error", "limit": 40, "rule": "a trigger keyword has more than limit characters; reported once"},
++    {"code": "tool_restriction_invalid", "field": "tool_restrictions", "severity": "error", "limit": null, "rule": "a tool restriction is not one plain tool name matching tool_name_pattern (D2-512); reported once"},
++    {"code": "frontmatter_name_mismatch", "field": "frontmatter", "severity": "error", "limit": null, "rule": "a bundle SKILL.md front matter name, trimmed, differs from the skill name, trimmed; only checked on a bundle upload"}
++  ]
++}
+diff --git a/apps/Model Plane/api/contracts/authored-behaviour-lint.json.sha256 b/apps/Model Plane/api/contracts/authored-behaviour-lint.json.sha256
+new file mode 100644
+index 000000000..5596b08d3
+--- /dev/null
++++ b/apps/Model Plane/api/contracts/authored-behaviour-lint.json.sha256	
+@@ -0,0 +1 @@
++8c494de401725b36609ed2565e1af30728f170b6b0eca9b13483cfe656b20bce  authored-behaviour-lint.json
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go
+index 11ccf1f77..ae6d25a1c 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
+@@ -34,6 +34,7 @@ import (
+ 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
+ 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
+ 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
+ )
+ 
+ type registryDatabase interface {
+@@ -50,11 +51,14 @@ type registryDatabase interface {
+ type SkillsHandler struct {
+ 	pool registryDatabase
+ 	pub  publisher.EventPublisher
++	// lintMode is SKILL_LINT_MODE (EP-11 S4): off runs no lint and leaves every write and
++	// body as it was.
++	lintMode skilllint.Mode
+ }
+ 
+ // NewSkillsHandler constructs the handler.
+ func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
+-	return &SkillsHandler{pool: pool}
++	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+ }
+ 
+ // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
+@@ -135,6 +139,67 @@ type skillTxBeginner interface {
+ 
+ var errSkillTransactionUnavailable = errors.New("skill mutations need a transactional database")
+ 
++// errSkillLintRefused ends a mutation whose text failed the skill lint under enforce, so the
++// transaction rolls back before its statement runs.
++var errSkillLintRefused = errors.New(skilllint.ErrorCode)
++
++// lintSkill runs the shared skill lint (EP-11 S4) under mode and counts what it finds. It
++// returns the findings and whether enforce refuses the write; off runs nothing.
++func lintSkill(ctx context.Context, mode skilllint.Mode, input skilllint.Input) ([]skilllint.Finding, bool) {
++	if mode == skilllint.ModeOff {
++		return nil, false
++	}
++	findings := skilllint.Lint(input)
++	skilllint.Count(ctx, mode, findings)
++	return findings, mode == skilllint.ModeEnforce && skilllint.HasError(findings)
++}
++
++// writeSkillLintRefusal answers a refused write with the typed envelope. The findings name
++// rules and fields, never the text; they sit under a named key because details is an object.
++func writeSkillLintRefusal(w http.ResponseWriter, findings []skilllint.Finding) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(http.StatusUnprocessableEntity)
++	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
++		"code":    skilllint.ErrorCode,
++		"message": "The skill does not pass the skill lint.",
++		"details": map[string]any{"findings": findings},
++	}})
++}
++
++// withLintWarnings adds the findings of a write that went ahead to its body. With no
++// findings, which is always the case while the lint is off, the body is unchanged.
++func withLintWarnings(body map[string]any, findings []skilllint.Finding) map[string]any {
++	if len(findings) > 0 {
++		body["warnings"] = findings
++	}
++	return body
++}
++
++// lintStoredSkill lints the row a PATCH is about to change, with the patch's description
++// and content laid over it the way the UPDATE lays them. A row that is not there passes:
++// the UPDATE then changes nothing and the caller gets 404.
++func lintStoredSkill(ctx context.Context, tx registryDatabase, mode skilllint.Mode, id, orgID, description, content string) ([]skilllint.Finding, bool, error) {
++	var input skilllint.Input
++	err := tx.QueryRow(ctx, `
++		SELECT name, description, content, trigger_keywords, tool_restrictions
++		FROM agent_skills WHERE id=$1 AND org_id=$2
++	`, id, orgID).Scan(&input.Name, &input.Description, &input.Content, &input.TriggerKeywords, &input.ToolRestrictions)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, false, nil
++	}
++	if err != nil {
++		return nil, false, err
++	}
++	if description != "" {
++		input.Description = description
++	}
++	if content != "" {
++		input.Content = content
++	}
++	findings, refused := lintSkill(ctx, mode, input)
++	return findings, refused, nil
++}
++
+ // skillActor is the verified caller as the revision log names it: "user" or
+ // "service" and the principal id, never anything the request body claims.
+ func skillActor(r *http.Request) (kind, id string) {
+@@ -315,6 +380,14 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 			s.OwnerUserID = ""
+ 		}
+ 		s.SharedWith = []string{}
++		lintFindings, lintRefused := lintSkill(r.Context(), h.lintMode, skilllint.Input{
++			Name: s.Name, Description: s.Description, Content: s.Content,
++			TriggerKeywords: s.TriggerKeywords, ToolRestrictions: s.ToolRestrictions,
++		})
++		if lintRefused {
++			writeSkillLintRefusal(w, lintFindings)
++			return
++		}
+ 		kw, _ := json.Marshal(s.TriggerKeywords)
+ 		fp, _ := json.Marshal(s.TriggerFilePatterns)
+ 		tr, _ := json.Marshal(s.ToolRestrictions)
+@@ -369,7 +442,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 			slog.Warn("reconcile emit failed", "kind", reconcile.KindSkill, "id", s.ID, "error", eerr)
+ 		}
+ 		w.WriteHeader(http.StatusCreated)
+-		writeJSON(w, map[string]any{"id": s.ID})
++		writeJSON(w, withLintWarnings(map[string]any{"id": s.ID}, lintFindings))
+ 	default:
+ 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+ 	}
+@@ -464,12 +537,28 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 	// the caller, so its revision carries the actor.
+ 	var result pgconn.CommandTag
+ 	proposalUndecided := false
++	// An edit of the text, or switching a skill on, is linted on the row as it will be, so a
++	// person who edits or re-enables learned text is held to the same rules as a new skill.
++	// A sharing change or a switch-off writes no text and is not linted.
++	lintPatch := h.lintMode != skilllint.ModeOff &&
++		(update.Description != "" || update.Content != "" || (update.Enabled != nil && *update.Enabled))
++	var lintFindings []skilllint.Finding
+ 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+ 		// A user-owned skill changes only for its owner or an admin. The check takes the row
+ 		// lock before the statement below, so the check and the write see the same skill.
+ 		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
+ 			return err
+ 		}
++		if lintPatch {
++			findings, refused, err := lintStoredSkill(r.Context(), tx, h.lintMode, id, orgID, update.Description, update.Content)
++			if err != nil {
++				return err
++			}
++			lintFindings = findings
++			if refused {
++				return errSkillLintRefused
++			}
++		}
+ 		var err error
+ 		result, err = tx.Exec(r.Context(), `
+ 			UPDATE agent_skills
+@@ -492,6 +581,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 		jsonErr(w, err.Error(), http.StatusForbidden)
+ 		return
+ 	}
++	if errors.Is(err, errSkillLintRefused) {
++		writeSkillLintRefusal(w, lintFindings)
++		return
++	}
+ 	if proposalUndecided {
+ 		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
+ 		return
+@@ -499,7 +592,7 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+ 		return
+ 	}
+-	writeJSON(w, map[string]any{"id": id, "updated_at": now})
++	writeJSON(w, withLintWarnings(map[string]any{"id": id, "updated_at": now}, lintFindings))
+ }
+ 
+ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
+@@ -546,11 +639,15 @@ func SkillBundlesAPIFromLookup(lookup func(string) string) bool {
+ type SkillBundlesHandler struct {
+ 	store   *skillbundle.Store
+ 	enabled bool
++	// db and lintMode check a bundle's SKILL.md name against its skill (EP-11 S4); while the
++	// lint is off the skill is not read.
++	db       skillbundle.DB
++	lintMode skilllint.Mode
+ }
+ 
+ // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
+ func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
+-	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled}
++	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
+ }
+ 
+ // Register mounts the bundle route. Its more specific pattern takes precedence over the
+@@ -581,6 +678,9 @@ type skillBundleSummaryView struct {
+ 	CreatedBy      string    `json:"created_by"`
+ 	CreatedAt      time.Time `json:"created_at"`
+ 	Replaced       bool      `json:"replaced"`
++	// Warnings are the skill lint findings of an upload that went ahead; absent while the
++	// lint is off.
++	Warnings []skilllint.Finding `json:"warnings,omitempty"`
+ }
+ 
+ func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
+@@ -683,6 +783,16 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
+ 		jsonErr(w, "invalid skill bundle", http.StatusUnprocessableEntity)
+ 		return
+ 	}
++	lintFindings, lintRefused, err := h.lintFrontMatter(r.Context(), principal.OrganizationID, skillID, bundle)
++	if err != nil {
++		slog.Error("read skill for bundle lint failed", "error", err)
++		jsonErr(w, "database unavailable", http.StatusInternalServerError)
++		return
++	}
++	if lintRefused {
++		writeSkillLintRefusal(w, lintFindings)
++		return
++	}
+ 	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
+ 	if err != nil {
+ 		slog.Error("write skill bundle failed", "error", err)
+@@ -699,9 +809,37 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
+ 	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
+ 		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
+ 		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
++		Warnings: lintFindings,
+ 	})
+ }
+ 
++// lintFrontMatter checks that the bundle's SKILL.md names the skill it is uploaded to. Only
++// the front matter rule applies here: the skill's own text was linted when it was written,
++// and an upload must not be refused for a row it does not change. A skill that is not there
++// is not checked.
++func (h *SkillBundlesHandler) lintFrontMatter(ctx context.Context, orgID, skillID string, bundle skillbundle.Bundle) ([]skilllint.Finding, bool, error) {
++	if h.lintMode == skilllint.ModeOff {
++		return nil, false, nil
++	}
++	var name string
++	err := h.db.QueryRow(ctx, `SELECT name FROM agent_skills WHERE id=$1 AND org_id=$2`, skillID, orgID).Scan(&name)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, false, nil
++	}
++	if err != nil {
++		return nil, false, err
++	}
++	frontMatterName := skillbundle.FrontMatterName(bundle)
++	var findings []skilllint.Finding
++	for _, finding := range skilllint.Lint(skilllint.Input{Name: name, FrontmatterName: &frontMatterName}) {
++		if finding.Code == skilllint.CodeFrontmatterNameMismatch {
++			findings = append(findings, finding)
++		}
++	}
++	skilllint.Count(ctx, h.lintMode, findings)
++	return findings, h.lintMode == skilllint.ModeEnforce && skilllint.HasError(findings), nil
++}
++
+ // delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and
+ // blobs no other bundle names are dropped.
+ func (h *SkillBundlesHandler) delete(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skills_lint_test.go b/apps/Model Plane/go/services/capability-core/internal/api/skills_lint_test.go
+new file mode 100644
+index 000000000..43053da06
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skills_lint_test.go	
+@@ -0,0 +1,196 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"strings"
++	"testing"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
++)
++
++// The skill lint on the registry's write paths (EP-11 S4). The rules themselves are tested
++// against the shared golden in internal/skilllint; these tests prove each route runs them.
++
++type lintRefusalBody struct {
++	Error struct {
++		Code    string `json:"code"`
++		Message string `json:"message"`
++		Details struct {
++			Findings []skilllint.Finding `json:"findings"`
++		} `json:"details"`
++	} `json:"error"`
++}
++
++func decodeLintRefusal(t *testing.T, body []byte) lintRefusalBody {
++	t.Helper()
++	var refusal lintRefusalBody
++	if err := json.Unmarshal(body, &refusal); err != nil {
++		t.Fatalf("refusal is not the typed envelope: %v (%s)", err, body)
++	}
++	return refusal
++}
++
++func lintCodes(findings []skilllint.Finding) []string {
++	codes := make([]string, 0, len(findings))
++	for _, finding := range findings {
++		codes = append(codes, finding.Code)
++	}
++	return codes
++}
++
++// storedSkillRow answers the PATCH lint's read of the row it is about to change.
++type storedSkillRow struct {
++	name, description, content string
++	keywords, tools            []string
++}
++
++func (row storedSkillRow) Scan(dest ...any) error {
++	if len(dest) != 5 {
++		return errors.New("storedSkillRow: the lint reads name, description, content, keywords and tools")
++	}
++	*dest[0].(*string), *dest[1].(*string), *dest[2].(*string) = row.name, row.description, row.content
++	*dest[3].(*[]string), *dest[4].(*[]string) = row.keywords, row.tools
++	return nil
++}
++
++func TestPostLintEnforce422(t *testing.T) {
++	t.Setenv(skilllint.ModeEnv, "enforce")
++	database := &recordingDatabase{}
++	body := `{"name":"Runbook","description":"d","scope":"user","content":"` + strings.Repeat("x", 40000) + `"}`
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills", body)
++	if response.Code != http.StatusUnprocessableEntity {
++		t.Fatalf("status = %d, want 422 (%s)", response.Code, response.Body.String())
++	}
++	refusal := decodeLintRefusal(t, response.Body.Bytes())
++	if refusal.Error.Code != skilllint.ErrorCode || strings.Join(lintCodes(refusal.Error.Details.Findings), ",") != skilllint.CodeContentTooLong {
++		t.Fatalf("refusal = %+v, want skill_lint_failed naming content_too_long", refusal)
++	}
++	if strings.Contains(response.Body.String(), "xxxx") {
++		t.Fatal("the refusal echoes the skill text")
++	}
++	if database.databaseCalls() != 0 || len(database.actorCalls) != 0 || database.commits != 0 {
++		t.Fatal("a refused create touched the registry")
++	}
++}
++
++func TestPostLintReportWritesAndAddsWarnings(t *testing.T) {
++	t.Setenv(skilllint.ModeEnv, "report")
++	database := &recordingDatabase{}
++	body := `{"name":"Runbook","description":"d","scope":"user","content":"User: a\nAssistant: b\nUser: c","tool_restrictions":["*"]}`
++	response := serveSkill(t, database, writeToken, http.MethodPost, "/api/v1/skills", body)
++	if response.Code != http.StatusCreated {
++		t.Fatalf("status = %d, want 201: report never refuses (%s)", response.Code, response.Body.String())
++	}
++	var created struct {
++		ID       string              `json:"id"`
++		Warnings []skilllint.Finding `json:"warnings"`
++	}
++	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
++		t.Fatalf("decode: %v", err)
++	}
++	if got := strings.Join(lintCodes(created.Warnings), ","); got != "transcript_shape,tool_restriction_invalid" {
++		t.Fatalf("warnings = %s", got)
++	}
++	if database.commits != 1 {
++		t.Fatalf("commits = %d, want the create written", database.commits)
++	}
++}
++
++// While the lint is off nothing extra is read and the body is the one it always was.
++func TestSkillWritesAreUnchangedWhileLintIsOff(t *testing.T) {
++	t.Setenv(skilllint.ModeEnv, "")
++	database := &recordingDatabase{}
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"content":"`+strings.Repeat("x", 40000)+`"}`)
++	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "warnings") {
++		t.Fatalf("status = %d, body=%s, want the old 200 body", response.Code, response.Body.String())
++	}
++	if len(database.queryRows) != 0 {
++		t.Fatalf("the off lint read the row: %#v", database.queryRows)
++	}
++	create := serveSkill(t, &recordingDatabase{}, writeToken, http.MethodPost, "/api/v1/skills", `{"name":"Runbook","scope":"user","content":"steps"}`)
++	if create.Code != http.StatusCreated || strings.Contains(create.Body.String(), "warnings") {
++		t.Fatalf("create = %d %s, want the old 201 body", create.Code, create.Body.String())
++	}
++}
++
++// Switching a skill on lints the text stored on the row, so a person cannot re-enable learned
++// text the lint would refuse on a create; a clean row switches on as before.
++func TestPatchLintsReenableOfLearnedText(t *testing.T) {
++	t.Setenv(skilllint.ModeEnv, "enforce")
++	learned := storedSkillRow{name: "Weekly report", description: "d", content: "steps", tools: []string{"*"}}
++	database := &recordingDatabase{nextRows: []pgx.Row{learned}}
++	response := serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"enabled":true}`)
++	if response.Code != http.StatusUnprocessableEntity {
++		t.Fatalf("status = %d, want 422 (%s)", response.Code, response.Body.String())
++	}
++	if got := lintCodes(decodeLintRefusal(t, response.Body.Bytes()).Error.Details.Findings); strings.Join(got, ",") != skilllint.CodeToolRestrictionInvalid {
++		t.Fatalf("findings = %v", got)
++	}
++	if len(database.execs) != 0 || database.commits != 0 {
++		t.Fatalf("a refused re-enable ran its UPDATE: %#v", database.execs)
++	}
++	if len(database.queryRows) != 1 || !strings.Contains(database.queryRows[0].query, "FROM agent_skills WHERE id=$1 AND org_id=$2") {
++		t.Fatalf("the lint must read the row inside the mutation: %#v", database.queryRows)
++	}
++
++	clean := learned
++	clean.tools = nil
++	database = &recordingDatabase{nextRows: []pgx.Row{clean}}
++	response = serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"enabled":true}`)
++	if response.Code != http.StatusOK || len(database.execs) != 1 || database.commits != 1 {
++		t.Fatalf("clean re-enable = %d, execs=%d, commits=%d", response.Code, len(database.execs), database.commits)
++	}
++
++	// A content edit is linted on the text it writes, not the text it replaces.
++	database = &recordingDatabase{nextRows: []pgx.Row{clean}}
++	response = serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"content":"`+strings.Repeat("x", 32001)+`"}`)
++	if response.Code != http.StatusUnprocessableEntity {
++		t.Fatalf("over-long edit = %d, want 422", response.Code)
++	}
++
++	// Switching a skill off writes no text and is not linted.
++	database = &recordingDatabase{}
++	response = serveSkill(t, database, writeToken, http.MethodPatch, "/api/v1/skills/sk-1", `{"enabled":false}`)
++	if response.Code != http.StatusOK || len(database.queryRows) != 0 {
++		t.Fatalf("switch-off = %d, reads=%d, want 200 with no lint read", response.Code, len(database.queryRows))
++	}
++}
++
++// bundleLintDB answers the bundle lint's read of the skill's name; everything else is the
++// bundle test database.
++type bundleLintDB struct {
++	*bundleTestDB
++	name string
++}
++
++func (d bundleLintDB) QueryRow(context.Context, string, ...any) pgx.Row {
++	return stringRow{value: d.name}
++}
++
++func TestBundleFrontmatterMismatch(t *testing.T) {
++	t.Setenv(skilllint.ModeEnv, "enforce")
++	admin := bundleTestAdmin()
++	upload := bundleTestZip(t, map[string]string{"SKILL.md": bundleTestSkillMD})
++
++	// The bundle says "xlsx"; the skill is named otherwise. No transaction is handed out, so
++	// any write fails the test.
++	refused := serveBundle(t, true, bundleLintDB{bundleTestDB: &bundleTestDB{t: t}, name: "Weekly report"}, &admin,
++		http.MethodPut, "/api/v1/skills/skill_1/bundle", upload)
++	if refused.Code != http.StatusUnprocessableEntity {
++		t.Fatalf("mismatch = %d, want 422 (%s)", refused.Code, refused.Body.String())
++	}
++	if got := lintCodes(decodeLintRefusal(t, refused.Body.Bytes()).Error.Details.Findings); strings.Join(got, ",") != skilllint.CodeFrontmatterNameMismatch {
++		t.Fatalf("findings = %v", got)
++	}
++
++	tx := &bundleTestRecorder{t: t}
++	stored := serveBundle(t, true, bundleLintDB{bundleTestDB: &bundleTestDB{t: t, tx: tx}, name: "xlsx"}, &admin,
++		http.MethodPut, "/api/v1/skills/skill_1/bundle", upload)
++	if stored.Code != http.StatusCreated || !tx.committed || strings.Contains(stored.Body.String(), "warnings") {
++		t.Fatalf("matching upload = %d (%s), want 201 with no warnings", stored.Code, stored.Body.String())
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/frontmatter_name_test.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/frontmatter_name_test.go
+new file mode 100644
+index 000000000..66d1f0c7c
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/frontmatter_name_test.go	
+@@ -0,0 +1,32 @@
++package skillbundle
++
++import "testing"
++
++// FrontMatterName reads the name the way Parse checks it: a column-zero key inside the block
++// at the top of SKILL.md, trimmed. Any other file, or a body line, never supplies it.
++func TestFrontMatterNameReadsTheSkillFile(t *testing.T) {
++	bundle := Bundle{Files: []File{
++		{Path: "references/name.md", Body: []byte("---\nname: other\n---\n")},
++		{Path: SkillFileName, Body: []byte("---\r\nname:  Weekly report \r\ndescription: d\r\n---\r\n  name: body\r\n")},
++	}}
++	if got := FrontMatterName(bundle); got != "Weekly report" {
++		t.Fatalf("FrontMatterName = %q, want the SKILL.md front matter name", got)
++	}
++	if got := FrontMatterName(Bundle{Files: []File{{Path: SkillFileName, Body: []byte("no front matter")}}}); got != "" {
++		t.Fatalf("FrontMatterName without front matter = %q, want empty", got)
++	}
++}
++
++// The refactor behind FrontMatterName keeps Parse's rule: the block must close and name both keys.
++func TestValidFrontMatterStillNeedsAClosedBlockWithNameAndDescription(t *testing.T) {
++	for body, want := range map[string]bool{
++		"---\nname: a\ndescription: b\n---\n": true,
++		"---\nname: a\ndescription: b\n":      false,
++		"---\nname: a\n---\n":                 false,
++		" name: a\n---\n":                     false,
++	} {
++		if got := validFrontMatter([]byte(body)); got != want {
++			t.Errorf("validFrontMatter(%q) = %v, want %v", body, got, want)
++		}
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go
+index c39a351d5..e30910bce 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go	
+@@ -148,17 +148,22 @@ func validPath(name string) bool {
+ // non-empty name and description. Keys are read at column zero only, so an indented line in
+ // a body cannot satisfy the check.
+ func validFrontMatter(body []byte) bool {
++	fields, closed := frontMatter(body)
++	return closed && fields["name"] != "" && fields["description"] != ""
++}
++
++// frontMatter reads the column-zero keys of the front matter block at the top of SKILL.md
++// and whether the block is closed.
++func frontMatter(body []byte) (map[string]string, bool) {
+ 	lines := strings.Split(string(body), "\n")
+ 	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
+-		return false
++		return nil, false
+ 	}
+ 	fields := make(map[string]string, 2)
+-	closed := false
+ 	for _, raw := range lines[1:] {
+ 		line := strings.TrimRight(raw, "\r")
+ 		if line == "---" {
+-			closed = true
+-			break
++			return fields, true
+ 		}
+ 		key, value, found := strings.Cut(line, ":")
+ 		if !found || key == "" || key != strings.TrimSpace(key) {
+@@ -166,7 +171,20 @@ func validFrontMatter(body []byte) bool {
+ 		}
+ 		fields[key] = strings.TrimSpace(value)
+ 	}
+-	return closed && fields["name"] != "" && fields["description"] != ""
++	return fields, false
++}
++
++// FrontMatterName is the name in the bundle's SKILL.md front matter, read by the same rules
++// Parse checked it with. The skill lint compares it with the name of the skill the bundle is
++// uploaded to (EP-11 S4).
++func FrontMatterName(bundle Bundle) string {
++	for _, file := range bundle.Files {
++		if file.Path == SkillFileName {
++			fields, _ := frontMatter(file.Body)
++			return fields["name"]
++		}
++	}
++	return ""
+ }
+ 
+ // DeckTemplatesEnv is the switch for deck brand templates (EP-5 S6). Only the literal "true"
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skilllint/lint.go b/apps/Model Plane/go/services/capability-core/internal/skilllint/lint.go
+new file mode 100644
+index 000000000..97e5dbd13
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skilllint/lint.go	
+@@ -0,0 +1,243 @@
++// Package skilllint is the one lint every skill write passes (EP-11 S4).
++//
++// Two services write agent_skills: session-core's UpsertAgentSkill and this service's
++// registry routes. The rules are written down once, in
++// api/contracts/authored-behaviour-lint.json; this is the Go reading of them and
++// mp-contracts skill_lint is the Rust one. Both test against the same rule file, its
++// .sha256 pin and authored-behaviour-lint-golden.json, so a rule changed in one language
++// and not the other fails a test.
++//
++// A finding names a rule and a field, never the text, so it can be logged, counted and
++// returned to a caller without echoing the skill back.
++package skilllint
++
++import (
++	"strings"
++	"unicode"
++	"unicode/utf8"
++)
++
++// ModeEnv is the switch both writers read. Only "report" and "enforce" turn the lint on.
++const ModeEnv = "SKILL_LINT_MODE"
++
++// ErrorCode is the typed error code a refused write answers with (HTTP 422).
++const ErrorCode = "skill_lint_failed"
++
++// The limits, in characters (Unicode scalar values).
++const (
++	MaxNameChars           = 64
++	MaxDescriptionChars    = 300
++	MaxContentChars        = 32000
++	ContentBudgetChars     = 8000 // SKILL_CONTEXT_BUDGET_CHARS: longer content is cut when injected
++	TranscriptMinLines     = 3
++	MaxTriggerKeywords     = 20
++	MaxTriggerKeywordChars = 40
++)
++
++// TranscriptPrefixes are the line starts that read as a chat turn rather than a lesson.
++// Case matters: the speaker labels chat exports write are capitalised.
++var TranscriptPrefixes = []string{"User:", "Assistant:", "Bruker:"}
++
++// The closed rule codes, in the order findings are reported.
++const (
++	CodeNameEmpty               = "name_empty"
++	CodeNameTooLong             = "name_too_long"
++	CodeNameCharset             = "name_charset"
++	CodeDescriptionMissing      = "description_missing"
++	CodeDescriptionTooLong      = "description_too_long"
++	CodeContentEmpty            = "content_empty"
++	CodeContentTooLong          = "content_too_long"
++	CodeContentExceedsBudget    = "content_exceeds_budget"
++	CodeTranscriptShape         = "transcript_shape"
++	CodeTriggerKeywordCount     = "trigger_keyword_count"
++	CodeTriggerKeywordTooLong   = "trigger_keyword_too_long"
++	CodeToolRestrictionInvalid  = "tool_restriction_invalid"
++	CodeFrontmatterNameMismatch = "frontmatter_name_mismatch"
++)
++
++// Severity says whether a finding refuses a write under enforce ("error") or only
++// informs ("warn").
++type Severity string
++
++const (
++	SeverityError Severity = "error"
++	SeverityWarn  Severity = "warn"
++)
++
++// Rule is one rule of the contract. Limit is 0 for a rule without one.
++type Rule struct {
++	Code     string
++	Field    string
++	Severity Severity
++	Limit    int
++}
++
++// Rules is every rule, in the contract's order.
++var Rules = []Rule{
++	{CodeNameEmpty, "name", SeverityError, 0},
++	{CodeNameTooLong, "name", SeverityError, MaxNameChars},
++	{CodeNameCharset, "name", SeverityError, 0},
++	{CodeDescriptionMissing, "description", SeverityWarn, 0},
++	{CodeDescriptionTooLong, "description", SeverityError, MaxDescriptionChars},
++	{CodeContentEmpty, "content", SeverityError, 0},
++	{CodeContentTooLong, "content", SeverityError, MaxContentChars},
++	{CodeContentExceedsBudget, "content", SeverityWarn, ContentBudgetChars},
++	{CodeTranscriptShape, "content", SeverityWarn, TranscriptMinLines},
++	{CodeTriggerKeywordCount, "trigger_keywords", SeverityError, MaxTriggerKeywords},
++	{CodeTriggerKeywordTooLong, "trigger_keywords", SeverityError, MaxTriggerKeywordChars},
++	{CodeToolRestrictionInvalid, "tool_restrictions", SeverityError, 0},
++	{CodeFrontmatterNameMismatch, "frontmatter", SeverityError, 0},
++}
++
++// Finding is one broken rule as a caller sees it: the code, the field and the severity.
++type Finding struct {
++	Code     string   `json:"code"`
++	Field    string   `json:"field"`
++	Severity Severity `json:"severity"`
++}
++
++// Input is the skill text a write would store. FrontmatterName is the name in a bundle's
++// SKILL.md front matter; nil unless a bundle is checked.
++type Input struct {
++	Name             string
++	Description      string
++	Content          string
++	TriggerKeywords  []string
++	ToolRestrictions []string
++	FrontmatterName  *string
++}
++
++// Mode is the lint mode a writer runs in.
++type Mode string
++
++const (
++	// ModeOff runs nothing: a write is exactly what it was before this lint.
++	ModeOff Mode = "off"
++	// ModeReport counts and logs findings; every write goes ahead.
++	ModeReport Mode = "report"
++	// ModeEnforce refuses a write with an error finding; warnings never refuse.
++	ModeEnforce Mode = "enforce"
++)
++
++// ModeFromLookup reads SKILL_LINT_MODE strictly: only the exact words "report" and
++// "enforce" turn the lint on, anything else leaves it off.
++func ModeFromLookup(lookup func(string) string) Mode {
++	switch value := lookup(ModeEnv); value {
++	case string(ModeReport), string(ModeEnforce):
++		return Mode(value)
++	default:
++		return ModeOff
++	}
++}
++
++// Lint runs every rule over input and returns the findings, in rule order.
++func Lint(input Input) []Finding {
++	var broken []string
++	if strings.TrimSpace(input.Name) == "" {
++		broken = append(broken, CodeNameEmpty)
++	} else {
++		if utf8.RuneCountInString(input.Name) > MaxNameChars {
++			broken = append(broken, CodeNameTooLong)
++		}
++		if strings.IndexFunc(input.Name, unicode.IsControl) >= 0 || strings.TrimSpace(input.Name) != input.Name {
++			broken = append(broken, CodeNameCharset)
++		}
++	}
++
++	if strings.TrimSpace(input.Description) == "" {
++		broken = append(broken, CodeDescriptionMissing)
++	}
++	if utf8.RuneCountInString(input.Description) > MaxDescriptionChars {
++		broken = append(broken, CodeDescriptionTooLong)
++	}
++
++	contentChars := utf8.RuneCountInString(input.Content)
++	if strings.TrimSpace(input.Content) == "" {
++		broken = append(broken, CodeContentEmpty)
++	}
++	if contentChars > MaxContentChars {
++		broken = append(broken, CodeContentTooLong)
++	} else if contentChars > ContentBudgetChars {
++		broken = append(broken, CodeContentExceedsBudget)
++	}
++	if transcriptLines(input.Content) >= TranscriptMinLines {
++		broken = append(broken, CodeTranscriptShape)
++	}
++
++	if len(input.TriggerKeywords) > MaxTriggerKeywords {
++		broken = append(broken, CodeTriggerKeywordCount)
++	}
++	for _, keyword := range input.TriggerKeywords {
++		if utf8.RuneCountInString(keyword) > MaxTriggerKeywordChars {
++			broken = append(broken, CodeTriggerKeywordTooLong)
++			break
++		}
++	}
++	for _, tool := range input.ToolRestrictions {
++		if !plainToolName(tool) {
++			broken = append(broken, CodeToolRestrictionInvalid)
++			break
++		}
++	}
++
++	if input.FrontmatterName != nil && strings.TrimSpace(*input.FrontmatterName) != strings.TrimSpace(input.Name) {
++		broken = append(broken, CodeFrontmatterNameMismatch)
++	}
++
++	findings := make([]Finding, 0, len(broken))
++	for _, code := range broken {
++		if rule, ok := RuleFor(code); ok {
++			findings = append(findings, Finding{Code: rule.Code, Field: rule.Field, Severity: rule.Severity})
++		}
++	}
++	return findings
++}
++
++// RuleFor returns the rule a code names.
++func RuleFor(code string) (Rule, bool) {
++	for _, rule := range Rules {
++		if rule.Code == code {
++			return rule, true
++		}
++	}
++	return Rule{}, false
++}
++
++// HasError reports whether any finding refuses a write under enforce.
++func HasError(findings []Finding) bool {
++	for _, finding := range findings {
++		if finding.Severity == SeverityError {
++			return true
++		}
++	}
++	return false
++}
++
++// transcriptLines counts the lines that start, after leading whitespace, with a speaker label.
++func transcriptLines(content string) int {
++	count := 0
++	for _, line := range strings.Split(content, "\n") {
++		line = strings.TrimLeftFunc(line, unicode.IsSpace)
++		for _, prefix := range TranscriptPrefixes {
++			if strings.HasPrefix(line, prefix) {
++				count++
++				break
++			}
++		}
++	}
++	return count
++}
++
++// plainToolName is one tool name matching [A-Za-z0-9_.-]+: no wildcard, no space, not empty.
++func plainToolName(tool string) bool {
++	if tool == "" {
++		return false
++	}
++	for i := 0; i < len(tool); i++ {
++		c := tool[i]
++		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skilllint/lint_test.go b/apps/Model Plane/go/services/capability-core/internal/skilllint/lint_test.go
+new file mode 100644
+index 000000000..4ba4face9
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skilllint/lint_test.go	
+@@ -0,0 +1,174 @@
++package skilllint
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"os"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++// The contract files are read where they are written, beside the other Model Plane
++// contracts; mp-contracts skill_lint reads the same three files.
++const (
++	contractPath = "../../../../../api/contracts/authored-behaviour-lint.json"
++	pinPath      = "../../../../../api/contracts/authored-behaviour-lint.json.sha256"
++	goldenPath   = "../../../../../api/contracts/authored-behaviour-lint-golden.json"
++)
++
++func readContract(t *testing.T, path string) []byte {
++	t.Helper()
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatalf("read %s: %v", path, err)
++	}
++	return raw
++}
++
++// The Rust test computes the same digest over the same file, so a rule changed in the file
++// without both readers being retested fails in both languages.
++func TestLintContractDigestIsThePinnedOne(t *testing.T) {
++	normalised := bytes.ReplaceAll(readContract(t, contractPath), []byte("\r\n"), []byte("\n"))
++	sum := sha256.Sum256(normalised)
++	pinned := strings.Fields(string(readContract(t, pinPath)))
++	if len(pinned) == 0 || hex.EncodeToString(sum[:]) != pinned[0] {
++		t.Fatalf("authored-behaviour-lint.json changed without its .sha256 pin being refreshed")
++	}
++}
++
++func TestLintRulesAreTheContractRulesInOrder(t *testing.T) {
++	var contract struct {
++		Mode struct {
++			Env string `json:"env"`
++		} `json:"mode"`
++		Refusal struct {
++			HTTPCode       string `json:"http_code"`
++			HTTPDetailsKey string `json:"http_details_key"`
++		} `json:"refusal"`
++		TranscriptPrefixes []string `json:"transcript_prefixes"`
++		TranscriptMinLines int      `json:"transcript_min_lines"`
++		ToolNamePattern    string   `json:"tool_name_pattern"`
++		Rules              []struct {
++			Code     string `json:"code"`
++			Field    string `json:"field"`
++			Severity string `json:"severity"`
++			Limit    *int   `json:"limit"`
++		} `json:"rules"`
++	}
++	if err := json.Unmarshal(readContract(t, contractPath), &contract); err != nil {
++		t.Fatalf("decode contract: %v", err)
++	}
++	if len(contract.Rules) != len(Rules) {
++		t.Fatalf("contract has %d rules, Go has %d: a rule was added to one side only", len(contract.Rules), len(Rules))
++	}
++	for i, row := range contract.Rules {
++		limit := 0
++		if row.Limit != nil {
++			limit = *row.Limit
++		}
++		got := Rule{Code: row.Code, Field: row.Field, Severity: Severity(row.Severity), Limit: limit}
++		if got != Rules[i] {
++			t.Errorf("rule %d: contract %+v, Go %+v", i, got, Rules[i])
++		}
++	}
++	if contract.Mode.Env != ModeEnv || contract.Refusal.HTTPCode != ErrorCode || contract.Refusal.HTTPDetailsKey != "findings" {
++		t.Errorf("switch or refusal drifted: %+v %+v", contract.Mode, contract.Refusal)
++	}
++	if !reflect.DeepEqual(contract.TranscriptPrefixes, TranscriptPrefixes) || contract.TranscriptMinLines != TranscriptMinLines {
++		t.Errorf("transcript rule drifted: %v %d", contract.TranscriptPrefixes, contract.TranscriptMinLines)
++	}
++	if contract.ToolNamePattern != "^[A-Za-z0-9_.-]+$" {
++		t.Errorf("tool name pattern drifted: %s", contract.ToolNamePattern)
++	}
++}
++
++func TestLintGoldenParity(t *testing.T) {
++	var golden struct {
++		Cases []struct {
++			ID    string `json:"id"`
++			Input struct {
++				Name             string   `json:"name"`
++				Description      string   `json:"description"`
++				Content          string   `json:"content"`
++				TriggerKeywords  []string `json:"trigger_keywords"`
++				ToolRestrictions []string `json:"tool_restrictions"`
++				FrontmatterName  *string  `json:"frontmatter_name"`
++			} `json:"input"`
++			Repeat *struct {
++				Field string `json:"field"`
++				Text  string `json:"text"`
++				Count int    `json:"count"`
++			} `json:"repeat"`
++			Expect []string `json:"expect"`
++		} `json:"cases"`
++	}
++	if err := json.Unmarshal(readContract(t, goldenPath), &golden); err != nil {
++		t.Fatalf("decode golden: %v", err)
++	}
++	if len(golden.Cases) == 0 {
++		t.Fatal("the golden has no cases")
++	}
++	for _, c := range golden.Cases {
++		input := Input{
++			Name: c.Input.Name, Description: c.Input.Description, Content: c.Input.Content,
++			TriggerKeywords: c.Input.TriggerKeywords, ToolRestrictions: c.Input.ToolRestrictions,
++			FrontmatterName: c.Input.FrontmatterName,
++		}
++		if c.Repeat != nil {
++			text := strings.Repeat(c.Repeat.Text, c.Repeat.Count)
++			switch c.Repeat.Field {
++			case "name":
++				input.Name = text
++			case "description":
++				input.Description = text
++			case "content":
++				input.Content = text
++			default:
++				t.Fatalf("case %s repeats unknown field %q", c.ID, c.Repeat.Field)
++			}
++		}
++		got := []string{}
++		for _, finding := range Lint(input) {
++			got = append(got, finding.Code)
++		}
++		want := c.Expect
++		if want == nil {
++			want = []string{}
++		}
++		if !reflect.DeepEqual(got, want) {
++			t.Errorf("case %s: got %v, want %v", c.ID, got, want)
++		}
++	}
++}
++
++func TestLintModeIsOnlyTheExactWords(t *testing.T) {
++	for raw, want := range map[string]Mode{
++		"report": ModeReport, "enforce": ModeEnforce,
++		"": ModeOff, "off": ModeOff, "true": ModeOff, "Enforce": ModeOff, " report": ModeOff,
++	} {
++		if got := ModeFromLookup(func(string) string { return raw }); got != want {
++			t.Errorf("SKILL_LINT_MODE=%q = %q, want %q", raw, got, want)
++		}
++	}
++}
++
++func TestLintFindingsCarrySeverityAndNoText(t *testing.T) {
++	findings := Lint(Input{Name: "Report", Content: "secret steps", ToolRestrictions: []string{"*"}})
++	want := []Finding{
++		{Code: CodeDescriptionMissing, Field: "description", Severity: SeverityWarn},
++		{Code: CodeToolRestrictionInvalid, Field: "tool_restrictions", Severity: SeverityError},
++	}
++	if !reflect.DeepEqual(findings, want) {
++		t.Fatalf("findings = %+v, want %+v", findings, want)
++	}
++	if !HasError(findings) || HasError(findings[:1]) {
++		t.Fatal("only an error-severity finding refuses")
++	}
++	encoded, _ := json.Marshal(findings)
++	if strings.Contains(string(encoded), "secret") {
++		t.Fatalf("a finding must not carry the text: %s", encoded)
++	}
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/skilllint/metrics.go b/apps/Model Plane/go/services/capability-core/internal/skilllint/metrics.go
+new file mode 100644
+index 000000000..0d31c14ad
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/skilllint/metrics.go	
+@@ -0,0 +1,32 @@
++package skilllint
++
++import (
++	"context"
++
++	"go.opentelemetry.io/otel"
++	"go.opentelemetry.io/otel/attribute"
++	"go.opentelemetry.io/otel/metric"
++
++	"github.com/triodelab/model-plane/services/capability-core/internal/telemetry"
++)
++
++// findingsTotal has the same name and code label as session-core's counter, so one query
++// over both services shows how many existing rows each rule would refuse before enforce.
++var findingsTotal, _ = otel.Meter(telemetry.MeterName).Int64Counter(
++	"skill_lint_findings_total",
++	metric.WithDescription("Skill lint findings on registry writes, labelled by rule code, severity and mode."),
++)
++
++// Count records every finding of one write. Labels are closed words, never skill text.
++func Count(ctx context.Context, mode Mode, findings []Finding) {
++	if findingsTotal == nil {
++		return
++	}
++	for _, finding := range findings {
++		findingsTotal.Add(ctx, 1, metric.WithAttributes(
++			attribute.String("code", finding.Code),
++			attribute.String("severity", string(finding.Severity)),
++			attribute.String("mode", string(mode)),
++		))
++	}
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 8cf7606e2..8b096376f 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -35,6 +35,7 @@ pub mod sandbox_report;
+ pub mod scheduled_contract;
+ pub mod shell_rule;
+ pub mod skill_bundle;
++pub mod skill_lint;
+ pub mod skill_recovery;
+ pub mod space_attention;
+ pub mod space_approvals;
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/skill_lint.rs b/apps/Model Plane/rust/crates/mp-contracts/src/skill_lint.rs
+new file mode 100644
+index 000000000..90c638518
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/skill_lint.rs	
+@@ -0,0 +1,404 @@
++//! The one lint every skill write passes (EP-11 S4).
++//!
++//! Two services write `agent_skills`: session-core's `UpsertAgentSkill` and
++//! capability-core's registry routes. Before this module each accepted whatever
++//! text it was handed, so a skill too long to inject, a transcript pasted as a
++//! "lesson", or a tool restriction that names no tool could reach the table from
++//! one writer and not the other. The rules are written down once, in
++//! `api/contracts/authored-behaviour-lint.json`; this is the Rust reading of
++//! them and capability-core `internal/skilllint` is the Go one. Both test
++//! against the same rule file, its `.sha256` pin and
++//! `authored-behaviour-lint-golden.json`, so a rule changed in one language
++//! and not the other fails a test.
++//!
++//! A finding names a rule and a field, never the text, so it can be logged,
++//! counted and returned to a caller without echoing the skill back.
++
++/// The switch both writers read. Only `report` and `enforce` turn the lint on.
++pub const MODE_ENV: &str = "SKILL_LINT_MODE";
++
++/// The prefix of the `skip_reason` a refused `UpsertAgentSkill` carries; the
++/// first error's code follows it.
++pub const SKIP_REASON_PREFIX: &str = "skill_lint:";
++
++/// Longest name, in characters.
++pub const MAX_NAME_CHARS: usize = 64;
++/// Longest description, in characters.
++pub const MAX_DESCRIPTION_CHARS: usize = 300;
++/// Longest content a write may store, in characters.
++pub const MAX_CONTENT_CHARS: usize = 32_000;
++/// The injection budget (`SKILL_CONTEXT_BUDGET_CHARS`): longer content is stored
++/// but cut when it is injected, so the author is warned.
++pub const CONTENT_BUDGET_CHARS: usize = 8_000;
++/// How many lines shaped like chat turns make the content a transcript.
++pub const TRANSCRIPT_MIN_LINES: usize = 3;
++/// Most trigger keywords on one skill.
++pub const MAX_TRIGGER_KEYWORDS: usize = 20;
++/// Longest trigger keyword, in characters.
++pub const MAX_TRIGGER_KEYWORD_CHARS: usize = 40;
++
++/// The line starts that read as a chat turn rather than a lesson. Case matters:
++/// the speaker labels chat exports write are capitalised.
++pub const TRANSCRIPT_PREFIXES: &[&str] = &["User:", "Assistant:", "Bruker:"];
++
++/// The closed rule codes, in the order findings are reported.
++pub mod code {
++    pub const NAME_EMPTY: &str = "name_empty";
++    pub const NAME_TOO_LONG: &str = "name_too_long";
++    pub const NAME_CHARSET: &str = "name_charset";
++    pub const DESCRIPTION_MISSING: &str = "description_missing";
++    pub const DESCRIPTION_TOO_LONG: &str = "description_too_long";
++    pub const CONTENT_EMPTY: &str = "content_empty";
++    pub const CONTENT_TOO_LONG: &str = "content_too_long";
++    pub const CONTENT_EXCEEDS_BUDGET: &str = "content_exceeds_budget";
++    pub const TRANSCRIPT_SHAPE: &str = "transcript_shape";
++    pub const TRIGGER_KEYWORD_COUNT: &str = "trigger_keyword_count";
++    pub const TRIGGER_KEYWORD_TOO_LONG: &str = "trigger_keyword_too_long";
++    pub const TOOL_RESTRICTION_INVALID: &str = "tool_restriction_invalid";
++    pub const FRONTMATTER_NAME_MISMATCH: &str = "frontmatter_name_mismatch";
++}
++
++/// Whether a finding refuses a write under `enforce` or only informs.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Severity {
++    Error,
++    Warn,
++}
++
++impl Severity {
++    #[must_use]
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Error => "error",
++            Self::Warn => "warn",
++        }
++    }
++}
++
++/// One rule of the contract: its code, the field it reads, its severity and
++/// its limit when it has one.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Rule {
++    pub code: &'static str,
++    pub field: &'static str,
++    pub severity: Severity,
++    pub limit: Option<usize>,
++}
++
++const fn rule(
++    code: &'static str,
++    field: &'static str,
++    severity: Severity,
++    limit: Option<usize>,
++) -> Rule {
++    Rule {
++        code,
++        field,
++        severity,
++        limit,
++    }
++}
++
++/// Every rule, in the contract's order.
++pub const RULES: &[Rule] = &[
++    rule(code::NAME_EMPTY, "name", Severity::Error, None),
++    rule(code::NAME_TOO_LONG, "name", Severity::Error, Some(MAX_NAME_CHARS)),
++    rule(code::NAME_CHARSET, "name", Severity::Error, None),
++    rule(code::DESCRIPTION_MISSING, "description", Severity::Warn, None),
++    rule(code::DESCRIPTION_TOO_LONG, "description", Severity::Error, Some(MAX_DESCRIPTION_CHARS)),
++    rule(code::CONTENT_EMPTY, "content", Severity::Error, None),
++    rule(code::CONTENT_TOO_LONG, "content", Severity::Error, Some(MAX_CONTENT_CHARS)),
++    rule(code::CONTENT_EXCEEDS_BUDGET, "content", Severity::Warn, Some(CONTENT_BUDGET_CHARS)),
++    rule(code::TRANSCRIPT_SHAPE, "content", Severity::Warn, Some(TRANSCRIPT_MIN_LINES)),
++    rule(
++        code::TRIGGER_KEYWORD_COUNT,
++        "trigger_keywords",
++        Severity::Error,
++        Some(MAX_TRIGGER_KEYWORDS),
++    ),
++    rule(
++        code::TRIGGER_KEYWORD_TOO_LONG,
++        "trigger_keywords",
++        Severity::Error,
++        Some(MAX_TRIGGER_KEYWORD_CHARS),
++    ),
++    rule(code::TOOL_RESTRICTION_INVALID, "tool_restrictions", Severity::Error, None),
++    rule(code::FRONTMATTER_NAME_MISMATCH, "frontmatter", Severity::Error, None),
++];
++
++/// The skill text a write would store. `frontmatter_name` is the `name` of a
++/// bundle's `SKILL.md` front matter, present only when a bundle is checked.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct SkillInput<'a> {
++    pub name: &'a str,
++    pub description: &'a str,
++    pub content: &'a str,
++    pub trigger_keywords: &'a [String],
++    pub tool_restrictions: &'a [String],
++    pub frontmatter_name: Option<&'a str>,
++}
++
++/// The lint mode a writer runs in.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Mode {
++    /// Nothing runs: a write is exactly what it was before this lint.
++    Off,
++    /// Findings are counted and logged; every write goes ahead.
++    Report,
++    /// A write with an error finding is refused; warnings never refuse.
++    Enforce,
++}
++
++impl Mode {
++    /// Only the exact words `report` and `enforce` turn the lint on; anything
++    /// else, including an unset variable, leaves it off.
++    #[must_use]
++    pub fn from_env_value(value: Option<&str>) -> Self {
++        match value {
++            Some("report") => Self::Report,
++            Some("enforce") => Self::Enforce,
++            _ => Self::Off,
++        }
++    }
++
++    #[must_use]
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Off => "off",
++            Self::Report => "report",
++            Self::Enforce => "enforce",
++        }
++    }
++}
++
++/// Runs every rule over `input` and returns the rules it breaks, in rule order.
++#[must_use]
++pub fn lint(input: &SkillInput<'_>) -> Vec<&'static Rule> {
++    let mut broken: Vec<&'static str> = Vec::new();
++
++    if input.name.trim().is_empty() {
++        broken.push(code::NAME_EMPTY);
++    } else {
++        if chars(input.name) > MAX_NAME_CHARS {
++            broken.push(code::NAME_TOO_LONG);
++        }
++        if input.name.chars().any(char::is_control) || input.name.trim() != input.name {
++            broken.push(code::NAME_CHARSET);
++        }
++    }
++
++    if input.description.trim().is_empty() {
++        broken.push(code::DESCRIPTION_MISSING);
++    }
++    if chars(input.description) > MAX_DESCRIPTION_CHARS {
++        broken.push(code::DESCRIPTION_TOO_LONG);
++    }
++
++    let content_chars = chars(input.content);
++    if input.content.trim().is_empty() {
++        broken.push(code::CONTENT_EMPTY);
++    }
++    if content_chars > MAX_CONTENT_CHARS {
++        broken.push(code::CONTENT_TOO_LONG);
++    } else if content_chars > CONTENT_BUDGET_CHARS {
++        broken.push(code::CONTENT_EXCEEDS_BUDGET);
++    }
++    if transcript_lines(input.content) >= TRANSCRIPT_MIN_LINES {
++        broken.push(code::TRANSCRIPT_SHAPE);
++    }
++
++    if input.trigger_keywords.len() > MAX_TRIGGER_KEYWORDS {
++        broken.push(code::TRIGGER_KEYWORD_COUNT);
++    }
++    if input
++        .trigger_keywords
++        .iter()
++        .any(|keyword| chars(keyword) > MAX_TRIGGER_KEYWORD_CHARS)
++    {
++        broken.push(code::TRIGGER_KEYWORD_TOO_LONG);
++    }
++    if input
++        .tool_restrictions
++        .iter()
++        .any(|tool| !is_plain_tool_name(tool))
++    {
++        broken.push(code::TOOL_RESTRICTION_INVALID);
++    }
++
++    if let Some(frontmatter) = input.frontmatter_name {
++        if frontmatter.trim() != input.name.trim() {
++            broken.push(code::FRONTMATTER_NAME_MISMATCH);
++        }
++    }
++
++    broken.into_iter().filter_map(rule_for).collect()
++}
++
++/// The first error among `findings`: the one a refusal names.
++#[must_use]
++pub fn first_error<'a>(findings: &[&'a Rule]) -> Option<&'a Rule> {
++    findings
++        .iter()
++        .copied()
++        .find(|rule| rule.severity == Severity::Error)
++}
++
++/// The rule a code names, or `None` for a code outside the contract.
++#[must_use]
++pub fn rule_for(code: &str) -> Option<&'static Rule> {
++    RULES.iter().find(|rule| rule.code == code)
++}
++
++/// Length in Unicode scalar values, the unit the contract counts in, so a
++/// Norwegian name is not held to a shorter limit than an English one.
++fn chars(text: &str) -> usize {
++    text.chars().count()
++}
++
++fn transcript_lines(content: &str) -> usize {
++    content
++        .split('\n')
++        .map(str::trim_start)
++        .filter(|line| TRANSCRIPT_PREFIXES.iter().any(|prefix| line.starts_with(prefix)))
++        .count()
++}
++
++/// One plain tool name (`[A-Za-z0-9_.-]+`): no wildcard, no space, not empty.
++fn is_plain_tool_name(tool: &str) -> bool {
++    !tool.is_empty()
++        && tool
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::Value;
++    use sha2::{Digest, Sha256};
++
++    const CONTRACT: &str = include_str!("../../../../api/contracts/authored-behaviour-lint.json");
++    const PIN: &str = include_str!("../../../../api/contracts/authored-behaviour-lint.json.sha256");
++    const GOLDEN: &str =
++        include_str!("../../../../api/contracts/authored-behaviour-lint-golden.json");
++
++    fn json(text: &str) -> Value {
++        serde_json::from_str(text).expect("the contract file is JSON")
++    }
++
++    fn strings(value: &Value) -> Vec<String> {
++        value
++            .as_array()
++            .map(|items| {
++                items
++                    .iter()
++                    .map(|item| item.as_str().expect("a list item is text").to_owned())
++                    .collect()
++            })
++            .unwrap_or_default()
++    }
++
++    /// The Go test computes the same digest over the same file, so a rule
++    /// changed in the file without both readers being retested fails here and there.
++    #[test]
++    fn skill_lint_contract_digest_is_the_pinned_one() {
++        let normalised = CONTRACT.replace("\r\n", "\n");
++        let digest: String = Sha256::digest(normalised.as_bytes())
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect();
++        let pinned = PIN.split_whitespace().next().expect("the pin names a digest");
++        assert_eq!(
++            digest, pinned,
++            "authored-behaviour-lint.json changed without its .sha256 pin being refreshed"
++        );
++    }
++
++    #[test]
++    fn skill_lint_rules_are_the_contract_rules_in_order() {
++        let contract = json(CONTRACT);
++        let rows = contract["rules"].as_array().expect("rules is a list");
++        assert_eq!(rows.len(), RULES.len(), "a rule was added to one side only");
++        for (row, rule) in rows.iter().zip(RULES) {
++            assert_eq!(row["code"], rule.code);
++            assert_eq!(row["field"], rule.field, "field of {}", rule.code);
++            assert_eq!(row["severity"], rule.severity.as_str(), "severity of {}", rule.code);
++            let limit = row["limit"]
++                .as_u64()
++                .map(|limit| usize::try_from(limit).expect("a limit fits"));
++            assert_eq!(limit, rule.limit, "limit of {}", rule.code);
++        }
++        assert_eq!(contract["mode"]["env"], MODE_ENV);
++        assert_eq!(contract["refusal"]["grpc_skip_reason_prefix"], SKIP_REASON_PREFIX);
++        assert_eq!(strings(&contract["transcript_prefixes"]), TRANSCRIPT_PREFIXES);
++        assert_eq!(contract["transcript_min_lines"], TRANSCRIPT_MIN_LINES);
++        assert_eq!(contract["tool_name_pattern"], "^[A-Za-z0-9_.-]+$");
++    }
++
++    #[test]
++    fn skill_lint_golden_cases_produce_their_codes() {
++        let golden = json(GOLDEN);
++        let cases = golden["cases"].as_array().expect("cases is a list");
++        assert!(!cases.is_empty());
++        for case in cases {
++            let id = case["id"].as_str().expect("a case has an id");
++            let input = &case["input"];
++            let text = |field: &str| -> String {
++                if case["repeat"]["field"] == field {
++                    let unit = case["repeat"]["text"].as_str().expect("repeat text");
++                    let count = case["repeat"]["count"].as_u64().expect("repeat count");
++                    unit.repeat(usize::try_from(count).expect("a count fits"))
++                } else {
++                    input[field].as_str().unwrap_or_default().to_owned()
++                }
++            };
++            let (name, description, content) = (text("name"), text("description"), text("content"));
++            let keywords = strings(&input["trigger_keywords"]);
++            let tools = strings(&input["tool_restrictions"]);
++            let findings = lint(&SkillInput {
++                name: &name,
++                description: &description,
++                content: &content,
++                trigger_keywords: &keywords,
++                tool_restrictions: &tools,
++                frontmatter_name: input["frontmatter_name"].as_str(),
++            });
++            let got: Vec<&str> = findings.iter().map(|rule| rule.code).collect();
++            assert_eq!(got, strings(&case["expect"]), "case {id}");
++        }
++    }
++
++    #[test]
++    fn skill_lint_mode_is_only_the_exact_words() {
++        assert_eq!(Mode::from_env_value(Some("report")), Mode::Report);
++        assert_eq!(Mode::from_env_value(Some("enforce")), Mode::Enforce);
++        for other in [None, Some(""), Some("off"), Some("true"), Some("Enforce"), Some(" report")] {
++            assert_eq!(Mode::from_env_value(other), Mode::Off, "{other:?}");
++        }
++    }
++
++    #[test]
++    fn skill_lint_first_error_skips_warnings() {
++        let findings = lint(&SkillInput {
++            name: "Report",
++            content: "User: a\nAssistant: b\nUser: c",
++            tool_restrictions: &["*".to_owned()],
++            ..SkillInput::default()
++        });
++        let codes: Vec<&str> = findings.iter().map(|rule| rule.code).collect();
++        assert_eq!(
++            codes,
++            [code::DESCRIPTION_MISSING, code::TRANSCRIPT_SHAPE, code::TOOL_RESTRICTION_INVALID]
++        );
++        assert_eq!(
++            first_error(&findings).map(|rule| rule.code),
++            Some(code::TOOL_RESTRICTION_INVALID)
++        );
++        let warnings_only = lint(&SkillInput {
++            name: "Report",
++            content: "steps",
++            ..SkillInput::default()
++        });
++        assert!(first_error(&warnings_only).is_none(), "a warning never refuses");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 6013a2ab3..fa7cc0031 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -3010,6 +3010,51 @@ fn skill_write_skipped(reason: &str) -> pb::UpsertAgentSkillResponse {
+     }
+ }
+ 
++/// The skill lint mode (`SKILL_LINT_MODE`), read once. Off unless the value is
++/// exactly `report` or `enforce`.
++fn skill_lint_mode() -> mp_contracts::skill_lint::Mode {
++    static MODE: std::sync::OnceLock<mp_contracts::skill_lint::Mode> = std::sync::OnceLock::new();
++    *MODE.get_or_init(|| {
++        mp_contracts::skill_lint::Mode::from_env_value(
++            env::var(mp_contracts::skill_lint::MODE_ENV).ok().as_deref(),
++        )
++    })
++}
++
++/// Runs the shared skill lint on one write. Off runs nothing; report and enforce
++/// count every finding by code; only enforce refuses, with `skill_lint:<code>` of
++/// the first error. A warning never refuses, and no finding carries the text.
++fn skill_lint_refusal(
++    mode: mp_contracts::skill_lint::Mode,
++    req: &pb::UpsertAgentSkillRequest,
++) -> Option<String> {
++    use mp_contracts::skill_lint::{first_error, lint, Mode, SkillInput, SKIP_REASON_PREFIX};
++    if mode == Mode::Off {
++        return None;
++    }
++    let findings = lint(&SkillInput {
++        name: &req.name,
++        description: &req.description,
++        content: &req.content,
++        trigger_keywords: &req.trigger_keywords,
++        tool_restrictions: &req.tool_restrictions,
++        frontmatter_name: None,
++    });
++    for rule in &findings {
++        metrics::counter!(
++            "skill_lint_findings_total",
++            "code" => rule.code,
++            "severity" => rule.severity.as_str(),
++            "mode" => mode.as_str()
++        )
++        .increment(1);
++    }
++    if mode != Mode::Enforce {
++        return None;
++    }
++    first_error(&findings).map(|rule| format!("{SKIP_REASON_PREFIX}{}", rule.code))
++}
++
+ /// Why a learned skill may not be written for this owner, or `None`. Their own
+ /// state (paused, off) and the organization's policy (memory disabled, learning
+ /// review not opted in, policy unreadable) both end it, with different tokens so
+@@ -9510,24 +9555,19 @@ impl SessionCore for SessionService {
+                 }
+                 ("user", owner.to_owned(), "proposed", false)
+             } else {
++                // A human write is accepted and keeps `enabled`, so only a person may
++                // make one. A service holding the write scope could otherwise write an
++                // enabled org-wide skill by claiming origin "user" (D2-509).
++                let Some(person) = caller.user_id() else {
++                    return Ok(Response::new(skill_write_skipped("origin_requires_person")));
++                };
+                 match req.scope.as_str() {
+                     "" | "org" => ("org", String::new(), "accepted", req.enabled),
+                     "user" => {
+-                        let owner = match caller.user_id() {
+-                            Some(verified) => {
+-                                if !req.owner_user_id.is_empty() {
+-                                    caller.authorize_user(&req.owner_user_id)?;
+-                                }
+-                                verified.to_owned()
+-                            }
+-                            None => req.owner_user_id.trim().to_owned(),
+-                        };
+-                        if owner.is_empty() {
+-                            return Err(Status::invalid_argument(
+-                                "owner_user_id is required for a user-scoped skill",
+-                            ));
++                        if !req.owner_user_id.is_empty() {
++                            caller.authorize_user(&req.owner_user_id)?;
+                         }
+-                        ("user", owner, "accepted", req.enabled)
++                        ("user", person.to_owned(), "accepted", req.enabled)
+                     }
+                     other => {
+                         return Err(Status::invalid_argument(format!("invalid scope: {other}")));
+@@ -9598,6 +9638,10 @@ impl SessionCore for SessionService {
+             ) {
+                 return Ok(Response::new(skill_write_skipped(&code.skill_token())));
+             }
++            // The shared skill lint (EP-11 S4), the same rules capability-core's routes run.
++            if let Some(token) = skill_lint_refusal(skill_lint_mode(), &req) {
++                return Ok(Response::new(skill_write_skipped(&token)));
++            }
+             // The conflict key is (org, scope, owner, name). A learned skill
+             // refreshes only a proposal it wrote itself and never touches
+             // enabled, scope, owner or review_state; a human write keeps setting
+@@ -20252,6 +20296,7 @@ mod tests {
+             "accepted_exists",
+             "rejected_exists",
+             "owner_required",
++            "origin_requires_person",
+         ] {
+             let response = super::skill_write_skipped(token);
+             assert!(!response.skipped_protected && response.id.is_empty() && !response.created);
+@@ -20261,6 +20306,117 @@ mod tests {
+         assert!(protected.skipped_protected, "a human's row keeps the old flag");
+     }
+ 
++    /// Counts `skill_lint_findings_total` increments by their `code` label.
++    #[derive(Default, Clone)]
++    struct LintCounts(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
++
++    struct LintCount {
++        code: String,
++        into: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
++    }
++
++    impl metrics::CounterFn for LintCount {
++        fn increment(&self, _value: u64) {
++            self.into.lock().expect("lint counts").push(self.code.clone());
++        }
++        fn absolute(&self, _value: u64) {}
++    }
++
++    impl metrics::Recorder for LintCounts {
++        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
++        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
++        fn describe_histogram(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: metrics::SharedString) {}
++        fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
++            if key.name() != "skill_lint_findings_total" {
++                return metrics::Counter::noop();
++            }
++            let code = key
++                .labels()
++                .find(|label| label.key() == "code")
++                .map(|label| label.value().to_owned())
++                .unwrap_or_default();
++            metrics::Counter::from_arc(std::sync::Arc::new(LintCount {
++                code,
++                into: std::sync::Arc::clone(&self.0),
++            }))
++        }
++        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
++            metrics::Gauge::noop()
++        }
++        fn register_histogram(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Histogram {
++            metrics::Histogram::noop()
++        }
++    }
++
++    fn linted_skill(content: &str) -> mp_contracts::model_plane::v1::UpsertAgentSkillRequest {
++        let mut request = skill_request("org-l", "Weekly report", content, "user", "user", "");
++        request.tool_restrictions = vec!["*".to_owned()];
++        request
++    }
++
++    #[test]
++    fn lint_off_runs_nothing() {
++        use mp_contracts::skill_lint::Mode;
++        let counts = LintCounts::default();
++        let refusal = metrics::with_local_recorder(&counts, || {
++            super::skill_lint_refusal(Mode::Off, &linted_skill(""))
++        });
++        assert_eq!(refusal, None);
++        assert!(counts.0.lock().expect("lint counts").is_empty(), "off counts nothing");
++    }
++
++    #[test]
++    fn lint_report_mode_counts_and_writes() {
++        use mp_contracts::skill_lint::Mode;
++        let counts = LintCounts::default();
++        let refusal = metrics::with_local_recorder(&counts, || {
++            super::skill_lint_refusal(Mode::Report, &linted_skill("User: a\nAssistant: b\nUser: c"))
++        });
++        assert_eq!(refusal, None, "report never refuses, so the write goes ahead");
++        assert_eq!(
++            *counts.0.lock().expect("lint counts"),
++            ["transcript_shape", "tool_restriction_invalid"]
++        );
++    }
++
++    #[test]
++    fn lint_enforce_refuses_with_token() {
++        use mp_contracts::skill_lint::Mode;
++        let counts = LintCounts::default();
++        let refusal = metrics::with_local_recorder(&counts, || {
++            super::skill_lint_refusal(Mode::Enforce, &linted_skill(&"x".repeat(32_001)))
++        });
++        assert_eq!(refusal.as_deref(), Some("skill_lint:content_too_long"), "the first error is named");
++        assert_eq!(
++            *counts.0.lock().expect("lint counts"),
++            ["content_too_long", "tool_restriction_invalid"]
++        );
++        let mut clean = linted_skill("steps");
++        clean.tool_restrictions.clear();
++        clean.description = String::new();
++        assert_eq!(
++            super::skill_lint_refusal(Mode::Enforce, &clean),
++            None,
++            "a missing description is a warning and never refuses"
++        );
++    }
++
++    /// The refusal sits after the content policy and before the statement, so a
++    /// refused write opens no row and keeps a stored proposal's text.
++    #[test]
++    fn upsert_agent_skill_lints_before_the_write() {
++        let source = include_str!("grpc.rs");
++        let handler = &source[source
++            .find("async fn upsert_agent_skill(")
++            .expect("the handler")..];
++        let policy = handler.find("write_policy::gate_skill(").expect("the content policy");
++        let lint = handler
++            .find("skill_lint_refusal(skill_lint_mode(), &req)")
++            .expect("the lint call");
++        let insert = handler.find("INSERT INTO agent_skills").expect("the write");
++        assert!(policy < lint && lint < insert);
++    }
++
+     /// The learned arm of the conflict update changes content and provenance
+     /// only. Reading `enabled`, `scope`, `owner_user_id` or `review_state` into
+     /// that SET list is how an admin-disabled or owner-decided row got
+@@ -21140,6 +21296,80 @@ mod tests {
+         clear_skill_rows(&pool, &org).await;
+     }
+ 
++    // -- D2-509: a human write needs a person (EP-11 S4, real Postgres) ---------
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn service_caller_cannot_write_origin_user() {
++        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
++        let Some((svc, pool, org)) = skills_service().await else {
++            return;
++        };
++        for scope in ["org", "user", ""] {
++            let refused = svc
++                .upsert_agent_skill(as_service(
++                    &org,
++                    &["session:skills:write"],
++                    skill_request(&org, "Runbook", "steps", "user", scope, "owner-a"),
++                ))
++                .await
++                .expect("a skipped write is not an error")
++                .into_inner();
++            assert_eq!(refused.skip_reason, "origin_requires_person", "scope {scope:?}");
++            assert!(!refused.created && refused.id.is_empty() && !refused.skipped_protected);
++        }
++        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM agent_skills WHERE org_id = $1")
++            .bind(&org)
++            .fetch_one(&pool)
++            .await
++            .expect("count");
++        assert_eq!(rows, 0, "a service claiming origin user writes nothing");
++
++        // A person still writes their own skill exactly as before.
++        let mine = svc
++            .upsert_agent_skill(as_user(
++                &org,
++                "owner-a",
++                skill_request(&org, "Runbook", "steps", "user", "user", ""),
++            ))
++            .await
++            .expect("person write")
++            .into_inner();
++        assert!(mine.created && mine.skip_reason.is_empty());
++
++        clear_skill_rows(&pool, &org).await;
++    }
++
++    /// The learning review is the RPC's only service caller and sends
++    /// `background_review`; the D2-509 check must not refuse it.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn learning_path_still_writes_proposals() {
++        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
++        let Some((svc, pool, org)) = skills_service().await else {
++            return;
++        };
++        for origin in ["background_review", ""] {
++            let name = format!("Learned {origin}");
++            let written = svc
++                .upsert_agent_skill(as_service(
++                    &org,
++                    &["session:skills:write"],
++                    skill_request(&org, &name, "steps", origin, "", "owner-a"),
++                ))
++                .await
++                .expect("proposal")
++                .into_inner();
++            assert!(written.created && written.skip_reason.is_empty(), "origin {origin:?}");
++            assert_eq!(
++                skill_row_state(&pool, &org, &name, "user", "owner-a").await,
++                Some((false, "user".into(), "owner-a".into(), "proposed".into()))
++            );
++        }
++
++        clear_skill_rows(&pool, &org).await;
++    }
++
+     #[tokio::test]
+     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+     async fn enable_of_learned_skill_rechecks_policy() {

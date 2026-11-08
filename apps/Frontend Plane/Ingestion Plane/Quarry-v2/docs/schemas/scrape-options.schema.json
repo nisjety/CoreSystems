@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScrapeOptions",
+  "description": "The options a caller may put at the root of a `/v1/scrape` body, as sent.\nEvery field is optional; `resolve` turns this into what the run uses.",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "description": "Actions to run on the page, in order. Checked by WS13.2, run by WS13.5.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": true
+    },
+    "actions_on_error": {
+      "description": "`abort` (the default) or `continue`. There is no retry: a replayed click\nor type can submit twice.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionOnError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "exclude_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "extractor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Extractor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "formats": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ScrapeFormat"
+      }
+    },
+    "include_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_age": {
+      "description": "INNH-7: serve a stored result no older than this many milliseconds\ninstead of fetching. Absent: no read of the URL result cache. `0`: never\nread it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "max_inline_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "only_main_content": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "redact_pii": {
+      "description": "E3.6-5: `off` (the default) or `on`: pass the returned text through the PII scanner.\n`on` is served under zero data retention only, and never with a capture or an action.\nAbsent and `off` are the same request.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PiiRedaction"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "remove_base64_images": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "ActionOnError": {
+      "description": "What to do when an action fails: stop and report, or go on to the next one.\nThere is no retry: a replayed click or type can submit twice.",
+      "type": "string",
+      "enum": [
+        "abort",
+        "continue"
+      ]
+    },
+    "Extractor": {
+      "description": "Which content extractor shapes the markdown. `Readability` is the\nmain-content heuristic (`only_main_content`, the default); `CleanFull` keeps\nthe whole body minus scripts and chrome; `Raw` converts the document as it is.",
+      "type": "string",
+      "enum": [
+        "readability",
+        "clean_full",
+        "raw"
+      ]
+    },
+    "PiiRedaction": {
+      "description": "E3.6-5: whether the text a scrape returns goes through the PII scanner\n(`quarry_transform::pii`). `Off` is the default. `On` is served under zero data\nretention only, and never with a capture or an action (see `ScrapeOptions::resolve`).",
+      "type": "string",
+      "enum": [
+        "off",
+        "on"
+      ]
+    },
+    "ScrapeFormat": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "html",
+            "rawHtml",
+            "links",
+            "metadata",
+            "screenshot",
+            "pdf",
+            "summary"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "screenshot",
+                "pdf"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "schema": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "object"
+                }
+              }
+            },
+            "type": {
+              "const": "json"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "language": {
+              "type": "string",
+              "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$"
+            },
+            "max_chars": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 200
+            },
+            "type": {
+              "const": "summary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "question"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "question"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max_chars_each": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 40
+            },
+            "max_highlights": {
+              "type": "integer",
+              "maximum": 10,
+              "minimum": 1
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 1000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "highlights"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "query"
+          ]
+        }
+      ]
+    }
+  }
+}

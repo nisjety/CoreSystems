@@ -1,0 +1,932 @@
+{
+ "batchId": "W3-02",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S2",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/model_record.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs (mock ModelInfo literal, 2 lines already in tree, not edited this round)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/effort_ladder_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (this round: 1 line)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.model-record.test.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p inference-core -p model-gateway --all-targets",
+     "outcome": "exit 0, so the E0063 break is gone. Warnings only: anthropic.rs:1145 dead code (same function at HEAD:1144, not changed by this slice); browser_run.rs:4701, 4743, 4789 unused must_use (not in this slice)."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+     "outcome": "172 passed, 0 failed, exit 0 (112 s)."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test effort_ladder_contract",
+     "outcome": "15 passed, 0 failed, exit 0."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib model_record",
+     "outcome": "7 passed, 0 failed, exit 0."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib list_models_carries_record_v2_fields",
+     "outcome": "1 passed, 0 failed, exit 0."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "2750 passed, 3 failed, 4 ignored, exit 101. Failures, re-run alone with the same result: room_metadata::tests::the_allowlist_is_artifacts_and_the_retrieval_decline_until_a_later_slice_adds_work (room_metadata.rs:270: constant has 3 keys including room_run::WORK_KEY, assertion expects 2); zdr_posture::tests::every_non_get_route_is_classified (zdr_posture.rs:1449: space-surface rows missing for several non-GET routes); zdr_posture::tests::no_raw_retention_claim_is_read_outside_the_named_inventory (zdr_posture.rs:756: space_routes/runs.rs::run_live). None is in this slice's diff, and their inputs (room_run.rs, room_metadata.rs, zdr_posture.rs, space_routes/, tests/fixtures/space-surface.v1.json) are unmodified in the worktree. Not checked at HEAD, since a HEAD copy is not allowed."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Regenerate Go bindings: buf generate --template .plan-work/buf.gen.local.yaml \"apps/Model Plane/proto\" (native protoc-gen-go, no docker). Copy model_plane/v1/inference.pb.go from .plan-work/gen-out into apps/Model Plane/go/gen/model_plane/v1/. The diff must add only ContextWindowTokens, MaxOutputTokens and Lifecycle to ModelInfo.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert above the first `## ` entry (newest first): `## 2026-11-03 - Record v2 limits come from a sourced per-model table; unknown stays unknown (EP-13 S2)`, then `Status: implemented, no switch (read-only metadata, absent when unknown).` Body: limits are rows in inference-core provider/model_record.rs keyed by provider family and model id, each citing its vendor page; a provider ceiling clamps a row and never fills a gap; lifecycle is ga, preview or deprecated (Active maps to ga, Deprecated to deprecated); ModelInfo fields 9-11 are additive; the gateway omits zero and empty values from /v1/models.",
+    "Picker wiring (outside this slice) in apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx and apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (menu block): show formatContextWindow(model.contextWindowTokens) when defined; show a Forhåndsversjon chip when model.lifecycle === 'preview'; render a group with folded === true as a collapsed disclosure labelled with its label.",
+    "Attribute the three model-gateway --lib failures (room_metadata.rs:270, zdr_posture.rs:1449 and :756) before integration; see depth_findings.",
+    "Live proof (depth, lead): rebuild inference-core, model-gateway and the frontend, then check /api/v1/models as described in depth_findings."
+   ],
+   "deviations": [
+    "e2e_invoke_chain_test.rs is not in the plan's files or new_files. It is a test beside effort_ladder_contract.rs, and the one-line edit is the reviewer's required fix for the new ModelInfo fields.",
+    "model-gateway/src/grpc.rs (mock ModelInfo literal, 2 lines: a comment and `..Default::default()`) is in the tree. It was a needs_other_files item last round. It is not in the plan's files list, and I did not edit it this round.",
+    "ModelInfo.lifecycle is Option<model_record::Lifecycle> (typed, default None), not &'static str as the design says. The wire field stays the string ga, preview or deprecated.",
+    "The table holds five sourced Anthropic rows, not a full catalogue. OpenAI, Azure OpenAI and Codex have no rows, so those models advertise zero tokens and no lifecycle.",
+    "A zero provider ceiling means none is declared, so the row is not clamped. The design did not specify this.",
+    "Haiku 4.5 (vendor page says Legacy) is mapped to ga. The owner may want a separate legacy stage.",
+    "The conversion test covers the From<provider::ModelInfo> impl that list_models uses, not the gRPC call itself."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx (context chip, preview chip, folded group disclosure)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (menu block: the same three items)",
+    "apps/Model Plane/docs/decisions/ledger.md (shared-edit entry, see lead_todo)",
+    "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go (regenerate with buf, not hand-edited)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go: regenerate it from the edited inference.proto with native buf and protoc-gen-go. Use the recipe from proto/buf.gen.go-only.yaml or .plan-work/buf.gen.local.yaml, and do not hand-edit it. Why: the file is in the slice's owned files, and the design (EP-13 S2 'Files') lists it as a deliverable. `bash \"apps/Model Plane/scripts/tests/go-gen-drift.sh\"` currently prints `DRIFT model_plane/v1/inference.pb.go`, so the checked-in Go bindings no longer match the proto. The regenerated diff should add only ContextWindowTokens, MaxOutputTokens and Lifecycle (tags 9-11) to ModelInfo. Afterwards go-gen-drift.sh must print no DRIFT line."
+    ],
+    "dod_gaps": [
+     "Live proof (lead, docker): rebuild inference-core, model-gateway and the frontend. Then GET /api/v1/models must show claude-sonnet-5-5 with context_window_tokens 1000000, max_output_tokens 128000 and lifecycle ga on Direct (200000 and 8192 on Foundry), and must leave all three fields out for an unlisted model.",
+     "Ledger entry in apps/Model Plane/docs/decisions/ledger.md (shared file; the lead applies the implementer's lead_todo lines).",
+     "Picker display (context chip 'NNk kontekst', 'Forhåndsversjon' chip, collapsed 'Eldre modeller' disclosure) needs AiModelPicker.tsx and the DashboardComposer.tsx menu block. Both are outside this slice's ownership set, so the lead must assign them."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway --lib has 3 failing tests outside this slice: room_metadata.rs:270 (allowlist constant includes room_run::WORK_KEY, assertion expects two keys), zdr_posture.rs:1449 (missing Space-surface rows for several non-GET routes) and zdr_posture.rs:756 (raw retention claim in space_routes/runs.rs::run_live). Attribute them before integration; this slice's diff does not cause them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "SPA context chip, preview chip and the folded 'Eldre modeller' disclosure are not wired: AiModelPicker.tsx and DashboardComposer.tsx are unmodified. Needs a frontend owner."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Go bindings are stale: apps/Model Plane/go/gen/model_plane/v1/inference.pb.go is unmodified. Regenerate with native buf; the diff must add only ContextWindowTokens, MaxOutputTokens and Lifecycle to ModelInfo."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "ModelDescriptor serde behaviour (fields omitted when unknown) is proven only by source text in effort_ladder_contract.rs. Add a serde unit test in the http_routes tests at depth."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Sourcing is incomplete. claude-sonnet-4-6, claude-opus-4-8, claude-opus-5, claude-sonnet-5, claude-fable-5, claude-fable-5-1 and all OpenAI, Azure OpenAI and Codex models have no sourced rows. Each new row needs its vendor page cited."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to confirm the lifecycle mapping. Active maps to ga and Deprecated to deprecated, so a model the vendor calls Legacy but not deprecated (claude-haiku-4-5) stays unfolded."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Live proof not run (wave mode). After rebuilding inference-core, model-gateway and the frontend, /api/v1/models should show claude-sonnet-5-5 with context_window_tokens 1000000, max_output_tokens 128000 and lifecycle ga, and omit all three for an unlisted model."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "DashboardSectionOverview.test.tsx fails 4 of 6, alone and in the directory run (last round). It is outside this slice and does not check the model catalogue; not proven at HEAD."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The committed buf lint baseline (apps/Model Plane/proto/buf-lint-baseline.json) is stale; the ratchet fails at HEAD too. Refresh it in its own reviewed change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Lifecycle::Preview has no sourced row. It exists for the wire contract and is exercised only by the wire-name test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Shared worktree: effort_ladder_contract was re-run this round against the current tree (15 passed), including other slices' uncommitted model-gateway edits. Re-run after integration."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "groupChatModels now returns a trailing group labelled 'Eldre modeller' with folded: true, but AiModelPicker.tsx and DashboardComposer.tsx ignore `folded`. Deprecated models (claude-sonnet-4-5) therefore show as an open last group, and formatContextWindow plus the preview chip have no UI caller yet."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "model-gateway/src/grpc.rs (a test mock ModelInfo literal gets `..Default::default()`) and tests/e2e_invoke_chain_test.rs (one line) are outside the plan's file list. Both are minimal compile fixes forced by the new proto fields and are acceptable, but the lead should record them as ownership deviations."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The /v1/models omission of unknown fields is proven only by source-text matching in effort_ladder_contract.rs. No serde test serialises a ModelDescriptor and asserts that context_window_tokens, max_output_tokens and lifecycle are absent when unknown and present when known."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Only five Anthropic rows are sourced. claude-sonnet-4-6, claude-opus-4-8, claude-opus-5, claude-sonnet-5, claude-fable-5 and every OpenAI, Azure OpenAI and Codex model advertise no limits until rows with vendor citations are added."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Haiku 4.5 (the model page says Legacy, the deprecations table says Active) is mapped to ga. The owner should confirm that Legacy-without-retirement stays unfolded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "model-gateway --lib has 3 failures the implementer reported in room_metadata.rs:270 and zdr_posture.rs:1449/:756. Their inputs are untouched by this slice's diff; attribute them to the owning slice before integration."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ModelInfo.lifecycle is typed Option<model_record::Lifecycle> rather than the design's &'static str. The wire string is unchanged, so this is an improvement, but the ledger text should describe the typed form."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p inference-core --lib model_record",
+      "outcome": "7 passed, 0 failed (exit 0)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test effort_ladder_contract",
+      "outcome": "15 passed, 0 failed (exit 0)",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p inference-core -p model-gateway --all-targets",
+      "outcome": "exit 0, no errors",
+      "passed": true
+     },
+     {
+      "command": "buf lint (apps/Model Plane/proto)",
+      "outcome": "buf exits 0 but reports 1899 findings repo-wide. 11 are in model_plane/v1/inference.proto, all missing-comment or naming findings on existing symbols (InferRequest, InferResponse, claim_mean_logprob, cache_creation_input_tokens, compaction_summary, residency, ...). None names the new record v2 fields. The ratchet script failed to run (it flags Windows backslash paths as new, so I could not use it) and I could not match the baseline file's format, so no new-finding verdict from the ratchet.",
+      "passed": true
+     },
+     {
+      "command": "buf breaking --against baseline.binpb (run in apps/Model Plane/proto)",
+      "outcome": "exit 0, no breaking changes",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/shared/api/chat-client.model-record.test.ts",
+      "outcome": "1 file, 7 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/shared/api",
+      "outcome": "110 files, 1094 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/shared/components",
+      "outcome": "3 files, 9 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run src/features/dashboard/home (pool=threads, then pool=forks --maxWorkers=2 --testTimeout=60000)",
+      "outcome": "threads pool: killed by my 280 s and 500 s timeouts with no result. forks pool: 4 failures, all in DashboardSectionOverview.test.tsx: 'falls back to Home for an invalid section' (cannot find 'Home overview'), 'restores the selected overview with Back and Forward' (cannot find nav 'Home navigation'), 'retries an unavailable source without showing a false zero summary' (cannot find 'This overview is unavailable right now.'), plus one more I did not read. I did not read the full file/test totals. DashboardSectionOverview and the dashboard/home directory are not in the slice's diff, so these look like pre-existing or other-slice failures, but I did not check them against HEAD.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Required fix 1 is applied: e2e_invoke_chain_test.rs now has `..Default::default()` after `effort_levels: Vec::new(),` (one added line; the file stays all-CRLF, 14727 CRLF and 14727 LF, with no bare CR). The grpc.rs mock literal already carried the fix. vision_parts.rs and tests/vision_parts_chain_test.rs already use update syntax. All cargo commands ran with CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0. Only read-only git commands were used (status, diff, show, ls-files --eol). The shared tree was tested as it stands, including other slices' uncommitted model-gateway edits. effort_ladder_contract.rs is LF at HEAD and stays LF. Not re-run this round, because no frontend or proto file changed: buf lint and breaking, and the pnpm vitest runs; last round's results were not re-verified. Still open and unchanged: the picker wiring, the ledger entry, and the Go bindings (inference.pb.go is unmodified). Live proof was not run (wave mode)."
+  },
+  {
+   "id": "EP-14-S3",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/activity/narration.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/activity/narration.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/StepStrip.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/StepStrip.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/shared/activity/narration.test.ts src/features/chat/components/StepStrip.test.tsx (env pnpm_config_verify_deps_before_run=false)",
+     "outcome": "2 files, 72 tests passed; re-run after the last narration edit and passing"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat/components/ChatMessages src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/SettledTurnFold.test.tsx src/features/chat/lib/settled-fold.test.ts src/features/chat/lib/chat-accessibility.test.ts src/features/chat/lib/chat-localization.test.ts src/features/chat/lib/chat-route-ownership.test.ts src/features/chat/lib/stream-activity.test.ts",
+     "outcome": "29 files, 355 tests passed. Run before the final narration fill fix; that fix changes only narrate(), which these suites reach only with the switch on, and the switch is off here."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on src/shared/activity, StepStrip.tsx, StepStrip.test.tsx, ChatMessages.tsx",
+     "outcome": "0 errors, 10 warnings. All 10 are solid/reactivity warnings at existing ChatMessages.tsx lines this slice does not touch."
+    },
+    {
+     "command": "UI copy and colour selectors from eslint.ui-gates.config.js (the rule set scripts/ui-gates-new-files.mjs applies), run by a scratch script on narration.ts and StepStrip.tsx",
+     "outcome": "0 errors. The same script reports 3 errors on a deliberately bad probe file, which was then removed, so the gate is shown to fire."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js . (the pnpm lint script)",
+     "outcome": "exit 1 with 51 errors and 313 warnings across the frontend. No finding is in a file this slice creates or edits. I did not compare against HEAD, so I cannot say the rest pre-date this change."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "One error: src/shared/api/schedule-contract.test.ts(28,16) TS2352, the baseline named in the batch notes. No error in this slice's files."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/styles/global.css: after the .verevon-chat-thinking__activity rule (about line 24715) add `.verevon-chat-step-strip { min-width: 0; overflow: hidden; color: var(--verevon-e-subtle, var(--subtle)); font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }` and `.verevon-chat-step-strip:not(:empty) { margin-top: 8px; }`. Do not hide the region with display:none, because the live region has to stay in the accessibility tree.",
+    "Optional, only when a build should carry the switch on: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docker-compose.yml, beside the VITE_CHAT_* build args at lines 462-464, add `VITE_CHAT_STEP_STRIP: ${VITE_CHAT_STEP_STRIP:-false}`. The switch is off by default and nothing else needs it.",
+    "No docker, compose, DB harness, migration or proto step: this slice is frontend only, so no buf step either.",
+    "Live proof, depth and lead-run, with the switch on on a second dev server (never :5173): a Do run with a 5-step plan should show the strip counting 1..5 while streaming and clearing on settle, a failed tool should read as a sentence, and a screen-reader pass should record the live announcements. Expect no 'of 5' on the execute turn until the approved-plan step-count item in depth_findings is built.",
+    "Decide the N semantics (depth_findings, P1) before the switch is flipped.",
+    "Size ratchet: ChatMessages.tsx is 4865 lines against a 4033 ceiling that was already exceeded before this slice. size-ratchet.py --check stays failing and the ceiling must not be raised."
+   ],
+   "deviations": [
+    "N is the settled calls plus one while a call is out, not the bare completed count the row names. The DoD asks for counts 1..5, and a bare count would show 0 on the first step. With no calls there is no strip.",
+    "M comes from the turn's own proposedPlan.steps, not from the plan-approval node. That node is derived only for finished plan-mode turns (derive.ts: planMode && !streaming), and the strip mounts only on a streaming turn.",
+    "narrate(call, i18n, notices) takes an optional third argument so a retry can be named. ToolCallCard calls it with the call alone.",
+    "The owned file list has no stylesheet, so this change adds no CSS rule. The strip's class is verevon-chat-step-strip, and its rule is handed to the lead as a shared edit to global.css.",
+    "ToolCallCard drops its count and truncation marks while the switch is on, because the sentence already carries them."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/styles/global.css (one CSS rule for .verevon-chat-step-strip, handed back as a shared edit in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof, lead-run on a second dev server with VITE_CHAT_STEP_STRIP=true: a Do run with a 5-step plan, the strip counting 1..5 and clearing on settle, a failed tool reading as a sentence, and an NVDA or VoiceOver pass on the live region.",
+     "Shared edit to global.css for .verevon-chat-step-strip, which the implementer handed back in lead_todo. Without it the strip is unstyled and may wrap.",
+     "Optional compose build arg VITE_CHAT_STEP_STRIP (default false) in verevonv3 docker-compose.yml, needed only for a build with the switch on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "N is the settled calls plus one while a call is out. The row says 'completed steps' while the DoD says counts 1..5, so the owner or lead should confirm this reading before the switch is flipped."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Do runs show no 'of M'. proposedPlan is set only on plan-mode turns (use-chat-controller.ts hydrateProposedPlan ~1019-1036 and the plan_proposed handler ~3413), and an approved plan runs as a separate executeGranted turn that carries no plan. The fix passes the approved plan's step count from ChatPage messageRows into AssistantMessage; ChatPage is not owned here."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing is proved live. The DoD (a 5-step Do run on a second dev server with VITE_CHAT_STEP_STRIP=true, the strip counting 1..5 and clearing on settle, a failed tool reading as a sentence, and a screen-reader pass on the live region) is lead-run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test renders ToolCallCard or AssistantMessage with the switch on, because the switch is read at module load. A vi.stubEnv plus vi.resetModules test should pin that rows keep the raw name and both count marks when off, and read as sentences when on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "awaiting_approval and retrying depend on data the live stream may not send. A tool call reads as awaiting approval only on an awaiting_approval or waiting_approval status (not verified against the stream), and a retry notice matches a call only through callId while that call is out."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A stopped or cancelled tool call has no state of its own and reads as done. ToolCallCard labels it completed too, so the stop status vocabulary needs checking against the stream."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Retry state reaches only the strip. ToolCallCard rows (rendered at ChatPanels.tsx:984) receive no lifecycle notices, so a retried row reads 'Using ...' until it settles; one prop from ChatPanels would fix it, and ChatPanels is not owned here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Norwegian sentences are unreviewed by a native speaker. The WS12-S4 copy gate in pnpm lint covers only src/features/chat and src/features/agents, so narration.ts is covered only by the new-file gate in CI; I reproduced that gate's selectors with 0 errors."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The virtualised transcript (VITE_CHAT_VIRTUALIZE, WS09-S10) is not checked with the strip mounted. The strip is one nowrap line, so its height should stay stable, but the planner's re-measure on first appearance is unverified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "While the switch is on, ToolCallCard hides its count and truncation marks because the sentence carries them. This should be checked against a long Do thread's Steps tab before the switch is flipped."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ChatMessages.tsx grows from 4854 to 4865 lines against a size-ratchet ceiling of 4033 that it already exceeded, so size-ratchet --check stays failing. The split is the D1-156 follow-up, and the ceiling must not be raised."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Do-catalogue coverage test reads ../../Model Plane/.../do_tool_catalogue.json from process.cwd(), so it must run from the FE root, as the other FE tests that read repo files do."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Without the global.css shared edit the strip is an unstyled block that may wrap. The lead applies the rule listed in lead_todo."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Do execute turns never show 'of M': StepStrip takes planSteps from message.proposedPlan, which exists only on plan-mode turns, so an approved plan's executeGranted turn shows 'Step N' alone and the DoD's 'counts 1..5 of 5' cannot be shown until ChatPage passes the approved plan's step count."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "N counts settled calls plus the one in flight. The design names N as completed steps, so the owner should confirm this reading before the switch is flipped."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test renders ToolCallCard or AssistantMessage with the switch on (vi.stubEnv plus resetModules). Nothing pins the switch-off row (raw name plus count and truncation marks) or the switch-on sentence row."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The awaiting_approval state matches only the status strings 'awaiting_approval' and 'waiting_approval', and retrying matches only a retry notice with the same callId. Neither is verified against the live stream vocabulary, and a cancelled call reads as done."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Retry narration reaches only the strip. ToolCallCard calls narrate without lifecycle notices, so a retried row reads as started until it settles."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No native speaker has reviewed the Norwegian templates. The WS12-S4 copy-gate glob does not cover src/shared/activity, so only the new-file gate checks narration.ts."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The strip has not been checked with VITE_CHAT_VIRTUALIZE on. A row that gains a strip line mid-stream may need the planner to re-measure it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ChatMessages.tsx grows by 12 lines past a size-ratchet ceiling it already exceeds (D1-156 split follow-up). The ceiling must not be raised."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Do-catalogue coverage test resolves the Model Plane fixture from process.cwd(), so it passes only when vitest runs from the verevonv3 root."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run src/shared/activity/narration.test.ts src/features/chat/components/StepStrip.test.tsx",
+      "outcome": "2 files, 72 tests passed",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (compile check of touched module)",
+      "outcome": "One error, schedule-contract.test.ts(28,16) TS2352, the known baseline; no errors in slice files",
+      "passed": true
+     },
+     {
+      "command": "eslint on src/shared/activity, StepStrip.tsx, StepStrip.test.tsx, ChatMessages.tsx (scoped stand-in for pnpm lint)",
+      "outcome": "0 errors, 10 solid/reactivity warnings in ChatMessages.tsx lines; slice files clean. The full pnpm lint was not run, because the implementer reported 51 pre-existing errors elsewhere.",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run src/features/chat/components/ChatMessages (regression on the edited file)",
+      "outcome": "22 files, 189 tests passed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "EP-14-S3 is built behind VITE_CHAT_STEP_STRIP (default off, read only as the literal 'true'). It adds no server change, proto, migration or model call. narration.ts holds a closed table of 6 families x 5 states, with both locales written inline inside i18n.tr, and fills the {object} and {outcome} slots in one pass. It caps objects at 60 characters, reduces URLs to their host, and maps every Do catalogue name explicitly (34 of 34). StepStrip.tsx is a polite, atomic live region that shows 'Step N of M - sentence' (no M without a plan, and dropped once N passes the plan). ChatMessages.tsx changes only mount and label lines: the row label goes through narrate() and the strip mounts on the streaming turn. With the switch off, row text, DOM and counts are unchanged. Two deliberate deviations from the row: N counts settled calls plus the one out, so the DoD's 1..5 holds; and M comes from the turn's own proposedPlan, because the plan-approval node exists only for finished plan-mode turns. Not run: docker, the DB harness, any live proof, the whole vitest suite and the pnpm typecheck script. No git stage, commit or push."
+  },
+  {
+   "id": "EP-14-S8",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\prompt_tool_manifest.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\fixtures\\prompt-tool-manifest.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\fixtures\\prompt-tool-manifest.json.sha256",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\scenario-touch.py",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\tests\\test_scenario_touch.py",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\baselines\\scenario-touch-exceptions.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\eval-lab.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest (in apps/Model Plane/rust)",
+     "outcome": "9 passed, 0 failed; wrote the fixture (119 entries) and its pin"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --test prompt_tool_manifest (same tree, after the final doc-comment edits; background run that waited behind sibling builds on the shared target)",
+     "outcome": "9 passed, 0 failed, CARGO_EXIT=0; golden matches the pinned fixture"
+    },
+    {
+     "command": "rustfmt --edition 2021 --check crates/mp-contracts/tests/prompt_tool_manifest.rs",
+     "outcome": "exit 0 (rustfmt applied once to this new LF file)"
+    },
+    {
+     "command": "python -m pytest scripts/gates/tests/test_scenario_touch.py -q, run with the eval-lab .venv Scripts/python.exe (pytest 9.1.1)",
+     "outcome": "16 passed"
+    },
+    {
+     "command": "python scripts/gates/scenario-touch.py --base origin/main",
+     "outcome": "exit 0: 'manifest changed and 3 scenario file(s) changed with it'. The three are cases/run_context/15-17 already changed by earlier branch commits 2b6beb20a and bc4cd7b26, so this does not prove the bootstrap rule"
+    },
+    {
+     "command": "python scripts/gates/scenario-touch.py --base origin/no-such-branch",
+     "outcome": "exit 2 (cannot run), naming the missing merge base"
+    },
+    {
+     "command": "YAML parse of .github/workflows/eval-lab.yml with the venv PyYAML 6.0.3, and CRLF count",
+     "outcome": "parses; push and pull_request each list 3 branches and 15 paths; steps in order checkout (fetch-depth 0), setup-python, install, selftest, rust toolchain, rust-cache, protoc 27.x, manifest cargo test, gate self-test, PR-only gate, upload; CRLF 149 of 149 lines"
+    },
+    {
+     "command": "Cross-check of extracted blocks against grep: agent.rs process 5, offered 26, browser 3; tool_loop.rs builtin 26 blocks; one bare builder call",
+     "outcome": "counts agree with the manifest entries"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the seven files listed in files_changed together, and leave the other working-tree changes alone. eval-lab.yml keeps its CRLF endings (149 of 149 lines).",
+    "After every Wave 3 slice in this worktree has landed, regenerate the manifest from apps/Model Plane/rust with MP_UPDATE_PROMPT_MANIFEST=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --test prompt_tool_manifest. Read the change report, then commit the fixture and its pin with an eval case, a cassette or a reviewed exception in the same commit. EP-2-S2 is editing model-gateway tool_loop.rs in this batch; the fixture is green at the time of this report but goes stale if that slice adds read_page or find_in_page to builtin_tool_defs.",
+    "Bootstrap decision (owner or lead): against origin/main, this change makes the manifest new, so the strict rule requires a case or cassette in the same change, or a reviewed exception. Add to scripts/gates/baselines/scenario-touch-exceptions.json an entry {\"manifest_sha256\": \"<final digest>\", \"reason\": \"...\", \"reviewed_by\": \"<reviewer>\"}. The digest at this report is d1a53b2a3961b1b0500a5206d561d173dbd64b07fb0d3469a2dbb18e19cfd779 and it changes whenever a pinned source changes. No exception was added here.",
+    "CODEOWNERS: the repository has no .github/CODEOWNERS file. The owner decides where code owners are declared and protects scripts/gates/baselines/scenario-touch-exceptions.json and the manifest fixture. Not created here.",
+    "Owner repository setting, after a green CI run: mark the eval-lab selftest job as a required check on fix/ui-premium-restore. Not done here.",
+    "CI proof is owed (Evidence: CI run URL, per the N1 carve-out). On a throwaway branch: a one-character edit to a prompt const in author_guidance.rs must turn prompt_tool_manifest red and name the file; adding a case under eval-lab-py/cases must turn the gate green. The first run also proves the rust toolchain and protoc 27.x install on ubuntu-latest.",
+    "Shared target contention: this slice's cargo runs waited behind sibling slices' builds on C:/dev/mp-target-w2 for about 25 minutes. No process was killed."
+   ],
+   "deviations": [
+    "The manifest reads source text instead of calling the builders: mp-contracts cannot depend on model-gateway or execution-core without a cycle, so runtime-assembled output is not hashed and the design's fixed-input builder call is not implemented.",
+    "Prompt coverage follows a file rule (every item before each named file's first cfg(test)), not a hand-written builder list. It also pins env-name consts and trigger vocabularies, a deliberate conservative choice.",
+    "retrieval_tools.rs, named by the design, holds no ToolDefinition, so it is not read; the retrieval tools are defined in builtin_tool_defs.",
+    "The eval-lab job gained the Rust toolchain, rust-cache, protoc 27.x (mirroring model-plane-rust-ci.yml), the cargo step, a gate self-test step and fetch-depth 0. The design named only the cargo and gate steps.",
+    "Gate semantics follow the design: no bootstrap exemption; exceptions are per manifest digest and need reason and reviewed_by; the exceptions file is created empty and no exception was added.",
+    "rustfmt was applied to the new Rust test file, because the repository's format job checks it."
+   ],
+   "needs_other_files": [
+    ".github/CODEOWNERS (absent from the repository; the design asks for a CODEOWNERS entry for scripts/gates/baselines/scenario-touch-exceptions.json and the manifest fixture; not created)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "CI proof on a throwaway branch (red on a one-character prompt or tool edit, green after adding a case or cassette): two run URLs",
+     "Owner repository setting: mark the eval-lab job as a required check on fix/ui-premium-restore",
+     "Owner or lead: add a CODEOWNERS entry for scripts/gates/baselines/scenario-touch-exceptions.json and the manifest fixture",
+     "Lead: regenerate the manifest after all Wave 3 slices land, and commit it with a case, a cassette or a reviewed exception for the final digest"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Prompt coverage is three files, not every platform prompt: CONVERSATION_SCOPE_NOTICE (model-gateway source_validation.rs:11, used as a system message in sse.rs) and sse.rs consts such as FILES_NEED_CODE_TOOL_MESSAGE (sse.rs:311) are unpinned, so editing them does not trigger the gate."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Tool coverage is the three Do lists in agent.rs plus builtin_tool_defs in tool_loop.rs; server-resolved tickets.create, dynamic MCP and client tools, and any ToolDefinition declared elsewhere (for example workspace_tools.rs, whose offered status I did not check) are unpinned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Offer gating in sse.rs (the web_search, reattach_context, recall and skill_file conditions around lines 3185-3220) is not pinned, so a change that stops offering a tool does not trigger the gate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gate passes on any scenario file in the change, not one that exercises the changed item: on this branch scenario-touch.py --base origin/main exits 0 because cases/run_context/15-17 (changed by commits 2b6beb20a and bc4cd7b26) are already in the branch diff."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Bootstrap: the manifest is new relative to origin/main, so the first landing is red under the strict rule unless a case, a cassette or a reviewed exception for the final digest is added in the same change. The owner or lead chooses; none was added."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "CI proof is owed on a throwaway branch: a one-character prompt edit turns prompt_tool_manifest red naming the file, and an added eval case turns the gate green. The first run also proves the toolchain and protoc install steps."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The one-character red is proven only by the synthetic unit test a_one_character_prompt_edit_changes_its_digest, not by a red run against the real source files."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "EP-2-S2 modified tool_loop.rs in this worktree after the fixture was generated (mtime 00:39 against a fixture at 00:32; read_page and find_in_page dispatch arms are present). The manifest pins builtin_tool_defs there, so regenerate once that slice's definitions land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The gate runs only on pull_request events, so a direct push to fix/ui-premium-restore or main is not gated; the workflow comment states this."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The mp-contracts test reads other crates by relative path (../../services/...); moving a pinned function fails the test by design, so such a move must update the test in the same change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "builtin_tool_defs lists result_query twice (tool_loop.rs:5435 and :5480). sse.rs keeps the first by name, so the second is dead data that the manifest pins as result_query#2."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The manifest pins source text, so a reformat or a comment inside a pinned item also flips the golden and requires a scenario touch. Conservative by design, but noisy."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The design names retrieval_tools.rs as a definitions source, but it holds no ToolDefinition; the retrieval tools are in builtin_tool_defs, so the design text should be corrected."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The system Python 3.14 has no pytest, so the 16 gate tests ran with the eval-lab venv (pytest 9.1.1). CI gets pytest from the eval-lab [dev] extra."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Bootstrap: against the real base, the manifest is new. The first landing PR passes only because unrelated cases/run_context files are already in the branch diff. The owner should add a reviewed exception for the final digest, or deliberately accept that incidental pass."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "scenario-touch.py passes on any file under cases/ or cassettes/ in the diff, whether or not that file exercises the changed prompt or tool. A long-lived branch that already touched a case therefore never gates later manifest changes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Manifest coverage is limited to three prompt files, the agent.rs and builtin_tool_defs lists, and two builders. CONVERSATION_SCOPE_NOTICE (source_validation.rs), the sse.rs system-message consts, tickets.create and the sse.rs offer gating are unpinned, so editing them does not trigger the gate."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The design asks the test to call runtime builders with a fixed input. The implementation hashes source text instead, because of a dependency cycle. Runtime-assembled output is therefore not pinned, and reformatting or comment edits flip the golden."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The tool_loop.rs read_page/find_in_page definitions near line 5604 sit outside builtin_tool_defs (a separate append/retain path). They are not pinned, so the manifest misses the page-reader tool schemas EP-2-S2 adds."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The DoD needs two CI run links from a throwaway branch: a one-character tool or prompt edit turns the job red and names the file, then an added case or cassette turns it green. The same run also proves the rust-toolchain and protoc 27.x steps work on ubuntu-latest."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "There is no .github/CODEOWNERS, so the reviewed-exceptions file and the manifest fixture lack the code-owner protection the design calls for. The owner must also mark the job as a required check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The workflow path filter lists retrieval_tools.rs, which holds no ToolDefinition, and does not list source_validation.rs or sse.rs. This mirrors the coverage gap above."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "result_query is defined twice in builtin_tool_defs. The manifest pins the dead second copy as result_query#2."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p mp-contracts --test prompt_tool_manifest",
+      "outcome": "9 passed, 0 failed (compiled in 14m37s, mostly waiting on the shared target lock); golden matches pinned fixture",
+      "passed": true
+     },
+     {
+      "command": "python -m pytest scripts/gates/tests/test_scenario_touch.py (eval-lab .venv python; the default python has no pytest)",
+      "outcome": "16 passed",
+      "passed": true
+     },
+     {
+      "command": "python scripts/gates/scenario-touch.py --base origin/main",
+      "outcome": "exit 0: manifest changed and 3 scenario file(s) changed with it (cases/run_context/15 etc., already changed by earlier branch commits, so the bootstrap rule is not proven)",
+      "passed": true
+     },
+     {
+      "command": "python scripts/gates/scenario-touch.py --base origin/no-such-branch",
+      "outcome": "prints 'cannot run: no merge base for origin/no-such-branch and HEAD' (the failure path works; I did not capture the exit code)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the prompt and tool manifest golden (mp-contracts test, fixture and pin), the scenario-touch gate with its tests and an empty reviewed-exceptions file, and widened eval-lab.yml. CI-only: no runtime switch, no proto, no migration, no rebuild or live proof. The manifest pins 119 items: 57 prompt items (every const, static and fn before the first cfg(test) in format_guidance.rs, author_guidance.rs and prompt_context.rs), 60 literal ToolDefinition blocks (the agent.rs process, offered and browser lists and tool_loop.rs builtin_tool_defs), and two builders (browser_act_tool_def, recall_conversations tool_definition). The test reads text from source because mp-contracts cannot call the builders without a dependency cycle; it folds CRLF, fails loudly on an unparseable tool block or an unlisted builder call, and names each changed item on a mismatch. The gate diffs the working tree against the merge base with the base ref (plus untracked files); the manifest or its pin triggers it; a case or cassette in the same change, or a reviewed exception pinned to the manifest digest, satisfies it; exit 2 when it cannot run. Hashes only, no user content (ZDR-neutral). The Rust test gets a green result after the final edits. The gate's green on origin/main is not evidence of the bootstrap rule (see depth findings and lead_todo)."
+  },
+  {
+   "id": "EP-2-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/page_reader.rs (new)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json (vendored copy beside zdr_posture_matrix.rs, byte-identical to the canonical file)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib page_reader (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "11 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib tool_loop::tests::reader",
+     "outcome": "15 passed, 0 failed (final tree, after the retrieval-scope gate change)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_posture_matrix",
+     "outcome": "8 passed, 0 failed (final tree); every enforcement row, now 30, is decided and normalised as the matrix says; the two new goldens decide as named"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+     "outcome": "10 passed, 3 failed (final tree). The new test the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked passes. The 3 failures predate this slice and sit in code it does not touch: every_field_has_a_row (cases() has no wake_context row, and HEAD's test file has none while zdr_features.rs names the field); usage_envelopes_* and usage_progress_* (the test's function_body searches LF terminators, but sse.rs is CRLF in this checkout, so bodies run to end-of-file; sse.rs and zdr_features.rs are unmodified)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full model-gateway lib)",
+     "outcome": "2750 passed, 3 failed, 4 ignored. The 3 failures are outside this slice's files: room_metadata::tests::the_allowlist_is_artifacts_and_the_retrieval_decline_until_a_later_slice_adds_work (room_metadata.rs untouched); zdr_posture::tests::every_non_get_route_is_classified (route inventory, http_routes.rs changed by EP-13-S2); zdr_posture::tests::no_raw_retention_claim_is_read_outside_the_named_inventory (flags space_routes/runs.rs run_live reading claims.zdr)"
+    },
+    {
+     "command": "cargo check -q -p model-gateway --lib (non-test code, earlier state)",
+     "outcome": "exit 0, no warnings; later test builds compiled the lib again with the final code"
+    },
+    {
+     "command": "node scripts/tests/zdr-contract-schema.mjs <worktree root>",
+     "outcome": "exit 0: well formed and consistent, after the two golden rows were given distinct inputs (the loader rejects duplicate inputs)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "148 passed, 10 failed. Three failures are this slice's pins and vendored copies (lead_todo 4 to 8); seven are in files this slice did not touch (quarry zdr-feature-matrix pin, usage-ledger pin, auth-core cross-plane token requests copy, model-gateway quarry-token-claims copy, verevonv3 space-denial-codes copy, two space-surface pins)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 services/model-gateway/src/page_reader.rs",
+     "outcome": "clean after one rustfmt pass; CRLF restored (422 of 422 lines)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: after the line '      MODEL_GATEWAY_CATALOGUE_PRICES: ${MODEL_GATEWAY_CATALOGUE_PRICES:-false}' in the model-gateway environment block, add '      MODEL_GATEWAY_WEB_READER: ${MODEL_GATEWAY_WEB_READER:-false}'. RESULT_HANDLES_EXTENDED has no compose pass-through today, so the reader is inert in a deployed gateway; with the S11 flip decide whether to add '      RESULT_HANDLES_EXTENDED: ${RESULT_HANDLES_EXTENDED:-false}'.",
+    "shared-edit apps/Model Plane/deploy/.env.example: optional. Add 'MODEL_GATEWAY_WEB_READER=false' only if the example is meant to list gateway switches (it lists six MODEL_GATEWAY_ keys today).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: new entry at the top with heading '## 2026-11-03 - Long-page reader (EP-2-S2): read_page and find_in_page reuse the parked-page store; offered only beside fetch_url where a page can be parked (not ZDR, not waived); behind MODEL_GATEWAY_WEB_READER (default off) and RESULT_HANDLES_EXTENDED; no new store, proto or migration; the outline gives way before ref is cut from a result.' Body: the design's D6 recommendation (new named tools on the existing handle store; result_query unchanged).",
+    "shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256: replace the line with 'c20446479a810ff59a9a2dcf7e9dfeb23371e3ceadaeeb49263ad2f916a21cba  zdr-posture-matrix.json'.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh, GOLDENS line 111: replace the pinned digest 9f61e99040d6895248fc8e22cec2adaf60e14dba7fefa1f3bf8ad7ccf149c201 with c20446479a810ff59a9a2dcf7e9dfeb23371e3ceadaeeb49263ad2f916a21cba.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json.sha256: the same digest line as item 4 (the fixture JSON is already byte-identical to the canonical file).",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json and its .sha256: copy the canonical bytes and the digest line from item 4. The crate's own tests read their copy and still pass at 28 rows.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json and its .sha256: same copy and digest. Then set ENFORCEMENT_ROWS from 28 to 30 in apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs (line 57) and in apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs (line 40), which pin the vendored row count.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/audit.rs, fn tool_data_category: add '| \"read_page\" | \"find_in_page\"' to the arm '\"web_search\" | \"fetch_url\" | \"web_fetch\" | \"news\" | \"traffic\" | \"yr_weather\"' so reader reads are audited as public_non_personal, not unclassified.",
+    "shared-edit apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs, TOOL_TRUST: add ('read_page', TrustClass::ExternalWeb) and ('find_in_page', TrustClass::ExternalWeb) beside the fetch_url row. Defence in depth: the arms replay the parked verdict, so no current path classifies these names by name.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/room_run.rs, BUILTIN_TOOL_CLASSES: after the fetch_url row add ('read_page', Some(StepClass::Web)) and ('find_in_page', Some(StepClass::Web)). Cosmetic; otherwise room steps show the generic Tool class.",
+    "After items 4 to 8, rerun scripts/tests/zdr-contract-sync.test.sh (expect only the seven unrelated pre-existing failures) and cargo test -q -p model-gateway --test zdr_posture_matrix.",
+    "Depth live proof F2, not run here (lead runs docker): with MODEL_GATEWAY_WEB_READER and RESULT_HANDLES_EXTENDED both true for the proof org's gateway, rebuild model-gateway via apps/Model Plane/scripts/compose.sh and recreate-with-live-env.sh. Ask a question whose answer sits past 4,000 characters of a long public page, capture the SSE transcript (fetch_url, then find_in_page, then a cited answer), and confirm the gateway log shows no second Quarry scrape.",
+    "Coordination: confirm with EP-13-S2 that its model-gateway grpc.rs ModelInfo test fix (already in the worktree during this run) lands with its slice."
+   ],
+   "deviations": [
+    "read_page takes section (an outline id such as s3) and offset (characters into the section; the result carries next_offset) instead of section-or-chunk; numbered chunk addressing is not built, and long sections are paged by offset.",
+    "find_in_page has no max_passages argument. It returns at most two passages (FIND_PASSAGES, mirroring grounding's per-source ceiling), most relevant first. select_passages reads only the first 60,000 characters of its input, so find runs per section.",
+    "Reader tool definitions are added per turn in tool_loop (tools_for_web_reader), not in builtin_tool_defs(), so the switch-off tool list is untouched. They are offered only beside fetch_url and only where a fetched page can be parked (not ZDR, not waived, RESULT_HANDLES_EXTENDED on).",
+    "WEB_CLASS_TOOLS keeps its original two names. The reader names are a separate WEB_READER_TOOLS list counted by is_web_class_tool(name, reader_on), so with the switch off the retrieval-scope filter is byte-identical; the design's wording put both names in WEB_CLASS_TOOLS.",
+    "The outline is trimmed from its end until the whole result fits MAX_TOOL_OUTPUT_CHARS, and the note states how many sections it lists (a result cut at the end would lose ref, because serde_json sorts keys).",
+    "The two goldens use inputs distinct from existing rows because the schema loader rejects duplicate inputs: e_zdr_token_web_reader_not_offered is a ZDR token on the azure-openai route with no connection; e_waived_web_reader_keeps_inline_head is a waiver bound to conn-2. Their meaning is carried by name and note. The not-offered property is enforced by construction and checked by a source-order test in zdr_feature_table, because posture rows express decisions only.",
+    "zdr_feature_table.rs has no tool-name list, so the design's add-the-two-names step had no target; the names went to the retrieval-scope list instead.",
+    "Not built as unit tests: the expired-ref path (no clock seam) and arm-level byte-identity through the Quarry-backed fetch arm (no quarry seam). The helpers are tested instead."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (shared; lead_todo 1)",
+    "apps/Model Plane/deploy/.env.example (optional; lead_todo 2)",
+    "apps/Model Plane/docs/decisions/ledger.md (shared; lead_todo 3)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256 (pin; lead_todo 4)",
+    "scripts/tests/zdr-contract-sync.test.sh (GOLDENS pin; lead_todo 5)",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json.sha256 (pin; lead_todo 6)",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json and .sha256 (vendored copy; lead_todo 7)",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json and .sha256 (vendored copy; lead_todo 8)",
+    "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs (ENFORCEMENT_ROWS 28 to 30; lead_todo 8)",
+    "apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs (ENFORCEMENT_ROWS 28 to 30; lead_todo 8)",
+    "apps/Model Plane/rust/services/model-gateway/src/audit.rs (tool_data_category; lead_todo 9)",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs (TOOL_TRUST; lead_todo 10)",
+    "apps/Model Plane/rust/services/model-gateway/src/room_run.rs (BUILTIN_TOOL_CLASSES, cosmetic; lead_todo 11)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof F2: with MODEL_GATEWAY_WEB_READER=true and RESULT_HANDLES_EXTENDED=true, run fetch_url, then find_in_page, then a cited answer past 4,000 characters, with no second Quarry scrape. This needs docker, so the lead runs it.",
+     "Shared edits handed back in lead_todo: docker-compose.yml switch pass-through, ledger.md entry, the zdr-posture-matrix .sha256 pins (canonical and model-gateway fixture), the zdr-contract-sync.test.sh GOLDENS digest, and the vendored copies in mp-contracts and execution-core with ENFORCEMENT_ROWS 28->30. Until these land, zdr-contract-sync.test.sh fails on this slice's pins.",
+     "audit.rs tool_data_category, mp-content-safety TOOL_TRUST and room_run BUILTIN_TOOL_CLASSES do not yet name read_page and find_in_page (lead_todo 9-11)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof F2 is owed (fetch_url, then find_in_page, then a cited answer past 4,000 characters, with no second Quarry scrape) with both switches on for the proof org; not run here, the lead runs docker."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "RESULT_HANDLES_EXTENDED has no compose pass-through today, so the reader stays inert in a deployed gateway even with MODEL_GATEWAY_WEB_READER=true; the S11 flip has to decide it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Switch-off byte-identity of the fetch arm and the screen-before-park property are asserted on the helpers (fetched_page_output, park_extended_result), not through the Quarry-backed arm; a quarry seam would close the gap."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The expired-ref path (resolve after HANDLE_TTL) has no unit test because there is no clock seam; the unknown-ref path is tested and both share resolve()."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The outline budget is tested on a synthetic 40-section page only; a real long page with many headings has not been measured through the fetch arm."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "find_in_page returns at most two passages (FIND_PASSAGES mirrors grounding's per-source ceiling) and does not offer the design's max_passages up to 5. select_passages reads only 60,000 characters, so find runs per section, and a window that crosses a heading cannot be returned."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "locate() places a passage by its first text match: a sentence repeated earlier in the same section gets the earlier offset, and a passage that cannot be placed is dropped rather than guessed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Headings inside fenced code blocks count as section headings. Above 40 headings the sections are merged under their first heading, which hides sub-headings from the outline."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "TOOL_TRUST in mp-content-safety has no read_page or find_in_page row. The arms replay the parked verdict, so no current path classifies those names, but a future name-based path would label them org-internal (lead_todo 10)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ToolResultStore::resolve clones the whole stored page (up to about 1 MiB) on every read_page or find_in_page call, as result_query already does; a shared payload would avoid the copy."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "duplicate_call_signature does not cover the reader tools, so an identical repeated find_in_page is not short-circuited; the loop guard is the only stop."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The reader result is capped at MAX_TOOL_OUTPUT_CHARS by trimming outline rows from the end. Sections past the cut are reachable only by find_in_page or by guessing ids; the note says how many rows are listed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The handle store is per process, so refs do not cross gateway replicas and a resumed stream on another replica cannot read them (design risk 5, unchanged)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The two golden rows use inputs distinct from existing rows because the loader rejects duplicate inputs (ZDR token on azure-openai with no connection; waiver bound to conn-2). The owner should confirm these rows match the design's intent."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Pre-existing and not from this slice: zdr_feature_table's function_body searches LF terminators in the CRLF sse.rs, so two usage tests fail on this checkout, and cases() has no wake_context row so every_field_has_a_row fails. These three failures predate EP-2-S2."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "room_run BUILTIN_TOOL_CLASSES and audit tool_data_category do not yet name the reader tools (lead_todo 9 and 11). Until then room steps show the generic Tool class and audit records say unclassified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "RESULT_HANDLES_EXTENDED has no compose pass-through, so external_parking_allowed is false in a deployed gateway and the reader stays inert even with MODEL_GATEWAY_WEB_READER=true. This must be decided before the switch is flipped."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The F2 live proof is owed: fetch_url, then find_in_page or read_page, then a cited answer for a fact past 4,000 characters, with no second Quarry scrape. Both switches must be on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The implementer's deviation note says WEB_CLASS_TOOLS kept two names and a separate WEB_READER_TOOLS list was added, but the final tree adds read_page and find_in_page to WEB_CLASS_TOOLS directly (tool_loop.rs:5570), and no WEB_READER_TOOLS or is_web_class_tool exists. This matches the plan row. The only switch-off difference is that a client-supplied tool named read_page or find_in_page is now pruned on a knowledge_only turn."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "tests/fixtures/zdr-posture-matrix.json under model-gateway is not in the owned list. It is the vendored test fixture beside zdr_posture_matrix.rs, it is byte-identical to the canonical file, and the test needs it, so I accepted it as a test file beside a changed file."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Switch-off byte-identity and the waived and ZDR non-parking cases are tested on fetched_page_output and park_extended_result helpers, not through the Quarry-backed fetch_url arm. There is no quarry seam."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The expired-ref path (resolve after HANDLE_TTL) has no unit test because there is no clock seam. The unknown-ref and foreign-user paths are tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "find_in_page caps at two passages (FIND_PASSAGES) and has no max_passages argument. It searches each section separately, so a passage that spans a heading boundary cannot be returned."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "page_reader::locate places a passage at its first textual match, so a sentence repeated earlier in the same section reports the earlier offset. Headings inside fenced code blocks also count as section openers."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Each read_page and find_in_page call re-runs outline() and clones the full parked page (up to about 1 MiB) through ToolResultStore::resolve, as result_query does today."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The two posture goldens use inputs distinct from existing rows: a ZDR token on azure-openai with no connection, and a waiver bound to conn-2. They assert only the posture decision. The not-offered property is checked by a source-order test in zdr_feature_table. The owner should confirm this reading of the goldens."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Three zdr_feature_table failures predate this slice: there is no wake_context row, and function_body searches LF in the CRLF sse.rs. Because of them, the plan's combined --test zdr_posture_matrix --test zdr_feature_table command cannot go green on this checkout."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib page_reader",
+      "outcome": "11 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib tool_loop::tests::reader",
+      "outcome": "15 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test zdr_posture_matrix",
+      "outcome": "8 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+      "outcome": "10 passed, 3 failed: every_field_has_a_row_that_matches_its_treatment (zdr_feature_table.rs:332), usage_envelopes_are_not_published_for_a_zdr_turn (:457), usage_progress_is_not_streamed_for_a_zdr_turn (:477). The slice's new test (web reader offered only where a page can be parked) passes. HEAD's version of this test file has no wake_context row, consistent with the implementer's claim that these predate the slice.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p model-gateway --lib",
+      "outcome": "exit 0, no errors (only an unused-result warning in a test module at tool_loop/other file line ~4789, not this slice)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Built the long-page reader behind MODEL_GATEWAY_WEB_READER (strict literal-true parser, default off). page_reader.rs is pure: outline (Markdown headings, or read-sized windows without headings; at most 40 sections), section reads paged by character offset (4,000 per read), and find built on grounding::select_passages run per section, with each passage placed in its section. tool_loop.rs: the fetch_url arm returns outline, ref, first chunk and note only when a page was parked and the reader is on; read_page and find_in_page arms resolve through the tenant-keyed handle store (same tenancy as result_query), require RESULT_HANDLES_EXTENDED and a turn that is neither ZDR nor waived, and return parked provenance through read_back_provenance, so flagged pages keep their SCREENING label. The reader tools are offered per turn only beside fetch_url and only where a page can be parked; with the switch off the tool list, the dispatch (unknown-tool error) and the retrieval-scope filter are unchanged. The outline gives way one row at a time so the whole result fits MAX_TOOL_OUTPUT_CHARS, because serde_json sorts keys and ref would otherwise be cut. No proto, migration or SSE change. Two rows added to the posture matrix (30 rows) with a schema-loader pass and Rust decision pass. Coordination: during the run the model-gateway test target failed on a ModelInfo literal in grpc.rs (test module) after EP-13-S2's uncommitted proto change; EP-13-S2 fixed it in the worktree before my final runs. I did not touch grpc.rs. No commits, staging or docker; all cargo runs used C:/dev/mp-target-w2 with CARGO_INCREMENTAL=0. The target was shared with other batch slices, so builds queued on its lock."
+  }
+ ]
+}

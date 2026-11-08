@@ -1,0 +1,859 @@
+{
+ "batchId": "W3-07",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-8-S3",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/http/handlers.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/http/ai_settings_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/persona.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/PersonaSection.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/ai-settings-client.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/python/eval-lab-py/cases/run_context/18_do_run_follows_a_tone_preset.yaml (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/python/eval-lab-py/tests/test_runner.py"
+   ],
+   "notes": "Owned work is complete and nothing was run (code first). Built: user-core AISettings.tonePreset (closed set; a save that names no tone keeps the stored one; invalid tone gets a typed 400 envelope with details.allowed); GET and PUT return tonePresetsAvailable from TONE_PRESETS_VISIBLE (strict \"true\"). BFF: persona.rs fetch_tone_preset (60 s cache, failures cached too, default and unknown not sent) and inject_persona_instructions strips any client persona_tone and sets the stored one. MG: InvokeRequest.persona_tone; Tone enum with one fixed sentence per name; tone renders inside the personal layer after the persona text; MODEL_GATEWAY_TONE_PRESETS strict switch, default off, so switch-off composition is byte-identical. SPA: radio group in PersonaSection shown only when offered; ai-settings-client.ts does read-then-PUT; settings.set_tone_preset registry entry plus model-access exempt row; action-registry test count 250 to 251. Design tests are written under their named descriptors. Eval case 18 is added (skips until a harness passthrough exists). The batch does not compile until the shared edits in lead_todo land: sse.rs, zdr_features.rs, normalize.rs and tests/zdr_feature_table.rs (required for the MG crate), and dispatchers.rs and handlers.rs (required for the action to have a backend). Goldens, the prompt-tool manifest and the compose lines are guard or lead steps.",
+   "deviations": [
+    "Path: the launch entry names apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs, which does not exist. The code is in src/domains/spaces/mod.rs, and that file is what I edited.",
+    "Cache: the design puts the tone cache on AppState. I used a process static keyed by user-core URL and user id, because AppState is built by struct literal in 23 files (about 32 sites), so one new field would be a large shared edit. The design test tone_cache_is_on_appstate became tone_preset_is_read_once_a_minute_per_person.",
+    "New files outside new_files: src/shared/api/ai-settings-client.ts (CLAUDE.md puts API clients under src/shared/api; settings-client.ts and persona-client.ts are not owned) and eval case cases/run_context/18_do_run_follows_a_tone_preset.yaml (the batch note requires an eval case or cassette for the persona-prompt change). tests/test_runner.py asserts the suite holds 17 cases, so I moved it to 18 and added an assertion for the new case.",
+    "Not created: docs/plans/wave3/evidence/EP-8-S3.md. It is the live-proof record and belongs to the depth phase.",
+    "Decision by default, not in the design text: the tone is not gated by the persona switches (global BFF switch or per-thread toggle). It renders after the persona text inside the same personal layer, and it renders with no persona text at all.",
+    "Responses: GET and PUT /api/v1/settings/ai gain tonePreset (default 'default') and tonePresetsAvailable even with every switch off. Both are additive JSON fields. The four existing fields keep the old whole-object write semantics unchanged.",
+    "Rule-level deviation from 'every switch off is byte-identical': the BFF makes one cached user-core GET per user per minute on chat and run turns even when MODEL_GATEWAY_TONE_PRESETS is off, because design D6 has no BFF-side switch. The composed prompt is identical with the switch off; outbound calls are not."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (REQUIRED TO COMPILE): in fn authored_layers, the AuthoredLayers literal at about line 8179. After the line `        persona: req.persona_instructions.clone(),` add `        tone: crate::run_context::tone_for_turn(req.persona_tone.as_deref()),`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (REQUIRED TO COMPILE, each anchor occurs once): (a) after line 160 `    (\"persona_instructions\", Treatment::Honored),` add `    (\"persona_tone\", Treatment::Honored),`; (b) after line 272 `        persona_instructions: _,` add `        persona_tone: _,`; (c) after line 321 `        \"persona_instructions\",` add `        \"persona_tone\",`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs (REQUIRED TO COMPILE): in fn make_request (InvokeRequest literal), after line 611 `            persona_instructions: None,` add `            persona_tone: None,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (REQUIRED, every FIELD_TREATMENTS entry needs a case row): in cases(), after the persona_instructions tuple (about lines 307-311) add the tuple `(\"persona_tone\", with(\"persona_tone\", json!(\"direct\")), None),` in that file's multi-line layout.",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs (REQUIRED: without it settings.set_tone_preset has no backend, which the action-registry test policy forbids, and a tone-only PUT would reset the four AI fields): insert after dispatch_settings_update_setting (ends about line 3685) the function `// Saves the caller's reply tone (EP-8-S3). user-core writes every AI field back on a PUT, so the four existing fields are read first and sent unchanged; a PUT of the tone alone would reset them.` / `pub(super) async fn dispatch_settings_set_tone_preset(state: &AppState, user: &AuthenticatedUser, input: &Value) -> Response {` / `    let tone = ticket_string(input, \"tonePreset\");` / `    if !crate::domains::persona::is_tone_preset(tone) {` / `        return ticket_bad_request(\"settings.set_tone_preset requires a tonePreset of default, professional, friendly, direct, warm or neutral\");` / `    }` / `    let actor = actor_for_user(user);` / `    let url = format!(\"{}/api/v1/settings/ai\", state.user_core_url);` / `    let (status, Json(mut settings)) = proxy_json(state, Method::GET, &url, None, None, Some(&actor), None).await;` / `    if !status.is_success() {` / `        return owner_json_response_to_envelope(\"settings.set_tone_preset\", user, status, settings);` / `    }` / `    if let Some(object) = settings.as_object_mut() {` / `        object.remove(\"tonePresetsAvailable\");` / `        object.insert(\"tonePreset\".to_owned(), json!(tone));` / `    }` / `    let (status, Json(resp)) = proxy_json(state, Method::PUT, &url, Some(settings), None, Some(&actor), None).await;` / `    owner_json_response_to_envelope(\"settings.set_tone_preset\", user, status, resp)` / `}`",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs (REQUIRED with the previous entry): (a) in the use list of dispatchers (about line 64) add `dispatch_settings_set_tone_preset,` between dispatch_settings_delete_api_key and dispatch_settings_update_me; (b) after the `\"settings.update_setting\" => {` arm (about lines 274-276) add the arm `\"settings.set_tone_preset\" => {` / `    dispatch_settings_set_tone_preset(&state, &user, &body.input).await` / `}`.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (lead applies; compose is not owned): in service model-gateway environment, after line 420 `      MODEL_GATEWAY_USER_LOCALE_CONTEXT: ${MODEL_GATEWAY_USER_LOCALE_CONTEXT:-false}` add `      MODEL_GATEWAY_TONE_PRESETS: ${MODEL_GATEWAY_TONE_PRESETS:-false}`.",
+    "shared-edit apps/Control Plane/docker-compose.yml (lead applies): in service user-core (block lines 378-530, environment lines 397-479), after line 446 `            SPACE_POLICY_ADMIN_WRITES: ${SPACE_POLICY_ADMIN_WRITES:-false}` add `            TONE_PRESETS_VISIBLE: ${TONE_PRESETS_VISIBLE:-false}`.",
+    "owner (not edited by me): add `MODEL_GATEWAY_TONE_PRESETS=false` to apps/Model Plane/deploy/.env.example beside MODEL_GATEWAY_USER_LOCALE_CONTEXT, and `TONE_PRESETS_VISIBLE=false` to the user-core env example.",
+    "guard, admission golden (after the shared edits): `cd apps/Frontend Plane/verevonv3 && VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts`. Then copy the generated src/shared/api/contracts/agent-action-admission.json to apps/Model Plane/api/contracts/agent-action-admission.json and re-vendor it to apps/Model Plane/go/services/capability-core/internal/api/testdata/, apps/Model Plane/rust/services/execution-core/tests/fixtures/ and apps/Model Plane/rust/services/model-gateway/tests/fixtures/. Refresh apps/Model Plane/api/contracts/agent-action-admission.json.sha256 and the pin on line 209 of scripts/tests/zdr-contract-sync.test.sh, then run `bash scripts/tests/zdr-contract-sync.test.sh`. Without this, admission-contract.test.ts and the vendor checks fail.",
+    "guard, prompt-tool manifest: `cd apps/Model Plane/rust && MP_UPDATE_PROMPT_MANIFEST=1 cargo test -p mp-contracts --test prompt_tool_manifest`, then refresh apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json.sha256. The scenario-touch gate is met by the new eval case cases/run_context/18_do_run_follows_a_tone_preset.yaml.",
+    "lead: the depth phase creates docs/plans/wave3/evidence/EP-8-S3.md with the paired-answer live proof (Neutral against Direct threads, MG composed-text log).",
+    "lead: src/shared/actions/action-registry.test.ts now asserts 251 registry ids. Any other slice in this batch or in a later merge that adds an action must renumber that assertion.",
+    "guard test commands, not run by me (set pnpm_config_verify_deps_before_run=false): `cd apps/Control Plane/user-core && go test ./internal/http/...`; `cd apps/Model Plane/rust && cargo test -q -p model-gateway --lib run_context`; `cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets tone`; `cd apps/Frontend Plane/verevonv3 && pnpm exec vitest run src/features/settings/components/PersonaSection.test.tsx src/shared/actions/action-registry.test.ts`; `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit`; eval-lab `tests/test_runner.py` (case count 18). action-registry.test.ts P-SPA1 stays as main's known failure."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "settings.set_tone_preset is registered without a gateway dispatcher until the dispatchers.rs and handlers.rs shared edits land, and the registry test comment forbids contracts that have no backend."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "user-core PUT /api/v1/settings/ai writes all four existing AI fields back (struct patch), so any save that carries only one field resets aiEnabled, modelPreference, dataCollectionEnabled and personalizationEnabled; the existing settings.update_setting action with key ai has the same bug, and only the new tone path reads first."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The tone sentence ignores both persona switches (BFF global and per-thread); the owner should confirm that switching Persona off in Settings does not also silence the tone."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The BFF reads user-core once a minute per user on every chat and run turn even with MODEL_GATEWAY_TONE_PRESETS off, because the design gives the BFF no switch; a BFF-side switch would remove that cost."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The tone cache is a process static keyed by user-core URL and user id instead of an AppState field, because AppState is built by literal in 23 files; the owner should accept this deviation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A tone chosen by one member shapes the shared room reply for every member, as persona text already does; the Space scope rules should say tone grants no authority."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A saved tone reaches replies up to 60 seconds late, because saving does not invalidate the BFF cache."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ai-settings-client.ts saves by reading then writing the whole AI object, so two tabs saving different AI settings at once can overwrite each other's four existing fields."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "TONE_PRESETS_VISIBLE is read with os.Getenv on every request in handlers.go, while the other user-core switches are read once at startup in cmd/server/main.go; move it to a Server setter if the startup pattern is wanted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ZDR direct stream's use of composed authored instructions is unverified, and zdr_features marks persona_tone Honored on the assumption that it follows the persona path."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing in this slice has been compiled or run; the Go, Rust, Vitest, typecheck, golden and eval-lab count assertions are unverified until the guard builds the batch."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Depth-phase live proof is still owed: paired answers in Neutral and Direct threads, the MG composed-text debug log, and eval case 18 once the harness can pass persona_tone and a tone fixture exists."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The thread-context inspector in json_handlers.rs shows a persona segment but no tone segment, and its token estimate counts persona text only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The tone sentences are English-only fixed code, like the other authored layers; the Norwegian copy appears only in the settings UI."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Control Plane/docker-compose.yml",
+    "apps/Model Plane/deploy/.env.example (owner)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerated by guard)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json.sha256 (guard)",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/prompt-tool-manifest.json (regenerated by guard)"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-8-S6",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0103_agent_memory_scope_key.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0103_agent_memory_scope_key.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/space_memory.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/proto/model_plane/v1/memory.proto",
+    "apps/Model Plane/go/services/capability-core/internal/api/memory_space_scope_test.go",
+    "docs/plans/wave3/evidence/EP-8-S6.md"
+   ],
+   "deviations": [
+    "Assumed D3 = (b): keep `scope` as the kind with a closed CHECK added NOT VALID, add scope_id, audience_hash, audience_revision, source_label; capability-core keeps its smaller enum.",
+    "Assumed D5 = (b): every Space row is stamped with the audience hash and revision of the message it came from (or, for a save, the thread's current audience). Recall and the withheld count stay in S7.",
+    "Assumed D11 = refuse: a thread with a zdr_waived run writes nothing (inline and background), a waived IndexMemory caller gets failed_precondition space_memory_not_written:waived, and ZDR credentials never reach a writer (they cannot hold session:write, and IndexMemory refuses them first).",
+    "Assumed D4 = (a), isolation: nothing in S6 reads Space rows.",
+    "Migration is 0103_agent_memory_scope_key, not 0075. 0075 is already taken on this branch (0075_space_mentions_and_wake_origin). Round B C-B2 moves round A's five migrations to 0100-0104, and EP-8 S6 is the fourth.",
+    "MemoryEntry fields are scope=11, scope_id=12, source_label=13, not 9/10/11. Fields 9 (origin_space_ref) and 10 (withheld_reason) already came in with WS17-S2.",
+    "Since the WS17 merge, the Space plan's containment (space::memory_scope, space_kind) decides what counts as a Space thread, not origin. Only contained (shared-room) threads write Space rows. A personal Space keeps learning into its owner's memory, as it does today.",
+    "Dreaming has no second loader. The existing loader already selects contained-thread messages, and its waived, org-policy, author and post filters already apply. With the switch on, the contained branch sends them to space_memory::mine_room_turns, which runs the deterministic extractor only.",
+    "This is narrower than the design: only an explicit \"husk at / remember that\" candidate becomes a room row. Name and preference candidates describe the speaker, and the assistant artifact note describes the thread, so they are dropped and never written as user rows either. Member `post` messages and non-owner authors stay excluded, as the existing extraction filters already do.",
+    "dreaming::scope_for_topic is left unchanged, so with the switch off a SPACE save is still a thread note, byte for byte. The SPACE route is taken in memory_grpc only when the switch is on and the thread is contained.",
+    "memory_control.rs and write_policy.rs are not changed. The Space write gate is space_memory::stamp_for plus the existing owner gate (permits_extraction or resolve_in_tx_for_thread). write_policy already lets a model write scope 'space' and refuses only 'org'.",
+    "zdr-refusals.json (both copies) is not edited. It is generated from mp-contracts zdr_refusal.rs, and no S6 code path needs the space_memory feature key, because refusals use the memory reason vocabulary. The feature key is in lead_todo.",
+    "Added an extra CHECK, agent_memory_space_audience_chk (a Space row must carry an audience), and a closed source_label CHECK. Both are NOT VALID."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/main.rs: add the line `mod space_memory;` in the alphabetical mod list right after `mod space;` (line 53). session-core does not compile without it. main.rs is owned by EP-14-S6 in this batch.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs: in the tests `fn entry(...)` MemoryEntry literal, after `withheld_reason: String::new(),` add `scope: String::new(),`, `scope_id: String::new(),` and `source_label: String::new(),`. The literal is exhaustive and stops compiling once the new proto fields exist.",
+    "Regenerate the proto bindings after the memory.proto change (MemoryEntry 11-13): `cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against proto/baseline.binpb && buf generate`, then commit the checked-in Go gen under go/gen/model_plane/v1/.",
+    "Optional: add the ZDR feature key space_memory. In apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs FEATURES, append `Feature { key: \"space_memory\", label: \"Space memory\" },` after sandbox_workspace. Then run MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal, copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json, update the .sha256 pins and the digest in scripts/tests/zdr-contract-sync.test.sh, then run bash scripts/tests/zdr-contract-sync.test.sh. No S6 code depends on this key.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block add `SESSION_SPACE_MEMORY_ENABLED: ${SESSION_SPACE_MEMORY_ENABLED:-false}`. The owner adds the .env.example line `SESSION_SPACE_MEMORY_ENABLED=false`, with a comment that it stays off until D2-480, D2-481 and D2-461 are closed.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (newest first): \"2026-11-03 EP-8 S6 (dark): One scope key: `scope` is the kind (closed CHECK, NOT VALID), `scope_id` the instance; Space memory is isolated, written only for shared-room threads with a Space decision and an audience stamp, deterministic extractor only, never mirrored to Letta; waived and ZDR refuse (D3=b, D4=a, D5=b, D11=refuse taken by default under the code-first order, pending owner ruling).\"",
+    "shared-edit apps/Model Plane/ZDR.md: in the store table add the row `agent_memory scope='space' (EP-8 S6, SESSION_SPACE_MEMORY_ENABLED off): no write on a ZDR credential (session:write refused) or a waived credential/thread; never mirrored to Letta; erased by Space deletion in S7`.",
+    "Guard compile: cargo test -q -p session-core --lib space_memory (11 unit tests) and the capability-core test `go test ./internal/api/ -run TestCapabilityCoreScopeEnumCannotWriteSpace`. DB harness (#[ignore]): space_turn_writes_space_row_with_audience_stamp, space_turn_without_decision_writes_nothing, waived_space_thread_not_mined, switch_off_space_writes_nothing, background_pass_writes_the_room_row_and_skips_external_content, space_save_is_stamped_with_the_thread_audience, migration_constraints_reject_unknown_scope. Then rerun the WS17 grpc_space_memory_tests and the memory_grpc DB set (switch off must leave them unchanged).",
+    "If the lead prefers the batch note's 'next free at or above 0105' over round B's renumber map, git mv both 0103 files to 0105 and change the two include_str! paths in space_memory.rs (test migration_closes_the_scope_set_and_has_a_revert) and the number in the migration header comment."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/main.rs (mod line)",
+    "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs (exhaustive MemoryEntry test literal)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs (optional space_memory feature key, generator of zdr-refusals.json)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D3 was taken as (b): `scope` kept as the kind with a closed NOT VALID CHECK plus a `scope_id`. It needs the owner's ruling and the Space session's acknowledgement before SESSION_SPACE_MEMORY_ENABLED goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D5 was taken as (b): rows carry the audience hash and revision they were learned under, and recall must filter on equality (S7). The owner must confirm this and the Control declassify path."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D11 was taken as refuse: a waived thread or caller and ZDR write no Space memory. The owner must confirm before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D4 was taken as (a), isolation. S6 reads nothing, but S7 is built on this assumption."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Only the explicit 'husk at / remember that' candidates become room rows. Name and preference facts and member `post` messages are not mined, so the design's live proof with two members stating a fact will only show owner-authored 'remember' turns. The owner should rule whether member posts are room statements."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Go-live still needs D2-480 and D2-481 (capability-core and the orchestrator write agent_memory around the gate) and D2-461 (follow-up turns without a Space decision) closed. Under D2-461 a follow-up writes nothing, which fails closed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The four NOT VALID CHECKs in 0103 must be VALIDATEd per deployment, after `SELECT DISTINCT scope FROM agent_memory` shows only the closed set. Until then, legacy rows with unknown scopes are not caught."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Space rows share owner '' and session_id NULL with org rows. Every reader that filters by scope is safe, but any future agent_memory query without a scope filter, or with `owner = ''`, would see Space rows. S7 should add a source-scan guard."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Migration 0103 sorts below the already-applied 0104 on live databases. sqlx applies it, but deployments must take this build before running any tool that assumes migrations are applied in order."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The IndexMemory SPACE route and the dream_once switch-on branch are pinned only by source scans, not by handler or DB tests. The process env switch cannot be set in tests (unsafe_code is forbidden), so a handler-level test needs an injectable flag."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Pending: switch on in dev, state 'Husk at vi leverer til Bergen på fredager.' in a shared room, run Dreaming, and psql must show one scope='space' row with the room's scope_id and audience hash and zero new user rows (evidence EP-8-S6.md)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "MemoryEntry.scope, scope_id and source_label are declared and always sent empty until the S7 Space readers fill them."
+    }
+   ],
+   "notes": "Built dark behind SESSION_SPACE_MEMORY_ENABLED, strict parser, default off. Nothing was compiled or run (code-first order).\n\n- **Switch off is unchanged.** The inline writer returns before any query, Dreaming keeps its skipped_space_scope branch, and a SPACE save stays a thread note.\n- **Status is partial for two reasons.** session-core needs `mod space_memory;` in main.rs (owned by EP-14-S6), and model-gateway's memory_provenance.rs test literal must gain the three new MemoryEntry fields. Both are in lead_todo.\n- **Writers.** The new module `apps/Model Plane/rust/services/session-core/src/space_memory.rs` is called from three places:\n  - the contained arm of append in `grpc.rs`;\n  - the contained branch of `dream_once` in `dreaming.rs`;\n  - the IndexMemory SPACE branch in `memory_grpc.rs`.\n- **Migration.** `apps/Model Plane/rust/services/session-core/migrations/0103_agent_memory_scope_key.sql`, plus its revert.\n- **Evidence.** `docs/plans/wave3/evidence/EP-8-S6.md`.",
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-14-S6",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/proto/model_plane/v1/run_ledger.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/request_snapshot.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/inference-core/src/request_capture.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc/real_rules_tests.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc/zdr_waiver_route_tests.rs",
+    "apps/Model Plane/rust/services/inference-core/src/lib.rs",
+    "apps/Model Plane/rust/services/inference-core/src/metrics.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0101_run_request_snapshots.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0101_run_request_snapshots.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/request_snapshots.rs",
+    "apps/Model Plane/rust/services/session-core/src/run_ledger_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+   ],
+   "notes": "I wrote the code and the tests but ran nothing, as ordered. All three switches default off, and each one turns on only for the exact value \"true\". With every switch off, inference-core has no capture handle, the writer returns FAILED_PRECONDITION and the sweep task parks without reading the database. The only new thing on the wire is InferRequest.run_id = 22, which routes nothing.\n\nWhat was built:\n- **Proto:** `InferRequest.run_id = 22`. A new `run_ledger.proto` with `RunLedgerService.RecordRequestSnapshot`, every field commented. S5 is not built yet, so S6 creates this file.\n- **mp-contracts (`request_snapshot.rs`):** the `RequestSnapshotV1` shape, the 256 KiB system and 512 KiB tools caps, canonical JSON and sha256 helpers, and a closed `purpose_name`.\n- **inference-core (`request_capture.rs`):** a bounded queue of 1,024 fed by `try_send`, after the provider call in both Infer and InferStream, never awaited. ZDR, waived and empty-run_id calls are skipped. A full queue drops the snapshot, counts it in `inference_request_snapshot_dropped_total{reason}`, and passes the per-run drop count to the run's next snapshot. A background writer mints a session-core token per org through auth-core.\n- **session-core:** migration 0101 (the round B number; 0073 is already used in this tree). The writer checks the token's org against the run's org (another org's run reads as not found), the run's owner, and the run's retention class: zdr and zdr_waived runs are refused with zdr_durable_mutation_forbidden. It stores the system and tool blobs once per run by digest and numbers each call under the run's row lock. TTL is 7 days, clamped to 1-30. The sweep runs every 10 minutes in batches of 500. The org purge now deletes snapshots explicitly before `runs`.\n- **Callers that now fill run_id:**\n  - execution-core: Do rounds.\n  - Gateway: tool rounds, the Ask answer, and side calls through `inherit_turn_floors`.\n- **ZDR matrix:** two rows added and the sha256 re-pinned.\n\nTests written but not run: mp-contracts `request_snapshot_v1_golden`, `request_snapshot_caps_truncate` and `call_purpose_closed_list`; inference-core `capture_*`; session-core unit tests plus the DB tests (marked ignore) `record_snapshot_*`, `snapshot_sweep_deletes_expired`, `snapshots_cascade_on_thread_delete` and `org_purge_deletes_snapshots`; execution-core `do_round_sets_run_id_and_purpose`; gateway `aux_requests_name_the_turns_run`.\n\nThe existing gdpr total test asserted 29, but the summary already had 30 fields. With my two new fields it now asserts 32.\n\nWrites cannot work yet: inference-core's session-core token is minted with retention zdr and has no write scope, so every write would be refused. The Control Plane principals edit in lead_todo has to land first.",
+   "deviations": [
+    "Assumed D1 = (a): capture once in inference-core's Infer and InferStream handlers after routing, behind the provider call, never awaited; a dropped write is counted.",
+    "Assumed D2 = (b): the snapshot holds params, routed model and provider, system digest, tools digest, prompt tiers, a message manifest (role, source_tag, chars, sha256) and an image manifest. No message bodies, no image bytes, no structured-output schema (only a bool). System and tools are stored once per run as capped blobs keyed by digest.",
+    "Assumed D4 = 7-day TTL, clamped 1-30, env SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS; sweep every 10 min in batches of 500 behind SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED.",
+    "Assumed D13 = refuse waived runs at the snapshot store, as ZDR (decisions_defaults): inference-core skips waived bearers and session-core refuses zdr_waived runs.",
+    "The migration is 0101_run_request_snapshots (+ revert), not 0073. 0073 is already taken in this tree (0073_thread_space_kind), and round B's C-B2 renumber map moves round A's 0073 to 0101.",
+    "RecordRequestSnapshotRequest uses `InferPurpose purpose = 3` instead of a string call_purpose (round A's C1 resolution). It also has four more fields: org_id = 9, user_id = 10, system_truncated = 11, tools_truncated = 12. That gives session-core the caller's org and user to check against the run and the token, and a truncation flag per blob.",
+    "call_seq 0 means session-core numbers the call next in its run, under the run's row lock. inference-core runs as several replicas and always sends 0, so a per-process counter could not be trusted.",
+    "run_ledger.proto is created by S6 with only the snapshot RPC, because S5 (which was to create it) is blocked and not built. S5 and S7 add their RPCs to it later.",
+    "Failed Infer calls are captured too, under the model they asked for. A streamed call is captured when its stream opens, so its snapshot names the requested model and an empty provider (the serving model only appears in the stream's chunks).",
+    "Gateway side calls (title, follow-ups and other auxiliary calls) inherit run_id from the turn's request through inherit_turn_floors.",
+    "The gdpr purge_summary_total test expected 29 although the summary already had 30 fields. With the two new snapshot fields it now expects 32."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D1 assumed (a): capture is in inference-core's Infer/InferStream after routing. The owner must accept it before INFERENCE_REQUEST_CAPTURE is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D2 assumed (b): system prompt, tool catalogue, params, routed model and a message manifest without bodies, with blobs stored once per run by digest. The owner must accept it before SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D4 assumed: 7-day TTL, clamped 1-30 via SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS, with the sweep behind SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED. The owner must accept it before the switches are turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D13 taken from decisions_defaults: waived runs are refused at the snapshot store, by both inference-core (waiver on the bearer) and session-core (retention_class zdr_waived)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In plane-service-principals.json, inference-core's session-core token is minted with retention zdr and only routing:read. authorize_operation therefore refuses every snapshot write with zdr_durable_mutation_forbidden until retentionByAudience.session-core becomes persistent and session:request-snapshots:write is granted. That widens a principal and needs a Control Plane owner decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "User-subject erasure is skipped in session-core (Q-ERASE). A user's snapshots, which can hold their memory block and persona text, stay until the TTL or an org purge."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs a live proof on the dev stack with both switches on (rebuild inference-core, session-core, execution-core and model-gateway): one snapshot row per call, one system blob and one tools blob per run, expires_at at now + 7 days, the sweep deleting a back-dated row, thread delete leaving zero rows, a ZDR-TEST org writing zero rows, and a saturated queue raising snapshots_dropped while the answer stays intact."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "capture_never_blocks_provider_call proves offer() is synchronous and drops at a full queue, but no test drives the full Infer handler with a fake provider while the queue is saturated."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Some InferRequest builders still send no run_id: execution-core grpc.rs:434 and llm_planner.rs:183, and the gateway's deep_research and other direct_infer calls outside inherit_turn_floors. Those calls get no snapshot until they fill it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Streamed calls, which most Ask answers are, record the requested model and an empty provider. The served model is only known from the stream's chunks."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Migration 0101 lands while 0103 and 0104 already exist and 0100/0102 are missing. On a database that already applied 0104, check that sqlx's migrator applies a lower-numbered new migration."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "offer() builds the snapshot synchronously on the request path once the cheap checks pass: one sha256 per message plus the system and tools text. The cost grows with prompt size; no await is involved."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The per-run drop counts live in process memory (max 4,096 runs). Drops that are not yet reported are lost on an inference-core restart; only the metric keeps them."
+    }
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/build.rs: in the mp_protos list, add the line `\"model_plane/v1/run_ledger.proto\",` right after `\"model_plane/v1/routing_policy.proto\",`.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/grpc.rs (serve): (1) in the generated-server import list, next to `routing_policy_server::RoutingPolicyServer,`, add `run_ledger_service_server::RunLedgerServiceServer,`. (2) After `let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone());`, add `// EP-14 S6: the request snapshot writer (refuses unless SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED).` and then `let run_ledger = crate::run_ledger_grpc::RunLedgerGrpc::new(pool.clone());`. (3) After `.add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))`, add `.add_service(RunLedgerServiceServer::with_interceptor(run_ledger, auth.clone()))`. Optionally add \"model_plane.v1.RunLedgerService\" to HEALTH_SERVICE_NAMES.",
+    "shared-edit apps/Control Plane/config/plane-service-principals.json, entry \"inference-core\": add \"session:request-snapshots:write\" to \"scopes\" and to \"scopesByAudience\".\"session-core\", and change \"retentionByAudience\".\"session-core\" from \"zdr\" to \"persistent\". The owner must decide first (depth finding). Then check apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts and any pinned copy.",
+    "Regenerate proto bindings (Rust via the build, Go and Python) for inference.proto (run_id = 22) and the new run_ledger.proto. Run buf lint, buf breaking --against proto/baseline.binpb and scripts/gates/buf-lint-ratchet.py.",
+    "Re-vendor apps/Model Plane/api/contracts/zdr-posture-matrix.json and its .sha256 (new digest a4b94d1d9014c7ddd85cfbc87c9b324411b4c8c48251fa033fc5cdc7f147ce75) into rust/crates/mp-contracts/tests/fixtures/, rust/services/execution-core/tests/fixtures/ and rust/services/model-gateway/tests/fixtures/. Update any digest pinned in scripts/tests/zdr-contract-sync.test.sh, and compare its failures to the pre-existing failure set by name (D0-003).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: under inference-core environment add `INFERENCE_REQUEST_CAPTURE: ${INFERENCE_REQUEST_CAPTURE:-false}`. Capture also needs SESSION_CORE_URL/ADDR, AUTH_CORE_URL and INFERENCE_ROUTING_SERVICE_API_KEY, which the routing-policy client already uses. Under session-core environment add `SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED:-false}`, `SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED: ${SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED:-false}` and `SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS: ${SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS:-7}`. The owner adds the same names to .env.example.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the newest entry \"Request snapshots are captured once, in inference-core, behind the provider call; a dropped write is counted, never silent (EP-14 D1, D2, D4 assumed by default; D13 waived = ZDR)\", marked proposed/implemented-dark pending owner acceptance.",
+    "shared-edit apps/Model Plane/ZDR.md: add the store run_request_snapshots and run_request_snapshot_blobs (EP-14 S6). Content: prompt text and tool schemas. Never written for ZDR or waived runs: inference-core skips them and session-core refuses with zdr_durable_mutation_forbidden. TTL 7 days (cap 30), cascade on run delete, explicit org purge. User-subject erasure is not covered (Q-ERASE).",
+    "Live proof per the design's S6 DoD, after the principal change and with both switches on, on a proof stack only. The compose defaults stay off until S7 and D3 are done.",
+    "Run python scripts/gates/log-content.py --check. The new warn/info lines name only the run id, the gRPC code and counts."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S7",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Application Plane\\convex-core\\convex\\agents.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Application Plane\\convex-core\\convex\\spaceAgents.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Application Plane\\convex-core\\convex\\schema.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Application Plane\\convex-core\\convex\\schema\\agentDefinitionVersions.ts (new, not in new_files)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Application Plane\\convex-core\\test\\agent-definition-versions.test.cjs (new)"
+   ],
+   "notes": "EP-6 S7 code is written, nothing run. convex-core gains: the agentDefinitionVersions table (feature file, composed in schema.ts); four service-key gateway functions (saveDraftForGateway, publishForGateway, listVersionsForGateway, getVersionForGateway) that check membership with requireGatewayMember; a body validator with a canonical sha256 digest; a version-aware agentPersonaForGateway; and a refusal of systemPrompt/tools writes on agents:update once a pointer exists. With no pointer anywhere, every path is byte-identical to before. agents.ts stays CRLF (704/704). Status is partial: two schema field additions are shared-edits for the lead, and the ZDR matrix row cannot be expressed under the strict loader. Pre-existing P0: agents:updateKnowledgeBindings and agents:updateRetrievalConfig are unauthenticated public mutations, left unchanged.",
+   "lead_todo": [
+    "shared-edit apps/Application Plane/convex-core/convex/schema/agents.ts: (a) after line 9 `import { v } from \"convex/values\";` add the line `import { agentDefinitionBodyFields } from \"./agentDefinitionVersions\";`. (b) Immediately before line 98 `    createdBy: v.optional(v.id(\"users\")),` (inside the agents table) insert these lines: `    // EP-6 S7 (AGENT_DEFINITION_VERSIONS): the version the gateway serves (absent = legacy row,`, `    // served from systemPrompt and tools as before) and the editable draft a publish copies`, `    // into an immutable agentDefinitionVersions row. The draft is not the status \"draft\".`, `    publishedVersion: v.optional(v.number()),`, `    draft: v.optional(v.object(agentDefinitionBodyFields)),`",
+    "shared-edit apps/Application Plane/convex-core/convex/schema/spaces.ts: immediately before line 201 `    projectionVersion: v.number(),` (the spaceAgentBindings table; line 230 is another table, do not touch it) insert: `    // EP-6 S7 (AGENT_DEFINITION_VERSIONS): the agent version this binding pins. Absent means`, `    // follow the agent's published version. Written only by the EP-6 S9 invoke-time pin.`, `    pinnedVersion: v.optional(v.number()),`",
+    "lead: add apps/Application Plane/convex-core/convex/schema/agentDefinitionVersions.ts to this slice's new_files (created here; schema.ts already imports and spreads it, and test/schema-split.test.cjs requires exactly that import).",
+    "guard, after the two shared-edits land: run `pnpm test` in apps/Application Plane/convex-core (tsx --test test/*.test.cjs) and `pnpm typecheck` there. test/agent-definition-versions.test.cjs has one case (agents carry the pointer and the draft...) that fails until the two shared-edits are applied; the other 11 do not depend on them.",
+    "lead decision, NOT applied by this slice: the ZDR posture-matrix row agent_definition_version (design section 5). The strict loader scripts/tests/zdr-contract-schema.mjs accepts only resolver rows (keys id, title, tags, inputs, expect, with a catalogue code), so a note row would fail zdr-contract-sync. Either record the content class in the ZDR documentation (apps/Model Plane/ZDR.md, shared) or change the loader and re-vendor zdr-posture-matrix.json to both fixture copies and re-pin the .sha256 files, then run bash scripts/tests/zdr-contract-sync.test.sh.",
+    "no regeneration needed: convex/_generated types derive from module exports and the schema; there is no .proto change, no numbered migration (Convex has none), and no prompt or tool definition changed, so no prompt-tool manifest, admission golden or eval case. No env switch is read in this slice; AGENT_DEFINITION_VERSIONS is read by the BFF in EP-6 S8, so nothing goes into deploy files now."
+   ],
+   "needs_other_files": [
+    "apps/Application Plane/convex-core/convex/schema/agents.ts (shared-edit, lead_todo item 1)",
+    "apps/Application Plane/convex-core/convex/schema/spaces.ts (shared-edit, lead_todo item 2)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json (ZDR row decision, not edited; lead_todo item 5)"
+   ],
+   "deviations": [
+    "Assumed OD-4 = (b): immutable published versions plus one draft, with a publishedVersion pointer on agents (the design's recommendation); the owner ruling is still open.",
+    "The table lives in a new P-CX1 feature file, convex/schema/agentDefinitionVersions.ts, not in convex/schema.ts as the launch list names. schema.ts only composes groups since the split. agents.draft, agents.publishedVersion and spaceAgentBindings.pinnedVersion belong to schema/agents.ts and schema/spaces.ts, which are not owned here, so they are shared-edits.",
+    "No ZDR posture-matrix note row was written (see lead_todo item 5). The content-class claim is pinned by a test that allowlists the version table's fields, so no transcript field can be added silently.",
+    "Bounds the design does not name, chosen as dark defaults: system prompt at most 4000 characters (the cap createSpaceAgentForGateway already applies), name 2-60 characters, model 1-200, at most 64 tool capability ids matching ^[a-z][a-z0-9_.-]{0,127}$, sorted and de-duplicated before digesting.",
+    "Authority in Convex is the service key plus requireGatewayMember, as in spaceAgents. The admin-or-creator and Space-manager role gate is the BFF's (S8), as the design places it.",
+    "agents:update refuses systemPrompt and tools writes only once publishedVersion exists. name, model, knowledgeSources and knowledgeBindings writes are unchanged, because the design names only the first two.",
+    "Publish writes one version row and moves the pointer only. The agents row's legacy fields are not mirrored, because the design says publish bumps the pointer.",
+    "No Convex function reads AGENT_DEFINITION_VERSIONS. With the BFF unchanged nothing calls the new functions, so switch-off behaviour is byte-identical. The reader is S8's."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "agents:updateKnowledgeBindings and agents:updateRetrievalConfig in convex/agents.ts are public mutations with no serviceKey and no identity check, so any client holding an agent id and its org id can widen that agent's retrieval scope; no caller exists in the repo; pre-existing and not changed here (delete both or gate them with assertServiceKey)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed OD-4 = (b) (immutable versions plus one draft, pointer on agents); the owner has not ruled, and AGENT_DEFINITION_VERSIONS must stay off until they do."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The ZDR posture-matrix row agent_definition_version is not added because the strict loader accepts only resolver rows; the lead must pick a ZDR.md statement or a loader change with re-vendored fixtures and re-pinned .sha256 files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "saveDraftForGateway and publishForGateway check gateway membership only, so the admin-or-creator (Space manager for Space agents) gate that S8 requires must exist in the BFF before any builder route calls them, or any org member can publish over another member's agent."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "versionDigest calls crypto.subtle.digest inside the publishForGateway mutation, and this repo uses Web Crypto only in actions and httpActions, so the first dev-deployment publish must prove it (a pure-JS SHA-256 is the fallback)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The save, publish, list and get handlers have no Convex harness, so two concurrent publishes must yield versions N+1 and N+2 with no duplicate or gap, which only a live run on a dev deployment can show."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Publish moves only the pointer, so the agents row's name, model and knowledgeBindings still drive live behaviour (retrieval reads the row; spaceAgentBindingsForGateway projects the row name) and agents:update still writes them after versioning; S8 must decide whether publish mirrors them or the version becomes authoritative."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "AGENT_DEFINITION_VERSIONS has no reader in this slice; S8 must read it with the strict parser before any BFF call, since the Convex functions are not flag-gated themselves."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "getById, listByOrg and listActiveByOrg return the row's systemPrompt, tools and the new draft to every service-key caller, so S8 must read the draft or version for the builder and strip draft from any browser response."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "spaceAgentBindingsForGateway does not project pinnedVersion (schema only in S7), so S9 must add that projection and the BFF pin read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "listVersionsForGateway returns at most 50 versions with no cursor, so the S8 history must page before an agent passes 50 publishes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The 4000-character prompt cap and the other bounds are my choices, so org agents with longer prompts cannot publish until shortened, and S8 must show that limit."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "publishedBy stores the gateway subject (externalAuthId), not a Convex users id like agents.createdBy, so the S8 history needs a lookup to show a display name."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "agentDefinitionBodyFields repeats the knowledgeBindings shape from schema/agents.ts, so a change to one must touch both."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S11",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/preset-agents.test.ts"
+   ],
+   "notes": "Built EP-6-S11 dark; nothing was run (no vitest, tsc, lint, build). preset-agents.ts: each preset declares requiredActionIds (triage-urgent-tickets requires tickets.create; the other three require none). New resolvePresetAgent(preset, admitted) keeps a required action only when the org admits it and it is model-executable (model-eligibility), and marks the preset available only when every required action is kept; an unavailable preset sends no actions. New switch presetAgentActionsEnabled() reads VITE_PRESET_AGENT_ACTIONS with the strict literal 'true' and defaults off; with it off every preset stays available and tool-free exactly as before. The change only narrows what a preset offers and grants nothing; the server remains authoritative. preset-agents.test.ts: added owner-action cases (switch off, strict parse, admitted, not admitted, plain-chat unaffected, all-required, not model-executable, narrowing only) and the registry check now covers requiredActionIds. Line endings: preset-agents.ts 151 CRLF lines, test 135, no bare LF. Status partial because the console still passes the authored preset and shows no availability, and no route serves the org's enabled-and-pinned set; both are in lead_todo and needs_other_files. Disclosure: one read-only `node -e` read the vitest version from node_modules/vitest/package.json; no test, build or lint ran.",
+   "deviations": [
+    "Assumed OD-4 = (b) immutable published versions plus one draft (design section 3 recommendation). S11 reads no agent definition, so no code here depends on it.",
+    "Assumed OD-5 = (a) Convex definition, applied tighten-only at invoke (design section 3 recommendation). The S11 resolver only narrows (required, then admitted, then model-executable). The S9 invoke-time pin is not built and this file does not need it, so the row's S9 dependency is sequencing only.",
+    "Added switch VITE_PRESET_AGENT_ACTIONS because the row and the design name none: default off, strict literal 'true', read by presetAgentActionsEnabled().",
+    "Availability rule chosen: a preset is available only when every required action is admitted (strict). An unavailable preset sends no actions rather than a partial set.",
+    "triage-urgent-tickets requires tickets.create only. Its assign step needs inbox.set_assignment, which has no owner executor (exempt in model-access.ts), so assignment stays a text proposal, as the goal already allows for effects.",
+    "The admitted set is the org's enabled rows that execution-core also pins, computed server-side. The frontend additionally requires isModelExecutableAction (model-access eligible) and never reads agent_action_admissions.",
+    "preset-agents.test.ts edited as the test file beside the owned module; no other files touched."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx: (a) add resolvePresetAgent and type ResolvedPresetAgent to the import from '@/shared/actions/preset-agents' (lines 40-44). (b) In runTask replace line 797 `const presetActions = preset ? presetAgentChatActions(preset) : undefined` with: `const resolved = preset ? resolvePresetAgent(preset, new Set<string>()) : undefined`, then `if (resolved && !resolved.available) return`, then `const presetActions = resolved ? presetAgentChatActions(resolved) : undefined`. The empty Set stands in until an admitted-set client exists; with the switch off this is a no-op.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx: in PresetPicker, inside `<For each={presetAgents}>` (line 1274) compute `const available = () => resolvePresetAgent(preset, new Set<string>()).available`, set the button to `disabled={props.disabled || !available()}`, and render `<Show when={!available()}>` under the description span with `i18n.tr('Ikke tilgjengelig i denne organisasjonen', 'Not available in this org')`. Add Show to the solid-js import if it is absent.",
+    "owner (not the lead) adds `VITE_PRESET_AGENT_ACTIONS=` (empty, so off) to apps/Frontend Plane/verevonv3/.env.example. Do not turn it on in any build until the depth live proof below passes.",
+    "No golden, prompt-tool manifest, proto or migration changes for this slice: it touches none of them, so the guard has no regeneration step for EP-6-S11.",
+    "Guard test command, from apps/Frontend Plane/verevonv3 with pnpm_config_verify_deps_before_run=false: `pnpm exec vitest run src/shared/actions/preset-agents.test.ts src/shared/actions src/features/agents`, then `node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit` (tsconfig.json checks nothing). Diff any failures against main; action-registry.test.ts P-SPA1 is pre-existing."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx: consumer wiring (see lead_todo shared-edit entries).",
+    "A read route for the org's enabled-and-pinned admissions. capability-core ListEnabled (internal/registry/agent_action_admissions_store.go) is reached only through the internal run-view path (internal/api/model_action_view.go). A model-gateway proxy, a BFF route under apps/Frontend Plane/verevonv3/apps/gateway/src and a client are needed; none exists. The route must report the set the Control run view offers, mode included. Owner to decide whether it needs an action-registry contract, since CLAUDE.md is contract-first for meaningful UI operations."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 assumed as (b) immutable published versions plus one draft; S11 reads no definition, so the choice has no effect in this file."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-5 assumed as (a) Convex definition applied tighten-only at invoke; S11's resolver only narrows, which matches it, and the S9 pin itself stays unbuilt."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No frontend source serves the org's enabled-and-pinned admissions; with the switch on, every preset that requires an action is unavailable (fail closed) until a read route exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A preset's tickets.create arrives as a client tool spec, which execution-core skips for reserved owner names (runtime_loop/agent.rs append_untrusted_tool_defs), so it reaches the model only through the Control run-view resolver; 'available' does not prove the model is offered the tool."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Depth live proof: with VITE_PRESET_AGENT_ACTIONS=true and MODEL_ACTION_ADMISSION=table, a triage run must show tickets.create offered by the run view, and with the row disabled the preset must show 'Not available in this org' and launch no run. [verify live]"
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The admitted-set route must match the Control run view: under the default MODEL_ACTION_ADMISSION=tickets_only the view requests tickets.create only (ticket_tools.rs:57 and :250), so a route that reports every enabled row would disagree with the run view in table mode. [verify live]"
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "triage-urgent-tickets is available on tickets.create alone; its assign step has no owner executor, so the owner should rule whether that is enough for a triage preset."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The all-required availability rule (partial admission means unavailable) is a judgement call; the owner may prefer a degraded but available preset."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The frontend tickets.create tool schema is generated by z.toJSONSchema from the registry input (agent-tools.ts schemaToParametersJson), not the pinned TICKET_CREATE_MODEL_PARAMETERS_JSON, so a client spec can never byte-match the server's exact-parameter pin; harmless only while the server ignores client reserved names."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing has been run: vi.stubEnv on import.meta.env, the new imports of model-eligibility, and the TypeScript types of the new tuple literals all need the guard's vitest and tsc6 run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "AgentRunConsole still passes the authored preset and shows no availability, so the switch has no effect until the shared edits in lead_todo land."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-P3",
+   "status": "blocked",
+   "files_changed": [],
+   "notes": "I wrote no code. The design (docs/plans/wave3/EP-6-agents-and-automations-hubs.md, \"Phase 3 outline\") says this row is an outline that has not been sliced. The launch entry gives it no files, no new files, no flag and no tests, and neither integration report reserves a proto or migration number for it. The design also says three things must be designed before slicing: who may read an agent's memory in a shared Space, deletion order in SC/src/gdpr.rs when a definition is deleted, and how the hub shows \"what this agent remembers\". Neither OD-6 nor OD-4 is the blocker, because the design recommends an option for both. The real gaps are the missing slice design and the dependencies EP-8 slice 1 (the scope + scope_id memory key) and EP-6-S7 (versioned definitions). The repo has no named_agent ZDR refusal key yet. Any dark build now would mean editing shared files that other agents own in this batch (zdr-refusals.json, session-core memory, gdpr.rs) against a contract nobody has designed, so I chose not to.",
+   "deviations": [
+    "Assumed OD-6 = (a): an interactive turn runs as the person invoking it, with their delegated bearer, narrowed by the agent's allowlist and cap. An unattended run is a WS20 schedule naming the agent version, with stored consent and service credentials. Never a service principal per agent, never stored delegated authority. Recorded only, since no code was built.",
+    "Assumed OD-4 = (b): immutable numbered agentDefinitionVersions with a digest, plus a publishedVersion pointer and one editable draft; rollback republishes an old version as a new number. Recorded only; S7 owns it.",
+    "Status is blocked rather than partial: the row has no owned files and no slice design, so nothing can be built that does not depend on undesigned parts."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-6 (named-agent authority) was taken at the recommendation, (a) the invoking person interactively plus WS20 stored consent unattended, and needs the owner's ruling before any phase-3 slice is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 (definition versioning) was taken at the recommendation, (b) immutable published versions plus one draft, and needs the owner's ruling before S7-S11 and P3 are switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "P3 needs a slice design covering the agent-memory audience rule in shared Spaces, deletion of agent-scoped memory in the SC/src/gdpr.rs order when a definition is deleted, and the hub's 'what this agent remembers' view, plus reserved proto/migration numbers, before it can be queued as buildable."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The proposed ZDR/waived refusal key named_agent does not exist in the repo yet; P3 must add it to zdr-refusals.json (with the sha change) and the refusal tests e_zdr_token_named_agent_memory_refused and e_waived_named_agent_memory_refused before any agent-scoped memory write ships."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The P3 outline still says (scope_kind, scope_id); per integration round A C4 it must say scope plus scope_id (EP-8 D3), and per C5 it must confirm that a scheduled fire reads memory as the creator and writes none."
+    }
+   ],
+   "lead_todo": [
+    "Leave EP-6-P3 at blocked-decision in the queue. Re-queue it only after: the owner rules on OD-4 and OD-6, EP-8 slice 1 (scope + scope_id key) and EP-6-S7 land, and a P3 slice design with reserved session-core migration numbers (round B range 0090+) is written.",
+    "Optional doc edit to docs/plans/wave3/EP-6-agents-and-automations-hubs.md, Phase 3 outline: change '(scope_kind, scope_id)' / \"scope_kind='agent'\" to the EP-8 naming 'scope' + 'scope_id' (integration round A C4)."
+   ],
+   "needs_other_files": [],
+   "outcome": "needs-attention",
+   "tests_run": []
+  }
+ ],
+ "designs": [
+  {
+   "design": true,
+   "epic": "EP-4 Inline outputs and MCP Apps (F-t3-044, F-t3-045)",
+   "design_file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/plans/wave3/EP-4-inline-outputs-and-mcp-apps.md",
+   "rows_file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/w3-rows/EP-4.json",
+   "slices": [
+    "EP-4-S1 Bridge-less static widget in the opaque-origin sandbox [BUILD, todo, opus]",
+    "EP-4-S2 Widget prompt notice and inline_widgets client feature [BUILD, todo, sonnet]",
+    "EP-4-S3 Narrow postMessage bridge: size, staged follow-up, safe link [BUILD, todo, opus]",
+    "EP-4-S4 MCP elicitation transport in the gateway (held call, McpElicitationService, schema mapping) [BUILD, todo, opus]",
+    "EP-4-S5 Question origin contract: run_questions origin columns, proto fields, store [BUILD, todo, opus]",
+    "EP-4-S6 Origin on the user_question event and QuestionCard [BUILD, todo, sonnet]",
+    "EP-4-S7 Elicitation in the governed loop: resume question, pause, answer held call [BUILD, todo, opus; depends on WS14-S5]",
+    "EP-4-S8 MCP Apps resource read: ui:// discovery and resources/read behind a viewer-checked route [BUILD, todo, opus]",
+    "EP-4-S9 MCP App host in the frame: JSON-RPC over postMessage [BUILD, todo, opus]",
+    "EP-4-S10 App-initiated tools/call: viewer-bound, same server, read class only, via ExecuteStep [BUILD, todo, opus]",
+    "EP-4-S11 ADR stub: dedicated user-content origin deferred [BUILD, todo, sonnet]",
+    "EP-4-S12 Flip switches, ledger, ZDR rows, ownership rows, live proof [FINISH, blocked-external, opus]"
+   ],
+   "reserved_numbers": [
+    "session-core migration 0105_run_question_origin (+ revert/0105_run_question_origin.down.sql) for EP-4-S5; tree head is 0104_routing_policy_candidates and no 01xx file exists on main, space-w2, mp-w2w3, w23/integ, quarryv2-next or space",
+    "capability-core 0036 held only if EP-4-S10 must seed a class row (normally unused; 0035 stays with EP-5 S6)",
+    "gateway.proto ProxyMcpToolRequest.allow_elicitation = 8 (fields 1-7 used on HEAD and the four branches)",
+    "gateway.proto ProxyMcpToolResponse.elicitation = 4 (fields 1-3 used)",
+    "orchestration.proto CreateRunQuestionRequest.origin = 8, origin_label = 9 (fields 1-7 used)",
+    "orchestration.proto RunQuestion.origin = 15, origin_label = 16 (fields 1-14 used)",
+    "NEW proto file model_plane/v1/mcp_elicitation.proto: service McpElicitationService (rpc AnswerMcpElicitation), messages McpElicitationPending, AnswerMcpElicitationRequest, AnswerMcpElicitationResponse; added to mp-contracts build.rs",
+    "SSE: no new event name; user_question gains optional origin and origin_label keys",
+    "Request feature family: inline_widgets",
+    "Flags (all default off, literal true): VITE_CHAT_INLINE_WIDGETS, MODEL_GATEWAY_WIDGET_GUIDANCE, VITE_CHAT_WIDGET_BRIDGE, MCP_ELICITATION_ENABLED (+ MCP_ELICITATION_HOLD_SECONDS number, default 600), MCP_DO_ELICITATION, MCP_APPS_ENABLED, VITE_MCP_APPS, MCP_APP_TOOL_CALLS, VITE_MCP_APP_TOOL_CALLS",
+    "ZDR golden cases: e_zdr_run_mcp_elicitation_not_advertised, e_waived_run_mcp_elicitation_not_advertised, e_zdr_token_mcp_app_resource_refused, e_zdr_token_mcp_app_tool_call_refused (no new refusal key; all reuse mcp_execution)"
+   ],
+   "owner_decisions": [
+    "OD-1 (D3): widget and MCP App follow-ups become chips the person clicks to send (through the existing onSelectFollowUp handler). They are never sent automatically. This is stricter than the plan's 'visible, rate-limited user turns'. Blocks only the S12 flip of S3/S9.",
+    "OD-2 (D7, D9): an elicitation is a WS14 resume question that only the run owner can answer. Only depth-0, non-ZDR, non-waived, parkable runs that are not Space-scoped can elicit. Blocks the S12 flip of S7.",
+    "OD-3 (D8): the list of sensitive field names that are always declined (password, secret, token, api key, pin, cvv, card, personnummer/fodselsnummer) and the cap of four fields per form. Blocks the S12 flip of S7.",
+    "OD-4 (D11): the ui:// uri stays outside the MCP tool digest in v1, and TOOL_DIGEST_VERSION stays unchanged. Needs a security nod before the S12 flip of S8/S9.",
+    "OD-5 (D13): in W3 an app may only call tools that are read class, on its own server, as the run owner, through ExecuteStep. Writes are refused with app_call_requires_chat. Blocks the S12 flip of S10.",
+    "OD-6 (D14, DEC-40): no dedicated user-content origin, app network access, app storage or viewer-bound connectors in W3. Recorded in the S11 ADR stub.",
+    "OD-7 (privacy): an elicitation answer leaves the platform to the named MCP server. This must be acknowledged in the privacy notice before S7 is enabled for real orgs."
+   ],
+   "notes": "Wrote two files and nothing else: the design (346 lines, LF) and the 12 queue rows. No source files were edited and no command was run beyond reads. The rows were checked against the EP-5-S1 row: same keys in the same order, same value types.\n\nFindings from reading the code that change the plan:\n1. The Space room uses ChatMarkdown for model turns and for people's own posts (SpaceTurnList.tsx:455,477; SpaceRoomComposer.tsx:1202,1634). If S1 rendered every widget fence, a person's room post would run script in other members' browsers. S1 therefore makes widgets live only through an InlineWidgetSurface context. It defaults to inert, and only AssistantMessage on the chat page sets it to live.\n2. The MCP HTTP transport reads the whole response body before parsing (mcp_http.rs:142-183 via bounded_mcp_response). A server that sends elicitation/create mid-call and waits for the answer would hang. S4 adds a reader that handles one SSE frame at a time.\n3. Execution-core calls ProxyMcpTool with an 8 s timeout (mcp_gateway.rs:69). So the gateway returns a pending form at once and holds the call in memory, for at most MCP_ELICITATION_HOLD_SECONDS (default 600). The answer comes back later through a new service in its own proto file, mcp_elicitation.proto, so the 50-RPC ModelGateway service and its test doubles stay unchanged.\n4. WS14-S5 has only its session-core half. Execution-core never sends delivery=resume yet, so S7 depends on WS14-S5. S4, S5 and S6 can land with their switches off before that.\n5. Questions carry no author today. S5 adds origin columns (session-core migration 0105) so a server's form cannot look like the assistant's question.\n6. McpToolDef is built in 14 places. S8 reads the ui:// uri from the raw tools/list result instead, so McpToolDef and the tool digest stay unchanged.\n7. MCP App HTML is fetched on demand through the gateway, using the viewer's authority (D10). This needs no proto change and nothing is stored.\n8. The tree already contains capability-core 0034_browser_console_tool. That collides with round B's EP-11 0034 reservation; the integrator should note it.\n\nItems to check at slice start are marked [verify at slice start] in the design:\n- the MCP elicitation protocol revision string, and the MCP Apps _meta keys and method names\n- whether ExecuteStep already sends mcp__ tools through execute_mcp with the signed class\n- that Do-run MCP calls reach the SPA as ChatToolCall with their namespaced name after a reload\n- how session-core tells the execution-core service apart from a delegated user caller\n- which gateway client reads capability_tools classes\n\nLead shared-edits (also listed in each row's lead_shared_files):\n- compose lines for each server-side switch\n- the four golden e_ rows in zdr-posture-matrix.json\n- the ledger, ZDR.md, capability-ownership-matrix.md and depth-register rows, all in S12\n\nSuggested build order: S1, S11, S2, S3, S4, S5, S6, S8, S9. Then S7 after WS14-S5, and S10 after WS05-S6 enforce. S12 last."
+  },
+  {
+   "design": true,
+   "epic": "EP-12 Sharing, export and the public Agent API (F-t3-046, F-t3-064)",
+   "design_file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/plans/wave3/EP-12-sharing-export-and-agent-api.md",
+   "rows_file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/w3-rows/EP-12.json",
+   "slices": [
+    "EP-12-S1 Origin on every run: inherit and project [BUILD, todo, sonnet]",
+    "EP-12-S2 API-key exchange route in auth-core (shared with INNH-10 CP-1/CP-4) [BUILD, todo, opus]",
+    "EP-12-S3 Agent API v1 contract, SDK target and four ZDR refusal keys [BUILD, todo, sonnet]",
+    "EP-12-S4 session-core api_key principal and api origin stamp [BUILD, todo, opus]",
+    "EP-12-S5 Agent API read and control routes in model-gateway [BUILD, todo, opus]",
+    "EP-12-S6 inference-core api_key principal [BUILD, todo, opus]",
+    "EP-12-S7 Start an API run (Ask, no tools) [BUILD, todo, opus]",
+    "EP-12-S8 Public Agent API ingress in the Verevon gateway [BUILD, todo, opus]",
+    "EP-12-S9 session-core ExportThread and the exportability rule [BUILD, todo, opus]",
+    "EP-12-S10 Export route with JSON and Markdown renderers [BUILD, todo, sonnet]",
+    "EP-12-S11 BFF export proxy and thread.export action contract [BUILD, todo, sonnet]",
+    "EP-12-S12 Export menu and redacted replay viewer [BUILD, todo, sonnet]",
+    "EP-12-S13 Share-model ADR (proposed) and conversation_snapshot taxonomy type [BUILD, todo, opus]",
+    "EP-12-S14 Share snapshots: store, RPCs and routes, dark [BUILD, todo, opus]",
+    "EP-12-S15 Import a thread export (untrusted input) [BUILD, todo, opus]",
+    "EP-12-S16 Flip, SDKs, document, prove [FINISH, blocked-external]"
+   ],
+   "reserved_numbers": [
+    "session-core migration 0105_thread_share_snapshots (+ migrations/revert/0105_thread_share_snapshots.down.sql), EP-12-S14. No wave-3 design or local branch holds 0105; the tree head is 0104_routing_policy_candidates",
+    "capability-core: no migration (head stays 0034; EP-5 holds 0035)",
+    "NEW proto file model_plane/v1/thread_export.proto: ThreadExportService.ExportThread (S9) and ImportThread (S15). ExportThreadRequest 1-2, ExportThreadResponse 1-6, ExportedMessage 1-6, ExportedRun 1-7, ImportThreadRequest 1-2, ImportThreadResponse 1-3. Add it to the mp-contracts build.rs list",
+    "NEW proto file model_plane/v1/thread_shares.proto: ThreadShareService Create/List/Get/RevokeSnapshot (S14). Add it to build.rs",
+    "No existing proto message gains a field: StartRunRequest stays at 7, RunDetail at 19, ListRunsRequest at 7 (checked on HEAD, main, space-w2, mp-w2w3, w23/integ), and events Envelope.origin=23 is untouched",
+    "New ZDR refusal feature keys agent_api, conversation_export, conversation_share, conversation_import, added in mp-contracts zdr_refusal.rs after sandbox_workspace (S3)",
+    "13 new flags, all default off. Grep confirms none exists in apps/ or in another wave-3 design: SESSION_RUN_ORIGIN_INHERIT, MODEL_GATEWAY_RUN_ORIGIN_FIELD, API_KEY_AGENT_EXCHANGE_ENABLED (shared name with INNH-10), SESSION_CORE_API_KEY_PRINCIPAL, MODEL_GATEWAY_AGENT_API, INFERENCE_API_KEY_PRINCIPAL, GATEWAY_AGENT_API_ENABLED, SESSION_THREAD_EXPORT_ENABLED, MODEL_GATEWAY_THREAD_EXPORT, VITE_THREAD_EXPORT, SESSION_THREAD_SHARES_ENABLED, MODEL_GATEWAY_THREAD_SHARES, SESSION_THREAD_IMPORT_ENABLED",
+    "Control taxonomy: new ownable type conversation_snapshot (S13). The ADR number is left for the integrator to assign"
+   ],
+   "owner_decisions": [
+    "OD-1 (D2): an API run is owned by the key principal apikey:<key_id>, and the person is attribution only, the same as INNH-10 OD-1. This blocks the flip of S4-S8; the code can be written now.",
+    "OD-2 (D3): one auth-core route, POST /api/:audience/api-key-exchange, shared with INNH-10. The Verevon gateway is the only caller, only user-keys are accepted, and the key permission agent:runs is granted by an org admin or owner. This blocks enabling S2.",
+    "OD-3 (D5): Agent API v1 is Ask-only, with no effectful tools, retrieval, connectors, code execution or browser. This blocks enabling S7.",
+    "OD-4 (D6): ZDR keys are refused on the Agent API in v1 (zdr_feature_not_supported: agent_api). This blocks enabling S5 and S7.",
+    "OD-5 (D10, DEC-40): accept the share-model ADR (immutable org-only snapshots, Control resource_grants on the new ownable type conversation_snapshot, static text only). This blocks enabling S14 only.",
+    "OD-6 (D7, D8, D11): export scope (owner-only, active branch, no binaries, full and redacted profiles) and the refusal rule (any non-persistent run, Space thread, or ZDR or waived caller refuses export, replay and share); import caps and role downgrade. Defaults are proposed and the slices build on them.",
+    "OD-7 (D4): the public path /api/agent/v1 and the SDK package names @verevon/agent-api and verevon_agent_api. Publishing to registries is out of W3."
+   ],
+   "notes": "I wrote two files: the design doc and EP-12.json (16 queue rows). No source code was touched and nothing was run except read-only git and grep. The rows copy the EP-5-S1 key set exactly; a script checked every key, value type and depends_on id against queue.json. Order values run from 21201 to 21217.\n\nFindings that change the plan's assumptions:\n(1) The plan cites the run routes at http_routes.rs:132-236, but that reference is stale. The route table is now at MG/http_routes.rs:250-388, with cancel, resume and continue at :484-488.\n(2) The api_key principal already exists in model-gateway (INNH-10 MP-3, ledger :109). It is admitted only on the two browser key-grant routes and may not send any delegation header. Neither auth-core half (CP-1 exchange, CP-4 principalType) is built, and neither is queued. EP-12 S2 builds that exchange once for both lanes, with audiences gated per registry entry.\n(3) session-core, and probably inference-core, refuse any principal type other than user or service (SC/auth.rs:851-905). That is why S4 and S6 add allow-list arms, and why v1 API runs are Ask-only: a key cannot hold the user-bound bearers that tools need.\n(4) Child runs do not inherit their parent's origin today. S1 fixes this behind a switch.\n(5) No whole-conversation export exists. Export today is per-answer and client-side only (FES chat-export). session-core erases by org only (gdpr.rs:419), so the org purge covers threads owned by keys.\n(6) The ZDR contract sync script is at the repo root, scripts/tests/zdr-contract-sync.test.sh, not under apps/Model Plane.\n\nGuard and lead work recorded in the rows (lead_shared_files and plan_external_notes):\n- Regenerate zdr-refusals.json and its .sha256 with MP_UPDATE_GOLDEN=1, and write agent-api-v1.json.sha256 (S3).\n- Add the zdr-posture-matrix rows each slice names (e_* ids listed in design section 5).\n- Add one compose line per switch.\n- Add the plane-service-principals.json registry entry only at flip time (S16).\n- Add the ledger entries.\n\nHot files: SC/grpc.rs, SC/auth.rs, MG/auth.rs and MG/http_routes.rs are CRLF; the new docs are LF like the sibling designs. Suggested build order: S1, S3, S9, S2, S13, S10, S4, S6, S11, S5, S15, S12, S8, S7, S14, S16. Channel Plane stays docs-only and has no slice."
+  }
+ ],
+ "guard": {
+  "checks": [
+   {
+    "command": "buf lint (apps/Model Plane/proto) + ratchet diff vs buf-lint-baseline.json, filtered to run_ledger/memory/inference .proto",
+    "outcome": "no new finding in run_ledger.proto, inference.proto or the new MemoryEntry fields (memory.proto hits are the pre-existing MemoryControls messages; the ratchet script itself reports ~1,200 path-mismatch findings on Windows backslash paths, pre-existing). Output kept in .plan-work/buf-lint-w307.json",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb (from apps/Model Plane/proto)",
+    "outcome": "exit 0, no breaking change",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml + copy differing model_plane files",
+    "outcome": "copied inference.pb.go, memory.pb.go, run_ledger.pb.go (new), run_ledger_grpc.pb.go (new) into apps/Model Plane/go/gen/model_plane/v1/",
+    "clean": true
+   },
+   {
+    "command": "bash \"apps/Model Plane/scripts/tests/go-gen-drift.sh\"",
+    "outcome": "44 generated Go files match go/gen/model_plane",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml + compare without version line/ValidateProtobufRuntimeVersion",
+    "outcome": "inference_pb2.py and memory_pb2.py differed and were copied into mp-events-py/_gen (memory_pb2.py kept CRLF); re-compare is empty. run_ledger_pb2.py not vendored: mp-events-py vendors only a subset and nothing imports it",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed; golden rewritten (+13 lines, settings.set_tone_preset); copied byte-identically to the 4 Model Plane copies; new sha256 42635df8c5006bdc5f76474bf7af15f5ceb3e431aac8bd4ad8ab30bfa4bd8984 in agent-action-admission.json.sha256 and on line 209 of scripts/tests/zdr-contract-sync.test.sh",
+    "clean": true
+   },
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+    "outcome": "171 passed, 11 failed. All 4 agent-action-admission vendor rows and the zdr-posture-matrix pin pass. 10 failures are in files this batch did not touch (quarry zdr-feature-matrix, usage-envelopes, cross-plane-token-requests, quarry-token-claims, space-denial-codes, space-surface x2, run-trace-envelope x3), so they are pre-existing D0-003-class failures. 1 failure is new and comes from EP-14-S6: zdr-contract-schema.mjs rejects the two new posture-matrix rows because their inputs duplicate existing rows (see still_broken)",
+    "clean": false
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "7 passed, 2 failed, golden not regenerated: 'pub fn builtin_tool_defs() in services/model-gateway/src/tool_loop.rs holds no ToolDefinition blocks; re-point this test'. This was already broken before the batch: builtin_tool_defs became a wrapper around builtin_tool_defs_with in e9faf71ac (WS16.S8). No source in this batch's manifest changed (the tone text lives in run_context.rs, which is not a manifest source), so the batch does not need a manifest change. I did not refresh the .sha256",
+    "clean": false
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished, 0 errors; the only warnings are pre-existing (session-core auth.rs/terminalization.rs, model-gateway browser_run.rs); none in batch files",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets",
+    "outcome": "Finished, 0 errors; 3 pre-existing unused-import warnings (website_list_tests.rs, browser.rs)",
+    "clean": true
+   },
+   {
+    "command": "GOWORK=off go build ./... && go vet ./... (apps/Control Plane/user-core)",
+    "outcome": "both exit 0",
+    "clean": true
+   },
+   {
+    "command": "go build ./... in Model Plane go.work modules gen, capability-core, orchestrator-core, cost-core, bridge-core, browser-broker, sandbox-manager, letta-bridge; go vet ./... in gen, capability-core, orchestrator-core, cost-core",
+    "outcome": "all exit 0",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+    "outcome": "exactly the 1 baseline error in src/shared/api/schedule-contract.test.ts",
+    "clean": true
+   },
+   {
+    "command": "pnpm install --frozen-lockfile then pnpm typecheck (tsc --noEmit) in apps/Application Plane/convex-core",
+    "outcome": "node_modules was missing in the worktree. After installing it (the folder is gitignored), typecheck is clean",
+    "clean": true
+   },
+   {
+    "command": "python -m py_compile eval-lab-py/tests/test_runner.py",
+    "outcome": "ok (PyYAML not installed, so the new YAML case was not parsed)",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "slice": "EP-6-S11",
+    "what": "Applied the shared edit, but the preset resolve and the 'unavailable, return' check now sit right after the goal/isActive guard at the top of runTask, not at the old line 797. At 797, an unavailable preset returned after setState had already set status 'running', and the console stayed stuck. Line 797 now only builds presetActions from the resolved preset."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "slice": "EP-8-S3",
+    "what": "Wrapped the dispatcher import line after adding dispatch_settings_set_tone_preset, so it stays within 100 columns."
+   },
+   {
+    "file": "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256 (+3 fixture copies)",
+    "slice": "EP-14-S6",
+    "what": "The builder wrote the pin file with CRLF; .gitattributes sets eol=lf. All four copies are now LF, matching HEAD."
+   }
+  ],
+  "still_broken": [
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json:838-862 (EP-14-S6): rows e_request_snapshot_refused_under_zdr and e_request_snapshot_refused_for_waived_run have the same inputs as e_browser_do_tools_refused_under_zdr and e_waived_web_reader_keeps_inline_head. scripts/tests/zdr-contract-schema.mjs fails with 'rows must differ', so zdr-contract-sync and the matrix golden tests will fail. The fix needs a decision: give each row distinct inputs whose resolver outcome is verified, or move the store note to ZDR.md (already added there) and drop the rows. Either way, re-vendor the matrix and its sha256 to the 3 fixtures and re-pin line 111 of scripts/tests/zdr-contract-sync.test.sh. Not a compile error.",
+   "apps/Model Plane/rust/crates/mp-contracts/tests/prompt_tool_manifest.rs:70 (broken before this batch, since e9faf71ac WS16.S8): the TOOL_LISTS entry 'pub fn builtin_tool_defs()' now matches a one-line wrapper, so the manifest generation step cannot run. Re-pointing it to builtin_tool_defs_with also brings the conditional extract tool into the manifest golden, so this needs a decision first. This batch changed no manifest source."
+  ],
+  "notes": "The batch compiles: the Model Plane Rust workspace, the verevonv3 gateway, user-core and the Model Plane Go modules (build and vet) are clean, convex-core tsc is clean, and verevonv3 tsc6 shows only its 1 baseline error. I committed and staged nothing.\n\nShared edits applied (each file's line endings kept):\n- **EP-8-S3**\n  - model-gateway: sse.rs authored_layers gets the tone line; zdr_features.rs (a, b, c); normalize.rs; tests/zdr_feature_table.rs gets the persona_tone case tuple.\n  - verevonv3 gateway: dispatchers.rs gets dispatch_settings_set_tone_preset after dispatch_settings_update_setting; handlers.rs gets the import and the \"settings.set_tone_preset\" arm.\n  - apps/Model Plane/deploy/docker-compose.yml: MODEL_GATEWAY_TONE_PRESETS defaulting to false.\n  - apps/Control Plane/docker-compose.yml: TONE_PRESETS_VISIBLE defaulting to false (user-core).\n- **EP-8-S6**\n  - session-core main.rs: `mod space_memory;`.\n  - model-gateway memory_provenance.rs test literal: scope, scope_id and source_label.\n  - compose: SESSION_SPACE_MEMORY_ENABLED defaulting to false (session-core).\n  - apps/Model Plane/docs/ZDR.md (ZDR.md lives under docs/): new row in the section 2 boundary table.\n- **EP-14-S6**\n  - mp-contracts build.rs: run_ledger.proto.\n  - session-core grpc.rs: the RunLedgerServiceServer import, the run_ledger construction with its comment, and the add_service line.\n  - compose: INFERENCE_REQUEST_CAPTURE defaulting to false (inference-core), plus SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED (false), SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED (false) and SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS (7) for session-core, each with a short comment.\n  - ZDR.md: a row for run_request_snapshots.\n  - Re-vendored zdr-posture-matrix.json and its .sha256 into the 3 fixture dirs and re-pinned line 111 of zdr-contract-sync.test.sh to a4b94d1d…\n- **EP-6-S7**\n  - convex/schema/agents.ts: the import, plus publishedVersion and draft with comments.\n  - convex/schema/spaces.ts: pinnedVersion in spaceAgentBindings, before its projectionVersion (I checked it is the table at lines 125-220).\n- **EP-6-S11**\n  - AgentRunConsole.tsx: the import, the runTask wiring (moved, see fixes), and in PresetPicker the available() check, the disabled state and the \"not available\" Show.\n\nShared edits skipped:\n- ledger.md entries (EP-8-S6, EP-14-S6) and all .env.example lines: the lead and the owner book these.\n- plane-service-principals.json inference-core scope and retention change: the builder says the owner must decide first.\n- Optional items:\n  - \"model_plane.v1.RunLedgerService\" in HEALTH_SERVICE_NAMES: a test pins the 14-name array.\n  - The space_memory ZDR feature key in zdr_refusal.rs: needs golden regeneration and nothing depends on it.\n  - EP-6-S7's ZDR matrix row decision.\n  - The 0103 to 0105 migration renumber.\n  - The EP-6 plan doc wording.\n- The prompt-manifest refresh: blocked, see still_broken.\n\nThe lead still needs to:\n- Add convex/schema/agentDefinitionVersions.ts to EP-6-S7's new_files.\n- Commit the new Go gen files run_ledger.pb.go and run_ledger_grpc.pb.go.\n- Know that I installed node_modules in apps/Application Plane/convex-core so tsc could run (the folder is gitignored).\n\nI ran no tests besides the two generation steps and the zdr-contract-sync check script.",
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/memory.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/run_ledger.pb.go (new)",
+   "apps/Model Plane/go/gen/model_plane/v1/run_ledger_grpc.pb.go (new)",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/inference_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/memory_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+   "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+   "scripts/tests/zdr-contract-sync.test.sh (admission pin line 209, posture-matrix pin line 111)",
+   "apps/Model Plane/rust/{crates/mp-contracts,services/execution-core,services/model-gateway}/tests/fixtures/zdr-posture-matrix.json(+.sha256) re-vendored"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs (EP-8-S3 tone in authored_layers)",
+   "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (EP-8-S3 a,b,c)",
+   "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (EP-8-S3 persona_tone: None)",
+   "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (EP-8-S3 persona_tone case)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs (EP-8-S3 dispatch_settings_set_tone_preset)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs (EP-8-S3 import + arm)",
+   "apps/Model Plane/deploy/docker-compose.yml (MODEL_GATEWAY_TONE_PRESETS, SESSION_SPACE_MEMORY_ENABLED, SESSION_CORE_REQUEST_SNAPSHOTS_ENABLED, SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED, SESSION_CORE_REQUEST_SNAPSHOT_TTL_DAYS, INFERENCE_REQUEST_CAPTURE)",
+   "apps/Control Plane/docker-compose.yml (TONE_PRESETS_VISIBLE)",
+   "apps/Model Plane/rust/services/session-core/src/main.rs (mod space_memory)",
+   "apps/Model Plane/rust/services/model-gateway/src/memory_provenance.rs (scope, scope_id, source_label)",
+   "apps/Model Plane/rust/crates/mp-contracts/build.rs (run_ledger.proto)",
+   "apps/Model Plane/rust/services/session-core/src/grpc.rs (RunLedgerServiceServer import, construction, add_service)",
+   "apps/Model Plane/docs/ZDR.md (Space memory and request-snapshot rows)",
+   "apps/Application Plane/convex-core/convex/schema/agents.ts (import, publishedVersion, draft)",
+   "apps/Application Plane/convex-core/convex/schema/spaces.ts (pinnedVersion in spaceAgentBindings)",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx (resolvePresetAgent wiring in runTask and PresetPicker)",
+   "zdr-posture-matrix.json + .sha256 re-vendored to 3 fixture dirs; digest pin updated"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md (EP-8-S6, EP-14-S6): booked by the lead",
+   "all .env.example lines (MODEL_GATEWAY_TONE_PRESETS, TONE_PRESETS_VISIBLE, SESSION_SPACE_MEMORY_ENABLED, INFERENCE_REQUEST_CAPTURE and the snapshot switches, VITE_PRESET_AGENT_ACTIONS): owner",
+   "apps/Control Plane/config/plane-service-principals.json inference-core session:request-snapshots:write and retention change: the builder says the owner must decide first",
+   "session-core HEALTH_SERVICE_NAMES RunLedgerService (optional; would change a pinned 14-name test)",
+   "mp-contracts zdr_refusal.rs space_memory feature key (optional; needs golden regen, no code depends on it)",
+   "EP-6-S7 ZDR posture-matrix row agent_definition_version (lead decision)",
+   "EP-8-S6 migration renumber 0103 to 0105 (lead preference)",
+   "EP-6-P3 plan doc wording (optional doc)",
+   "prompt-tool-manifest refresh: blocked by a test that was already broken before this batch (see still_broken)"
+  ]
+ }
+}

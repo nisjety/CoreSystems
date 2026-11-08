@@ -1,0 +1,321 @@
+{
+ "batchId": "W1-05",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS12-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\plane-boundary.py (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\gates\\plane-boundary.json (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\tests\\test_plane_boundary.py (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\tests\\fixtures\\plane-boundary (new: 10 case directories with expect.json, plus .gitignore re-including the fixture .env.example files)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\repo-gates.yml (modified: plane-boundary job appended after size-ratchet)"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 scripts/gates/plane-boundary.py --check (run from the worktree root)",
+     "outcome": "exit 1 with 14 problems on the tree, as designed: 1 R1 (Model Plane browser-broker to ingestion-postgres), 2 R1 (Control Plane auth-core and user-core .env.example name the shared host coresystem-postgres-local), 1 R2 (Infra core-gateway default DSN host postgres), 9 R2 (\\connect in Ingestion Plane init-databases.sql), 1 R3 (Control Plane user-core go.mod replace into Model Plane gen). The documented Quarry SDK manifest exception is used. The CI step is advisory (continue-on-error), so the tree stays red until the owner decides each item."
+    },
+    {
+     "command": "python3 scripts/gates/plane-boundary.py --self-test",
+     "outcome": "plane boundary self-test ok: every fixture matches its expect.json (exit 0), 10 fixture cases"
+    },
+    {
+     "command": "python3 -m unittest scripts/tests/test_plane_boundary.py",
+     "outcome": "Ran 9 tests in about 4 s, OK"
+    },
+    {
+     "command": "git add --dry-run on two fixture .env.example files",
+     "outcome": "both reported as addable, so the root .gitignore rule .env* does not hide them under the fixture .gitignore"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the owned files with explicit paths only: scripts/gates/plane-boundary.py, scripts/gates/plane-boundary.json, scripts/tests/test_plane_boundary.py, scripts/tests/fixtures/plane-boundary/ (includes a .gitignore that re-includes the fixture .env.example files), and .github/workflows/repo-gates.yml. Shared-edit: none.",
+    "Owner decision before the plane-boundary gate step loses continue-on-error: fix each of the 14 reported violations, or add a reviewed db_exceptions or manifest_exceptions entry with a reason in scripts/gates/plane-boundary.json. The P0 browser-broker link needs the owner's call first.",
+    "After pushing, record the first plane-boundary run (gh run list) and its failing set in the CI baseline, per the advisory rollout convention.",
+    "DEC-39 D2 follow-up (shared files, not edited here): add the repo-root gates row to apps/master-ownership-matrix.md and a CODEOWNERS entry for scripts/gates/plane-boundary.json."
+   ],
+   "deviations": [
+    "The row's DoD 'green on the tree' is not met: the gate reports the 14 existing violations rather than exempting them, because the plan allows only the Quarry SDK path dependency and names no database exception.",
+    "The shipped db_exceptions list is empty; manifest_exceptions holds only the documented Quarry SDK entry. Both mechanisms exist with reasons and a stale check, so the owner can record reviewed exceptions later.",
+    "Added shared_hosts (not in the row) so that legacy hosts no plane owns are named as such: coresystem-postgres-local and nango-postgres. R2 treats them as foreign.",
+    "R1 also reads libpq keyword DSNs (host=) on DATABASE_URL and *_DSN lines, since the row names *_DSN hosts; no keyword-form DSN exists in the tree today.",
+    "--self-test is a gate mode that runs the fixtures; the unittest module calls it, because the row names both.",
+    "Scope: R1 to R3 cover apps/<Plane>/ only. A plane missing from plane-boundary.json owns no database host."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Row DoD 'green on tree' not met: 14 genuine violations need owner fix or reviewed exception; CI job is advisory until then.",
+     "No CI run recorded yet (not pushed); evidence of a CI run and fixture failure output is a lead task.",
+     "DEC-39 D2 gate ownership (matrix row + CODEOWNERS) not recorded."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "apps/Model Plane/deploy/docker-compose.yml:1829: the browser-broker DATABASE_URL connects directly to the Ingestion Plane's Postgres host ingestion-postgres (role browser_broker; comments at lines 1819 and 1839 say so), which CLAUDE.md forbids (no direct database crossing between planes); design section 2.3's claim that every plane uses only plane-local hosts is wrong."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The gate is red on the tree with 14 problems, all existing and all listed in the check output: the P0 link above; Control Plane auth-core/.env.example:12 and user-core/.env.example:13 name the shared host coresystem-postgres-local (ENVIRONMENT_FILES.md calls these names stale); apps/Control Plane/user-core/go.mod:21 replaces into apps/Model Plane/go/gen; apps/Infra Plane/core-gateway/internal/config/config.go:233 default host postgres; and nine \\connect lines in apps/Ingestion Plane/init-databases.sql. Blocking mode needs the owner to fix each or record a reviewed db_exceptions/manifest_exceptions entry with a reason."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "apps/Infra Plane/core-gateway/internal/config/config.go:233 is a Viper default DSN that names the legacy coresystem database and embeds a literal password value in source (value deliberately not reproduced here); the Viper default applies when DATABASE_POSTGRESURL is unset. Remove the literal and the default."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The allowlist can be edited in the same change that adds a violation, because the gate has no base-ref relaxation check like size-ratchet has; add that check, and a CODEOWNERS entry for scripts/gates/plane-boundary.json (DEC-39 D2), before the step blocks."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "R1 is host-based and cannot see which databases a host serves: apps/Data Plane v2/tests/e2e/isolated/real-authority-compose.yml runs the auth_service and user_service databases (Control Plane's) on the Data Plane postgres host, and that file falls outside R1's docker-compose*.yml pattern; a database-name ownership list would close this."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "R2's \\connect token flags apps/Ingestion Plane/init-databases.sql, which creates and switches only among Ingestion Plane's own databases (quarry, quarry_v2, quarry_edge, imports, integration, finspo, shipping_core, plus ingestion_plane_db); the owner decides whether the token rule should flag only connect targets owned by another plane."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Root-level files are outside R1 and R2 because no plane owns them: root docker-compose.yml names coresystem-postgres-local in six lines (defaults and literal DSN hosts) and also mp-postgres and dpv2-postgres; the owner decides whether root composition is a gated surface."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "apps/Control Plane/docker-compose.production.yml:70 takes DATABASE_URL from the environment (${...}), so R1 cannot check its host."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The bare service name postgres is used in the Model Plane, Data Plane and Ingestion Plane composes and in the Quarry and integration-corev2 env examples, so a bare postgres host cannot prove its owner; plane-prefixed service names would remove the need for the Infra exception."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "DEC-39 D2 ownership is not recorded: the repo-root gates have no row in apps/master-ownership-matrix.md and no CODEOWNERS entry (shared files, not edited here)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Tracked copies inflate the scan: apps/Ingestion Plane/Quarry-v2/.claude/worktrees/vigilant-banach-6933aa/ is a nested worktree committed under the plane, and apps/Data Plane v2/scripts/eval-corpus/repo/ holds copies of other planes' docs, which are attributed to Data Plane v2."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The gate reads tracked files only (git ls-files, like size-ratchet), so a violation in an untracked file is not seen until it is staged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "apps/Model Plane/deploy/docker-compose.yml:1829 gives browser-broker a DATABASE_URL on the Ingestion Plane host ingestion-postgres, a direct cross-plane database connection that the gate now flags and the owner must resolve."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The gate is red on the tree with 14 existing violations, so the row's DoD 'green on tree' is not met; the repo-gates.yml step is continue-on-error (advisory) and each item needs a fix or a reviewed exception in plane-boundary.json before it can block."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "apps/Infra Plane/core-gateway/internal/config/config.go:233 holds a Viper default DSN with a literal password in source; the gate output does not echo it, but the literal should be removed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "plane-boundary.json can be relaxed in the same change that adds a violation, because there is no base-ref relaxation check (as size-ratchet has) and no CODEOWNERS entry; add both before the step blocks."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "R1 only matches docker-compose*.yml and .env.example inside apps/<Plane>/, so root-level compose files and files like Data Plane v2 tests/e2e/isolated/real-authority-compose.yml (which hosts Control Plane databases) are not covered."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "R2 flags every \\connect, including Ingestion Plane init-databases.sql which only switches among that plane's own databases; the owner decides whether to narrow the rule to foreign targets or record exceptions."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "DEC-39 D2 ownership is not recorded (no apps/master-ownership-matrix.md row, no CODEOWNERS entry for scripts/gates/); shared files, lead to add."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "After push, record the first CI run of the plane-boundary job and its failing set in the CI baseline per the advisory rollout convention; the workflow YAML was not parsed by a YAML library here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Tracked copies (nested worktree under Quarry-v2/.claude/worktrees, Data Plane v2 scripts/eval-corpus/repo) inflate the scan and are attributed to the wrong plane."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority"
+   ],
+   "notes": "Built WS12-S9, the plane-boundary gate. Three rules over apps/<Plane>/ tracked files: R1 Postgres DSN hosts in docker-compose*.yml and .env.example must be a host the plane owns or a local host (unknown hosts fail too); R2 non-test source has no dblink, postgres_fdw, CREATE SERVER or \\connect, and no DSN naming another plane's host or a shared host; R3 Cargo path, go.mod replace and package.json file:/link: must not resolve into another plane's directory. Config is scripts/gates/plane-boundary.json. Exceptions are pinned to one file and one host or target, need a reason, and fail when stale. The shipped list holds only the Quarry SDK manifest exception that the plan documents. The gate's --self-test runs 10 fixtures, each in a throwaway git repo; the unittest module calls it. Enumeration uses git ls-files, like size-ratchet.\n\nThe row's DoD says green on the tree, and it is not met. The plan allows only the Quarry SDK path dependency, so I did not add exceptions for the 14 real violations. Those are the owner decisions listed in depth_findings. Blocking mode needs each one fixed or a reviewed exception. Until then the CI gate step stays advisory per the rollout convention. The status is partial for that reason only: the code, tests and deliverable are done.\n\nNot verified: CI itself (not pushed), docker (not run, as instructed), and the workflow YAML was not parsed by a YAML library because PyYAML is not installed here. The new job mirrors the log-content job's structure. Nothing was committed or staged. The git CRLF warnings seen during self-test come from this machine's autocrlf setting and do not affect the result.\n\nGate run time on this Windows machine: about 9 s for --check and about 4 s for --self-test."
+  },
+  {
+   "id": "WS01-S7.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/zdr-live-turn.spec.ts",
+    "apps/Model Plane/scripts/tests/zdr-live-proof.sh",
+    "apps/Model Plane/scripts/tests/zdr-live-proof-test.sh",
+    "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md"
+   ],
+   "tests_run": [
+    {
+     "command": "bash \"apps/Model Plane/scripts/tests/zdr-live-proof-test.sh\" (stub docker contract test, new)",
+     "outcome": "ok: preflight pass/fail on order, waiver switch, waived run, ZDR row, wave commit; before/after delta fail on thread, cache key, ZDR row, unread cache; read-only SELECTs only; credential absent from docker argv, output, evidence, state file"
+    },
+    {
+     "command": "pnpm exec playwright test tests/e2e/zdr-live-turn.spec.ts --list, plus tsc --ignoreConfig --strict on the spec",
+     "outcome": "spec lists and typechecks (not executed: opt-in ZDR_LIVE_TURN=1, needs live stack)"
+    },
+    {
+     "command": "pnpm vitest run src/features/settings/components/WorkspaceSettingsPage.zdr-gate.test.tsx src/shared/api/chat-client.zdr-capability.test.ts",
+     "outcome": "2 files, 15 tests passed"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q --manifest-path apps/gateway/Cargo.toml domains::orgs::settings",
+     "outcome": "19 passed, 0 failed"
+    },
+    {
+     "command": "node --test apps/gateway/scripts/zdr-seed-test-org.test.mjs",
+     "outcome": "19 passed, 0 failed (offline plan test only; --apply not run)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the DB-backed session-core zdr_receipt tests through the DB harness (>=8 must pass): scripts/tests/session-core-db-tests.sh filter 'zdr_receipt' (tests in session-core grpc.rs, retention_receipt.rs, memory_grpc.rs, orchestration_grpc.rs).",
+    "Operator live steps in order (runbook apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md): deploy the wave with rebuild-service.sh --require-clean from a clean detached worktree (session-core, execution-core, model-gateway + SPA pinning hash + FE gateway + docker restart frontend-plane-verevonv3-frontend-1, inference-core); zdr-live-proof.sh --phase preflight; seed/confirm the ZDR-TEST org (zdr-seed-test-org.mjs --apply, credential from the secret store); --phase before; ZDR_LIVE_TURN=1 playwright zdr-live-turn.spec.ts; ZDR_GATE_LIVE_PATCH=1 playwright zdr-org-switch-gate.spec.ts; --phase after; switch the org back with --zdr false --apply. Run the dry-run on the dev stack with a non-ZDR org first: the spec and preflight must refuse it.",
+    "Run bash scripts/tests/zdr-live-proof-test.sh in CI/local gate if desired (needs only bash and git).",
+    "shared-edit apps/Model Plane/docs/ZDR.md: line 407 (Z-60 row, section 4 table) change 'Not run' to 'Pass 1 (fail-closed turn, zero row delta) run <date>, evidence docs/compliance/evidence/live-reads-zdr-<date>.txt; pass 2 (answer from an attested deployment) waits for Z-40' only after the live run passes; also point Step 5 (line ~252) at runbooks/zdr-attestation-and-live-proof.md.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: in the own-connection ZDR entry (build state paragraph near line 797 and the 'Trigger to flip' paragraph) replace 'Not done: Z-40 (attestation) and Z-60 (live proof)' with the Z-60 pass 1 result and date after the live run, and flip the entry to implemented only if the owner accepts pass 1 as the trigger (the trigger text names an acknowledged-connection proof on gpt-5.6-terra, which pass 1 does not cover).",
+    "shared-edit apps/Model Plane/docs/runbooks/README.md: add a line linking zdr-attestation-and-live-proof.md.",
+    "shared-edit docs/compliance/evidence/live-reads-zdr-<date>.txt: created by zdr-live-proof.sh at run time; append the Playwright report path and seed status lines by hand, then commit.",
+    "Commit the four new files (all LF): the spec, zdr-live-proof.sh, zdr-live-proof-test.sh, the runbook."
+   ],
+   "deviations": [
+    "Added scripts/tests/zdr-live-proof-test.sh (a contract test beside the new script, following the audit-delivery-proof-test.sh precedent); not named in the row but allowed as a test file beside what I changed.",
+    "The row's 'ordered wave-deploy script' is implemented as runbook steps using the existing rebuild-service.sh plus the preflight order check, not a new deploy script (no owned file for one, and rebuild-service.sh already owns rebuild plus rollback tags).",
+    "The plan row says the proof script writes the evidence file; it writes it at run time (operator action), I did not create docs/compliance/evidence/live-reads-zdr-<date>.txt."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/docs/runbooks/README.md",
+    "docs/compliance/evidence/live-reads-zdr-<date>.txt"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live ordered deploy (rebuild-service.sh x4 + SPA pinning/FE gateway + frontend restart) and zdr-live-proof.sh preflight/before/after on the dev stack not run (docker; lead).",
+     "Dry-run with a non-ZDR org (spec and preflight must refuse) not run.",
+     "DB-backed session-core zdr_receipt tests (>=8 pass) not run (DB harness; lead).",
+     "Playwright zdr-org-switch-gate.spec.ts (incl. ZDR_GATE_LIVE_PATCH=1) and zdr-seed-test-org.mjs --apply, and switching the test org back off: operator steps.",
+     "Evidence file docs/compliance/evidence/live-reads-zdr-<date>.txt is created only by the live run; ZDR.md Z-60 rows, decisions/ledger.md flip and runbooks/README.md link are shared edits for the lead after the live run passes.",
+     "Four new files are untracked and need committing (all LF, ASCII)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Counter deltas are stack-global (no org filter): any other traffic during the turn makes zdr-live-proof.sh --phase after fail; add an org-scoped variant once the threads/messages/runs/outbox org columns are confirmed, or run on a quiet stack."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The spec's refusal-frame parsing (HTTP error body versus RUN_ERROR frame, field name 'code') and the 'not sent to a model' text were written from chat-client.ts and zdr-refusals.ts, not observed on a live stack; the first live run may need a selector or frame-shape tweak."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Preflight order check compares container StartedAt, so any unrelated restart of an earlier service fails it and forces a redeploy in order; a rebuild-service.sh-written deploy log would be a more exact source."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Pass 2 (ZDR_LIVE_TURN_EXPECT=answer) is only skipped in the spec, not implemented; WS01-S13 must add the answer-path assertions and the audit-envelope absence read."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The proof does not read model-gateway or inference-core logs for the refusal line or the absence of any provider call; adding a log-name/count read would strengthen the 'no model call' claim."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Whether pass 1 alone is enough to flip the ledger entry to implemented is an owner decision: the entry's trigger text describes an acknowledged-connection proof on gpt-5.6-terra, which this fail-closed pass does not exercise."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "zdr-live-proof.sh passes MODEL_DRAGONFLY_PASSWORD to redis-cli via REDISCLI_AUTH in the docker exec environment; the value exists in the host process environment while the script runs, as with any exported secret."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "zdr-live-proof.sh counters are stack-global (no org filter), so any other traffic during the turn makes --phase after fail; run on a quiet stack or add an org-scoped variant."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The spec's refusal parsing (HTTP error body vs RUN_ERROR frame, field 'code', page text 'not sent to a model') comes from chat-client.ts/zdr-refusals.ts, not a live observation; the first live run may need a frame-shape tweak."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Preflight deploy-order compares docker StartedAt as strings, so an unrelated restart of an earlier wave service fails it, and unpadded RFC3339Nano fractions could in rare cases mis-order; a rebuild-service.sh deploy log would be exact."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Pass 2 (ZDR_LIVE_TURN_EXPECT=answer) is only skipped in the spec; WS01-S13 must add answer-path assertions and the audit-envelope absence read."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The proof does not read model-gateway or inference-core logs to show no provider call was made; adding a log read would strengthen the 'before any model call' claim."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Whether pass 1 alone justifies flipping the own-connection ZDR ledger entry to implemented is an owner call: its trigger text names an acknowledged-connection proof, which fail-closed pass 1 does not exercise."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The row's 'ordered wave-deploy script' is delivered as runbook steps over rebuild-service.sh plus the preflight order check; acceptable since rebuild-service.sh owns rebuild and rollback tags and no owned file for a new script exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "MODEL_DRAGONFLY_PASSWORD reaches redis-cli via docker exec -e REDISCLI_AUTH (environment, not argv); it lives in the host process environment while the script runs, as with any exported secret."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Built the code half only. zdr-live-proof.sh has phases preflight|before|after: preflight checks the four wave services started in order session-core, execution-core, model-gateway, inference-core, each from a revision containing ZDR_WAVE_COMMIT, migrations 0044/0045 and runs.retention_class present, ZDR_WAIVER_ENABLED not literally true on any service (reduced to one word, no other env printed), zero waived runs and zero ZDR outbox rows. before/after bracket the spec with counters (threads, messages, runs, feedback_ratings, session_audit_outbox, ZDR outbox rows, count of mp:gw:cache:* keys via redis-cli --scan, count only) and after fails on any delta. Output is tee'd to docs/compliance/evidence/live-reads-zdr-<date>.txt by default (--out overrides); the script creates that file only when the operator runs it. zdr-live-turn.spec.ts is opt-in (ZDR_LIVE_TURN=1), refuses to send unless the org is named ZDR-TEST with ZDR on and the live catalogue lists no ZDR chat model, then asserts the stream ends in zdr_unavailable or zdr_connection_not_supported with zero content frames and the reader-facing 'not sent to a model' text; handles both HTTP-error and RUN_ERROR-frame refusals. The runbook holds the ordered deploy via rebuild-service.sh, rollback, the before/turn/after sequence, switching the test org back off, and pass 2 pointer. No docker, no live proof, no dry-run against the dev stack was done (lead's). Waiver minting untouched."
+  }
+ ]
+}

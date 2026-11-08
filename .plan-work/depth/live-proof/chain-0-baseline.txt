@@ -1,0 +1,26 @@
+== chained rows and heads
+ chained_rows | heads | all_rows 
+--------------+-------+----------
+            0 |     0 |   110159
+
+== chained rows, latest 12
+ org_id | chain_seq | event | plane | chain_mode | prev | row_hash | ingested_at 
+--------+-----------+-------+-------+------------+------+----------+-------------
+
+== contiguity, links and genesis per org (expect gaps 0, link_breaks 0, genesis_ok t)
+ org_id | rows | min | max | gaps | link_breaks | genesis_ok 
+--------+------+-----+-----+------+-------------+------------
+
+== head equals the last row (expect seq_ok t, hash_ok t, state ok)
+ org_id | head_seq | state | activated_at | seq_ok | hash_ok 
+--------+----------+-------+--------------+--------+---------
+
+== verifier state
+ org_id | last_status | last_reason | first_broken_seq | verified_through_seq | legacy_unchained_rows | last_run_at 
+--------+-------------+-------------+------------------+----------------------+-----------------------+-------------
+
+== the latest audit rows of any kind (plane, producer, event), last 10 minutes
+  plane  | source_producer |           event            | count |             max              
+---------+-----------------+----------------------------+-------+------------------------------
+ control | auth-core       | plane_service_token_issued |    17 | 2026-10-27 06:02:17.21058+00
+

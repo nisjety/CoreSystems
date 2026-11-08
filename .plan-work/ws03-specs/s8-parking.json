@@ -1,0 +1,325 @@
+{
+ "slice": "WS03 S8 Parking (design only; nothing edited). Source of truth: plan row S8 plus Appendix B 4.3, and the existing designs in .plan-work/designs/WS03-durable-loop.md. All paths below are relative to the worktree root; Model Plane paths start with \"apps/Model Plane\".",
+ "summary": "A Do run that hits a typed, content-free, recoverable stop at a round boundary writes an encrypted `park` fold (SaveLoopCheckpoint, kind \"park\") and returns RunAgentResponse.status \"parked\". It does not finalize: no terminal receipt, no assistant message, no failure. Parking is an upgrade of a failure, never a new way to fail. Every park-write error (store off, stale seq, size, credential-shaped text, key missing, park_until beyond TTL, park cap) falls back to exactly the pre-S8 outcome.\n\nMapping:\n- CredentialWindow: loop-top `DeadlineCause::Credential` only.\n- ProviderExhausted: `subscription_usage_limit`; `rate_limited` only with retry_after_ms; and a new typed inference-core trailer for an unpinned exhausted ladder.\n- UpstreamUnavailable: `subscription_upstream_unavailable`.\n- ReauthRequired: `subscription_reauth_required`.\n- CrashInterrupted: set only by the session-core recovery worker.\n\nEverything else stays a failure: the wall clock, bad_request, prompt_too_long, route_unavailable and route violations, untyped failures, budget exhaustion, ZDR, waived, Space-scoped and depth>0 loops, and parks beyond the cap.\n\nThe recovery worker gets fold awareness:\n- paused/parked folds, and resuming folds with a live claim, are spared until `updated_at + SESSION_CORE_PARK_TTL_SECONDS`.\n- an active fold (or a resuming fold with an expired claim) at the 15-minute deadline is crash-parked, re-sealed under seq+1 so a zombie writer is fenced.\n- past the TTL the worker terminalizes through the unchanged `apply_managed_terminal_outcome` as outcome_unknown, which purges the fold in the same transaction.\n\nWire changes: OrchestrationEvent.RunParked=24 and RunResumed=25, RunAgentResponse.park_reason=11 (new), RunDetail.resumable=17 and park_reason=18, and a raw `run_parked` SSE frame with exactly {run_id, reason, retry_after_ms?, resets_at?}. The SPA gets display-only handling; its Continue button needs S7's park-aware /continue.\n\nHARD DEPENDENCY: S6 (FoldWriter, LoopState::to_fold) and S7 (claim/resume) are not built in this tree. Verified: no fold.rs exists, and the execution-core test double's save_loop_checkpoint returns unimplemented. The execution-core write side of S8 cannot land before S6. Steps 1-3 and 5-6 below are independent of S6/S7.",
+ "approach": "DECISION SITES (all in execution-core agent.rs run_rounds, root loop only, depth==0). One helper `try_park` is called at three sites and returns Option<ParkedRun>; None means \"fall through to the old outcome\".\n\n1. Loop top, `ctx.refusal.latched()` branch (agent.rs ~1310): a run-wide refusal latched by this loop or a child. Only usage_limit and reauth_required latch.\n2. Loop top, `ctx.deadline.expired()` branch (~1326): if cause == DeadlineCause::Credential, try park; WallClock always returns OutOfTime exactly as today.\n3. The `Err(error)` arm of `inference.infer` (~1438): for a pinned run use `refusal_for_failed_round`; for an unpinned run use the new typed trailer reader. The failed round never produced a response, so the fold records rounds_executed-1 and the unchanged `messages`. The post-loop latched-refusal path and `Exhausted` never park, because no budget is left to resume into.\n\nMAPPING TABLE (`park_reason_for`, pure):\n- Credential deadline -> CredentialWindow. NOTE `RunDeadline::for_run` only builds a Credential deadline when guard_credentials is true, today only `route.is_pinned()`. Under EXECUTION_LOOP_PARKING_ENABLED, `run_agent_with_tools` must pass `guard_credentials = route.is_pinned() || (parking_enabled() && parkable_run)`, otherwise unpinned Do runs never reach CredentialWindow. This is a flag-gated behaviour change.\n- Refusal.code subscription_usage_limit -> ProviderExhausted (resets_at, retry_after_ms carried).\n- rate_limited -> ProviderExhausted only when retry_after_ms is Some; else failure.\n- subscription_upstream_unavailable -> UpstreamUnavailable.\n- subscription_reauth_required -> ReauthRequired.\n- Unpinned run, new inference-core trailer `x-mp-provider-error: provider_chain_exhausted` (AllExhausted arm, grpc.rs:1495, currently an untyped Status::unavailable and the message must never be parsed) -> ProviderExhausted. Unpinned `rate_limited` with retry_after -> ProviderExhausted. Both sit behind the same flag, and the trailer makes this last in order.\n- CrashInterrupted: never produced by execution-core.\n- Stay failures: WallClock, subscription_bad_request, prompt_too_long, subscription_route_unavailable, RouteUnavailable/route violation, any untyped status, Exhausted, InferFailed(None) on an unpinned run without the trailer.\n\n`parkable()` also requires: !req.zdr, !ctx.route.is_waived(), req.space_id empty (DEC-06: /continue refuses Space runs, so a Space park would be unresumable), session bearer present, rounds_used < max_rounds, parks_so_far < MAX_PARKS_PER_RUN (5). resets_at beyond the TTL is refused by session-core.\n\nPARK FOLD WRITE: LoopFoldV1 {segment_no, counters, step_seq, attempted_retrievals, messages (scrubbed), round_in_flight: None, pending: Some(PendingPause{kind: Park, pause_ref: park_ref}), authority: offered_authority(...), prompt_digest, extensions {\"parks\": n+1}} -> to_bytes() (credential and size check; one clear_stale_tool_results retry on TooLarge, else no park) -> SaveLoopCheckpoint{kind \"park\", expected_seq from the FoldWriter, authority_digest, pause_ref = park_ref, park_reason = reason.as_str(), park_until}.\n\npark_ref = \"park:{run_id}:{parks}\". park_until: Credential/Crash/Reauth = now; Upstream = now + retry_after_ms (default 60 s); ProviderExhausted = resets_at, else now + retry_after_ms, else now + 300 s. park_until is the earliest useful resume time; it does not block /continue and is not the TTL.\n\nRETURN: `RoundsOutcome::Parked(ParkedRun)`. `run_agent_with_route` returns `parked_response(..)` early like Paused: no finalize, no sandbox lease release (same as Paused, so the lease follows its own TTL and a long park may meet WorkspaceStateLost in S7 closers). StateStore RunStatus is left unchanged (it is a per-replica cache; no Parked variant).\n\nresponse: status \"parked\", failure_code \"\", RunAgentResponse.park_reason (new), retry_after_ms (7) and resets_at (8) reused with their doc comments widened.\n\nEMISSION: execution-core publishes OrchestrationEvent.RunParked best-effort through RecordOrchestrationEvent (precedent: publish_plan_transition) after a successful save. The plan's \"orchestration_grpc.rs broadcasts from the park/claim handlers\" is not implementable as written: SessionGrpc has no events_tx or ReplayBuffer, which are private to OrchestrationGrpc. session-core therefore only adds event_run_id arms. Verified: `grpc::serve` hands events_tx only to OrchestrationGrpc::new_from_env.\n\nThe gateway emits the raw `run_parked` SSE frame at the outcome site. `follow_agentic_run` forwards only step updates, so the frame is not duplicated. The separate runs/{id}/events endpoint forwards the orchestration event under the same name and the same keys via orchestration_event_to_sse.\n\nRECOVERY WORKER (terminalization.rs): all fold-awareness is gated on loop_checkpoint::enabled(), so the existing kill switch restores pre-S8 behaviour (terminalize at the deadline, fold purged) and rollback never strands runs. Predicates:\n- fold_holds(run) = store on AND fold row where (state IN paused,parked AND updated_at > now-ttl) OR (state=resuming AND claim_expires_at > now).\n- fold_expired(run) = store on AND fold row state IN paused,parked AND updated_at <= now-ttl.\n- claim_due_recovery candidate adds: NOT fold_holds AND (no pending approval OR fold_expired). This also bounds approvals that never expire (verified: nothing flips expired 'requested' approvals, and has_pending_approval ignores expires_at).\n- recover_claimed_terminalization, after lock_run_status and lock_managed_obligation and after the pending-approval check, locks the fold row last (lock order runs -> outbox -> fold, same as save and claim) and calls `decide_hold` (pure): Spare -> release_recovery_for_activity; CrashPark -> park_crashed, then release; Terminalize -> the unchanged apply_managed_terminal_outcome(Failed(\"outcome_unknown\"), reconciliation_required=true).\n- park_crashed: decrypt with AAD seq N, set pending=Park and extensions.parks+1, re-seal under seq N+1, UPDATE state parked, kind park, park_reason crash_interrupted, pause_ref park:{run}:{parks}, park_until now, updated_at now. The bump fences a zombie loop (its CAS save fails loop_checkpoint_stale). If parks >= MAX or the cipher is unavailable, it terminalizes as before.\n- TTL expiry therefore uses the same single receipt path as the 15-minute deadline: one RUN_TERMINAL event, outbox state reconciliation_required, runs UPDATE guarded by status NOT IN terminal, purge_run in the same transaction. Claim and the worker both lock the runs row FOR UPDATE, so a click racing the TTL either finds the fold purged (loop_checkpoint_not_claimable) or makes the worker see a live resuming claim and spare.\n\nsession-core `save` hardening for kind park: park_reason must parse as ParkReason; park_until must be <= now + park_ttl (else failed_precondition park_until_beyond_ttl); the fold's extensions.parks must be <= MAX_PARKS_PER_RUN. record_event payload gains park_reason for the park kind. RunDetail projection: park_reason from fold state parked; resumable = state IN paused,parked OR (resuming AND claim expired). runs.status stays 'running' for a parked run, exactly as it stays for a paused one.\n\nSPA (minimal, display only): chat-client handles `run_parked` (and orchestration `run_resumed`) -> new optional handlers.onRunParked, falling back to onStep with status 'parked'. The controller records the run id, sets updateLocalRunHint(threadId,'parked',runId) and shows a closed-token reason line via tr(no,en). runs-client normalizes parkReason/resumable. No Continue button and no new operation until S7's /continue accepts a parked run (CLAUDE.md: action contract before any UI operation; the S3 BFF body requires approval_id and claim_token).",
+ "file_changes": [
+  {
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/loop_fold.rs",
+   "change": "Add `impl ParkReason { pub const ALL:[Self;5]; pub const fn as_str(self)->&'static str; pub fn parse(&str)->Option<Self> }` (wire strings credential_window, provider_exhausted, upstream_unavailable, crash_interrupted, reauth_required, equal to the existing serde snake_case). Add `pub const MAX_PARKS_PER_RUN: u32 = 5`, `pub const PARKS_EXTENSION_KEY: &str = \"parks\"`, `pub fn parks_in(&LoopFoldV1)->u32` (reads extensions, 0 if absent or malformed). Edit with the Edit tool (CRLF)."
+  },
+  {
+   "path": "apps/Model Plane/rust/crates/mp-contracts/tests/loop_fold_golden.rs",
+   "change": "Pin ParkReason::as_str to the serde spelling for all 5, parse round trip, unknown string -> None, parks_in defaults."
+  },
+  {
+   "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "change": "OrchestrationEvent oneof: `RunParked run_parked = 24; RunResumed run_resumed = 25;` (verified highest tag today is 23 = approval_continuation_verified; Appendix B 4.3 finals: 24/25 WS03, 26 retry, 27/28 questions, 29 usage progress; do not use 26+). New nested messages: `RunParked {string run_id=1; string reason=2; optional uint64 retry_after_ms=3; string resets_at=4;}` (reason = closed token, resets_at RFC 3339 UTC whole seconds, empty when unknown) and `RunResumed {string run_id=1; uint32 segment_no=2; string park_reason=3;}` (park_reason = the park resumed from, empty for an approval). Update the oneof header comment."
+  },
+  {
+   "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+   "change": "RunAgentResponse: add `string park_reason = 11;` (closed token, set only with status \"parked\"). CLAIMED 11 because 9 = WS02 usage and 10 = WS25 per Appendix B; record in the T0 reservation table and have the integrator confirm. Update the `status` comment to list \"parked\", and widen the comments of retry_after_ms (7) and resets_at (8): also meaningful with park_reason. failure_code stays empty for a park."
+  },
+  {
+   "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+   "change": "RunDetail: `bool resumable = 17; string park_reason = 18;` (verified highest tag today is 16 = metadata; Appendix B finals 17/18)."
+  },
+  {
+   "path": "apps/Model Plane/go/gen/model_plane/v1/",
+   "change": "Regenerate with buf generate (checked-in *.pb.go). No exhaustive Go switch over the oneof was found by grep (types.go only builds events), but this is not fully verified. Rust bindings regenerate through the mp-contracts build.rs. buf breaking against proto/baseline.binpb must stay clean (additive only)."
+  },
+  {
+   "path": "apps/Model Plane/rust/crates/mp-orchestration/src/run_event.rs",
+   "change": "Add domain variants `OrchestrationEvent::RunParked{run_id,reason,retry_after_ms:Option<u64>,resets_at:String,at}` and `RunResumed{run_id,segment_no,park_reason,at}`, their OrchestrationEventKind entries (the kind list near :369-376) and the kind() arms. Required because the proto_shim decode and encode matches are exhaustive with no `_` arm."
+  },
+  {
+   "path": "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs",
+   "change": "Encode/decode arms for the two new variants (the TryFrom<ProtoOrchestrationEvent> match at ~:594 has no wildcard) plus round_trip tests."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+   "change": "NEW. parking_enabled() (EXECUTION_LOOP_PARKING_ENABLED, default false, thread-local test override `ParkSwitch` copying effect.rs LedgerSwitch); ParkStop; park_reason_for; ParkTiming and park_until_for; parkable(); park_ref(); ParkedRun; LoopSnapshot (a borrow of the loop locals, to be replaced by S6 LoopState); try_park(); parked_response(); publish_run_parked() (RecordOrchestrationEvent, best-effort, content-free, warn on failure). Pure parts carry the table tests."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+   "change": "`mod park;` beside resume/effect/closers."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "change": "(a) `RoundsOutcome::Parked(park::ParkedRun)` (:440-464). (b) run_rounds: try_park at the three sites above, with the credential site only for DeadlineCause::Credential. (c) run_agent_with_route outcome match (:966-991): `RoundsOutcome::Parked(p) => return Ok(park::parked_response(..))` placed beside Paused, before finalize and before release_sandbox_lease_if_any. (d) the subagent outcome match (~:3300-3380) is exhaustive: add `Parked(_) => Err(\"subagent cannot park the run\")`, unreachable because try_park requires depth 0. (e) run_agent_with_tools (:~750-780): guard_credentials = route.is_pinned() || (parking_enabled() && park::parkable_run(&req,&route)). (f) tests module: extend the session double at ~:6389 so save_loop_checkpoint records requests (and can be told to fail), mirroring Recorder.reservations; add the parked tests listed. Existing tests stay byte-identical with the flag off."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/src/subscription_refusal.rs",
+   "change": "Add `PROVIDER_CHAIN_EXHAUSTED: &str = \"provider_chain_exhausted\"` and `pub(crate) fn unpinned_park_signal(&tonic::Status)->Option<(ProviderKind,Option<u64>)>` recognising ONLY that trailer and `rate_limited`+retry-after on an unpinned run (never subscription_* codes, never the message). Leave TRAILER_CODES and Refusal untouched."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/tests/subscription_refusal_contract.rs",
+   "change": "Pin PROVIDER_CHAIN_EXHAUSTED to inference-core's constant (same str_const pattern)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/execution-core/tests/scrub_checkpoint_test.rs",
+   "change": "Add: a bearer/JWT-shaped string in a tool result never reaches the park fold bytes (scrub then assert_no_credentials)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+   "change": "Last, optional slice. `pub const PROVIDER_ERROR_ALL_EXHAUSTED: &str = \"provider_chain_exhausted\"`; the ProviderError::AllExhausted arm (:1495) becomes typed_status(Code::Unavailable, <same message>, kind, None, None). Code and message are unchanged, so existing callers behave identically; only a trailer is added. The metrics outcome label gains one value (metrics.rs reads the kind trailer)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+   "change": "Add park_ttl_seconds() (SESSION_CORE_PARK_TTL_SECONDS, default 86400, clamp 60..2_592_000, invalid -> default). `save`: for kind park require ParkReason::parse OK, park_until <= now+ttl (failed_precondition park_until_beyond_ttl), parks_in(fold) <= MAX_PARKS_PER_RUN (failed_precondition park_limit_reached). Add `enum RecoveryHold{Terminalize,Spare,CrashPark}`, pure `decide_hold(...)`, `recovery_hold(tx,run_id,ttl)`, `park_crashed(tx,cipher,run_id)` (re-seal under seq+1, CHECKPOINT_SAVED event with park_reason). record_event payload gains park_reason for park. `Claimed` gains prior_state and prior_park_reason (claim SQL via a CTE over the old row) so S7 can emit RunResumed. Do not change claim's pause_ref contract here (see open_questions)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+   "change": "claim_due_recovery candidate query (:1699-1742): add the fold_holds / fold_expired predicates (bind loop_checkpoint::enabled() and ttl). recover_claimed_terminalization (:1782-1836): after has_pending_approval, call recovery_hold; Spare -> release_recovery_for_activity + commit + Ok(false); CrashPark -> park_crashed + release + commit + metric mp_session_loop_crash_parks_total; Terminalize -> unchanged. Immutable-receipt code (apply_managed_terminal_outcome, transition_managed_run_terminal, insert_managed_run_terminal_event) is NOT modified. Add a metric mp_session_loop_park_ttl_terminalized_total."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+   "change": "event_run_id (:1895-1925) is an exhaustive match: add RunParked and RunResumed arms; extend event_run_id_extracts_per_variant (~:4379). No direct broadcast from checkpoint handlers (no access to events_tx or replay)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+   "change": "RUN_SELECT (:357-382, shared by GetRun and ListRuns) gains two correlated sub-selects over run_loop_checkpoints (park_reason where state='parked'; resumable = state IN paused,parked OR resuming with expired claim); RunRow and row_to_detail (:384-418) map to RunDetail.resumable and park_reason. Fixture constructors of RunRow in the file's tests need the two fields."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "change": "AgenticRunOutcome gets Parked (:9214); classify_agentic_run_outcome maps \"parked\" (:9248). agentic_run_stream: new arm beside AwaitingApproval (:9903-9926): publish envelope \"RUN_PARKED\" on the run event subject, then `Event::default().event(\"run_parked\").data(run_parked_payload(...))` and return. The payload is built by a pure fn with EXACTLY the keys run_id, reason, retry_after_ms (only when Some), resets_at (only when non-empty); no request_id or status key (WS15 S7 promotes the frame as a code move). If park_reason fails ParkReason::parse the outcome is Unknown (existing RUN_DISPATCH_DEGRADED path). Also add the exhaustive arms in orchestration_event_to_sse (:10232, names run_parked/run_resumed), event_payload_value (:10442), and orchestration_event_to_step_update (:10266)."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "change": "run_detail_value (:~6058): add `park_reason` (empty_to_null) and `resumable` (bool)."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "change": "New optional handler `onRunParked?:(e:{runId?:string;reason:string;retryAfterMs?:number;resetsAt?:string})=>void` in ChatStreamHandlers. `case 'run_parked'` in the main switch (next to `case 'awaiting_approval'` ~:1618) and in the orchestration-event switch (~:1398, with `run_resumed`). Closed-token check on reason; an unknown reason goes to onUnknownEvent. Falls back to onStep({title:'Parked', status:'parked'}) when no handler is set. No new ChatEvent name, so the taxonomy script is unaffected."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/runs-client.ts",
+   "change": "normalizeRun (:82) reads park_reason and resumable into optional parkReason and resumable on RunDetail."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+   "change": "Wire onRunParked next to onStep (~:3114): setTurnRunId, updateLocalRunHint(threadId,'parked',runId), upsertTaskStep with the localized closed-reason line. Verify updateLocalRunHint (:661) tolerates the new status value, and that ACTIVE_RUN_STATUSES in chat-normalizers.ts:118 still treats a 'running' run with parkReason as parked on reload (display only)."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+   "change": "NEW (+ run-park.test.ts): parkReasonLabel(reason, tr) for the 5 closed tokens, with tr(no,en) wording and a neutral fallback."
+  },
+  {
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "change": "execution-core env (next to :1046): `EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}`; session-core env (next to :758): `SESSION_CORE_PARK_TTL_SECONDS: ${SESSION_CORE_PARK_TTL_SECONDS:-86400}`. Do not run compose; edit only."
+  },
+  {
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "change": "Append an addendum to the 2026-10-16 durable-loop entry: parking decisions (credential-only deadline parks, wall clock stays failure, typed evidence only, Space/ZDR/waived never park, park cap 5, TTL from updated_at, crash-park re-seal fence, kill-switch semantics, no direct broadcast, tag 11 claim)."
+  }
+ ],
+ "interfaces": "// mp-contracts (loop_fold.rs)\nimpl ParkReason { pub const ALL: [ParkReason; 5]; pub const fn as_str(self) -> &'static str; pub fn parse(s: &str) -> Option<Self>; }\npub const MAX_PARKS_PER_RUN: u32 = 5;\npub const PARKS_EXTENSION_KEY: &str = \"parks\";\npub fn parks_in(fold: &LoopFoldV1) -> u32;\n\n// execution-core runtime_loop/park.rs (pub(crate))\npub(crate) fn parking_enabled() -> bool;   // EXECUTION_LOOP_PARKING_ENABLED\npub(crate) enum ParkStop<'a> { CredentialWindow, WallClock, Refusal(&'a Refusal), ChainExhausted { retry_after_ms: Option<u64> }, RouteUnavailable }\npub(crate) fn park_reason_for(stop: &ParkStop<'_>) -> Option<ParkReason>;\npub(crate) struct ParkTiming { pub retry_after_ms: Option<u64>, pub resets_at: Option<DateTime<Utc>> }\npub(crate) fn park_until_for(reason: ParkReason, t: &ParkTiming, now: DateTime<Utc>) -> DateTime<Utc>;\npub(crate) fn parkable(req: &pb::RunAgentRequest, route: &ModelRoute, depth: u32, has_session_bearer: bool, parks_so_far: u32) -> bool;\npub(crate) fn park_ref(run_id: &str, parks: u32) -> String;   // \"park:{run_id}:{parks}\"\npub(crate) struct ParkedRun { pub reason: ParkReason, pub park_ref: String, pub seq: u64, pub retry_after_ms: Option<u64>, pub resets_at: Option<DateTime<Utc>> }\npub(crate) async fn try_park(ctx: &LoopContext<'_>, snapshot: &LoopSnapshot<'_>, stop: ParkStop<'_>, max_rounds: u32) -> Option<ParkedRun>;\npub(crate) fn parked_response(p: &ParkedRun, rounds_executed: u32, grounded: bool, compaction_triggered: bool) -> pb::RunAgentResponse;\n// Consumed from S6 (signatures NOT verified: S6 is unbuilt, I assume): FoldWriter::save_park(&mut self, fold: LoopFoldV1, park_ref: &str, reason: ParkReason, park_until: DateTime<Utc>) -> Result<u64 /*seq*/, FoldWriteError>; LoopState::to_fold(&self, pending: Option<PendingPause>) -> LoopFoldV1 (carries extensions.parks forward from a restored fold).\n// agent.rs: enum RoundsOutcome { ..., Parked(park::ParkedRun) }\n// response: pb::RunAgentResponse { status: \"parked\", final_output: \"\", failure_code: \"\", retry_after_ms, resets_at, park_reason /*=11*/ }\n\n// session-core loop_checkpoint.rs\npub(crate) fn park_ttl_seconds() -> i64;\npub(crate) enum RecoveryHold { Terminalize, Spare, CrashPark }\npub(crate) fn decide_hold(fold: Option<&HoldRow>, now: DateTime<Utc>, ttl_secs: i64, store_enabled: bool, parks: u32) -> RecoveryHold;  // pure\npub(crate) async fn recovery_hold(tx: &mut Transaction<'_, Postgres>, run_id: &str, ttl_secs: i64) -> Result<RecoveryHold, Status>;\npub(crate) async fn park_crashed(tx: &mut Transaction<'_, Postgres>, cipher: &DescriptorCipher, run_id: &str) -> Result<bool, Status>;\n\n// Proto\nOrchestrationEvent.run_parked = 24 -> RunParked{run_id=1, reason=2, optional retry_after_ms=3, resets_at=4}\nOrchestrationEvent.run_resumed = 25 -> RunResumed{run_id=1, segment_no=2, park_reason=3}\nRunAgentResponse.park_reason = 11 (claimed; integrator to confirm)\nRunDetail.resumable = 17, park_reason = 18\n\n// Raw SSE frame (model-gateway, event name \"run_parked\"), keys exactly:\n{ \"run_id\": \"...\", \"reason\": \"credential_window|provider_exhausted|upstream_unavailable|crash_interrupted|reauth_required\", \"retry_after_ms\": 52260000 /*omitted when unknown*/, \"resets_at\": \"2026-10-18T06:00:00Z\" /*omitted when unknown*/ }\n\n// Env\nEXECUTION_LOOP_PARKING_ENABLED (execution-core, default false). SESSION_CORE_PARK_TTL_SECONDS (session-core, default 86400). Existing: SESSION_CORE_LOOP_CHECKPOINT_ENABLED gates the store AND (new) all recovery-worker fold logic. EXECUTION_LOOP_CHECKPOINT_ENABLED (S6) is needed only for CrashInterrupted (no round folds, nothing to crash-park).\n\n// Park row semantics (run_loop_checkpoints; no migration needed, the 0047 columns suffice)\nstate='parked', kind='park', pause_ref=park_ref, park_reason, park_until (earliest useful resume time, not the TTL), seq CAS. TTL = updated_at + park_ttl. The row columns, not the fold body, are authoritative for pause_ref and park_reason (a crash park re-seals the body to match anyway).",
+ "tests": [
+  {
+   "name": "mp-contracts::loop_fold_golden::park_reason_wire_strings_are_pinned",
+   "proves": "as_str equals the serde snake_case spelling for all 5 reasons, parse round-trips, unknown -> None. The same spellings reach the row, the frame, the proto event and the SPA."
+  },
+  {
+   "name": "execution-core park::tests::outcome_mapping_table",
+   "proves": "Exhaustive table StopCause -> Option<ParkReason>: credential deadline -> CredentialWindow; wall clock -> None; usage_limit -> ProviderExhausted; rate_limited with retry_after -> ProviderExhausted, without -> None; upstream_unavailable -> UpstreamUnavailable; reauth_required -> ReauthRequired; bad_request, prompt_too_long, subscription_route_unavailable, RouteUnavailable -> None; chain-exhausted trailer -> ProviderExhausted; untyped unavailable -> None."
+  },
+  {
+   "name": "execution-core park::tests::parkable_refuses_zdr_waived_space_children_and_caps",
+   "proves": "parkable is false for req.zdr, route.is_waived(), non-empty space_id, depth>0, missing session bearer, parks_so_far>=5; true for an ordinary persistent root run."
+  },
+  {
+   "name": "execution-core park::tests::park_until_defaults_and_resets_at_wins",
+   "proves": "ProviderExhausted uses resets_at, else retry_after, else +300 s; Upstream +60 s default; Credential/Crash/Reauth = now."
+  },
+  {
+   "name": "execution-core agent::tests::a_pinned_run_with_a_spent_usage_limit_parks_with_resets_at",
+   "proves": "Flag on: typed subscription_usage_limit trailer -> exactly one SaveLoopCheckpoint(kind park, park_reason provider_exhausted, park_until=resets_at); response status parked, park_reason set, failure_code empty; NO terminal receipt, NO assistant append, NO release of the sandbox lease; rounds counter rolled back by the failed round."
+  },
+  {
+   "name": "execution-core agent::tests::a_credential_deadline_parks_at_the_loop_top_with_messages_intact",
+   "proves": "Pinned run whose bearer is inside the 60 s margin (variant of a_pinned_run_whose_credentials_are_inside_the_margin_never_starts_a_round) parks with CredentialWindow; the fold messages equal the loop's messages; no round started."
+  },
+  {
+   "name": "execution-core agent::tests::an_unpinned_run_parks_at_the_credential_margin_only_when_parking_is_on",
+   "proves": "guard_credentials is true for an unpinned run only under the flag; flag off leaves the unpinned behaviour byte-identical."
+  },
+  {
+   "name": "execution-core agent::tests::wall_clock_expiry_still_fails_with_the_time_limit_reply",
+   "proves": "DeadlineCause::WallClock is never parked, flag on or off (RUN_TIME_LIMIT_REPLY, failed receipt)."
+  },
+  {
+   "name": "execution-core agent::tests::a_park_write_that_fails_falls_back_to_the_prior_failure",
+   "proves": "Table over save errors (failed_precondition loop_checkpoint_disabled, aborted loop_checkpoint_stale, ZDR refusal, park_until_beyond_ttl, park_limit_reached, unauthenticated, TooLarge after one clear_stale_tool_results, credential-shaped text): the outcome is the pre-S8 failure with its typed failure_code; never parked, never a second terminal."
+  },
+  {
+   "name": "execution-core agent::tests::zdr_and_waived_pinned_runs_never_call_save_loop_checkpoint",
+   "proves": "The double records zero save calls for req.zdr and for a waived route."
+  },
+  {
+   "name": "execution-core agent::tests::repeat_parks_stop_at_the_cap",
+   "proves": "extensions.parks carried forward; the 6th would-be park fails as before."
+  },
+  {
+   "name": "execution-core agent::tests::a_delegated_child_never_parks_and_the_root_parks_on_the_latched_refusal",
+   "proves": "Child usage limit stays a child tool-result failure; the root parks at its next loop top from the latched refusal; the exhaustive subagent match arm is unreachable."
+  },
+  {
+   "name": "execution-core tests/scrub_checkpoint_test::park_fold_carries_no_credentials",
+   "proves": "Bearer/JWT-shaped text in a tool result is scrubbed; assert_no_credentials passes on the park fold; credential-shaped residue refuses the park."
+  },
+  {
+   "name": "execution-core tests/subscription_refusal_contract::chain_exhausted_trailer_matches_inference_core",
+   "proves": "The literal is the same in inference-core grpc.rs and execution-core (pattern of the existing contract test)."
+  },
+  {
+   "name": "session-core loop_checkpoint::tests::park_ttl_env_parsing",
+   "proves": "Default 86400; invalid, zero and negative fall back; clamped to [60, 2592000]."
+  },
+  {
+   "name": "session-core loop_checkpoint::tests::decide_hold_table",
+   "proves": "Pure matrix of (none|closed|active|paused|parked|resuming-live|resuming-expired) x (within|beyond TTL) x (store on|off) x (parks<cap|>=cap) -> Spare/CrashPark/Terminalize. Store off => Terminalize for every row (kill-switch = pre-S8)."
+  },
+  {
+   "name": "session-core recover_parks_active_fold_becomes_crash_interrupted_not_terminal",
+   "proves": "DB-gated (--ignored, DATABASE_URL). Due obligation + active fold: row becomes state parked, park_reason crash_interrupted, pause_ref park:{run}:1, seq+1, ciphertext opens under AAD seq+1; runs.status stays running; obligation not applied; no RUN_TERMINAL event; CHECKPOINT_SAVED event carries park_reason."
+  },
+  {
+   "name": "session-core recover_parks_stale_writer_is_fenced_after_a_crash_park",
+   "proves": "DB-gated. A late round save with the old expected_seq is refused loop_checkpoint_stale, so a live-but-silent loop cannot resurrect an active fold over the park."
+  },
+  {
+   "name": "session-core recover_parks_spares_parked_and_paused_within_ttl",
+   "proves": "DB-gated. A due run with a parked fold, a paused fold, or a resuming fold with a live claim is not terminalized, even with no approval row, and a paused fold with a still-requested approval is spared."
+  },
+  {
+   "name": "session-core recover_parks_ttl_expiry_terminalizes_as_outcome_unknown_with_one_receipt",
+   "proves": "DB-gated. Fold updated_at older than the TTL: worker applies outcome_unknown via apply_managed_terminal_outcome: exactly one RUN_TERMINAL event, outbox state reconciliation_required/outcome unknown, runs.status failed, fold row purged in the same transaction, second worker pass is a no-op (already applied), receipt id stable. Also covers a paused fold with an unexpired-by-flag 'requested' approval beyond TTL."
+  },
+  {
+   "name": "session-core recover_parks_claim_races_ttl_without_double_terminal",
+   "proves": "DB-gated. Claim and worker serialize on the runs row lock: either the claim wins (resuming live claim, worker spares) or the worker wins (claim returns loop_checkpoint_not_claimable), never both."
+  },
+  {
+   "name": "session-core recover_parks_store_off_terminalizes_like_before",
+   "proves": "DB-gated. With SESSION_CORE_LOOP_CHECKPOINT_ENABLED off, a due run with a parked fold terminalizes outcome_unknown and the fold is purged (clean rollback, nothing stranded)."
+  },
+  {
+   "name": "session-core recover_parks_crash_park_cap_terminalizes",
+   "proves": "DB-gated. extensions.parks >= 5: a due active fold terminalizes instead of parking again."
+  },
+  {
+   "name": "session-core loop_checkpoint::db::save_park_validates_reason_ttl_and_cap",
+   "proves": "DB-gated. Unknown park_reason, park_until beyond TTL, and parks>cap are refused with the typed messages; a ZDR or zdr_waived run still gets DURABLE_MUTATION_FORBIDDEN."
+  },
+  {
+   "name": "session-core run_service_grpc::tests::run_detail_reports_park_reason_and_resumable",
+   "proves": "DB-gated. GetRun and ListRuns return park_reason only for state parked and resumable for paused/parked/expired-resuming; runs.status remains running."
+  },
+  {
+   "name": "session-core orchestration_grpc::tests::event_run_id_extracts_per_variant (extended)",
+   "proves": "RunParked and RunResumed are run-scoped, so RecordOrchestrationEvent accepts and routes them."
+  },
+  {
+   "name": "mp-orchestration proto_shim::tests::round_trip_run_parked / round_trip_run_resumed",
+   "proves": "The two new domain variants round-trip through the exhaustive shim (compile-time proof that no oneof arm is missing)."
+  },
+  {
+   "name": "model-gateway sse::tests::classify_agentic_run_outcome_parked (extends :12258 test)",
+   "proves": "\"parked\" -> Parked; unknown strings still -> Unknown."
+  },
+  {
+   "name": "model-gateway sse::tests::run_parked_frame_has_exactly_the_documented_keys",
+   "proves": "Keys are run_id, reason, retry_after_ms (omitted when None), resets_at (omitted when empty); no request_id/status; identical key set to the orchestration run_parked event payload. WS15 S7 can promote it with an unchanged wire."
+  },
+  {
+   "name": "model-gateway sse::tests::a_parked_response_with_an_unknown_reason_is_not_a_parked_frame",
+   "proves": "An unparsable park_reason degrades to agent_run_state_unknown, never a free-text reason on the wire."
+  },
+  {
+   "name": "model-gateway sse::tests::orchestration_run_parked_and_resumed_map_to_named_sse_frames",
+   "proves": "orchestration_event_to_sse and event_payload_value arms for run_parked/run_resumed."
+  },
+  {
+   "name": "verevonv3 src/shared/api/chat-client.test.ts: run_parked frame",
+   "proves": "Parses reason/retry_after_ms/resets_at into onRunParked; unknown reason -> onUnknownEvent; missing handler -> onStep status parked; run_resumed handled in the orchestration switch."
+  },
+  {
+   "name": "verevonv3 src/features/chat/lib/run-park.test.ts + runs-client normalizeRun test",
+   "proves": "All 5 tokens have both languages; park_reason/resumable normalization; unknown token -> neutral label."
+  },
+  {
+   "name": "gen-sse-event-taxonomy --check (python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check)",
+   "proves": "Stays green and needs no regeneration: the script only parses ChatEvent variants in sse_events.rs against SPA `case` labels (verified by reading it), and S8 adds no ChatEvent variant and removes no SPA case. It is a no-regression guard, not proof the raw frame is covered; WS15 S7 later adds the ad-hoc-frame coverage."
+  }
+ ],
+ "steps": [
+  "0. Preconditions: confirm S6 (FoldWriter, LoopState::to_fold, expected_seq tracking, prompt_digest) and S7 (claim/resume) status. Steps 1-3 and 5-6 do not need them; step 4 does. Land the integrator confirmation of RunAgentResponse tag 11 (or take the number it assigns).",
+  "1. mp-contracts: ParkReason::as_str/parse/ALL, MAX_PARKS_PER_RUN, PARKS_EXTENSION_KEY, parks_in, golden tests. `cargo test -q -p mp-contracts loop_fold`.",
+  "2. Protos and compile-green fan-out in one commit: orchestration.proto 24/25 + messages, execution.proto park_reason=11 + comments, runs.proto 17/18; buf generate for Go; mp-orchestration domain variants and shim arms; session-core event_run_id arms; model-gateway orchestration_event_to_sse / event_payload_value / step_update arms. Cargo one crate at a time.",
+  "3. session-core: park_ttl_seconds, save validations, decide_hold + recovery_hold + park_crashed, claim_due_recovery predicates, recover_claimed_terminalization branch, RUN_SELECT/RunDetail projection, record_event park_reason. Write the DB-gated recover_parks tests but do NOT run them without a disposable Postgres and instruction; run the pure ones with `cargo test -p session-core --bins park` and `decide_hold`.",
+  "4. execution-core (needs S6): park.rs pure parts + tests first; then the RoundsOutcome::Parked variant, the three try_park sites, run_agent_with_route early return, subagent arm, guard_credentials change, session double changes, agent tests. Flag off must leave every existing agent test untouched.",
+  "5. model-gateway: AgenticRunOutcome::Parked, frame builder + arm, run_detail_value fields, tests.",
+  "6. SPA: chat-client case + handler, controller wiring, runs-client normalization, run-park.ts, vitest. No Continue button; leave a code comment pointing at S7 and the chat.run.continue contract (extend the contract in the S7 change that makes /continue accept a parked run).",
+  "7. Last, optional: inference-core typed trailer for AllExhausted + execution-core unpinned reader + contract test. Ships separately because it widens parking from user-opted subscription runs to every Do run.",
+  "8. compose env defaults (false / 86400), ledger addendum. Evidence is S9's job (fake inference-core usage_limit trailer; docker kill execution-core past a shortened deadline). Do not run docker from this task.",
+  "Deploy order when it is time: model-gateway + BFF + SPA first (they understand `parked`), then session-core (worker logic is dormant without folds), then execution-core with EXECUTION_LOOP_PARKING_ENABLED last. An older gateway receiving status parked would hit the Unknown arm (RUN_DISPATCH_DEGRADED) while the run is in fact parked."
+ ],
+ "risks": [
+  "S6/S7 are absent: S8's write side has no fold writer to call, and a park without S7 is not resumable (the DoD line '/continue after reset resumes' is an S7+S8 joint proof). Mitigation: keep the flag off until both land; S9 live proof covers the joint flow.",
+  "Credential-window parking only exists for pinned runs today because RunDeadline::for_run gates the credential guard on route.is_pinned(). Extending it to unpinned runs under the flag changes behaviour (unpinned runs stop starting rounds ~60 s before their earliest bearer expires, ~240 s into a 300 s bearer) and, if the park write then fails, they fail earlier than before. Gate on parking_enabled() and measure round latency before enabling widely.",
+  "Park loop / privacy: each park resets updated_at and thus the TTL. Capped by MAX_PARKS_PER_RUN=5 (enforced in execution-core and again in session-core save and park_crashed), so worst case ~5 x TTL of encrypted retention. A usage-limit reset beyond the TTL is refused at save and the run fails with the typed reason as today.",
+  "Zombie writer / double execution: a loop that is alive but silent for 15 min could be crash-parked, then resumed by a click while still running. The seq+1 re-seal makes its next CAS save fail (S6 pre_effect saves are fail-closed), but an in-flight tool call can still finish; the ledger sweep already closes reserved rows of parked runs as unknown_outcome and S7 closers must not retry them. Not covered: a tool that completes after the park is recorded completed-without-output, which the closers treat as ResultLost.",
+  "Worker re-seal requires the descriptor key in the worker path; if the key is missing the worker terminalizes (pre-S8 behaviour) rather than leaving a half-parked row. Decrypt+encrypt of up to 4 MiB inside a transaction holding the runs/outbox/fold locks; acceptable at crash-park frequency.",
+  "Sandbox lease and processes are not released on park (same as Paused). A 24 h park outlives the lease TTL; S7 closers will report WorkspaceStateLost for workspace tools. Not verified how long leases live.",
+  "The recovery worker is safety-critical (honest outcomes). Changes are confined to the candidate query and a pre-terminalize branch; the receipt functions are untouched; the kill switch reverts to pre-S8. The candidate query now takes the fold table into account for every due run: confirm with EXPLAIN that (state, updated_at) index and the PK keep it cheap, since the worker polls every second.",
+  "Stale pending approvals: today an expired-but-'requested' approval spares a run forever (verified: nothing flips it, and has_pending_approval ignores expires_at). S8's fold_expired clause fixes this only for loop-mode approvals that have a paused fold; cold-mode approvals keep the old behaviour.",
+  "Unpinned ProviderExhausted depends on a new inference-core trailer; an older inference-core never sends it and the run simply keeps failing as today (safe). The metrics `outcome` label gains a value.",
+  "RunAgentResponse.park_reason = 11 collides with nothing in Appendix B but is not integrator-confirmed; 9 (WS02 usage) and 10 (WS25) are intentionally skipped.",
+  "Crash parks emit no live orchestration event (the worker has no events_tx/replay); the UI learns of them from RunDetail.park_reason on reload or poll. A user still staring at a dead stream sees the gateway's existing dispatch-degraded handling.",
+  "SPA wording and the closed-token set live in two places (Rust as_str and TS); the golden test pins Rust only, so add a TS table test that fails when a token is added without a label."
+ ],
+ "invariants": [
+  "A park is an upgrade of an existing failure: if the park cannot be durably written for ANY reason the outcome is exactly the pre-S8 outcome (same reply, same typed failure_code, same terminal receipt).",
+  "Park only on typed, content-free evidence (a closed trailer code, DeadlineCause::Credential, or the worker's own state). Never parse a status message; untyped failures stay failures.",
+  "The wall clock (EXECUTION_RUN_WALL_CLOCK_SECS) is an operator cap and never parks.",
+  "ZDR, zdr_waived, Space-scoped and depth>0 runs never park. execution-core refuses before calling, and session-core refuses again (run_owner_tx requires retention_class='persistent'; refuse_zdr_continuation).",
+  "Parking happens only at a round boundary or at a failed inference round with unchanged messages: round_in_flight is None, rounds_executed excludes the failed round, no effect is ever in flight at the park point.",
+  "A park returns before finalize: no terminal receipt, no assistant message, no tool-ledger finalization.",
+  "The fold is ciphertext-only (AES-GCM, AAD run/org/user/seq), scrubbed, assert_no_credentials-checked, <=4 MiB; no bearer is persisted or logged; park/event/log fields are closed tokens, counts and timestamps only.",
+  "Row columns (pause_ref, park_reason, park_until, state) are authoritative; crash parks re-seal the body under seq+1 so the body, AAD and row agree.",
+  "Immutable receipts: exactly one RUN_TERMINAL event and one outbox application per run; TTL expiry uses apply_managed_terminal_outcome(Failed('outcome_unknown'), reconciliation_required=true) unmodified; fold purge happens in the same transaction; crash-park and spare never write terminal state.",
+  "Lock order is runs -> outbox -> fold everywhere (save, claim, worker), so claim/TTL races serialize on the runs row.",
+  "Kill switch: SESSION_CORE_LOOP_CHECKPOINT_ENABLED off disables all worker fold logic and restores pre-S8 terminalization; parked runs end outcome_unknown, never stranded.",
+  "Flag off everywhere is byte-identical to today; the raw run_parked frame keys are exactly {run_id, reason, retry_after_ms?, resets_at?}, with no ChatEvent variant added.",
+  "Model proposes, Quarry executes: parking never touches browser_agent or Quarry state; browser_agent is never resumed (S5 closers).",
+  "Park never blocks /continue before park_until; park_until is a hint, the TTL is the only expiry."
+ ],
+ "open_questions": [
+  "Resume of a park needs claim by pause_ref, but the browser and gateway do not know the ref. Proposal for S7: ClaimLoopCheckpoint accepts an empty pause_ref meaning 'the run's current parked fold' (SQL `(pause_ref = $4 OR ($4 = '' AND state = 'parked'))`, parked only, never paused). Alternative: expose park_ref on RunDetail. Needs an owner call; both are S7 work, and S8 guarantees at most one parked fold per run (PK run_id).",
+  "S7's /continue route (continue_preflight, ContinueRunRequest{approval_id, claim_token}) must accept a parked run with no approval, and re-pin a subscription run from the fold: continue_run currently passes AgentRoute::default() and Authority carries provider_hint but not model or subscription_connection_id. Should the park fold store route.model and connection_id in extensions (identifiers, not credentials)? I recommend yes; not verified how S7 intends to rebuild the route.",
+  "Should rate_limited park only with retry_after_ms (my design, matching the design doc wording) or always? A short throttle may be better retried by inference-core than parked.",
+  "Unpinned ladder exhaustion: ship the inference-core trailer in S8 or defer to a follow-up? Recommend deferring behind the pinned-run parks.",
+  "Should crash parks emit a live event (needs the worker to share events_tx/replay with OrchestrationGrpc, or a NATS bridge)? Currently no.",
+  "Default park_until when the provider gives no timing (300 s, 60 s) and MAX_PARKS_PER_RUN=5 are my choices, not from the plan.",
+  "Extending the credential guard to unpinned runs is a behaviour change under the flag; the plan only says 'S8 parks at the credential margin'. Confirm intent.",
+  "Is a user's Cancel on a parked run purged correctly? run_service_grpc.rs:848 calls purge_run (seen), but I did not verify the cancel path ends the managed obligation for a parked run.",
+  "Not verified: BFF relay of the raw run_parked frame end to end (inferred from the awaiting_approval precedent and proxy_sse_stream_with_data_plane); whether the BFF ag_ui.rs should list run_parked as CUSTOM (currently falls to RAW, which is safe); that no Go code has an exhaustive switch on the oneof; exact FoldWriter/LoopState signatures from S6; whether execution-core StateStore leaks an entry for a parked run."
+ ],
+ "verification_commands": [
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts loop_fold",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-orchestration",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib park",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib runtime_loop::agent::tests -- parks parked credential_deadline wall_clock",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --test subscription_refusal_contract --test scrub_checkpoint_test",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --all-targets",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --bins park",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --bins decide_hold",
+  "(only when told, disposable Postgres) cd \"apps/Model Plane/rust\" && DATABASE_URL=<scratch test db> cargo test -p session-core --bin session-core recover_parks -- --ignored --test-threads=1",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib classify_agentic_run_outcome run_parked orchestration_run_parked",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway -p session-core --all-targets",
+  "cd \"apps/Model Plane/rust\" && cargo test -q -p inference-core --lib grpc (only if step 7 ships)",
+  "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+  "cd \"apps/Model Plane\" && buf generate && buf breaking proto --against proto/baseline.binpb",
+  "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/api/chat-client.test.ts src/features/chat/lib/run-park.test.ts && pnpm typecheck && pnpm lint (pre-existing failures per memory: diff against HEAD)",
+  "cd \"apps/Model Plane/rust\" && cargo fmt --all -- --check"
+ ]
+}

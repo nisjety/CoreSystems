@@ -1,0 +1,298 @@
+//! Normalized output envelope (runtime → edge/control). Mirrors CONTRACTS §9.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::ids::kinds;
+use crate::privacy::PrivacyPolicy;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormalizedOutput {
+    pub run_id: kinds::RunKind,
+    pub url: UrlTriple,
+    pub status: u16,
+    pub fetched_at: DateTime<Utc>,
+    pub fingerprint: String,
+    pub formats: OutputFormats,
+    pub change: ChangeInfo,
+    pub metadata: PageMetadata,
+    pub driver: DriverInfo,
+    /// Cycle 21 / cluster #2 — runtime stamps the Determinism mode +
+    /// policy fingerprint + identity hash so downstream consumers can
+    /// audit which RunPolicy produced the artifact. `None` for legacy
+    /// outputs produced before P21 wiring. Always populated by the
+    /// current PageRunner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub determinism: Option<DeterminismStamp>,
+    /// Privacy policy that governed the fetch and any downstream writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<PrivacyPolicy>,
+    /// Branding signals extracted by `quarry_transform::branding_rendered`
+    /// for HTML responses (favicon, theme color, palette, logo
+    /// candidate, font family, og:image). `None` for binary responses
+    /// or when extraction returned no usable fields. Serialized as an
+    /// opaque JSON `Value` so this crate doesn't pull a hard
+    /// dependency on `quarry-transform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branding: Option<serde_json::Value>,
+    /// HTTP `ETag` response header, when the server emits one.
+    /// Stored so a re-crawl can send `If-None-Match` and short-circuit
+    /// on a 304 instead of re-downloading + re-parsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    /// HTTP `Last-Modified` response header. Pairs with ETag for
+    /// conditional re-crawls — send `If-Modified-Since` when ETag is
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    /// Post-transform page-level extraction (title provenance, excerpt,
+    /// word count, serving driver). Mirrors the `page_extracted` event
+    /// payload so the `/v1/internal/run_page` response can hand it to the
+    /// orchestrator, which re-emits it into control's per-job event log for
+    /// consumers that poll `/v1/jobs/{id}/events`. `None` for binary/non-HTML
+    /// responses and for outputs produced before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<PageExtraction>,
+    /// E3.5-4: whitespace- and case-normalised fingerprint of the page's readable text
+    /// (`quarry_transform::fingerprint::text_fingerprint` over the transformed markdown),
+    /// e.g. `"blake3:..."`. `fingerprint` above stays the raw-byte hash (artifact addressing,
+    /// cache keys); this one is what a change monitor compares with
+    /// `QUARRY_EDGE__CHANGE_TEXT_FP` on, so a rotating nonce or a reflowed attribute no longer
+    /// reads as a change. `None` for outputs produced before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_fp: Option<String>,
+}
+
+/// Where a page's display title came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    /// `<title>` / `og:title` parsed from the HTML and judged specific enough.
+    Html,
+    /// The HTML title was missing or generic (empty, the host name, "Home",
+    /// "Untitled", …) and Model Plane produced a clean title from the excerpt.
+    Model,
+    /// No usable HTML title and no model result: the host label is used.
+    Host,
+}
+
+impl TitleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TitleSource::Html => "html",
+            TitleSource::Model => "model",
+            TitleSource::Host => "host",
+        }
+    }
+}
+
+/// Page-level extraction emitted as the `page_extracted` event payload and
+/// carried on [`NormalizedOutput::extraction`]. Every text field is derived
+/// from the transformed markdown, never from raw HTML, so it is safe to show
+/// verbatim in a UI card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageExtraction {
+    pub url: String,
+    /// Display title after provenance resolution (never empty).
+    pub title: String,
+    pub title_source: TitleSource,
+    /// First ~300 chars of the readable markdown, markup stripped and
+    /// whitespace collapsed. Empty when the page had no readable text.
+    #[serde(default)]
+    pub excerpt: String,
+    /// Optional one-sentence model summary (only when `title_source == model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub word_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Driver that actually served the fetch (`static` | `tls` | `browser`).
+    pub driver: DriverKind,
+}
+
+/// Compact policy/identity stamp embedded in [`NormalizedOutput`]. The
+/// fields mirror [`crate::contracts`] / quarry-runtime's `policy.rs`
+/// types but live in `quarry-core` so consumers don't need to depend
+/// on the runtime crate to interpret the stamp.
+#[cfg(test)]
+mod text_fp_tests {
+    use super::NormalizedOutput;
+
+    fn minimal(extra: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "run_id": crate::ids::kinds::RunKind::new(),
+            "url": { "requested": "https://example.com/", "final_url": "https://example.com/" },
+            "status": 200,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "fingerprint": "blake3:raw",
+            "formats": {},
+            "change": { "status": "new" },
+            "metadata": {},
+            "driver": { "kind": "static", "duration_ms": 1 }
+        });
+        if let Some(fp) = extra {
+            v["text_fp"] = serde_json::json!(fp);
+        }
+        v
+    }
+
+    #[test]
+    fn an_output_from_before_the_text_fingerprint_decodes_without_it() {
+        let out: NormalizedOutput = serde_json::from_value(minimal(None)).unwrap();
+        assert!(out.text_fp.is_none());
+        let wire = serde_json::to_value(&out).unwrap();
+        assert!(wire.get("text_fp").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn the_text_fingerprint_round_trips_next_to_the_raw_one() {
+        let out: NormalizedOutput = serde_json::from_value(minimal(Some("blake3:text"))).unwrap();
+        assert_eq!(out.text_fp.as_deref(), Some("blake3:text"));
+        assert_eq!(out.fingerprint, "blake3:raw");
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(wire["text_fp"], "blake3:text");
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeterminismStamp {
+    /// `"strict" | "best_effort" | "off"`.
+    pub mode: String,
+    /// `policy_fingerprint(&RunPolicy)` — e.g. `"blake3:..."`.
+    pub policy_fp: String,
+    /// `record_determinism_inputs(url, &policy).id` — `"dq:..."`.
+    pub identity_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlTriple {
+    pub requested: String,
+    pub final_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutputFormats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<FormatRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<FormatRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<FormatRef>,
+    #[serde(default)]
+    pub links: Vec<Link>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<FormatRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<FormatRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<ExtractRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormatRef {
+    pub artifact_id: kinds::ArtifactKind,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractRef {
+    pub artifact_id: kinds::ArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Link {
+    pub href: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rel: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeInfo {
+    pub status: ChangeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeStatus {
+    New,
+    Changed,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// One-line description. `og:description` → `meta[name=description]`
+    /// → `twitter:description` → JSON-LD `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Author display name. `meta[name=author]` → `article:author`
+    /// → JSON-LD `author.name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// ISO-8601 publish timestamp. `article:published_time` →
+    /// JSON-LD `datePublished` → `<time pubdate datetime>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    /// ISO-8601 last-modified timestamp. `article:modified_time` →
+    /// `og:updated_time` → JSON-LD `dateModified`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
+    /// SEO keywords. `meta[name=keywords]`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<String>,
+    /// Canonical URL. `link[rel=canonical]` → `og:url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    /// OG image. `og:image` → `twitter:image`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub og_image: Option<String>,
+    /// Robots directive. `meta[name=robots]`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robots: Option<String>,
+    /// What the body was detected to be (`html`, `pdf`, `docx`, ...), from the
+    /// Content-Type and the first bytes. Absent when content routing is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind: Option<String>,
+    /// Where `content_kind` came from: `header`, `magic` or `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_kind_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverInfo {
+    pub kind: DriverKind,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_view_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriverKind {
+    Static,
+    Browser,
+    Tls,
+}

@@ -1,0 +1,365 @@
+{
+ "batchId": "W3-21",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-11-S3",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_ec100703-48e-1",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+    "apps/Model Plane/proto/model_plane/v1/runs.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/skills.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback.go",
+    "apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback_test.go"
+   ],
+   "notes": "Part (a) is built, with code and unit tests written but not run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-21/EP-11-S3.patch (52 KB).\n\nWhat is in it:\n- Protos: gateway.proto `Skill` gains version=7 and digest=8. runs.proto gains the new message `SkillPin` and `RunContextStatus.skills=4`.\n- mp-contracts `status_json`: adds a `skills` key only when pins exist, so a status with no pins stamps exactly what it did before. A pins-only status stamps only `skills`. Ids, digests (64 hex characters only) and sources (a closed set) are sanitised, and at most 16 pins are kept.\n- session-core `RecordRunContext`: now merges into `metadata.run_context` one level deeper, so a pins-only stamp and a parts stamp do not erase each other. A three-part stamp writes the same keys as before. One ignored database test was added.\n- model-gateway, all behind `MODEL_GATEWAY_SKILL_PINS` (off unless the literal `true`):\n  - `agent_skill_to_skill` copies version and digest only while the switch is on.\n  - Builtin skills get version 0 and a digest that is the sha256 of the embedded SKILL.md with CRLF folded to LF (`builtin_skills::digest_of`).\n  - `fetch_skill_context` pins every skill the turn set out to inject, including blocks the budget cut or dropped, because `reattach_skill` recovers exactly those.\n  - The Ask path stamps the pins on the run record with a spawned `run_context::record_skill_pins`. It never runs for a ZDR or waived turn. A failed stamp is counted on `skill_pin_record_failed_total`.\n  - `record_status` now returns a bool.\n  - `chat_turn_registry` records a pinned skill as `id@version`. There is also a new in-process pin registry per (org, run) that recovery reads.\n  - `reattach_skill` reads the pinned version through `GetAgentSkillVersion` when the cached row's digest has moved since the pin. A gone version returns a `not_available` text, and a failed read is an error; it never falls back to the current text.\n  - The skill-mount lookup in tool_loop strips the `@version` suffix.\n- orchestrator-core: `feedback.Normalize` strips `@version` with the new `SplitSkillRef`, so pinned ratings key and quarantine on the bare skill id. This is needed as soon as the gateway switch is on.\n\nDeviations:\n1. Part (b) was not built: no migration 0003, no version-keyed quarantine, no `FEEDBACK_SKILL_VERSIONS`.\n2. The gone text is a new `not_available` rendering rather than an existing one.\n3. Do runs are not pinned. execution-core injects its own skills (`runtime_loop/agent.rs`) and has its own `reattach_skill`, and neither is in this slice's files.\n\nStatus is partial because of points 1 and 3.",
+   "deviations": [
+    "Part (b) (orchestrator-core migration 0003_feedback_skill_version, version-keyed ratings and quarantine, FEEDBACK_SKILL_VERSIONS) was not built; only the parse-safety part is in: Normalize strips the @version suffix so gateway refs do not break promotion or quarantine.",
+    "Do-path pins were not built: the gateway Do launch (run_context::prepare) composes no skills; execution-core injects and recovers skills itself, outside this slice's files.",
+    "A gone pinned version renders a new JSON status 'not_available' (skills::render_pinned_skill_gone) rather than reusing an existing text; a failed version read is an error outcome, not a silent fallback to the current row.",
+    "The design names test 'recovery_reads_pinned_version_after_mid_run_edit'; it is covered at the decision level (skills::pin_needs_version_read, chat_turn_registry RunPinRegistry tests). The RPC leg has no unit test because the gateway has no SkillVersionService mock."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs: (1) in the `use mp_contracts::model_plane::v1::{...}` list add `skill_version_service_client::SkillVersionServiceClient,` (after `session_core_client::SessionCoreClient, ...`); (2) after the field `pub artifact_revision_client: ArtifactRevisionServiceClient<Channel>,` add `/// Session Core's SkillVersionService (EP-11 S3: recovery reads a run's pinned skill version) on the session_client endpoint.\\n    pub skill_version_client: SkillVersionServiceClient<Channel>,`; (3) in the test/default constructor after `artifact_revision_client: ArtifactRevisionServiceClient::new(session_channel.clone()),` add `skill_version_client: SkillVersionServiceClient::new(session_channel.clone()),`; (4) in from_env after the `let artifact_revision_client = ArtifactRevisionServiceClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);` block add the same block as `let skill_version_client = SkillVersionServiceClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);`; (5) in BOTH branches after `state.artifact_revision_client = artifact_revision_client;` add `state.skill_version_client = skill_version_client;`. tool_loop.rs pinned_skill_recovery uses `state.skill_version_client`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs: in test fn `skill(id, name) -> Skill` after `min_score: 0.0,` add `            version: 0,\\n            digest: String::new(),` (Skill gained gateway.proto fields 7/8).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (model-gateway environment, after the `BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}` line): `      # EP-11 S3: a run records the skill versions it injected and recovery inside the run reads the pinned version. Off\\n      # by default; only the literal `true` turns it on. Needs SKILL_VERSIONS_API on in session-core for recovery reads.\\n      MODEL_GATEWAY_SKILL_PINS: ${MODEL_GATEWAY_SKILL_PINS:-false}`",
+    "Guard: regenerate proto bindings (gateway.proto Skill 7/8, runs.proto SkillPin + RunContextStatus.skills=4) for Rust/Go/Python, then run buf lint and buf breaking against proto/baseline.binpb.",
+    "Guard: compile and run cargo test for mp-contracts --lib, model-gateway --all-targets and session-core --all-targets (the new ignored database test is record_run_context_merges_skills_without_dropping_other_keys), plus go test ./... and go vet ./... in orchestrator-core.",
+    "Owner .env.example: add MODEL_GATEWAY_SKILL_PINS=false (the agent did not edit it)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs (skill_version_client field and wiring)",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs (Skill literal)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs and runtime_loop/mod.rs (Do-path skill injection and reattach_skill, to pin through RunContextStatus.skills)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Do runs are not pinned: execution-core runtime_loop/agent.rs injects skills itself and runtime_loop/mod.rs reattach_skill reads the current row, so a mid-run edit still changes Do recovery even with MODEL_GATEWAY_SKILL_PINS on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With MODEL_GATEWAY_SKILL_PINS on and session-core SKILL_VERSIONS_API off, every pinned recovery after an edit returns the error 'could not read the version of this skill this run used', so both switches must flip together."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Run pins for recovery live in an in-process RunPinRegistry (6 h TTL); after a gateway restart or on another replica, recovery reads the current row even though runs.metadata.run_context.skills holds the durable pin."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Pins cover every skill the turn set out to inject, including blocks the budget dropped, because reattach_skill recovers exactly those; the run record can therefore list a skill whose block was not in the prompt."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Part (b) remains: orchestrator-core 0003_feedback_skill_version plus FEEDBACK_SKILL_VERSIONS to key ratings and quarantine by (skill_id, version); today SplitSkillRef drops the version, so a fixed v4 still inherits v3's ratings."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Unverified: whether the Ask-path session bearer holds session:write for RecordRunContext (design [verify live]); a refusal shows only as skill_pin_record_failed_total and a warn log."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test drives the GetAgentSkillVersion RPC leg of tool_loop pinned_skill_recovery (no SkillVersionService mock in model-gateway); the gone and mid-run-edit paths need the live proof in design section S3."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S6",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_ec100703-48e-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0109_authored_behaviour_kind.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0109_authored_behaviour_kind.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_kinds_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skilllint/lint.go",
+    "apps/Model Plane/go/services/capability-core/internal/skilllint/lint_test.go",
+    "apps/Model Plane/api/contracts/authored-behaviour-lint.json",
+    "apps/Model Plane/api/contracts/authored-behaviour-lint.json.sha256",
+    "apps/Model Plane/api/contracts/authored-behaviour-lint-golden.json",
+    "apps/Model Plane/rust/crates/mp-contracts/src/skill_lint.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/authored-kinds-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.templates.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.presets.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/authored-lint.ts",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/TemplateEditor.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/PresetEditor.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/skills/components/PresetEditor.test.tsx"
+   ],
+   "deviations": [
+    "The migration is numbered 0109, not the reserved 0098. 0108 (S2) creates agent_skill_version_body with the constants 'skill'/'{}'. On a fresh database a 0098 would run before 0108, and 0108 would then put the constants back. 0109 is the next free number after both integration reports.",
+    "0109 also replaces agent_skill_revision_snapshot (0064) so that it carries kind and settings. session-core RESTORE_SKILL_SQL now restores kind (COALESCE 'skill') and settings. Without this, an undo of a deleted template re-created it as an enabled skill that gets injected into turns.",
+    "Template and preset rules (template_placeholder_invalid, preset_settings_invalid, preset_unknown_key) run on every template/preset write while AUTHORED_KINDS_ENABLED is on, whatever SKILL_LINT_MODE says, because no stored row predates them. Other lint codes still follow SKILL_LINT_MODE. Non-preset settings get 422 settings_not_allowed.",
+    "GET /api/v1/skills/{id} also filters on ?kind= (default skill) while the switch is on. PATCH accepts settings, for presets only, while the switch is on. While the switch is off, settings are ignored and the statement is unchanged.",
+    "Templates do not go through loadSpecializedActions. A specialized action rides the invoke tools array, so a separate loadSlashTemplates registers templates into the composer's slash registry instead. A typed '/template rest' + Enter expands into the draft and returns {ok:false}; it is never sent.",
+    "New helper files authored-kinds-client.ts and features/skills/authored-lint.ts carry the new lint messages, because skill-lint.ts is not mine.",
+    "PresetEditor shows only mode and web search. skillIds/templateId are allowed by the schema but have no UI yet."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (~2488, pb::ListAgentSkillsRequest): add `kinds: Vec::new(),` after `for_user_id: String::new(),` (needed to compile after proto field kinds=4).",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (~3798, ListAgentSkillsRequest): add `kinds: Vec::new(),` after `for_user_id: String::new(),`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs (~2075), src/sse.rs (~8230, fetch_skill_context) and src/tool_loop.rs (~4649): in each ListAgentSkillsRequest literal add `kinds: Vec::new(),` after `for_user_id: String::new(),`, with a comment in sse.rs: `// EP-11 S6: no kinds = skills only; a template or preset is never matched or injected.`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs tests: add `#[test] fn templates_never_injected_as_skills()`, a source-text test asserting that the fetch_skill_context ListAgentSkillsRequest literal contains `kinds: Vec::new()` and never names \"template\"/\"preset\".",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts after line `'skills.versions.list': exempt('no_owner_executor', 'read'),` add: `'templates.create': exempt('agent_cannot_self_govern', 'context_write'),` `'templates.update': exempt('agent_cannot_self_govern', 'context_write'),` `'presets.create': exempt('agent_cannot_self_govern', 'context_write'),` `'presets.update': exempt('agent_cannot_self_govern', 'context_write'),` (MODEL_ACCESS is Record<ActionId,...>, so this is required for typecheck).",
+    "Regenerate: buf generate (sessions.proto ListAgentSkillsRequest.kinds=4, AgentSkill.kind=21/settings_json=22) and the agent-action-admission golden (4 new actions).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs list_skills_proxy (~8370) and get_skill_proxy: forward a `kind` query param only when it is exactly skill|template|preset (e.g. `Query(q): Query<HashMap<String,String>>`, then append `&kind={k}` to `skills?org_id=`). Today the proxy drops the query string, so ?kind=template reaches capability-core as a skills list. The SPA filters by row kind, so nothing leaks, but templates and presets never appear.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml capability-core environment: `AUTHORED_KINDS_ENABLED: ${AUTHORED_KINDS_ENABLED:-false}`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): 'Authored behaviours are one table with a kind; skill_packages is retired (EP-11 D1)' and 'Templates are text, presets are visible composer defaults; agents are EP-6 (EP-11 D6)'.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx: mount <TemplateEditor/> and <PresetEditor/> (features/skills/components) behind a 'New template' / 'New preset' button, shown only when GET /api/v1/skills?kind=template answers kinds_enabled:true.",
+    "docs: record in docs/plans/wave3/00-integration-round-b.md that EP-11 S6 took session-core 0109 (0098 stays unused) so it applies after 0108."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "If AUTHORED_KINDS_ENABLED is turned off after templates or presets exist, capability-core's list and get run the old kind-blind SQL, so those rows show as skills on the Skills page. session-core still never injects them, because ListAgentSkills defaults to kinds=['skill']."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The model-gateway skills proxy drops the query string, so ?kind=template never reaches capability-core. The authored lists stay empty until the http_routes.rs shared edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF create_skill lets a member write only while SKILL_MEMBER_AUTHORING is on, so members cannot create their own templates or presets until that switch is flipped."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not yet proven live: on a database with 0108 applied, run 0109 and confirm every agent_skills.digest equals agent_skill_digest(row) (ignored PG test existing_digests_unchanged_by_kind_migration). Also check the CREATE UNIQUE INDEX lock time against the live row count."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Session-core PG tests existing_digests_unchanged_by_kind_migration and same_name_skill_and_template_coexist are written but #[ignore]. They need the session-core-db-tests.sh harness, and no PG test yet covers an undo that restores a deleted template."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The capability-core history route body (skillVersionBody) still omits kind and settings. A template's or preset's version history shows its text but not its kind or settings."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Templates are registered once, after the first '/'. A template created later in the same composer session appears only after a remount, and a template whose slug equals a built-in command is shadowed by the built-in."
+    }
+   ],
+   "notes": "I built the slice code-first, with nothing run; the patch is at .plan-work/execution/patches/W3-21/EP-11-S6.patch (140 KB). One deviation matters most: the migration is 0109_authored_behaviour_kind, not the reserved 0098. 0108 creates the version body function and must run before this migration replaces it.\n\n- **Migration:** adds kind (CHECK skill/template/preset, NOT VALID then VALIDATE), settings JSONB (object CHECK) and scope_id. It creates the unique index (org_id, kind, scope, scope_id, owner_user_id, name) and only then drops agent_skills_scope_owner_name_uq, under a contract marker. It replaces agent_skill_version_body to read the real kind and settings; the field list is unchanged, so no existing digest moves. It also adds kind and settings to the revision snapshot so an undo keeps a template a template. The revert file deletes templates and presets and restores the 0108/0064 functions and the old index.\n- **session-core:** both upsert arms use the new conflict key, and the conflict lookup now filters kind 'skill'. ListAgentSkills takes kinds (empty means ['skill']; unknown kinds are refused as invalid_argument) and returns kind and settings_json. Unit tests: upsert_conflict_uses_new_index, template_never_listed_for_matching, kind_migration_keeps_the_digest_field_list, restore_keeps_the_kind_of_a_deleted_template. Two PG tests are #[ignore] (listed in depth_findings).\n- **Proto:** additive, all commented: ListAgentSkillsRequest.kinds = 4, AgentSkill.kind = 21 and settings_json = 22.\n- **capability-core:** AUTHORED_KINDS_ENABLED is read strictly. Off, every statement and body is as before; a ?kind=template read gets {skills:[], kinds_enabled:false} without touching the database, and a template/preset POST gets 422 kind_not_enabled in the typed envelope. On, list and get filter on ?kind= (default skill); POST and PATCH write kind and settings and always run the kind rules. Tests are in skills_kinds_test.go.\n- **Lint:** the contract, its .sha256 pin (recomputed) and the golden file gain three codes plus kinds, template_placeholder and preset_settings_keys. Go and Rust implement them the same way, including overlapping {{ detection and null settings read as absent.\n- **Frontend:** authored-kinds-client drops any row whose kind is not the one asked for. Templates register into the composer's slash registry; picking one or typing '/name rest' fills the draft and never sends. Authored presets list under the curated ones in AgentRunConsole and only set goal, mode (if it is a mode the console offers) and web. TemplateEditor and PresetEditor are written but not mounted. Four action contracts are added and the registry test count goes from 306 to 310.\n\nAll files are LF, as before.",
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S10",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_ec100703-48e-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/thread_export_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/api/openapi.yaml"
+   ],
+   "notes": "EP-12-S10 built in the isolated worktree, detached at model-plane c2168756d. New thread_export_routes.rs: GET /v1/threads/:thread_id/export with format json|markdown and profile full|redacted (both required). It calls session-core ThreadExportService.ExportThread with the caller's session bearer and renders verevon.thread-export.v1 (struct-declared key order) or escaped Markdown with a run table and a Not included footer. Responses are attachments with no-store; errors are typed envelopes with object details. A zero-retention or waived caller is refused by zdr_or_refuse before any call; api_key principals are refused by the route policy. Switch MODEL_GATEWAY_THREAD_EXPORT is read with switch_from; off gives 404 thread_export_disabled. Unit tests are written (names per the design) but not run. The module does not compile until the state.rs shared-edit in lead_todo is applied. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-21/EP-12-S10.patch (36,680 bytes, four files, staged, not committed).",
+   "deviations": [
+    "Switch off: the path is registered and answers a typed 404 thread_export_disabled rather than being an unmatched route; the route-policy coverage test requires registration. Unauthenticated requests get 401 and other methods get 405, because auth and the method router run before the switch gate.",
+    "ZDR refusals keep the catalogue body (error.code, message, retryable, action, feature) with no details object, as every ZDR refusal on this gateway does. The object-details envelope applies to the other refusals.",
+    "Markdown adds each text artifact under its turn in a code fence and a System heading for system turns. The design named only You, Verevon and the run table, and its footer says citations, tool steps and attachment details are JSON-only.",
+    "Markdown escapes only < (as &lt;), not & or >, which is narrower than the design's escapes-HTML wording so that code and blockquotes keep their meaning.",
+    "format and profile are both required query parameters, and success answers carry Cache-Control: no-store (the design is silent on both).",
+    "The gateway needs a ThreadExportService client in AppState, a file the design's file list omits, so the wiring is a shared-edit. The openapi tags list also gained one entry (threads) outside the path block."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs: (a) in the `use mp_contracts::model_plane::v1::{` block insert `    thread_export_service_client::ThreadExportServiceClient,` directly above `    thread_fork_service_client::ThreadForkServiceClient,`; (b) in `pub struct AppState`, after `    pub thread_goal_client: ThreadGoalServiceClient<Channel>,`, insert the doc line `    /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).` and the field `    pub thread_export_client: ThreadExportServiceClient<Channel>,`; (c) in `AppState::new()`, after `            thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),`, insert `            thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),`; (d) in `from_env()`, after the statement `let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(...)?);`, insert `let thread_export_client = ThreadExportServiceClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);` wrapped as its neighbours are; (e) in BOTH branches of `from_env()`, after each `            state.thread_goal_client = thread_goal_client;`, insert `            state.thread_export_client = thread_export_client;`. thread_export_routes.rs does not compile until (a) to (e) apply.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, after the line `      MODEL_GATEWAY_THREAD_GOALS_ENABLED: ${MODEL_GATEWAY_THREAD_GOALS_ENABLED:-false}` and before the `# EP-7 S4` comment, insert `      # EP-12 S10: the owner's conversation export route (JSON and Markdown). Only the literal true.` and `      MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}`.",
+    "No regeneration for this slice: no proto, migration, prompt or tool definition, or golden changes. The openapi path is not checked by CI and api/sdk is not regenerated.",
+    "Owner only: MODEL_GATEWAY_THREAD_EXPORT=false may be added to apps/Model Plane/deploy/.env.example beside the other switches. This slice did not touch that file."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "On a non-ZDR proof thread, prove the JSON and Markdown downloads carry the same turns, redacted drops tool payloads, a thread holding a waived or zero-retention run answers 412 thread_not_exportable, and a ZDR org gets zdr_feature_not_supported with no new rows."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Switch-off answers a typed 404 thread_export_disabled on a registered route, not an unregistered one, because the route-policy coverage test in http_routes.rs requires every .route literal to be registered; the owner should accept that reading of the design's route absent."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A waived caller is refused at the gateway with zdr_waiver_route_mismatch (403) before any call, not with session-core's conversation_export; the S12 copy for waived exports must be written against that 403."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each export holds up to 8 MiB of turn text plus its rendered copy in memory, and the route has no limit beyond the global limiter, so a per-principal limit is needed before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Markdown copy escapes only <, so a < inside a fenced code block of an assistant answer reads as &lt; in the raw file; a Markdown-aware escape would avoid that."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The renderers are unit-tested on hand-built fixtures, so the JSON shape against real session-core output is proven only by the live export in the depth phase."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The S11 BFF action must send both format and profile, because this route answers 400 invalid_request with details.parameter when either is missing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With the switch off, an unauthenticated request to this path gets 401 and other methods get 405, unlike an unknown path, because auth and the method router run before the switch gate."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "openapi.yaml gained a top-level threads tag beside the path block; no CI gate checks the spec and this slice does not regenerate the SDK."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn EP-11-S3.patch, EP-11-S6.patch, EP-12-S10.patch (in that order), then git reset -q",
+    "outcome": "All three patches applied with no conflicts and no .rej files. Every slice's files show in git diff --stat, and the index is empty.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (Go) + go-gen-drift.sh",
+    "outcome": "go-gen-drift: 54 generated Go files match go/gen/model_plane",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml (Python)",
+    "outcome": "Updated gateway_pb2.py, runs_pb2.py and sessions_pb2.py. The space_* files are untracked in the tree, so they were not copied.",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb",
+    "outcome": "exit 0, no breaking changes",
+    "clean": true
+   },
+   {
+    "command": "buf lint --error-format json > .plan-work/buf-lint-w321.json",
+    "outcome": "Exit 100. This is the existing lint debt; none of the new fields or messages are flagged (gateway Skill 7/8, runs SkillPin and RunContextStatus.skills=4, sessions ListAgentSkillsRequest.kinds=4, AgentSkill.kind=21 and settings_json=22).",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5/5 passed. Golden regenerated (sha256 bc1c4bcd...18e2) and copied byte-identically to api/contracts, the capability-core testdata, the execution-core fixtures and the model-gateway fixtures. .sha256 and the zdr-contract-sync.test.sh pin updated.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished with 0 errors. The only warnings are in files this batch did not touch (the unused Json at http_routes.rs:20645/20648 is in an existing test).",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... in go/gen, services/capability-core, services/orchestrator-core (go.work)",
+    "outcome": "all clean",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+    "outcome": "exit 0, 0 errors (at or below the 1-error baseline)",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "slice": "EP-11-S6",
+    "what": "Before my edit the working copy was CRLF while HEAD is LF, so the whole file showed as changed. I wrote it back as LF to match HEAD, so the diff is now only the one added kinds line."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "slice": "EP-11-S6",
+    "what": "Same as mod.rs: the working copy was CRLF and HEAD is LF. Written back as LF, so the diff is only the added kinds line."
+   }
+  ],
+  "still_broken": [],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/runs.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/gateway_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/runs_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+   "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+   "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+   "scripts/tests/zdr-contract-sync.test.sh (agent-action-admission pin b292c5be... -> bc1c4bcd...)"
+  ],
+  "shared_edits_applied": [
+   "model-gateway/src/state.rs: added the skill_version_client field (EP-11-S3) and the thread_export_client field (EP-12-S10), each with its import, doc comment, constructor in new(), lazy_channel in from_env() and assignment in both from_env branches",
+   "model-gateway/src/deck_templates.rs (CRLF kept): the test Skill literal gains version: 0 and digest: String::new()",
+   "deploy/docker-compose.yml model-gateway: MODEL_GATEWAY_SKILL_PINS (after BUILTIN_OFFICE_SKILLS_ENABLED) and MODEL_GATEWAY_THREAD_EXPORT (after MODEL_GATEWAY_THREAD_GOALS_ENABLED, before the EP-7 S4 comment), both default false",
+   "deploy/docker-compose.yml capability-core: AUTHORED_KINDS_ENABLED default false, with a comment, after SKILL_VERSIONS_API",
+   "kinds: Vec::new() in the ListAgentSkillsRequest literals in execution-core runtime_loop/agent.rs and runtime_loop/mod.rs, and in model-gateway grpc.rs, sse.rs fetch_skill_context (with the EP-11 S6 comment) and tool_loop.rs (the recovery list literal)",
+   "model-gateway/src/sse.rs: new test module authored_kinds_tests with templates_never_injected_as_skills, a source-text test on the fetch_skill_context literal",
+   "verevonv3 src/shared/actions/model-access.ts: templates.create/update and presets.create/update set to exempt('agent_cannot_self_govern','context_write')",
+   "model-gateway/src/http_routes.rs: new helper authored_kind_suffix. list_skills_proxy and get_skill_proxy now take a Query and forward kind only when it is exactly skill, template or preset",
+   "verevonv3 src/features/settings/components/SkillsSection.tsx: 'Ny mal / New template' and 'Nytt oppsett / New preset' buttons that mount TemplateEditor or PresetEditor, shown only when canAuthor() is true and listAuthored('template').kindsEnabled is true (a failed read keeps them hidden)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md: the EP-11 D1 and D6 entries (the lead books these)",
+   "docs/plans/wave3/00-integration-round-b.md: the note that EP-11 S6 took session-core migration 0109 (a doc item, not a shared-edit; left for the lead)",
+   "Every .env.example entry (MODEL_GATEWAY_SKILL_PINS, MODEL_GATEWAY_THREAD_EXPORT): owner only",
+   "execution-core runtime_loop agent.rs/mod.rs: EP-11-S3's Do-path skill pinning through RunContextStatus.skills. This was listed under needs_other_files with no exact edit, so it is new design work and is not applied"
+  ],
+  "notes": "I applied all three patches in order with git apply --3way. There were no conflicts. I then ran git reset -q, so every change sits unstaged in the working tree. Nothing was committed.\n\nWhat I regenerated:\n- Proto bindings for Go and Python. Rust bindings come from mp-contracts' build.rs.\n- The agent-action-admission golden.\n\nNothing touched a prompt, a tool definition, an SSE payload or zdr-posture-matrix, so steps 4 and 4b did not run. I skipped the verevonv3 gateway cargo check because the batch did not touch apps/gateway. The new buf-lint output is at .plan-work/buf-lint-w321.json.\n\nOn the frontend, typecheck shows 0 errors where the baseline expected 1. The schedule-contract.test.ts error the baseline counted does not appear any more.\n\nEP-11-S3 is still partial, as its builder reported: the execution-core Do-path skill pinning is not built (see the skipped list).\n\nThings the lead should note:\n1. execution-core runtime_loop/mod.rs and model-gateway grpc.rs were CRLF in the working tree but LF at HEAD. I wrote both back as LF so the commit diff is only the one added line in each.\n2. Two of the shared edits I made carry new behaviour, not just wiring:\n   - http_routes.rs: the kind forwarding in the two skill proxies.\n   - SkillsSection.tsx: the template and preset editor buttons.\n   Both need to be covered by a test pass when the lead runs tests."
+ }
+}

@@ -1,0 +1,704 @@
+{
+ "batchId": "W2-02",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS25-S0",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/tests/org_policy_characterisation.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test org_policy_characterisation",
+     "outcome": "Started in the background (log in the scratchpad ws25s0_exec.log). The run had not reported a result when this report was written, so no pass or fail is claimed. A first foreground attempt hit the 580 s timeout during the build."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Confirm the background run `cargo test -q -p execution-core --test org_policy_characterisation` is green (log: scratchpad ws25s0_exec.log); then run `cargo test -q -p model-gateway --lib hook_context_json` (the model-gateway lib target, not the non-lib target that has pre-existing failures).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (append only): D1 ownership = capability-core is the system of record for the org agent policy (DEC-14); D3 strictest-wins across hook rules, Deny > Ask > Allow (DEC-15); D4 fail-closed on malformed or unknown input (DEC-15); D2 webhook hooks deferred to F-t3-059; D7 post-tool deny on a write withholds the result and does not fail the step (DEC-15). Note that the goldens here pin today's first-match, fail-open behaviour, which S3 reverses.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md:61: change the hook config row to name `org_hook_rules` in capability-core as the durable table; note `hook_configs` (migration 0004) is unused and dropped in S12; add an org-agent-policy row owned by capability-core.",
+    "shared-edit apps/master-ownership-matrix.md row 130: add one clause naming capability-core as owner of the org agent policy and org hook rules."
+   ],
+   "deviations": [
+    "The Do-loop empty-hook-context and resolve_mode goldens scan agent.rs source instead of calling the function, because both are private and agent.rs is not in this slice's owned files.",
+    "Plan line numbers drifted, so the goldens were located by function or call name."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (a unit test beside resolve_mode would be a stronger golden than the source scan)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must append the decision entries to apps/Model Plane/docs/decisions/ledger.md (append only): D1 capability-core is system of record for the org agent policy (DEC-14); D3 strictest-wins, Deny > Ask > Allow (DEC-15); D4 fail-closed on malformed or unknown input (DEC-15); D2 webhook hooks deferred to F-t3-059; D7 post-tool deny on a write withholds the result and does not fail the step (DEC-15). Note that the goldens pin today's first-match and fail-open behaviour, which S3 reverses. Not applied yet: git diff shows ledger.md unchanged.",
+     "Lead must edit apps/Model Plane/docs/capability-ownership-matrix.md at line 65 (not 61): change the hook config row to name org_hook_rules in capability-core as the durable table, note that hook_configs (session-core migration 0004) is unused and is dropped in S12, and add an org-agent-policy row owned by capability-core. Not applied yet: git diff shows the file unchanged.",
+     "Lead must add one clause to apps/master-ownership-matrix.md row 130 (the capability-core row) naming capability-core as owner of the org agent policy and org hook rules. Not applied yet: the file is unchanged.",
+     "Not run here: the workspace-wide cargo test, cargo fmt and clippy. No docker and no live proof are needed for S0 because there is no runtime change."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway hook_context_json iterates a DashMap, so the rule order in the context is nondeterministic; first-match across two rules is therefore not reproducible until WS25 S3 sorts by priority."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "PermissionMode::from_wire maps \"\" and unknown values to Auto while the Do loop resolve_mode maps them to Ask; the two tables disagree, and the goldens pin both on purpose."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The resolve_mode and Do-dispatch goldens are source scans, not behaviour tests; a unit test inside runtime_loop/agent.rs (not owned by this slice) would pin the real function."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No golden covers the ExecuteStep RPC path that forwards req.hook_context in grpc.rs; only the Do path is pinned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway hook_context_json (C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\runtime_registries.rs, about lines 3136-3160) iterates the DashMap, so with two or more enabled rules the order execution-core applies first-match in is nondeterministic and an org allow can shadow an org deny for the same tool; no golden pins multi-rule order, and S3 must sort by priority (desc, then id) before first-match is kept."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The resolve_mode and Do-loop dispatch goldens in execution-core/tests/org_policy_characterisation.rs are source-text scans of runtime_loop/agent.rs, so they break on a rustfmt reflow and do not exercise behaviour; a unit test beside resolve_mode in agent.rs would pin the real function (agent.rs is outside this slice's owned set)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No golden covers the ExecuteStep RPC path that forwards req.hook_context in grpc.rs; only the Do-loop empty-context path is pinned, and the gateway golden pins the key set for a single rule only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The lead_todo cites apps/Model Plane/docs/capability-ownership-matrix.md:61, but the hook config row is at line 65 (Hook config (registry) | capability-core (hook_configs)); that table is created by session-core migration 0004 and read by session-core gdpr.rs, so the row's owner claim needs correcting, not just a note."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "The goldens are written but not yet verified green. In execution-core/tests/org_policy_characterisation.rs (new, CRLF) there are goldens for from_wire, the resolve_mode arms, the Do-loop dispatch passing the literal empty hook context, and hook::evaluate (empty and blank context, malformed fails open, first-match, earlier ask over later deny, unknown decision, missing tools matcher, prefix matcher, event spellings, legacy block_execution). resolve_mode and the dispatch call are private to runtime_loop/agent.rs, so those two goldens read the source as zdr_refusal_inventory.rs does. In model-gateway/src/runtime_registries.rs (CRLF, +18 lines) one exact-equality golden was added for the hook_context_json per-rule JSON; the existing shape tests at 3551-3596 already covered the field values, so the new one only pins the key set. The plan's line numbers drifted (for example resolve_mode is at agent.rs ~5331, the empty-context call at ~3689), so the code was found by name. No proto, migration, runtime or deploy change.\""
+  },
+  {
+   "id": "WS22-S0",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/sandbox-manager-service.yml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/go/services/sandbox-manager && GOWORK=off go vet ./...",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/sandbox-manager && GOWORK=off go test ./...",
+     "outcome": "ok: cmd, internal/authz, lease, process, redact, server, snapshot, workspace; internal/telemetry has no test files"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib direct_execute_step_still_passes_empty_thread_id_to_memory_tools",
+     "outcome": "1 passed, 0 failed (new pin test)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+     "outcome": "1263 passed, 1 failed. Failure: runtime_loop::agent::tests::a_shadow_gate_learns_the_built_in_classes_without_offering_mcp (agent.rs:8404, 'the registry answered for the built-in tool'). That test passes when run alone (1 passed). agent.rs is not in my ownership and has about 222 uncommitted lines of other work in this worktree, so this is an order-dependent or in-flight failure outside this slice. Not checked against HEAD (no copy allowed)."
+    },
+    {
+     "command": "python3 YAML parse of .github/workflows/sandbox-manager-service.yml",
+     "outcome": "not run: pyyaml is not installed locally; the file is modelled on session-core-service.yml and has not been parsed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert this new entry directly above the line '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)' (line 25): '## 2026-10-23 - Per-thread sandbox computer: thread lease and workspace now, SandboxBackend seam at microVM build start (WS22-S0)' / blank / '**Status: decided at defaults (DEC-22; DEC-23 option a); switches off.** This reverses the 2026-08-22 deferral of a SandboxBackend trait. Thread-scoped sandbox leases and a thread workspace are built behind flags that default off (WS22-S1 to S6). The SandboxBackend trait waits for the first remote executor (WS22-S7), which starts only after the microVM spike and ADR-0009 (WS22-S8). Still open for S8, not decided here: ZDR snapshot destruction, no aliasing or bypass of Space ACLs, the guest-image owner, and VM-second metering. Thread rows (thread_workspace_files, thread_workspaces) never share a table or an RPC with Space rows. Authority is a delegated, user-bound sandbox bearer; default-on waits for the Control decision model.thread.sandbox_workspace.'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: in the entry '## 2026-08-22 — Sandbox-backend interface: defer a `SandboxBackend` trait' (line 1796), replace the two lines '**State:** `rejected` (for now — same shape as the letta-bridge entry below;' and 'revisit if a second real sandbox backend is ever planned)' with '**State:** `archived`. Reversed by the 2026-10-23 entry above (WS22-S0): the trigger is met, because the microVM sandbox backend is planned. The reasoning below stays as the record of why the trait waited.'",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: in the row '| Sandbox lease lifecycle | **sandbox-manager** (Go) | in-mem + Redis target | execution-core requests lease | — | ✅ owner; **no real isolation yet (gap §5)** |' (line 69), replace the last cell '✅ owner; **no real isolation yet (gap §5)**' with '✅ owner; isolation is the next row'.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: replace the row '| Real OS isolation (bwrap/Landlock/seccomp/egress) | **execution-core** (NEW) + sandbox-manager (provisioning) | — | — | — | ❌ **GENUINE GAP** — nothing exists |' (line 70) with '| Real OS isolation (bwrap/Landlock/seccomp/egress) | **execution-core** (`sandbox.rs`, `executor.rs`) + sandbox-manager (provisioning) | — | — | — | ✅ bwrap isolation built, verified by `scripts/verify-sandbox-isolation.sh`; a remote executor waits for WS22-S7 (DEC-22) |'.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: directly after that row, insert: '| Thread workspace rows and blobs (`thread_workspace_files`, `thread_workspaces`, `cas/thread/<org>/<thread>/`) | **sandbox-manager** (Go, WS22-S1) | Postgres (migration numbers per plan 4.4) | execution-core reaches them only through `GetThreadWorkspace` and `ApplyThreadWorkspaceChanges` (WS22-S2); WS24 file tools use those RPCs; Space rows never share a table or RPC with these | MinIO, under the thread prefix | 🟡 planned, switches off; erasure in WS22-S5 |'.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: in the G1 gap text (line 129), the sentence 'Nothing executes sandboxed processes yet.' is stale (the executor and bwrap isolation are built, see line 145). Replace it with 'The executor and bwrap isolation are built (line 145); the remaining gap is provisioning.' Optional, cleanup only.",
+    "Before merge: open a PR so the new .github/workflows/sandbox-manager-service.yml runs on GitHub. The integration job uses testcontainers on ubuntu-latest and needs Docker there; the first green run is the slice's CI evidence. Not run locally: no docker, per the slice rules.",
+    "Rerun the execution-core lib suite on a clean tree before the batch is trusted. The one failure, runtime_loop::agent::tests::a_shadow_gate_learns_the_built_in_classes_without_offering_mcp, is in agent.rs (not my file, with uncommitted changes from other work). It passed when run alone."
+   ],
+   "deviations": [
+    "The pin test drives runtime_loop's step primitive (execute_step) with thread_id \"\", which is the value grpc.rs passes on the direct ExecuteStep path. It does not exercise grpc.rs:936-938 itself, because that needs the full service harness.",
+    "Ledger trigger wording: the plan's S0 row says trigger 'microVM backend is planned', while the DEC-22 default says 'second real backend being built'. The shared-edit text below uses both; the owner should confirm one.",
+    "The plan's matrix row numbers (66, 126 vs 138) have drifted. The stale rows found are the sandbox lease row (line 69), the real-OS-isolation row (line 70, 'GENUINE GAP - nothing exists'), and the G1 gap text (line 129, 'Nothing executes sandboxed processes yet').",
+    "CI deviations from session-core-service.yml: added GOWORK=off, permissions contents:read, the path filters for go/gen and go/pkg/authctx, and a separate integration job for testcontainers suites."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/docs/capability-ownership-matrix.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Clean-tree rerun of cd 'apps/Model Plane/rust' && cargo test -q -p execution-core --lib is required; it could not compile in this run because of concurrent uncommitted work (sessions.proto RecordScheduledRunResult vs agent.rs MockSession). Re-run after that work lands or in an isolated tree.",
+     "Ledger and capability matrix edits are lead steps (shared files); the exact lines are in notes.",
+     "First green GitHub Actions run of .github/workflows/sandbox-manager-service.yml on a PR is the CI evidence; not runnable locally (no Docker, per slice rules).",
+     "Owner decision on the ledger trigger wording before the ledger entry is merged."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new pin test calls the step primitive with thread_id \"\" rather than grpc.rs execute_step itself, so a regression at the grpc.rs:936-938 call site would not be caught by unit tests."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "runtime_loop::agent::tests::a_shadow_gate_learns_the_built_in_classes_without_offering_mcp failed once in the full execution-core lib run and passed alone; the cause is either order dependence or in-flight agent.rs work, and it needs a clean-tree rerun."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Inline ExecuteStep Space and thread edits have no run-end signal, so their workspace uploads are lost (documented in the sandbox_lease.rs module doc); WS22-S2 and S4 must not assume the run-end path covers them."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The ledger trigger wording differs between the plan's S0 row ('microVM backend is planned') and the DEC-22 default ('second real backend being built'); the owner should choose one before the entry is merged."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The new sandbox-manager CI workflow has never run on GitHub; the integration job depends on testcontainers and Docker on ubuntu-latest, so the first PR run is the evidence."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The capability matrix G1 gap text at line 129 ('Nothing executes sandboxed processes yet') is stale."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The workflow YAML was not parsed locally because pyyaml is not installed; the first CI run is the only parse check."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "direct_execute_step_still_passes_empty_thread_id_to_memory_tools calls the step primitive with thread_id \"\", not grpc.rs execute_step (grpc.rs:936-938), so a regression at that call site would not be caught by unit tests."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "runtime_loop::agent::tests::a_shadow_gate_learns_the_built_in_classes_without_offering_mcp failed once in the implementer's full lib run and passed alone; it needs a clean-tree rerun to decide between order dependence and in-flight agent.rs work."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The sandbox-manager CI workflow has never run on GitHub; the integration job needs Docker on ubuntu-latest, so the first PR run is the evidence and the YAML was not parsed locally (pyyaml missing)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Ledger trigger wording conflicts: the plan S0 row says 'microVM backend is planned' while the DEC-22 default says 'second real backend being built'; the owner should pick one before the shared-edit text is applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Inline ExecuteStep Space and thread edits have no run-end signal, so their uploads are lost; WS22-S2 and S4 must not assume the run-end path covers them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The workflow triggers on main and develop only, matching siblings, but this repo's PR base may be fix/ui-premium-restore (buf.yml and quarry-v2-ci.yml include it); confirm the base branch when opening the PR or the workflow will not run."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The capability matrix G1 gap text ('Nothing executes sandboxed processes yet.') is stale; the shared-edit line below is optional cleanup."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority"
+   ],
+   "notes": "Code and tests for WS22-S0 are done. Owned-file edits: (1) new CI workflow .github/workflows/sandbox-manager-service.yml, with a test job (go vet, go test ./...) and an integration job (go test -tags integration ./internal/...), GOWORK=off, paths covering the service plus its replace targets go/gen and go/pkg/authctx; (2) workspace_hydrate.rs lines 1-14 header rewritten. The old header said \"not wired\"; hydrate and diff_and_upload are called from sandbox_lease.rs (ensure_hydrated_workspace, release_sandbox_lease_if_any). The CRLF style is kept, and git diff for this file is header-only (6 insertions, 9 deletions); (3) runtime_loop/mod.rs mod tests gets direct_execute_step_still_passes_empty_thread_id_to_memory_tools, which runs save_memory and recall_memory through the step primitive with thread_id \"\" and asserts the 'outside an agent-loop thread context' refusal. CRLF is kept (3530 of 3530 lines). No runtime behaviour changed. The ledger and capability matrix are not edited by me; the lead applies the exact lines in lead_todo. Status is partial only because the shared-file edits and the first green CI run are lead steps."
+  },
+  {
+   "id": "WS26-S9",
+   "outcome": "needs-attention",
+   "status": "blocked",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse::tests::agentic_goal_is_redacted_when_pii_policy_on",
+     "outcome": "FAILED TO COMPILE: error[E0046] not all trait items implemented, missing `record_scheduled_run_result` in impl SessionCore for MockSessionCore (services\\model-gateway\\src\\grpc.rs:3749). The test was not run, so it is not verified to pass. The error is in grpc.rs, which this slice does not own; sse.rs is not implicated."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Add the missing record_scheduled_run_result stub to MockSessionCore in apps/Model Plane/rust/services/model-gateway/src/grpc.rs (or land it with the sessions.proto change), then rerun: cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse::tests::agentic_goal_is_redacted_when_pii_policy_on",
+    "Owner decision needed on the P1 stored-goal issue (sse.rs:1355, prepare_managed_run_authenticated receives the raw req.content) before the DoD sentence about stored goals can be claimed.",
+    "Commit sse.rs with the other WS26 work (lead commits)."
+   ],
+   "deviations": [],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\grpc.rs"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Outside this slice's ownership, so the lead or the owner of the uncommitted sessions.proto change must land it: add a `record_scheduled_run_result` stub to `MockSessionCore` in `apps/Model Plane/rust/services/model-gateway/src/grpc.rs` (impl block at line 3749, next to `record_scheduled_step_receipt` around line 4038). Match the signature of the stub already at `apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs:1268` (returns an unimplemented/`todo!()`-style status). Why: the uncommitted `rpc RecordScheduledRunResult` at `apps/Model Plane/proto/model_plane/v1/sessions.proto:193` (+36 lines in the working tree) makes the `model-gateway` lib test target fail to compile with E0046, so the plan's test cannot run. Then rerun `cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse::tests::agentic_goal_is_redacted_when_pii_policy_on`. No edit to sse.rs is needed for this fix."
+    ],
+    "dod_gaps": [
+     "Stored run goal holds no raw email: the DoD clause is unmet because `sse.rs:1349` stores the raw `req.content` as the session run goal (see the P1 finding); needs an owner decision.",
+     "Live Do-run proof with the org PII policy on (run record goal field and executor input), needs docker and the lead.",
+     "The plan's test has not passed in this tree because of the grpc.rs compile break; the test cannot be claimed until it runs green after the stub lands.",
+     "WS01-S0 live-baseline landing is not verifiable from the tree; the lead must confirm it before closing WS26-S9."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The stored run goal is still raw on the Do path: `sse.rs:1349` passes `&req.content` into `prepare_managed_run_authenticated`, whose `goal` is stored as the session run goal (`session_flow.rs:496`, `618-631`) and appended as the user message (`session_flow.rs:588`, `604`, `745`), so the DoD clause 'stored run goals hold no raw email' is not met. The Ask path has the same raw session prep, so the owner must decide between redacting before prepare (this changes the retry digest and the stored thread text) or narrowing the DoD to executor input."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "`agentic_goal_is_redacted_when_pii_policy_on` (`sse.rs:13862`) is a source-text scan of the call's argument list, so it breaks on any reformat or rename and does not exercise the handler; only its `redact_pii` half checks behaviour."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The scan takes the first `return agentic_run_stream(` after `invoke_stream_sse`, so a second production stream call added later would not be checked; today there is only one production call (`sse.rs:1511`), which I confirmed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "No live evidence exists yet: a Do run with an email in the goal and the org PII policy on must show the redacted executor goal and the stored run goal in the run record (docker, lead only)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The uncommitted `sessions.proto` RPC (+36 lines in the working tree) breaks the `model-gateway` lib test target on HEAD until the `grpc.rs` mock stub lands, so the proto and the stub must be committed together or every model-gateway lib test breaks."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The row's risk note asks that a task needing the raw value sees `[redacted]` and that this is documented, and nothing in the slice documents it yet."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The dependency WS01-S0 (live baseline) is not verifiable from the working tree (no commit identified), so the lead should confirm it landed before the slice is closed."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Fix 1 (tree-level blocker) is not done by me: grpc.rs is outside my ownership, so I did not edit it. Verified current state: MockSessionCore (grpc.rs:3749) implements record_scheduled_step_receipt (around line 4038) but has no record_scheduled_run_result. Grep finds no RecordScheduledRunResult anywhere in model-gateway/src, so the only error is the missing stub. The fix belongs to the owner of the sessions.proto change or the lead: add a stub to MockSessionCore that returns todo!() or an unimplemented status, matching the trait signature with RecordScheduledRunResultRequest and RecordScheduledRunResultResponse. Then rerun the test from apps/Model Plane/rust. Fix 2 and the rest of the slice: sse.rs is unchanged this round. The test agentic_goal_is_redacted_when_pii_policy_on exists at sse.rs:13862 (in the top-level tests module). It asserts that the agentic_run_stream call's goal argument is the pii_redaction_required ternary over redact_pii(&req.content).0, and that redact_pii strips an email. Its previous pass (1 passed) and the 221-passing sse:: run were from before the proto change, so they are not valid now. Not run: docker, the DB harness, live proofs. Depth finding P1 from the previous report still stands: the stored run goal at sse.rs:1355 is raw."
+  },
+  {
+   "id": "WS19-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\artifact-renderers.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\artifact-renderers.test.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-artifacts.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-artifacts.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatArtifactPanel.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatArtifactPanel.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/chat-artifacts.test.ts src/features/chat/components/ChatArtifactPanel.test.tsx src/features/chat/components/artifact-renderers.test.ts",
+     "outcome": "3 files, 75 tests passed (baseline before edits: 2 files, 64 passed)"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm typecheck",
+     "outcome": "exit 1 with 33 errors, all outside the slice files: src/features/support/components/RemoteSupportPage.tsx (12) and src/shared/api/quarry-client.ts (21, missing module @quarry/client). Zero errors in artifact-renderers.ts, chat-artifacts.ts, ChatArtifactPanel.tsx or their tests. Not compared against HEAD (no copy built, per rules)."
+    },
+    {
+     "command": "pnpm exec eslint on the six slice files",
+     "outcome": "0 errors, 1 warning at ChatArtifactPanel.tsx:100 (solid/reactivity on the pre-existing ArtifactsPanel selection memo, not touched by this slice)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the six files (two new, four modified) on branch model-plane; the lead commits and this slice does not stage or commit anything.",
+    "Optional DoD evidence from the plan: before and after screenshots of an HTML, a PDF and an xlsx card on a second dev server for this worktree (not :5173, which is the main checkout). Not run here; this is for the lead."
+   ],
+   "deviations": [
+    "Built-in renderer table lives in chat-artifacts.ts, not artifact-renderers.ts: its matchers need the kind sets and predicates defined there, and artifact-renderers.ts must stay a JSX-free leaf to avoid a runtime import cycle. The registry mechanism itself is in artifact-renderers.ts.",
+    "Names differ from the plan's wording: the exports are createArtifactRendererRegistry, pickArtifactRenderer and the extraArtifactRenderers singleton (with register and resolve methods), not registerArtifactRenderer and resolveArtifactRenderer as free functions.",
+    "ArtifactRenderer carries an optional component field, which the plan's list (id, match, priority) does not name. It is needed so the Dynamic slot has something to render.",
+    "A registered extra takes the body before the built-in switch, even when a built-in kind also matches the artifact. This is a design choice the owner has not confirmed."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Before and after screenshots of an HTML card, a PDF card and an xlsx card on a second dev server for this worktree (not :5173) are not produced; the lead must capture them to close the plan's DoD evidence.",
+     "The plan's test command ends with pnpm typecheck, which exits 1 in this worktree: 33 errors in src/features/support/components/RemoteSupportPage.tsx (12) and src/shared/api/quarry-client.ts (21). The cause is that package.json depends on file:../../Ingestion Plane/Quarry-v2/sdks/typescript and that directory in this worktree contains only docs/ with no package, so @quarry/client does not resolve. The lead should restore the Quarry TypeScript SDK package in the worktree before treating the gate as green; no slice file has a type error.",
+     "The slice is uncommitted and unstaged; the lead commits the six named files (artifact-renderers.ts and artifact-renderers.test.ts as new files; chat-artifacts.ts, chat-artifacts.test.ts, ChatArtifactPanel.tsx and ChatArtifactPanel.test.tsx as modified)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner should confirm whether a registered extra viewer may replace the body of a kind the built-ins already draw, as the Dynamic slot does now (extras currently win over the built-in body)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers two extra renderers competing at different priorities inside the panel; the registry-level priority tests exist but the panel test registers only one extra."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "extraArtifactRenderers is a module-level mutable singleton; a registration that is never unregistered persists for the page lifetime, so later slices should register from a scoped effect."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "pnpm typecheck has 33 pre-existing errors in RemoteSupportPage.tsx and quarry-client.ts (missing @quarry/client); this slice did not touch them and did not verify them against HEAD."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ChatArtifactPanel.tsx:100 has a pre-existing solid/reactivity lint warning in the ArtifactsPanel selection memo, which this slice did not touch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "extraArtifactRenderers is a plain mutable array with no reactive signal, so ChatArtifactPanel's extraRenderer memo does not re-run when an extra is registered or unregistered after the panel mounts (apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.ts and ChatArtifactPanel.tsx); a version signal bumped by register/unregister and read in resolve would fix it before any caller registers at runtime."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers registration or removal after the panel has mounted (the reactivity gap above), and no panel-level test has two extra renderers competing at different priorities; the existing panel tests register before render only."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A registered extra takes the panel body ahead of the built-in switch even when a built-in kind also matches the artifact, so an extra whose match overlaps html or pdf would replace that built-in body; the owner should confirm this precedence before any extra is registered."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan row names registerArtifactRenderer and resolveArtifactRenderer as free functions, but the slice exports createArtifactRendererRegistry, pickArtifactRenderer and an extraArtifactRenderers singleton with register and resolve methods; the S5 office-pdf entry and the Space registry consumers are written against the plan names, so either add those names as thin aliases or amend the plan row."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "extraArtifactRenderers is a module-level singleton, so a registration that is never unregistered persists for the page lifetime; later slices should register from a scoped effect with the returned unregister function."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The built-in renderer table lives in chat-artifacts.ts rather than artifact-renderers.ts as the plan row lists; this is a documented, reasonable deviation to keep artifact-renderers.ts a JSX-free leaf and avoid an import cycle, and the plan text should be amended to match."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The worktree has out-of-set changes that are not part of this slice (ChatMessages.tsx, ChatPanels.tsx, ChatLiveRunPanel.tsx, chat-markdown.test.ts, chat-media-markdown.tsx, ooxml.ts, and the untracked lib/safe-href.ts and safe-href.test.ts); none of the six slice files import them, so the WS19-S1 commit must stage only the six named files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The pre-existing solid/reactivity lint warning at ChatArtifactPanel.tsx:100 (ArtifactsPanel selection memo) and the 33 typecheck errors are not from this slice and should be tracked as baseline debt."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS19-S1 FE artifact renderer registry. No prior partial edits existed for the owned files (git status was clean for them at start), so everything here is this attempt. Pure registry in artifact-renderers.ts: ArtifactRenderer<Id> {id, priority, match, component?}, pickArtifactRenderer (highest priority wins, ties keep registration order), createArtifactRendererRegistry (register returns an unregister function), and the singleton extraArtifactRenderers for runtime extras. Built-ins in chat-artifacts.ts as BUILT_IN_ARTIFACT_RENDERERS with priorities 90..0 that reproduce the original if-chain order exactly (image kind, html, document, code, pdf, binary kind, image content, binary data URI, text fallback). artifactRenderKind is now pickArtifactRenderer(BUILT_IN..., artifact)?.id ?? 'text'. ChatArtifactPanel.tsx: a Dynamic slot (Match first in the body Switch, from @solidjs/web) renders a registered extra's component; the header keeps the built-in kind. With no extras registered the body is unchanged. No switches, no proto, no migration, no ZDR surface. Line endings: all six files are LF in the working copy, and the new files are LF too."
+  },
+  {
+   "id": "WS27-S8",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/budget_window_test.go",
+    "apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/org_quota.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/rust && rustfmt --check --edition 2021 services/model-gateway/src/org_quota.rs",
+     "outcome": "pass (exit 0); file is CRLF, 315/315 line endings"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib",
+     "outcome": "pass (exit 0): the lib target compiles with the widest-period change"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- org_quota",
+     "outcome": "NOT RUN TO COMPLETION: the test target fails to compile at services/model-gateway/src/grpc.rs:3749 (E0046, MockSessionCore missing record_scheduled_run_result). grpc.rs is unchanged against HEAD; the trait gained that method from the uncommitted proto/sessions.proto change of another slice. Not my file, not edited."
+    },
+    {
+     "command": "single-file scratch crate holding a copy of org_quota.rs (the fetch function removed from the copy only), chrono =0.4.45, serde =1.0.228, serde_json =1.0.150, shared target dir, cargo test --offline --lib",
+     "outcome": "pass: 6 passed, 0 failed. Covers the_cost_rows_reset_period_governs_the_window_else_the_token_rows (cost monthly + tokens daily = Monthly; cost daily + tokens monthly = Monthly; cost none + tokens daily = None; tokens-only daily = Daily; none = None) and the other org_quota tests. Scratch crate deleted afterwards."
+    },
+    {
+     "command": "cargo test -q -p model-gateway reset_period_daily_sends_start_of_utc_day",
+     "outcome": "NOT CONFIRMED: blocked by the same test-target compile error in grpc.rs; the test lives in budget.rs and is not run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: insert after line 296 (`MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}`, inside the model-gateway service environment) the line `      MODEL_GATEWAY_BUDGET_WINDOW: ${MODEL_GATEWAY_BUDGET_WINDOW:-false}` (6-space indent, match the file's line endings).",
+    "Unblock the model-gateway test target: services/model-gateway/src/grpc.rs MockSessionCore (line ~3749) needs record_scheduled_run_result, because the uncommitted proto/sessions.proto change of another slice added the rpc to SessionCore. Whoever owns that proto change must add the mock method (or the lead must land it) before cargo test can run in model-gateway.",
+    "After that unblock, run on the final tree: cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- org_quota reset_period_daily_sends_start_of_utc_day. Both are unconfirmed in this round.",
+    "Deploy order when the flag is ever turned on: redeploy cost-core FIRST, then model-gateway. cost-core decodes with DisallowUnknownFields, so an old cost-core rejects a check carrying since with 400, and the gateway fails closed with 503.",
+    "Live proof (lead only, not run here): rebuild cost-core, then model-gateway; seed one org with fixture entries dated last month and this month; POST /api/v1/budget/check with and without since, with MODEL_GATEWAY_BUDGET_WINDOW on and off; confirm a capped org with last month's spend is admitted this month.",
+    "Commit: the lead commits the four owned files (server.go, budget_window_test.go, budget.rs, org_quota.rs) and the shared compose line. Nothing was committed, staged, pushed or reset by me."
+   ],
+   "deviations": [
+    "The gateway takes one window for both caps, with the widest period when both rows are set (the reviewer's fix). The earlier plan wording said the single reset_period row governs; this is the implemented rule.",
+    "The test name reset_period_daily_sends_start_of_utc_day and the_cost_rows_reset_period_governs_the_window_else_the_token_rows are kept as named; the second's name is slightly broader than its new mixed-period assertions."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (test-only MockSessionCore, line ~3749, needs record_scheduled_run_result for the uncommitted sessions.proto rpc; not edited by me)",
+    "apps/Model Plane/deploy/docker-compose.yml (shared; lead applies the single line in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "services/model-gateway/src/grpc.rs (test-only MockSessionCore, cfg(test) mod near line 3746-3749): add the record_scheduled_run_result method that the uncommitted apps/Model Plane/proto/model_plane/v1/sessions.proto rpc (line 193) requires. This is another slice's change, but until it lands `cargo test -p model-gateway --lib` cannot compile, so the plan's gateway test reset_period_daily_sends_start_of_utc_day cannot be confirmed in the real target. Owner or lead must land it, then rerun the gateway command."
+    ],
+    "dod_gaps": [
+     "Live proof (lead, docker): rebuild cost-core first, then model-gateway; seed one org with entries dated last month and this month; POST /api/v1/budget/check with and without since, with MODEL_GATEWAY_BUDGET_WINDOW on and off; confirm a capped org with last month's spend is admitted this month.",
+     "Compose: apply shared-edit to apps/Model Plane/deploy/docker-compose.yml, insert after line 296 the line `      MODEL_GATEWAY_BUDGET_WINDOW: ${MODEL_GATEWAY_BUDGET_WINDOW:-false}` (6-space indent, CRLF to match file). Not present in the file yet.",
+     "Deploy order: cost-core before model-gateway; an old cost-core rejects since with 400 under DisallowUnknownFields and the gateway fails closed with 503."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Model-gateway lib tests cannot compile in this shared worktree: the uncommitted sessions.proto change adds an rpc that MockSessionCore in model-gateway/src/grpc.rs does not implement. This blocks every model-gateway test-target run, not only this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Enabling MODEL_GATEWAY_BUDGET_WINDOW before cost-core is redeployed makes every budgeted request fail closed (old cost-core 400, gateway 503)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Control must confirm the windowed semantics (DEC-18 D2) before the flag is switched on, because capped orgs are admitted again at each reset and that changes spend authority."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Mixed-period rule is now implemented as widest period (None over Monthly over Daily). Control should confirm this is the intended rule, since a daily cost cap can now be measured over a month when the token row is monthly."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The window also applies to a per-request cap when the org row has a daily or monthly period, so a request cap is compared against windowed org spend; confirm this is intended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "inference-core's advisory BudgetClient still reads lifetime totals, so the downgrade posture and the gateway's 402 gate can disagree for a windowed org."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Postgres Aggregate path with the Since filter (buildWhere created_at >= $n) has no integration test; add one in store_integration_test.go behind COST_CORE_TEST_DATABASE_URL."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An unrecognised reset_period value reads as lifetime, so a capped org with a typo stays blocked until fixed; Control should validate the enum at write time."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The window start uses the gateway's UTC clock while cost-core compares stored created_at, so a few seconds of skew at the reset boundary can move an entry across the window."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "check_budget_at takes eight arguments with an allow(clippy::too_many_arguments); a small request struct would remove the allow."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "reset_period_daily_sends_start_of_utc_day and the org_quota tests were not confirmed in the real model-gateway test target; I started a scratch crate (budget.rs, org_quota.rs copied, stub normalize, worktree Cargo.lock) in the scratchpad but its result was not collected before this report."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Widest-period rule in org_quota.rs limits_from_rows: a daily cost cap combined with a token row whose reset_period is none is enforced over lifetime spend, so a capped org is never re-admitted. Fail-closed, not an overspend, but it breaks the headline for that configuration; Control must decide per-cap windows vs widest before MODEL_GATEWAY_BUDGET_WINDOW is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The window also applies to the per-request cap (normalized.max_cost_usd) when the org row has a daily or monthly period, so a request cap is compared against windowed org spend; confirm intended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "inference-core BudgetClient still reads lifetime totals, so the advisory downgrade posture and the gateway 402 gate can disagree for a windowed org."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No cost-core test exercises the budget check window on Postgres (UserID plus Since path); the existing store_integration_test.go line 259 covers Aggregate with Since only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Unrecognised or differently-cased reset_period (for example Monthly) parses as None, so a capped org stays blocked until the row is fixed; Control should validate the enum at write time."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Window start uses the gateway UTC clock while cost-core compares stored created_at, so a few seconds of skew can move an entry across the reset boundary."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "check_budget_at now takes eight arguments under allow(clippy::too_many_arguments); a small request struct would remove the allow."
+    }
+   ],
+   "unreviewed_risk": [
+    "money",
+    "authority"
+   ],
+   "notes": "Required fix applied in org_quota.rs. limits_from_rows now takes the widest reset period when both the cost and token rows are set (ResetPeriod::widest: None covers Monthly covers Daily), so neither cap is checked over a shorter window than its own period. A single row still governs by its own period; neither row set gives None. OrgQuotaLimits.reset_period doc comment updated to match. Added assertions in the_cost_rows_reset_period_governs_the_window_else_the_token_rows for cost daily plus tokens monthly (expect Monthly) and cost none plus tokens daily (expect None); the existing cost monthly plus tokens daily assertion (Monthly) still holds. The test name is unchanged as the reviewer named it. Only org_quota.rs changed in this round; budget.rs, server.go and budget_window_test.go are unchanged from the previous report. Confirmed from the previous report: the earlier mixed-period P2 decision is now implemented as the widest-period rule."
+  },
+  {
+   "id": "WS21-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib (full run, output in scratchpad ec_lib_rerun.txt)",
+     "outcome": "exit 0. test result: ok. 1280 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 303.80s. Two tests (executor::tests::a_hung_child_is_killed_at_the_timeout and runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused) ran over 60 seconds and then passed."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment block, directly after the line `      MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}`, add the line `      EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}` (6-space indent). Optional comment above it: `# WS21-S1: the Do loop's browser tools are offered only to a browser-bearing, non-ZDR run; only the value 1 enables them. Off until WS21-S2.`",
+    "Reconcile the MockSession record_scheduled_run_result stub in agent.rs with the owner of the sessions.proto RPC (RecordScheduledRunResult) before merging, so the stub is not duplicated.",
+    "Live proof (lead runs docker): with the flag off, the Do run's tool list must contain no browser.* names. The same holds with EXECUTION_DO_BROWSER_ENABLED=1, because no bearer reaches the loop until WS21-S2.",
+    "Flag vocabulary: the slice row says only the value 1 enables the flag, while the computed task text says the strict parser pattern where only the literal true enables. The lead should confirm which is intended. The code follows the slice row (exact \"1\")."
+   ],
+   "deviations": [
+    "No code change in this round. The required fix was verification only."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (shared file, lead applies the shared-edit in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must apply the compose shared-edit in apps/Model Plane/deploy/docker-compose.yml: after the line `      MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}` (currently line 1300, inside the execution-core environment block; confirm it is that service) add `      EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}`. The file is eol=lf in git, so write LF line endings.",
+     "Live proof (lead, with docker): rebuilt execution-core, a Do run with the flag unset and with EXECUTION_DO_BROWSER_ENABLED=1 must show no browser.* names in the captured tool list, since no bearer reaches the loop until WS21-S2.",
+     "Lead must confirm the flag vocabulary (exact \"1\" per the row, versus \"true\" per sibling switch_from) before the compose line is written.",
+     "Dispatch-arm hardening and the S2 bearer replacement are later-slice work; S1 is only verified as off in production."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "do_browser_enabled() reads the environment and is not unit-tested directly (the crate forbids env mutation); only parse_do_browser_enabled is tested. The live proof must confirm the compose value reaches the process."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "offered_tools still hard-codes browser_bearer = false as a placeholder. WS21-S2 must replace it with the verified bearer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Browser-offered runs fail the park-derivability check, so a parked browser-scoped run cannot be restored by a park resume. S2 must decide whether such runs are refused a park or the park rebuild carries the bearer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Dispatch arms for browser.observe and browser.act (runtime_loop/mod.rs about 589-594) still run with browser_grant None. The purpose-lock allowlist is the only barrier, and it holds only because the allowlist is built from the offered set. S2/S5a must close the arm before the family is offered."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ACTION_TOOL_NAMES does not include browser.act, so the action-capability prompt snippet does not fire when the browser tools are offered. Decide with S5b."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The offered-names == dispatch-arms contract test (EC/tests/browser_do_contract.rs) is S10 work and is not written here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt was not run on the CRLF agent.rs. A later formatting pass should check only the new lines."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Flag vocabulary conflict: the slice row and the code accept only the exact value \"1\" (no trim, no case folding, \"true\" is refused), while sibling Do-loop switches use loop_fold::switch_from (only \"true\") and post_mutation::parse_enabled (1/true/on/yes/enabled); the lead must confirm which vocabulary is intended."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "is_browser_tool_name in append_untrusted_tool_defs now drops any MCP or caller tool whose name starts with \"browser.\" even when the switch is off, a behaviour change for switched-off deployments; confirm no org MCP tool uses that prefix."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the production offered_tools path with EXECUTION_DO_BROWSER_ENABLED set; do_browser_enabled() is untested (only parse_do_browser_enabled), and the tests pass browser_bearer directly, so the hard-coded false in offered_tools is not pinned."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No regression test pins that a switched-off run's offer equals the pre-slice offer minus exactly the two browser names, so the derivable and built-in learning behaviour for switched-off runs is only argued in comments."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Dispatch arms for browser.observe and browser.act (runtime_loop/mod.rs ~589-594) still run with browser_grant None; the purpose-lock offered allowlist is the only barrier, which holds in S1 only because browser_bearer is hard-coded false in offered_tools and merged_tool_defs_with_sources; S2 must replace the placeholder and close or gate the arms before the family can be offered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A browser-offered run is derivable=false, so it cannot park with a rebuilt base set; S2 must decide whether such runs refuse a park or carry the bearer through a park resume."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The record_scheduled_run_result MockSession stub added to agent.rs tests is unrelated to WS21-S1 and is needed only because sessions.proto already defines the RPC; reconcile it with that RPC's owner so it is not duplicated."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt was not run on the CRLF agent.rs; a formatting pass should check only the new lines so the file is not rewritten."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "runtime_loop/mod.rs has 36 uncommitted insertions with no browser content, which belong to other slices; they are outside S1's ownership and were not reviewed here."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "No code was changed in this round. The required fix was to confirm the full execution-core lib run, and it is green: 1280 passed, 0 failed, exit 0. That total matches the previous report's 1274 passed plus 6 failed (1280 tests). The 6 code_interpreter::office_verify::tests failures reported earlier do not appear in this run, so the other slice's office_verify.rs must have changed since then. I did not verify that change. The earlier browser-tool tests and the shadow-gate test are included in the 1280 passing. Nothing was committed, staged or pushed. The lead still has to apply the compose line and reconcile the MockSession stub, both listed in lead_todo."
+  }
+ ]
+}

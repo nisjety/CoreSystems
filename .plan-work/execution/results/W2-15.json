@@ -1,0 +1,137 @@
+{
+ "batchId": "W2-15",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS23-S3.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/tool_arguments.rs",
+    "apps/Model Plane/scripts/seed_tool_knowledge.sql",
+    "apps/Model Plane/rust/services/execution-core/tests/provider_read_contract.rs (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test tool_class_registry_parity",
+     "outcome": "FAIL: 4 passed, 2 failed. every_tool_in_the_legacy_golden_is_seeded and every_trusted_capability_arm_has_a_seeded_tool_on_the_same_capability both report read_provider_action has no capability_tools seed row. Confirmed the reviewer finding. Fix 1 needs the lead's shared-edit to 0016_capability_tool_classes.up.sql; not applied here."
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib integration_tools",
+     "outcome": "PASS: 33 passed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib a_connection_id_that",
+     "outcome": "PASS: 1 passed (new test: a_connection_id_that_could_leave_the_connection_path_makes_no_call; covers conn/../x#, conn_1?x=1, .., whitespace, empty for read_action and read_action_json; asserts the integration mock received no request)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib (full lib)",
+     "outcome": "PASS: 1370 passed, 0 failed (was 1369; +1 new test)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test provider_read_contract",
+     "outcome": "PASS: 5 passed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.up.sql: insert after line 158 (the list_provider_actions row, file is LF, row ends with a comma): `    ('global', 'cap.tool.provider.read', 'read_provider_action', 'read', 'none', NULL, 'seed'),`. Then re-run `cargo test -q -p execution-core --test tool_class_registry_parity` (expect 6 passed).",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs and apps/Model Plane/api/contracts/approval-causes.json: add CauseCode::TaintedEgress with wire token tainted_egress to the closed vocabulary; update the a_token_outside_the_vocabulary_is_unclassified test (line ~335-340 asserts tainted_egress is unknown) and the golden pin (line ~409). After that, the implementer (or the lead) switches apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs line ~3743 from CauseCode::RiskyEffectUnderAsk to CauseCode::TaintedEgress and adds a test that the held outcome carries that cause. Not done in this round.",
+    "Ledger entries (apps/Model Plane/docs/decisions/ledger.md, unchanged from round 1): DEC-26 read tool shape; K3-15 offer rule; screening-taint hold on web_fetch and execute_provider_action, in memory only until durable fold state exists.",
+    "Confirm that integration-corev2 connection ids match [A-Za-z0-9_-]{1,128}; any other format will now be refused by read_action and read_action_json.",
+    "Pre-existing (from round 1, unchanged): agent.rs and runtime_loop/mod.rs ListAgentSkillsRequest literals gained for_user_id; agent.rs sample_agent_skill gained ..Default::default(). tests/org_policy_characterisation.rs::the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context fails at HEAD for an unrelated reason; owner decision needed.",
+    "Live proof (lead only, not run here): rebuild execution-core; set PROVIDER_READ_TOOL_ENABLED=true on the proof stack; check a Do run with a selected connection (after WS23-S4) calls read_provider_action, STEP rows carry counts only, and a flagged read holds a following web_fetch."
+   ],
+   "deviations": [
+    "Fix 2 guard also applied to read_action_json (in the same file, sharing send_read). The lead said 'if the lead agrees'; confirm.",
+    "Fix 3 left undone because the shared-edit to approval_cause.rs and approval-causes.json has not been applied; the caller switch and held-outcome cause test must follow the lead's edit."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.up.sql (Fix 1 seed row)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs and apps/Model Plane/api/contracts/approval-causes.json (Fix 3 cause variant)",
+    "apps/Model Plane/docs/decisions/ledger.md and apps/Model Plane/docs/capability-ownership-matrix.md (from round 1)",
+    "apps/Model Plane/deploy/docker-compose.yml and apps/Model Plane/deploy/.env.example (from round 1, the PROVIDER_READ_TOOL_ENABLED env lines)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "runtime_loop/mod.rs (execute_reattach_skill, live tree ~line 2587-2597; WS07-S7 hunk added at 15:10 by a concurrent session, not WS23 code): the new `.collect()` has no target type, so execution-core lib fails to compile with E0277. Fix: annotate `let skills: Vec<mp_contracts::model_plane::v1::AgentSkill> = match ...`. Confirmed in a scratch snapshot that this single annotation is enough to build; the lead must confirm owner before applying.",
+     "shared-edit apps/Model Plane/go/services/capability-core/migrations/0016_capability_tool_classes.up.sql: insert after line 158 (LF file, row ends with comma): `    ('global', 'cap.tool.provider.read', 'read_provider_action', 'read', 'none', NULL, 'seed'),`. Then `cargo test -q -p execution-core --test tool_class_registry_parity` must show 6 passed. Verified: with the migration present, my run gives 4 passed, 2 failed (every_tool_in_the_legacy_golden_is_seeded at tool_class_registry_parity.rs:229 and every_trusted_capability_arm_has_a_seeded_tool_on_the_same_capability at :197). Without the row the signed gate fails closed for the tool.",
+     "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs and apps/Model Plane/api/contracts/approval-causes.json: add CauseCode::TaintedEgress with wire token `tainted_egress` (update the test at approval_cause.rs ~335-340 that asserts it is unknown, the golden pin ~409, and approval_cause_golden.rs). Then in runtime_loop/agent.rs run_rounds (the tainted_egress_held hold, ~line 3743) switch `CauseCode::RiskyEffectUnderAsk` to `CauseCode::TaintedEgress` and add a test that the held outcome carries that cause. This is the row's explicit DoD; the held approval currently names the wrong gate.",
+     "runtime_loop/mod.rs execute_step_inner (~line 708) and its caller: the Space refusal `if tool_name == READ_PROVIDER_ACTION_TOOL && sandbox.is_some()` is dead code. The run_rounds sandbox (agent.rs ~3695-3712) is built only for code_interpreter and process_* tools, and the single-step RPC (grpc.rs ~1279) only for code_interpreter, so `sandbox` is always None for read_provider_action. The row requires a dispatch refusal on space_id. Fix: refuse when the run's space_id is non-empty (pass a space_scoped flag from run_rounds via ctx.req.space_id, or check it in the caller), and change the source-text guard in tests/provider_read_contract.rs (the_dispatch_refuses_the_read_under_zdr_waived_and_in_a_space_room) so it asserts the real condition."
+    ],
+    "dod_gaps": [
+     "Live proof (lead only, docker): rebuild execution-core, set PROVIDER_READ_TOOL_ENABLED=true on the proof stack, and check a Do run with a selected connection (after WS23-S4) calls read_provider_action, STEP rows carry counts only, and a flagged read holds a following web_fetch with cause tainted_egress.",
+     "The full named test set was not verified green on the live tree. The live runtime_loop/mod.rs did not compile at my check (concurrent WS07-S7 hunk, see required_fixes); the implementer's 1370-pass lib run predates that edit. Full crate and lib suites were not re-run by me.",
+     "Compose and .env.example PROVIDER_READ_TOOL_ENABLED lines are shared-edits listed by the implementer and not applied (apps/Model Plane/deploy/docker-compose.yml, apps/Model Plane/deploy/.env.example).",
+     "Ownership: git status shows no edits outside the owned set from this slice. The only foreign hunk in an owned file is the WS07-S7 reattach hunk in runtime_loop/mod.rs."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execute_action (the existing write-path execute_provider_action client, around integration_tools.rs lines 369-451) still interpolates connection_id into the URL path without validation. Same retargeting risk as the reviewer's read finding. Not fixed here because it is outside the listed fixes; a follow-up for the lead to decide."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Egress hold cause is still RiskyEffectUnderAsk, not tainted_egress, until the WS13 vocabulary shared-edit lands. The approval a person sees names the wrong gate until then."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The screening taint is in memory only: a pause and resume segment starts a new loop without the flag."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The screening taint lives only in memory (ConnectorTaint in LoopContext, runtime_loop/mod.rs ~311). A pause and resume starts a new loop with a default taint, so after one person-approved egress call, later web_fetch or execute_provider_action calls in the resumed run are not held even though the flagged content is still in history. Needed before the flag is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execute_action (the write-path execute_provider_action client, integration_tools.rs ~369-451) still interpolates connection_id into the URL path with no is_connection_id check, the same retargeting risk the reviewer raised for reads."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In run_rounds, any read in a round holds egress calls in the same round (read_in_round), even when the read is clean. That is stricter than the DoD (after a read with screening taint or Flagged) and is not recorded as a deviation, while a clean read's egress in the next round is not held."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the held outcome end to end (an approval pause carrying the tainted_egress cause), and none covers a flagged read in round N holding web_fetch in round N+1. Only the pure function tainted_egress_held is unit-tested."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No permission-level test for read_provider_action: only a golden table row in permission/mod.rs:1252. The named permission test pattern and tests/autonomy_ladder_contract.rs are not extended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "read_action_json now validates connection_id (a behaviour change) but has no production callers in the tree, so its guard is covered only by tests; confirm it is intended or remove the dead function."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The tool is never offered in production: merged_tool_defs passes an empty connector_scope, which is correct until WS23-S4 lands, so the flag-on path is untested end to end until then."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "audit",
+    "policy"
+   ],
+   "notes": "Round 2 of WS23-S3.code. Done: Fix 2 (connection_id validation). Not done, blocked on lead shared-edits: Fix 1 (seed row) and Fix 3 (tainted_egress cause). Fix 2: added free fn is_connection_id (ASCII alnum, '_' or '-', 1..=128 bytes) in integration_tools.rs; read_action returns ReadError::Refused and read_action_json returns Err before any token mint or HTTP call when it fails. Applied to read_action_json too, which shares send_read with the read path. execute_action (the existing write path, around lines 369-451) still interpolates connection_id unvalidated; not changed, because it is outside the reviewer's list. File stays CRLF (2238/2238). Fix 3 not done: CauseCode::TaintedEgress does not exist yet in mp-contracts approval_cause.rs (its test asserts tainted_egress is unknown), so the switch would not compile. Fix 1 not done: the seed row is in WS05-S1's migration, outside ownership. The earlier report's 11-passing claim for this target does not match the tree (2 of 6 fail)."
+  }
+ ]
+}

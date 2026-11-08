@@ -1,0 +1,795 @@
+{
+ "batchId": "W3-17",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-2-S10",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-1",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/page_reader.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/page_reader.rs",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/result_handles.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs"
+   ],
+   "notes": "Built the shared long-page reader in mp-contracts (outline, section reads, passage placement; find takes the passage rule as a parameter) and the Do-loop reader in execution-core. With EXECUTION_WEB_READER and EXECUTION_RESULT_HANDLES both literal true, web_fetch and web.read park the whole page under a ref and return an outline envelope; read_page and find_in_page answer from the run's held pages; both names are offered only with a store, and their capability class is bound only while the switch is on. With the switch off every path is byte-identical (fetch still cuts at 8,000 characters). Nothing was compiled or run; the guard compiles. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-2-S10.patch (7 files, staged in the worktree, not committed). mp-content-safety already classes read_page and find_in_page as ExternalWeb (trust.rs:36-37), so the latch needs no change. The model-gateway tool_loop.rs and the S2 switch are unchanged.",
+   "deviations": [
+    "find_in_page in the Do loop ranks with mp_contracts::page_reader::select_chunks (paragraph slices, exact word or prefix match, no stemming), not grounding::select_passages. The design asks for one selector; sharing grounding's selector needs grounding.rs and relevance::stem moved into mp-contracts, which is outside this slice. Recorded as a P1 decision.",
+    "runtime_loop/mod.rs (dispatch and tail, three hunks) and deploy/docker-compose.yml were not edited because they are not in this slice's files; both are in lead_todo as shared edits.",
+    "The capability-core binding for read_page and find_in_page needs a new migration, which is not in this slice's files; listed in needs_other_files.",
+    "web_fetch returns the complete page when EXECUTION_WEB_READER is on. The 8,000-character cut moved from web_tools::fetch into the loop tail (result_handles::inline_text), and it is byte-identical with the switch off. This depends on the lead_todo tail hunk."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (dispatch): insert immediately before the line `    if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {` (about line 1311, after the comment block that starts `// \\`result_query\\` reads a result this run held`) this block: `    // The long-page reader (EP-2-S10) answers read_page and find_in_page from the pages this run holds, as result_query answers from its own store. Off, the names fall through as before.` then `    if let Some(read) = result_handles::execute_reader_tool(tool_name, tool_input, org_id, run_id, result_store) {` then `        return match read {` then `            Ok(output) => StepOutcome::completed(output),` then `            Err(error) => StepOutcome::failed(&error),` then `        };` then `    }`.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (tail, render): replace the single line `    let rendered = crate::provenance::render(&screened.output, &screened.provenance);` (about line 1696) with `    let rendered = crate::provenance::render(` then `        &result_handles::inline_text(tool_name, &screened.output),` then `        &screened.provenance,` then `    );`.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (tail, park): in `let parked = result_store` (about lines 1700-1712) keep the `.filter(|_| result_handles::is_parkable_tool(tool_name))` line and replace the whole `.and_then(|store| {...})` closure (through its closing `})` before the semicolon) with: `        .and_then(|store| {` then `            let prefix = crate::provenance::render(\"\", &screened.provenance);` then `            let label = prefix.strip_suffix('\\n').unwrap_or(&prefix);` then `            result_handles::hold_for_model(store, org_id, run_id, tool_name, label, &screened.output)` then `        });`. Items 1-3 must land together; they call inline_text, hold_for_model and execute_reader_tool, which exist only in this patch.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: after the line `      EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}` (line 1576, execution-core service) add `      # EP-2-S10: the Do loop's long-page reader (read_page, find_in_page) over held pages. Off by default; only the literal true enables it, and it needs EXECUTION_RESULT_HANDLES on.` then `      EXECUTION_WEB_READER: ${EXECUTION_WEB_READER:-false}`. apps/Model Plane/deploy/.env.example does not list EXECUTION_RESULT_HANDLES, so it needs no entry.",
+    "new migration, outside this slice's files: apps/Model Plane/go/services/capability-core/migrations/0036_reader_tool_bindings.up.sql and .down.sql (0036 is the next free number at or above 0036; 0035 is reserved by round B for EP-5 S6). up: INSERT INTO capability_tools (org_id, capability_id, tool_name, side_effect_class, approval_floor, call_refinement, source) VALUES ('global', 'cap.tool.http', 'read_page', 'read', 'none', NULL, 'seed'), ('global', 'cap.tool.http', 'find_in_page', 'read', 'none', NULL, 'seed') ON CONFLICT (org_id, capability_id, tool_name) DO UPDATE SET side_effect_class = EXCLUDED.side_effect_class, approval_floor = EXCLUDED.approval_floor, call_refinement = EXCLUDED.call_refinement, updated_at = now() WHERE capability_tools.source = 'seed'; down: DELETE FROM capability_tools WHERE org_id = 'global' AND capability_id = 'cap.tool.http' AND tool_name IN ('read_page', 'find_in_page') AND source = 'seed'; Without these rows the capability gate denies both names (tool not bound). Apply before EXECUTION_WEB_READER is ever set to true.",
+    "No regeneration is needed for this slice: no proto, generated code or golden changed. tool_catalogue_characterisation.rs and prompt_tool_manifest.rs read only the three offer functions and TOOL_BUILDERS, and the reader definitions sit outside both, as result_handles::tool_definition does, so their goldens stay green. Whether the scenario-touch gate (an eval case or replay cassette for read_page and find_in_page) applies is for the lead to decide.",
+    "Ordering: land the Rust hunks (items 1-3) with the patch; do not flip EXECUTION_WEB_READER until items 1-3 and 5 are in. With the switch on but the tail hunk missing, a page that cannot be parked would be shown whole inline."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (shared: three hunks in lead_todo)",
+    "apps/Model Plane/deploy/docker-compose.yml (shared: one pass-through line in lead_todo)",
+    "apps/Model Plane/go/services/capability-core/migrations/0036_reader_tool_bindings.up.sql and .down.sql (new; seed rows in lead_todo)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "find_in_page in the Do loop ranks paragraph slices by exact word or prefix match (mp_contracts::page_reader::select_chunks), not grounding::select_passages' stemmed sentence windows, so the chat and Do loops can rank one page differently; one selector needs grounding.rs and relevance::stem moved into mp-contracts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With EXECUTION_WEB_READER=true and the runtime_loop/mod.rs tail hunk missing, fetch returns the complete page and the old tail shows it inline whenever parking is refused (run full or over 1 MiB), so the switch must stay off until lead_todo items 1-3 land."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the capability-core seed (lead_todo item 5) lands, read_page and find_in_page are denied as not bound even with the switch on, so the reader does nothing useful; this is a precondition for switch-on, not a code defect."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Owed in the depth phase: a fetch of a long public page whose answer sits past 4,000 characters, read through read_page or find_in_page in a Do run and in a wide-research child, with both switches on, showing the ref in the transcript and no second Quarry scrape."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, fetch no longer caps the page in execution-core, so the screening RPC carries the complete extracted page under its 3-second deadline; a timeout or a message over tonic's default 4 MiB limit keeps the local verdict, which scans the whole page."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A run holds up to 4 MiB of parked page text (MAX_RUN_BYTES) until release_run, and concurrent runs multiply this per replica with no process-wide cap for the reader."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "tool_class_registry_parity.rs parses trusted_capability_id arms with a regex that does not match guarded arms, so read_page and find_in_page are invisible to its seed check; add an explicit assertion once the seed lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The reader envelope and reader results name the page ref, but result_query still takes handle_id; a model that passes the ref to result_query gets a 'requires a handle_id' error, which is recoverable."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "No ZDR matrix row or feature refusal: under ZDR there is no store, so the reader is not offered and a call is refused as not available on this run; the docs/ZDR.md and flags-and-config.md rows belong to S11."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-2",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css"
+   ],
+   "notes": "Built the EP-5-S4 code and unit tests, none of them run (code-first order): the deck strip viewer (ArtifactDeckView.tsx: 16:9 cards with layout icon, title, first two lines and an OK/Advarsel/Feil chip via i18n; the selected slide's lines, findings and notes toggle; the generated file card through the panel's fallback; the Office preview only when the file has one; the \"Utkast fra manifest\" label when there is no render), the manifest parser (deck-manifest.ts, zod, version 1 only, caps 40 slides, unknown keys dropped), the chat.open_deck_slide contract and its test, the strip CSS (one contiguous block, CRLF kept, tokens only), and the vendored manifest copy with its sha256 pin (byte-identical to the Rust fixture at 1f0e5b22e). ChatArtifactPanel.tsx gets one import and one register line beside the Office viewer. No switch: the strip renders only for a deck artifact. Nothing is dispatched or persisted. New files were checked by grep against the UI copy and colour gate (no Norwegian letters outside i18n.tr, no bare JSX copy, no raw colours). Nothing committed; the patch is staged in the worktree and written to C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-5-S4.patch (38132 bytes, 11 files).",
+   "deviations": [
+    "chat.open_deck_slide has ownerPlane 'model', not the design's 'frontend': PlaneOwner allows only application, control, data, ingestion and model.",
+    "ChatArtifactPanel.tsx registers deckManifestRenderer explicitly beside officePdfRenderer, not as a bare side-effect import, to match the Office viewer's pattern.",
+    "A draft slide's chip reads 'Ikke bygget' / 'Not built'; the design named only OK, Advarsel and Feil.",
+    "The selected slide's detail lists every line of the slide; the design showed only the first bullets on the card.",
+    "deck-manifest.ts validates with zod (already a dependency of shared/api) rather than hand-written guards.",
+    "artifact-renderers.test.ts gained a jsdom pragma because it now imports the TSX viewer. The 375 px and keyboard-order checks are DOM-order and structure only: jsdom has no layout."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `  'chat.apply_deck_template': exempt('no_owner_executor', 'context_write'),` add the line `  'chat.open_deck_slide': exempt('ui_state_only', 'read'),`. MODEL_ACCESS is exhaustive by type, so typecheck fails and the new action-registry test fails without it.",
+    "After the model-access row lands, regenerate apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (it pins one row per registry action); the guard regenerates it.",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts asserts `expect(ids).toHaveLength(294)`, which assumes this slice is the only registry addition in this batch. EP-7-S4 edits the same assertion, so the final value is the sum of every slice's delta.",
+    "Rust fixture drift: the FE copy (src/shared/api/contracts/deck_manifest_v1.json and its .sha256) matches apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/deck_manifest_v1.json at 1f0e5b22e. If EP-5-S6 or S8 changes that Rust fixture, re-copy it here and re-pin the sha256; the FE test pins only its own copy, so it would still pass while drifting."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Owed in the depth phase: screenshots of a 6-slide deck with one warn at 1280 px and 375 px, before and after the fix. jsdom has no layout, so the 375 px no-page-scroll rule is unverified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The panel header keeps the built-in 'text' kind for a deck, so its Copy action and revision diff act on the manifest JSON, not on the slides."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The strip is unreachable until a 'deck' artifact with JSON content reaches the panel, which depends on EP-5 S2's emission and S3's rehydration; S3 must keep waived turns out (D6)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The viewer's caps (40 slides, 64-character slide ids) are constants in deck-manifest.ts with no test tying them to mp-contracts MAX_SLIDES and MAX_ID_CHARS, so a server-side change is silent."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "chat.open_deck_slide is catalogue-only: the strip selects locally and never dispatches it, so no server route exists for it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Builder findings are English server text, shown as received under the Norwegian locale; localising them needs message keys from the server."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The gateway whole-set test in apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs cannot hold on HEAD (not run): grep finds no handlers.rs arm for any chat.* contract, including EP-5-S7's. This id adds to that drift, and no arm was added."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_tool.rs",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.deck-artifact.test.ts"
+   ],
+   "notes": "The slice is built dark behind the existing MODEL_GATEWAY_DECK_TOOL switch, and no new switch was added. With the switch off, no `deck` frame is ever emitted, so persistence behaves exactly as before. Nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-5-S3.patch (33 KB).\n\nWhat changed:\n- **Deck persistence (`sse_events.rs`):** `RecordedArtifact::from_event` now keeps kind `deck` only when the content passes `DeckManifest::from_untrusted_json` (which also enforces the 120,000-char manifest cap) and the manifest's `deck_id` matches the artifact id. Tests: `recorded_artifact_keeps_a_deck_manifest`, `recorded_artifact_drops_a_deck_over_the_cap`.\n- **Waived turns (`session_flow.rs`):** `persistable_artifacts` drops deck artifacts on ZDR or waived turns, so `turn_evidence_metadata` keeps the same shape. Test: `waived_turn_does_not_persist_deck`.\n- **Rehydration and publish (`sse.rs`):** both places that seed persisted artifacts now restore the kind through the new `deck_tool::stored_kind`. A model's declared kind still never parses to `deck`. Test: `rehydrated_deck_continues_at_next_version`.\n- **`rebuild` op (`deck_tool.rs`):** it is parsed as an alias of Build on the kept manifest, so no mp-contracts change was needed. The tool schema and description now tell the model that a reloaded deck has no file until it calls `rebuild`. Version stamping is factored into `keep()`. A rebuild always bumps the version, because keeping the old version would collide with the revision store's compare-and-set. Tests: `rebuild_uses_the_stored_manifest`, `a_stored_deck_kind_is_restored_and_a_declared_one_is_not`.\n- **Front end (`chat-normalizers.ts`):** `isChatArtifact` refuses a deck whose content is not a JSON object. A deck with a manifest version other than 1 is shown as a plain code block (`deckArtifactForDisplay` in `transcriptTurnToChatTurn`). The new vitest file covers both cases.\n- **Posture matrix:** new waived golden row `e_waived_deck_manifest_not_persisted`, using connection `conn-deck` so its inputs differ from every other row. `ENFORCEMENT_ROWS` goes from 32 to 33, and a test checks the row decides as named.\n\nDependency check (C-B8): the EP-3 S2 dual write receives the same `sink.recorded_artifacts()` list, and session-core 0090 already accepts any kind string, so decks reach `artifact_revisions` without further change. Waived turns are excluded by `permits()`. No proto change, no migration.",
+   "deviations": [
+    "Assumed D1 = (a) deck manifest is a thread-owned artifact kind `deck` persisted in message metadata like document/code/html; the pptx is never stored and is rebuilt on demand",
+    "Assumed D6 = do not persist: waived (DEC-32) and ZDR turns stream the deck manifest only; persistable_artifacts drops it",
+    "Assumed OD-1 = accept D1(a) + D6 as recommended; no separate switch, built dark behind MODEL_GATEWAY_DECK_TOOL (default off)",
+    "`rebuild` is implemented as a parse-time alias of DeckOp::Build in deck_tool.rs, not as a new mp-contracts DeckOp variant (contract file not owned); a rebuild always gets a new version, because reusing the old version would trip the revision store's compare-and-set",
+    "The golden is a matrix row with a distinct connection `conn-deck` (persistence golden, not a feature refusal), mirroring e_waived_research_metadata_not_persisted"
+   ],
+   "lead_todo": [
+    "Copy apps/Model Plane/api/contracts/zdr-posture-matrix.json byte-for-byte to rust/services/model-gateway/tests/fixtures/, rust/crates/mp-contracts/tests/fixtures/ and rust/services/execution-core/tests/fixtures/ (zdr-posture-matrix.json). Regenerate api/contracts/zdr-posture-matrix.json.sha256 and its three fixture copies, and update the pinned digest on line 111 of scripts/tests/zdr-contract-sync.test.sh. If another builder in this batch also adds rows, merge them and set ENFORCEMENT_ROWS in tests/zdr_posture_matrix.rs to the final count.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs: in seed_from_table_heads, replace `crate::artifacts::ArtifactKind::parse(&head.kind)` with `crate::deck_tool::stored_kind(&head.kind)` so decks seeded from the revision table in `on` mode keep kind Deck",
+    "shared-edit apps/Model Plane/docs/ZDR.md: add a row for the `deck` metadata kind (manifest JSON in message metadata `artifacts`, at most 120,000 chars, erased with the message, not stored on ZDR or waived turns, pptx never stored)",
+    "Regenerate the prompt-tool manifest golden (the deck tool definition gained op `rebuild` and one sentence in its description)",
+    "Run: cargo test -q -p model-gateway --lib recorded_artifact; --lib deck_tool; --lib waived_turn_does_not_persist_deck; --lib rehydrated_deck_continues_at_next_version; --test zdr_posture_matrix; node scripts/tests/zdr-contract-schema.mjs; pnpm exec vitest run src/features/chat/components/chat-normalizers.deck-artifact.test.ts"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs",
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1/D1 assumed (a): the deck manifest is persisted in assistant message metadata `artifacts` as kind `deck`, and the pptx is never stored; this needs the owner's confirmation before MODEL_GATEWAY_DECK_TOOL is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1/D6 assumed do-not-persist: session_flow::persistable_artifacts drops deck artifacts on ZDR or waived turns, so a waived thread reopens with no deck; this needs the owner's confirmation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "tool_loop.rs update_artifact does not refuse an id whose kind is Deck, so the model could rewrite a deck with a hand-made manifest (for example with forged `ok` slide states) that from_event would then persist. Refuse deck kinds there, as EP-3 S4 does for user edits, before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Now that decks are recorded in the sink, a deck turn sets hold_artifact_answer and goes through the staged publish, and result_validation::revision_completion can replace the answer with the document-revision receipt when the turn's only artifact is a deck. Check the wording live and exclude decks if it misleads."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On a waived turn the publish loop in sse.rs still seeds the process-local committed_artifacts store with the deck (in memory, never durable), so the same replica can continue a waived deck until restart. That is consistent with in-turn memory, but DEC-32 reviewers should confirm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "seed_from_table_heads in artifact_revisions.rs still uses ArtifactKind::parse, so in revision mode `on` a deck seeded only from the table has no kind and deck ops refuse it until the lead_todo shared edit lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof still to run: build a deck, reload, add a slide, then psql keys and versions only to confirm version 3 in session-core message metadata, then `rebuild` returns a pptx; a waived-connection turn shows no `deck` in metadata."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Confirm that session-core gdpr.rs erases messages together with their metadata, and that the 120,000-char deck manifest per message fits within session-core's metadata size limits (design risk 5)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S8",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-4",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/deck_manifest.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_tool.rs",
+    "apps/Model Plane/skills/office/pptx/SKILL.md",
+    "apps/Model Plane/skills/office/pptx/scripts/build_deck.py",
+    "apps/Model Plane/skills/office/pptx/scripts/test_build_deck.py"
+   ],
+   "notes": "The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-5-S8.patch (56 KB). Nothing was compiled or run. Each edited file keeps its CRLF endings. All new behaviour is behind MODEL_GATEWAY_DECK_FROM_ARTIFACT, which only accepts the literal \"true\" and is checked only after MODEL_GATEWAY_DECK_TOOL. With the switch off: the tool definition is unchanged, a create_from_artifact call fails the same way as any unknown op, and source_artifact_id is ignored by serde as before.\n\nWhat was built:\n- mp-contracts: an optional DeckManifest.source (DeckSource{artifact_id, version, provenance_digest?, ledger_digest?, sources[DeckCitation{number,title,url?,document_id?}], unsupported_claims[]}). It is the last field and is skipped when None, so the canonical JSON of a deck without a source is byte-identical. Validation reports the field path. New caps: MAX_SOURCES=40, MAX_CITATION_NUMBER=999, MAX_UNSUPPORTED_CLAIMS=32, plus title/url/claim lengths; caps_match_the_builder now checks the first three. builder_json adds top-level sources and unsupported_claims only when present.\n- deck_tool.rs:\n  - Op create_from_artifact{artifact_id, max_slides 1..40, default 8}. It reads a document artifact from the same thread only, within MAX_READ_ARTIFACT_CHARS (resolved the way read_artifact resolves ids), and returns headings with per-section [n] numbers, all cited numbers and source titles. It stores nothing.\n  - create gains source_artifact_id. The server reads that document again from the thread store and records the source; the model never supplies it.\n  - Provenance is read as untrusted, capped and scrubbed: sha256 provenance_digest, ledger_digest, deduplicated sources, and the claims marked unsupported.\n- build_deck.py: when a manifest has sources or unsupported_claims, it strips each known [n] from bullets/left/right and appends \"Kilde n: <title|url|document_id>\" to the notes (\"Source\" for non-Nordic locales). An unknown [n] stays in the text and is flagged citation_unknown (warn). A bullet that matches an unverified claim without \"(ikke verifisert)\" is flagged unsupported_claim (warn). A manifest without these keys builds exactly as before.\n- Tests written, not run:\n  - deck_tool: create_from_artifact_reads_only_this_thread, missing_artifact_is_a_tool_error, the_outline_lists_headings_and_their_citation_numbers, citation_numbers_move_to_notes, provenance_is_copied_when_present, a_stored_stamp_comes_back_with_whole_numbers, switch_off_refuses_the_op, a_source_step_is_read_strictly\n  - deck_manifest: a_deck_without_a_source_writes_no_source_key, a_source_survives_storage_and_reaches_the_builder, a_bad_source_is_refused_with_its_field_path\n  - Python: test_citation_numbers_move_to_notes, test_an_unknown_citation_stays_and_is_flagged, test_without_sources_markers_are_left_alone, test_unsupported_claim_bullet_is_warned, test_bad_sources_refuse_the_deck\n\ndeck_tool.rs will not compile until the guard applies the artifacts.rs shared-edit in lead_todo (provenance_of / remember_provenance).",
+   "deviations": [
+    "Assumed D1 = the deck manifest, including its new source key, lives in the thread-owned artifact store and is persisted in message metadata like document/code/html (S3's path); S8 adds no store of its own.",
+    "Assumed D6 = waived turns (DEC-32) do not persist the manifest or its source; S8 relies on S3's waived skip of deck kinds and adds no persistence path.",
+    "Assumed OD-1 = the design's recommendation: (D1 a) a thread-owned deck artifact kind, (D6) not persisted on waived turns. Built dark behind MODEL_GATEWAY_DECK_FROM_ARTIFACT (default off).",
+    "The source is recorded when the model calls create with source_artifact_id, not by create_from_artifact itself. The design records it in create_from_artifact, but there is no deck yet at that point. Recording it at create avoids storing a revision-0 deck and an extra version bump, and the server still reads the source from the thread store.",
+    "deck_manifest_v1.json fixture left unchanged: the new tests build manifests inline instead. EP-5-S4 copies this fixture into the SPA with a sha256 in the same batch, so changing it would break that slice.",
+    "The design's provenance and ledger half is no longer inert: EP-2 S4/S6 are in the tree. The ArtifactVersionStore does not yet keep the provenance stamp, so the store accessors are requested as a shared edit to artifacts.rs and sse.rs.",
+    "The notes label is 'Kilde n' for nb/nn/no/da locales and 'Source n' otherwise. The design names only 'Kilde'."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs (CRLF): in `struct StoredArtifact`, after the field `user_version: Option<u32>,` add:\n    /// The research provenance stamp the durable thread kept beside this artifact (EP-2 S4) and the\n    /// version it was stamped on. Read only by research-to-deck (EP-5 S8), and only while that\n    /// version is current, so a later revision never inherits an older report's stamp.\n    provenance: Option<(u32, serde_json::Value)>,",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs: directly after `pub fn kind_of(...) { ... }` add:\n    /// Keep the provenance stamp a durable artifact carried at `version` (EP-5 S8).\n    pub fn remember_provenance(&self, thread_id: &str, artifact_id: &str, version: u32, provenance: serde_json::Value) {\n        if self.current_version(thread_id, artifact_id).is_some() {\n            self.known.entry((thread_id.to_owned(), artifact_id.to_owned())).or_default().provenance = Some((version, provenance));\n        }\n    }\n\n    /// The provenance stamp of the artifact's current version, if it had one.\n    pub fn provenance_of(&self, thread_id: &str, artifact_id: &str) -> Option<serde_json::Value> {\n        let current = self.current_version(thread_id, artifact_id)?;\n        self.known\n            .get(&(thread_id.to_owned(), artifact_id.to_owned()))\n            .and_then(|entry| entry.provenance.clone())\n            .filter(|(version, _)| *version == current)\n            .map(|(_, provenance)| provenance)\n    }",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs: in `fork_thread`, right after the `if let Some(kind) = self.kind_of(thread_id, &artifact.id) { fork.remember_kind(...); }` block add:\n                if let Some(provenance) = self.provenance_of(thread_id, &artifact.id) {\n                    fork.remember_provenance(thread_id, &artifact.id, version, provenance);\n                }",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (CRLF, file owned by EP-5-S3 this batch): in `rehydrate_persisted_artifacts`, right after the `if let Some(kind) = crate::artifacts::ArtifactKind::parse(&text(\"kind\")) { state.artifact_versions.remember_kind(thread_id, &id, kind); }` block add:\n        // Research-to-deck reads a report's stamp back from the store (EP-5 S8).\n        if crate::deck_tool::from_artifact_enabled() {\n            if let Some(Kind::StructValue(stamp)) = fields.fields.get(\"provenance\").and_then(|value| value.kind.as_ref()) {\n                state.artifact_versions.remember_provenance(thread_id, &id, version, crate::deck_tool::stamp_json(stamp));\n            }\n        }",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, directly below line `      MODEL_GATEWAY_DECK_TOOL: ${MODEL_GATEWAY_DECK_TOOL:-false}` add `      MODEL_GATEWAY_DECK_FROM_ARTIFACT: ${MODEL_GATEWAY_DECK_FROM_ARTIFACT:-false}`",
+    "owner: add MODEL_GATEWAY_DECK_FROM_ARTIFACT=false to apps/Model Plane/deploy/.env.example (agents do not edit it)",
+    "guard: compile and run `cargo test -q -p mp-contracts --lib deck_manifest` and `cargo test -q -p model-gateway --lib deck_tool`; the Python tests run with `python3 -m unittest discover -s \"apps/Model Plane/skills/office/pptx/scripts\" -p \"test_*.py\"` (pytest is not installed)",
+    "guard: SKILL.md (pptx) gained one line. If builtin_skills_contract / skill_budget_contract or the prompt-tool manifest pins the embedded SKILL.md, regenerate it (MP_UPDATE_PROMPT_MANIFEST=1 cargo test -p mp-contracts --test prompt_tool_manifest). The deck tool definition is unchanged while the switch is off.",
+    "guard: deck_tool.rs and build_deck.py are also edited by EP-5-S3 (rebuild op) and EP-5-S6 (--theme) in this batch. S8's edits are new functions plus one-line changes in dispatch, check_manifest and check_slide, so check those hunks during the 3-way merge."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D1 assumed (the deck manifest and its source key live in the thread-owned artifact store, persisted in message metadata); owner ruling needed before MODEL_GATEWAY_DECK_FROM_ARTIFACT is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D6 assumed (waived turns do not persist the manifest or its source); S8 inherits S3's waived skip and adds no persistence path of its own, so owner sign-off is needed before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1 assumed as recommended (thread-owned deck kind, not persisted on waived turns); OD-1 blocks enabling S3 and therefore S8's persistence of the source."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The SPA deck guards (EP-5-S4 deck-manifest.ts, EP-5-S3 chat-normalizers.ts) must accept the optional top-level `source` key, or a deck made from a document will fall back to a code block in the panel."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Provenance only reaches the deck after a reload: a deep-research report emitted in the same turn is never remember()ed in the artifact store, so create_from_artifact finds it only on a later turn, after the persisted metadata has been rehydrated."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The unsupported_claim check is substring matching on normalised text (minimum 12 characters), so a paraphrased unverified claim passes without a warning; it is advisory only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "provenance_digest is the sha256 of the gateway's JSON rendering of the stored prost Struct (sorted keys, whole numbers as integers), not a digest defined by EP-2, so it can differ from any digest EP-2 computes at emit time."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A deck with 40 full slides plus 40 sources and 32 claims can exceed MAX_MANIFEST_CHARS, and the create is then refused with a 'manifest' cap error rather than trimmed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof still needed: deep research report, reload, then 'lag 8 lysbilder av dette' with both deck switches on. Expected: the manifest source is set, the notes carry 'Kilde n' lines, and no source is stored on a waived connection."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-5-S6",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-5",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/deck_theme.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/deck_theme_v1.json",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/validate_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/testdata/deck_theme_v1.json",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/authz/authz.go",
+    "apps/Model Plane/go/services/capability-core/internal/authz/authz_test.go",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_tool.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/skills/office/pptx/scripts/build_deck.py",
+    "apps/Model Plane/skills/office/pptx/scripts/test_build_deck.py"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-5-S6.patch (108 KB, 16 files). Nothing was compiled or run, as the code-first order says.\n\nWhat was built:\n- **Proto.** `SkillBundleSummary.deck_template = 7`, a new commented bool field. It is worked out when the bundles are read, so there is no migration and 0035 stays unused.\n- **Theme contract.** `mp-contracts` has a new `deck_theme.rs` with the `DeckTheme` contract: strict keys, hex colours, logo only under `templates/` as png/jpg, master only at `templates/master.pptx`, footer at most 80 characters. A font the sandbox does not have is reported as substituted, not refused. It also holds `DeckTemplateRef`. A shared fixture sits at `tests/fixtures/deck_theme_v1.json`, with an identical Go copy in `testdata` and a Go test that checks the two match.\n- **capability-core.**\n  - `validate.go`: a Go copy of the theme rules, `ValidateDeckTemplate` (master must be a zip with `ppt/presentation.xml`, logo must be PNG/JPEG by its file signature, no program anywhere under `templates/`), and `DeckTemplatesFromLookup`, which only accepts the literal \"true\".\n  - `store.go`: `Summary.DeckTemplate` is derived in the List query (EXISTS on the theme path).\n  - `server.go`: `WithDeckTemplates`; the field is reported only while the switch is on.\n  - `authz.go`: `AuthorizeGRPCWith(bundleReadRule)` behind the new switch `SKILL_BUNDLE_READ_RULE_ENABLED`. With it on, `GetSkillBlob` is allowed only for service principals with `capability:read`. List and Manifest are allowed for user principals and for service principals with read scope. With it off, behaviour is the same as `AuthorizeGRPC`.\n- **model-gateway.**\n  - `deck_tool.rs`: `hold_turn_template` resolves the request's `deck_template` once per turn, holds it in a guard keyed by run id (checked against org and user), and drops it at the end of the turn. A pick is accepted only if capability-core lists the bundle with `deck_template=true`, its digest is a valid SHA-256, and `deck_templates::resolve` passes. Holding needs MODEL_GATEWAY_DECK_TOOL, SKILL_DECK_TEMPLATES_ENABLED and SKILL_BUNDLE_MOUNT_ENABLED all on and the turn not ZDR.\n  - A build with a template mounts only that bundle, at the fixed name `deck-template`, and runs the constant `THEMED_BUILD_COMMAND`.\n  - The manifest records the template. The model is told \"Template applied / changed digest / unavailable / default theme\", plus finding ids from the builder only, filtered and capped.\n  - The envelope is unchanged when there is no template note.\n  - `tool_loop.rs`: `skill_bundle_mounts_enabled` is now `pub(crate)`, and its test `SkillBundleSummary` literal gets the new field.\n- **`build_deck.py`.** New `--theme` flag. It uses `master.pptx` as the base when present (dropping its sample slides), maps layouts by name and falls back with a `layout_missing_in_master` finding, applies heading and body fonts and colours, sets the background when there is no master, puts the logo on title and section slides and the footer text on the others, and scales the geometry to the master's slide size. A bad theme does not refuse the deck: it builds in the default theme and the report says the theme was not applied. The report gains a `theme` entry only when `--theme` is given.\n- **Tests (written, not run).**\n  - Go `validate_test`: valid theme, bad colour, out-of-contract theme, master that is not a presentation, master missing, logo not an image, program under `templates/`, switch, fixture parity.\n  - Go `server_test`: `TestListReportsDeckTemplate`.\n  - Go `authz_test`: `TestAUserPrincipalCannotReadABlob`, switch.\n  - Rust `deck_theme::tests`, including unknown font reported not refused and colour must be hex.\n  - Rust `deck_tool::tests`: `template_id_from_the_model_is_ignored`, `a_template_from_another_org_is_not_found`, `a_non_template_bundle_is_refused_as_template`, `changed_template_digest_is_reported`, themed build command fixed, theme findings are capped ids, and a ZDR or switched-off turn holds no template.\n  - Python `test_build_deck`: `test_theme_colours_and_fonts_are_applied`, `test_missing_master_layout_falls_back_with_a_finding`, and a `ThemeTests` class.\n- **ZDR.** `deck_template` was already mapped to `refused_feature(\"skills\")` by S7 in `zdr_features.rs`, and docs/ZDR.md already has the row. Following the rules, no row was added to zdr-posture-matrix.json and the ZDR test files were not changed.\n\n`deck_tool.rs` will not compile until the guard applies the `deck_manifest.rs` shared-edit: it reads and writes `manifest.template`.",
+   "deviations": [
+    "Assumed D4 (OD-2) = brand templates are capability-core skill bundles (templates/deck-theme.json plus optional templates/master.pptx), not Data Plane documents",
+    "Assumed D5 (OD-3) = template chosen explicitly by the request's deck_template skill id, resolved server-side; the deck tool schema has no template field and a model-supplied one is ignored",
+    "Assumed D8 (OD-4) = explicit bundle read rule (GetSkillBlob: service principal with capability:read only; ListSkillBundles/GetSkillBundleManifest: user principal or service with read scope, metadata only); no ZDR refusal at rest; a ZDR turn never holds or mounts a template. Built behind its own switch SKILL_BUNDLE_READ_RULE_ENABLED (default off), not SKILL_DECK_TEMPLATES_ENABLED, because the rule refuses the user-bearer blob reads that S7's picker, the S6 resolve and skill_file depend on",
+    "Assumed D9 = keep the 1 MiB per-file cap (no 0021 change)",
+    "The template is not added to the turn's general mount set through skill_mounts_from_bundles; it is mounted only on the deck build step, under the fixed name 'deck-template', so the themed command stays a constant and the execution-core 3-mount cap is never shared with matched skills",
+    "The template pick reaches the deck dispatch through a run-scoped guard (deck_tool::hold_turn_template) held by sse.rs, instead of a new parameter threaded through dispatch_audited_tool/dispatch_tool_with_cost, to keep hot-file edits small",
+    "A turn with no pick builds the stored deck in the default theme and says so (the stored template is not re-resolved without the request's pick)",
+    "Upload validation of templates/ runs only while SKILL_DECK_TEMPLATES_ENABLED is on (wired via a shared edit in registry_apis.go), so uploads with the switch off are checked exactly as before",
+    "build_deck.py usage message now mentions --theme (a refused-usage report's message text changed)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/deck_manifest.rs: in `pub struct DeckManifest`, after `pub next_slide: u32,` add:\n    /// The brand template the deck was last built with (EP-5 S6), set by the gateway from the turn's resolved pick, never by an operation. Absent for a deck in the default theme, so its canonical text is unchanged.\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub template: Option<crate::deck_theme::DeckTemplateRef>,\nand in `DeckManifest::empty`, after `next_slide: 1,` add `template: None,` (CRLF file)",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs: in tests fn `bundle()`, after `created_at: \"2026-11-04T10:00:00Z\".to_owned(),` add `deck_template: false,` (new proto field 7 breaks the struct literal)",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: immediately before `let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(` (inside `if !tool_defs.is_empty() {`) insert:\n            // The turn's brand deck template (EP-5 S6): resolved once from the request's own pick and held while the tool rounds run; the model never names one. Holds nothing while a switch is off or under ZDR.\n            let _deck_template = crate::deck_tool::hold_turn_template(\n                &session_state,\n                &session_run_for_terminal.run_id,\n                &org_clone,\n                &user_clone,\n                capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),\n                effective_zdr,\n                req.deck_template.as_ref(),\n            )\n            .await;",
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go: in `(h *SkillBundlesHandler) put`, right after `bundle, err := skillbundle.Parse(body)` insert:\n\tif err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {\n\t\t// EP-5 S6: a deck template's theme, master and logo are checked before anything is stored.\n\t\terr = skillbundle.ValidateDeckTemplate(bundle)\n\t}",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: replace `grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPC))` with `grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPCWith(authz.BundleReadRuleFromLookup(os.Getenv))))`; and append to the capSrv chain after `WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv))` the call `.\n\t\tWithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv))`",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: capability-core environment (next to `SKILL_BUNDLES_ENABLED: ${SKILL_BUNDLES_ENABLED:-false}`, ~line 2125) add `SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}` and `SKILL_BUNDLE_READ_RULE_ENABLED: ${SKILL_BUNDLE_READ_RULE_ENABLED:-false}`; model-gateway environment (next to `SKILL_BUNDLE_MOUNT_ENABLED`, ~line 354) add `SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}` if S7 did not already",
+    "regenerate Go proto bindings for capabilities.proto (buf generate, Go-only recipe) so mpv1.SkillBundleSummary has DeckTemplate; Rust bindings regenerate via mp-contracts build.rs; run buf lint / buf breaking (additive)",
+    "guard: run gofmt -l on the changed Go files and cargo fmt --check (multi-line Rust test asserts were hand-formatted)"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/deck_manifest.rs (DeckManifest.template field; see lead_todo)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (hold the turn template guard; see lead_todo)",
+    "apps/Model Plane/rust/services/model-gateway/src/deck_templates.rs (test struct literal)",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go and cmd/main.go (switch wiring)",
+    "apps/Frontend Plane/verevonv3 deck-manifest guard (S4) must accept the optional `template` key in a deck manifest"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D4/OD-2 assumed: brand templates are capability-core skill bundles, not Data Plane documents; needs the owner's ruling and the ledger entry reversing the audit wording before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D5/OD-3 assumed: a template is chosen only by the request's deck_template id, never by keyword or by the model; needs owner acknowledgement and ledger entry before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D8/OD-4 assumed: GetSkillBlob for service principals with capability:read only, list/manifest also for users, no ZDR refusal at rest; owner must acknowledge (closes D2-383/D2-384) before SKILL_BUNDLE_READ_RULE_ENABLED or SKILL_DECK_TEMPLATES_ENABLED is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D9 assumed: the 1 MiB per-file cap stays, so a real brand master.pptx must fit in 1 MiB; verify with a real template."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With SKILL_BUNDLE_READ_RULE_ENABLED on, the gateway's user-bearer GetSkillBlob reads (S7 picker theme read, deck_templates::resolve used by S6, and skill_file) are refused, so templates resolve as unavailable; the theme read must move to a service bearer or the rule must allow the theme blob before both switches can be on together."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A bundle uploaded while SKILL_DECK_TEMPLATES_ENABLED was off is listed as deck_template=true once the switch is on without ever passing ValidateDeckTemplate; re-validate or require re-upload on switch-on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "F3 live proof outstanding: admin uploads a brand bundle, the turn picks it, the build mounts /skills/deck-template read-only (bwrap argv), the deck shows brand colours/logo/footer, an org-B user cannot resolve it, and a user principal gets PermissionDenied on GetSkillBlob with the rule on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end test covers hold_turn_template resolving against a fake capability client (list with deck_template=true, then resolve), only its pure parts and the switched-off/ZDR early return."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A later turn with no pick rebuilds a templated deck in the default theme (it says so); re-resolving the stored template by its skill_id under the turn's bearer would keep the brand across turns."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "resolve_pick lists the bundle and then deck_templates::resolve lists it again (two ListSkillBundles calls per pick); have resolve return the summary digest, and let the S7 listing filter on the new deck_template flag instead of opening every bundle's manifest."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-7-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-6",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0092_thread_goal_turns.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0092_thread_goal_turns.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/thread_goals.rs",
+    "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_goal.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.goal-progress.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalDialog.tsx"
+   ],
+   "notes": "The slice is built dark behind the existing S1 switches (SESSION_CORE_THREAD_GOALS_ENABLED and MODEL_GATEWAY_THREAD_GOALS_ENABLED, both default off). The gateway only claims a turn when that switch is on, the turn is agentic and it names a goal_id, so with the switch off every turn behaves as before. Nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-17/EP-7-S2.patch (117 KB).\n\nWhat was built:\n- **Migration 0092** adds the thread_goal_turns table (one row per turn, an outcome check, usage_source, a counted flag, a unique (goal_id, run_id) index, an index on open turns) and three cached counters on thread_goals: tokens_used, cost_used_usd_micros and turns_used. A revert file ships with it.\n- **Proto (thread_goals.proto)** gets three new RPCs, ClaimGoalTurn, BindGoalTurnRun and SettleGoalTurn, and five new messages. Every field is commented and the change is additive only.\n- **session-core (thread_goals.rs)** implements claim, bind and settle:\n  - Claim locks the goal row, runs the full owner, Space and waiver checks, settles expired leases (30 min) as lease_expired, refuses a second turn while one is in flight, and refuses with thread_goal_budget_reached or thread_goal_turns_reached once a cap is hit. Those two refusals also close the goal.\n  - Settle is idempotent on the run. A late settle of a lease_expired turn adds its usage once. Turns count unless they never started a run and ended cancelled. Hitting a cap moves the goal to budget_reached or turns_reached and bumps its revision.\n  - Unit tests and #[ignore] database tests cover the named cases.\n- **New gateway module thread_goal.rs** holds goal_turn_cap (D10), metered_tokens (subscription legs count zero), settle_outcome, the claim refusal mapping, the progress_event builder and GoalTurnLedger. The ledger claims, binds right after the session run is prepared, and settles from RunAgentResponse.usage, falling back to the WS27-S9 round tally (D2-005) and then to none. If the stream ends any other way, dropping the ledger settles the turn: cancelled, or unknown once a run exists.\n- **SSE**: a new ungated `goal_progress` event (ChatEvent::GoalProgress) is sent before the run's end frame. It carries ids, counts and closed tokens only, never the objective.\n- **Frontend**: the chat client parses goal_progress in its event switch (goalProgressEventOf, onGoalProgress). GoalBar gains a usage line (\"41k of 200k tokens - turn 3 of 10\"), a stop-reason chip and an applyGoalProgress helper. GoalDialog gains turn-cap and token-budget fields plus a note that the subscription route spends no metered tokens.\n\nLine endings are kept: the Rust and proto files are CRLF (the new thread_goal.rs matches goal_judge.rs); the SQL and TS files are LF.",
+   "deviations": [
+    "Assumed D2 = budget counts metered tokens only (subscription legs count zero) plus a mandatory turn cap (default 10, max 50); the judge's tokens count (SettleGoalTurn.judge_tokens); at 100% no new continuation is claimed.",
+    "Assumed D10 = the goal turn cap is min(remaining, org per-run ceiling) per dimension, never above the org's (thread_goal::goal_turn_cap, built from the org-only ceiling so a request cap cannot loosen it). A Do run has no per-run token-cap field (D2-705), so the cap is computed and logged at claim and enforced at the next claim, not inside the run.",
+    "No new switch: the slice rides the S1 switches (design says 'part of the S1 switches').",
+    "The SSE payload names the cost fields cost_used_usd_micros / cost_budget_usd_micros, not the design's cost_used / cost_budget, so the unit is explicit.",
+    "The verdict columns are not folded into 0092. S3's session-core part was not built with this slice, so 0093_thread_goal_verdicts stays reserved for it.",
+    "ClaimGoalTurn treats expected_revision 0 as 'any revision', and the gateway sends 0: the SPA's Continue sends goalId only, and the S1 recitation helper (not my file) does not return the revision.",
+    "A turn that never started a run and was cancelled does not count toward max_turns. Every turn that started a run counts, as do lease_expired turns. Without this, a start refused after the claim (image refusal, session-prepare failure) would burn a turn or block the goal for the 30-min lease.",
+    "The settle is driven from the follower stream, with a drop guard for every other exit, not from the detached dispatch task. A run that outlives the follow deadline settles 'unknown' with no usage.",
+    "model-gateway grpc.rs was not changed: ThreadGoalService is its own service and the gateway mock does not implement it."
+   ],
+   "lead_todo": [
+    "Regenerate the proto bindings (Go under apps/Model Plane/go/gen/model_plane/v1/ and mp-contracts) for thread_goals.proto; run buf lint and buf breaking against baseline.binpb.",
+    "Regenerate the SSE event payload golden apps/Model Plane/api/contracts/sse-event-payloads.json (MP_UPDATE_GOLDEN=1, sse_events payload_contract), its .sha256, the SPA's vendored copy apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json and the pinned digest in scripts/tests/zdr-contract-sync.test.sh, for the new GoalProgress variant. Re-run gen-chat-event-types.mjs if it generates from the golden.",
+    "Regenerate apps/Model Plane/docs/sse-event-taxonomy.md with python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py (goal_progress has a ChatEvent producer and a dispatchEvent case).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: (1) add `import { applyGoalProgress } from './GoalBar'`. (2) In the stream handler object that ends `} satisfies Partial<ChatStreamHandlers>`, after the onRetrievalNotice handler, add: `onGoalProgress: (event: Parameters<NonNullable<ChatStreamHandlers['onGoalProgress']>>[0]) => { setThreadGoalState((current) => applyGoalProgress(current, event)) },`. (3) In saveGoal, change the input type to `GoalDraft` (from './GoalDialog') and pass `...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}), ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {})` to both updateThreadGoal and putThreadGoal.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts: add `tokenBudget?: number` to SetThreadGoalInput and to UpdateThreadGoalInput. In setThreadGoal's PUT body add `...(input.tokenBudget ? { tokenBudget: input.tokenBudget } : {})`. In updateThreadGoal's PATCH body add `...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {})`. The gateway's SetGoalBody and UpdateGoalBody already accept token_budget.",
+    "Run cargo fmt --all in apps/Model Plane/rust (a few hand-wrapped lines in thread_goals.rs, thread_goal.rs and sse.rs may need reflow), then the slice's test commands, including session-core-db-tests.sh for the new #[ignore] DB tests: claim_is_single_in_flight, expired_claim_settles_lease_expired_then_reclaims, settle_idempotent_on_run_id, budget_reached_moves_status, turns_reached_moves_status, cancelled_start_without_run_is_not_a_turn, paused_goal_refuses_claim.",
+    "Rebuild session-core (migration 0092 runs at start) and model-gateway before any live proof."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D2 was taken by recommendation (metered tokens only plus a mandatory turn cap; judge tokens count; no new turn at 100%) and built dark behind the S1 switches; the owner must confirm before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D10 was taken by recommendation (goal cap = min(remaining, org per-run ceiling), never above the org's) and built dark; the owner must confirm before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A Do run carries no per-run token or USD cap to execution-core (register D2-705), so goal_turn_cap is only logged at claim. One goal turn can overshoot the remaining budget by a whole run, and the goal stops only at its next claim."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The settle runs in the follower stream. A run that outlives the follow deadline, or a replica that dies, is settled 'unknown' or 'lease_expired' with no usage, and its tokens are lost unless a later settle names the run; moving the settle into the dispatch task, as AgentUsageLedger did, would close this."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A goal turn that ends awaiting_approval or parked is settled then. The tokens its later /continue segment spends are never debited, because the continuation passes goal_turn None and the settle is idempotent on the run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Settle and drop-settle use the turn's user session bearer (~300 s). A long run's settle can be refused with an expired credential, leaving the turn to lease expiry and losing its usage."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The claim lease (30 min, D11) can be shorter than a pinned run's follow deadline. An expiring lease then lets a second turn be claimed while the first still runs; the late settle adds the first turn's usage once."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SettleGoalTurn trusts the caller's usage figures and accepts any owner bearer. Only the gateway calls it today, but restricting it to a gateway service principal would stop a direct gRPC caller from under-reporting spend."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway stream tests named by the design (goal_turn_refused_over_budget_creates_no_run, goal_progress_frame_after_terminal_run) were not written; the claim refusal mapping and the frame builder are unit-tested only, and the sse.rs wiring needs a stream-level test with a mock ThreadGoalService."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Cost is enforced only for priced turns. A turn whose usage could not be priced settles cost_usd_micros = -1 and adds nothing, so a goal with only a cost budget can overrun when the catalogue is unavailable."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof is still owed: a goal with a 30k-token budget on a metered route pressed until budget_reached (goal_progress frames, thread_goal_turns rows, cost-core /cost/run agreement with MODEL_GATEWAY_AGENT_USAGE_ENVELOPE on), then a subscription-route goal reaching turns_reached."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The AG-UI CUSTOM switch (dispatchAgUiEvent) has no goal_progress case; only the native dispatchEvent reads it."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-7-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_448f275e-941-7",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/thread_goals.rs",
+    "apps/Model Plane/rust/services/session-core/src/thread_goals/claim_guard.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/goal_auto.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/goal-auto-continue.spec.ts"
+   ],
+   "notes": "Code written, nothing run. Patch: .plan-work/execution/patches/W3-17/EP-7-S4.patch (14 files, 80 KB).\n\nServer side:\n- session-core: new submodule `thread_goals/claim_guard.rs`, declared with one `mod claim_guard;` line in thread_goals.rs.\n  - `refuse_unsettled_claim(tx, thread_id, goal_id)` refuses `failed_precondition` `thread_goal_pending_decision` when the thread has any of: a live requested approval (takeovers included), an unexpired requested run_question, a `proposed` plan, or a park/resuming checkpoint. It refuses `resource_exhausted` `thread_goal_rate_limited` at 30 `thread_goal_turns` claims in the last hour.\n  - `goal_auto_requested(metadata)` reads the header `x-goal-auto` (only the literal \"true\" counts). `stamp_goal_auto(tx, run, org)` merges `runs.metadata.goal_auto=true`. This keeps the slice free of proto changes.\n  - EP-7-S2 (the claim/bind code) is being built at the same time, so the guard is not yet called: the wiring is in lead_todo.\n- model-gateway: new `goal_auto.rs`.\n  - Switch `MODEL_GATEWAY_GOAL_AUTO_CONTINUE`, read with the strict parser, default off.\n  - `available()` is true only when this switch, the thread-goals switch and the judge switch are all on.\n  - `refusal()` gives `goal_auto_disabled`, or `invalid_request` when the turn is not a Do turn or names no goal.\n  - `mark()` adds the header.\n- `InvokeRequest.goal_auto` (alias goalAuto, default false). sse.rs refuses before any run exists, just ahead of the S1 goal recitation. A turn without the mark is never refused, so with the switch off every other turn behaves as before.\n\nSPA side:\n- Pure state machine `goal-pump.ts` (wait/countdown/send/stop, 11 closed stop reasons, hidden tab holds the countdown).\n- GoalBar adds the Keep going switch, a role=timer countdown, Stop, and the stop reason.\n- The controller drives it from `continueGoal({auto})`. It records the settled turn's outcome and re-reads the goal. It sends at most once per settled turn, and only once the goal's turnsUsed has moved past the count at send time, so a stale verdict is never used.\n- `onRunParked` is tracked. The pump resets on thread change. Visibility is followed.\n- chat-client sends `goal_auto: true` only beside `goal_id`.\n- New `chat.goal_auto_toggle` action (risk medium, reversible); registry count 293 to 294.\n\nTests written:\n- goal-pump table (every stop reason, countdown, hidden tab, one send per settled turn, round B C-B5 takeover cases).\n- GoalBar toggle/Stop/no focus steal.\n- Registry test.\n- gateway `goal_auto_*` unit tests.\n- session-core unit tests plus #[ignore] DB tests: claim_refused_with_pending_approval/_while_a_takeover_waits/_with_unanswered_question/_with_proposed_plan/_with_parked_run, claim_rate_limited, goal_auto_stamp_marks_the_run_only.\n- e2e (gated by E2E_GOAL_AUTO=1): three turns then met; an approval stops the pump; Stop cancels the countdown.\n\nLine endings were measured: Rust files are CRLF (new ones too), TS files LF.",
+   "deviations": [
+    "Assumed D4 = (a) the SPA sends the next turn after a 5 s visible countdown with Stop; a hidden tab never sends; closing the tab or leaving the thread stops the goal.",
+    "Assumed D5 = (a) every pause stops the pump and the pump never approves; ClaimGoalTurn refuses thread_goal_pending_decision for a pending approval, question, proposed plan or parked run; max 30 claims per goal per hour.",
+    "runs.metadata.goal_auto has no proto field (the design says no proto change), so the gateway marks the BindGoalTurnRun gRPC request with the header x-goal-auto and session-core stamps the run while binding. The stamp needs the S2 bind wiring listed in lead_todo.",
+    "The pending-decision guard and the rate guard apply to every claim, the person's manual Continue included. The claim carries no trustworthy marker of who sent it, so this matches the design's 'even for a hostile client'.",
+    "The availability field is camelCase `autoContinueAvailable` inside `data`, matching the goal JSON's camelCase; the design wrote it as `auto_continue_available`.",
+    "Stop turns Keep going off (it is not a one-turn skip). The stop reason stays on the bar until the toggle is turned on again or a turn settles.",
+    "No vitest test drives the controller's pump wiring; it is covered by the pure goal-pump tests and the e2e spec only."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: add `pub mod goal_auto;` between `pub mod gateway_metrics;` and `pub mod goal_judge;` (CRLF).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs: in test fn make_request's InvokeRequest literal, after `goal_id: None,` add `goal_auto: false,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs: (1) in FIELD_TREATMENTS after the goal_id row add `    // EP-7 S4: a pump-sent goal turn continues a goal, so a ZDR turn carrying the mark is refused like the goal.` and `    (\"goal_auto\", refused_feature(\"thread_goal\")),`; (2) in invoke_field_names' destructuring after `goal_id: _,` add `goal_auto: _,`; (3) in the names vec after `\"goal_id\",` add `\"goal_auto\",`; (4) in refusal() right after the goal_id check add `    if request.goal_auto {\\r\\n        return feature(crate::thread_goal_routes::ZDR_FEATURE);\\r\\n    }`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs cases(): after the context_refs rows add `(\"goal_auto\", with(\"goal_auto\", json!(true)), refused(\"thread_goal\")),` and `(\"goal_auto\", with(\"goal_auto\", json!(false)), None),`. goal_id and deck_template also have no rows there yet, so every_field_has_a_row_that_matches_its_treatment may already fail; add `(\"goal_id\", with(\"goal_id\", json!(\"goal_1\")), refused(\"thread_goal\")), (\"goal_id\", with(\"goal_id\", Value::Null), None),` if so.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/thread_goal_routes.rs goal_body: change the last line to `Json(json!({ \"data\": { \"found\": goal.is_some(), \"goal\": goal, \"autoContinueAvailable\": crate::goal_auto::available() } }))`; in goal_body_answers_found_inside_data add `assert_eq!(body[\"data\"][\"autoContinueAvailable\"], false);`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/thread_goal_routes.rs goal_error: before the NotFound arm add `tonic::Code::FailedPrecondition if message == \"thread_goal_pending_decision\" => typed(StatusCode::CONFLICT, \"thread_goal_pending_decision\", \"a decision waits on you in this conversation\"),` and `tonic::Code::ResourceExhausted if message == \"thread_goal_rate_limited\" => typed(StatusCode::TOO_MANY_REQUESTS, \"thread_goal_rate_limited\", \"this goal continued too often in the last hour\"),`. S2's ClaimGoalTurn refusal mapping in sse.rs must also pass both codes through as typed stream errors before any run exists.",
+    "S2 wiring (apply after EP-7-S2 merges) in session-core thread_goals.rs: (a) in claim_goal_turn, inside its transaction after the goal row is selected FOR UPDATE and checked active, add `claim_guard::refuse_unsettled_claim(&mut tx, &goal.thread_id, &goal.id).await?;` (use the goal's thread id and id variables as S2 names them); (b) in the BindGoalTurnRun RPC handler, before `request.into_inner()`, add `let goal_auto = claim_guard::goal_auto_requested(request.metadata());` and pass it into the bind store fn, which after binding the run does `if goal_auto { claim_guard::stamp_goal_auto(&mut tx, &run_id, &org_id).await?; }`. Until then the claim_guard pub(crate) fns are dead code (warnings only).",
+    "S2 wiring in model-gateway sse.rs: on the request S2 builds for BindGoalTurnRun, call `crate::goal_auto::mark(&mut request, req.goal_auto);` before sending (req is the InvokeRequest in scope).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts: in type ThreadGoal after `revision?: number` add `  /** The gateway offers Keep going on this deployment (EP-7 S4, `autoContinueAvailable` on the read). */\\n  autoContinueAvailable?: boolean`; in normalizeGoalResponse replace `return normalizeGoal(record.goal)` with `const goal = normalizeGoal(record.goal)\\n  return goal && record.autoContinueAvailable === true ? { ...goal, autoContinueAvailable: true } : goal`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx: add `import type { GoalAutoContinueView } from '../lib/goal-pump'`; in props after `onClearGoal?: () => void` add `  /** \"Keep going\" on the goal bar (EP-7 S4). */\\n  goalAutoContinue?: GoalAutoContinueView`; in the <GoalBar> element after `onClear={() => props.onClearGoal?.()}` add `autoContinue={props.goalAutoContinue}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: in the useChatController() destructuring after `continueGoal,` add `goalAutoContinue,`; on <ComposerTrays> after `onContinueGoal={() => void continueGoal()}` add `goalAutoContinue={goalAutoContinue}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `'chat.continue_goal': exempt('no_owner_executor', 'external_write'),` add `'chat.goal_auto_toggle': exempt('agent_cannot_self_govern', 'context_write'),`.",
+    "Regenerate the agent-action-admission golden (FE src/shared/api/contracts and MP api/contracts copies) for chat.goal_auto_toggle.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml model-gateway environment: `MODEL_GATEWAY_GOAL_AUTO_CONTINUE: ${MODEL_GATEWAY_GOAL_AUTO_CONTINUE:-false}`. The owner adds the .env.example line.",
+    "docs/Model Plane ZDR.md thread-goal row: mention that invoke `goal_auto` is refused with feature thread_goal (no new posture-matrix row)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_goal_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/thread-goal-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D4 = (a): the SPA drives attended continuation with a 5 s visible countdown and Stop; a hidden tab never sends; closing the tab stops the goal. The owner must confirm before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D5 = (a): any pending approval, question, proposed plan or park stops the pump and ClaimGoalTurn refuses thread_goal_pending_decision (30 claims/goal/hour). This also refuses a manual Continue while a plan is proposed, so plan-mode goals stop every turn. The owner must confirm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The server guard is inert until claim_goal_turn (EP-7-S2) calls claim_guard::refuse_unsettled_claim inside its locked transaction; without that wiring D5 holds only in the client."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The pump continues only after a goal re-read shows turnsUsed past the count at send. If S2/S3 settle or judge after the SSE done frame, the single post-turn read can be early and the pump then waits forever (fail-safe, but auto-continue silently stalls)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No vitest test drives use-chat-controller's pump wiring (countdown timer, send-once, thread reset, visibility); only the pure goal-pump table and the gated e2e spec cover it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof outstanding: an execute-mode goal with three auto turns and a met close; a second goal stopped by pending_approval and continued by hand; plus SSE transcripts, thread_goal_turns rows, runs.metadata.goal_auto, and a countdown recording."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "tests/zdr_feature_table.rs cases() has no goal_id or deck_template rows, so every_field_has_a_row_that_matches_its_treatment likely already fails on HEAD."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new GoalBar classes (__auto, __auto-toggle, __countdown, __stop, __auto-stopped) have no global.css styling yet."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-2-S10, EP-5-S4, EP-5-S3, EP-5-S8, EP-5-S6, EP-7-S2, EP-7-S4",
+    "outcome": "All 7 patches applied. Some files conflicted: deck_tool.rs (S3 against S8, then S6 against both), GoalBar.tsx and GoalBar.test.tsx (S2 against S4), and action-registry.test.ts (S4 against S4). Every conflict was resolved by keeping both sides. EP-5-S6 refused to apply on the first pass because deck_tool.rs was still unmerged in the index. I staged the resolved file and re-applied S6. The final `git reset -q` unstaged everything, and `git diff --stat` shows 40 tracked files changed plus each slice's new files. No conflict markers or .rej files remain.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (Go), copy differing files, bash scripts/tests/go-gen-drift.sh",
+    "outcome": "Updated capabilities.pb.go, thread_goals.pb.go and thread_goals_grpc.pb.go. The drift script printed: 50 generated Go files match go/gen/model_plane.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml (Python)",
+    "outcome": "Updated mp-events-py/_gen/model_plane/v1/capabilities_pb2.py with the tree's version header and Validate call kept. There is no thread_goals_pb2.py in the tree, so nothing to copy for it.",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb; buf lint on thread_goals.proto and capabilities.proto",
+    "outcome": "Breaking check passed (additive changes only). Lint reports one new finding of an existing pattern: the new SettleGoalTurn RPC returns ThreadGoalResponse, which is already the response type of 3 other RPCs. The other lint findings were there before this batch.",
+    "clean": false
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 tests passed and the golden was regenerated with 26 more lines (chat.open_deck_slide and chat.goal_auto_toggle). I copied it byte for byte to the MP api/contracts, capability-core testdata, execution-core fixtures and model-gateway fixtures, wrote the new .sha256 (e2aaeaa3...) and updated the digest pinned in zdr-contract-sync.test.sh.",
+    "clean": true
+   },
+   {
+    "command": "node scripts/tests/zdr-contract-schema.mjs",
+    "outcome": "ok: the matrix and connection-zdr-capabilities.json are well formed and consistent. The new row e_waived_deck_manifest_not_persisted differs from the other rows only by its connection id, so it stays. I copied the matrix to the 3 fixture copies, refreshed its .sha256 (0d7fa243...) and the 3 copies of it, updated the digest pinned on line 111 of zdr-contract-sync.test.sh, and set ENFORCEMENT_ROWS to 33 in loop_fold_zdr_matrix.rs, zdr_mcp_golden.rs and zdr_mcp_observation_golden.rs (zdr_posture_matrix.rs was already 33).",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 tests passed. prompt-tool-manifest.json and its .sha256 were regenerated (one line changed: the deck tool).",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden; copy golden to SPA; node scripts/gen-chat-event-types.mjs",
+    "outcome": "1 test passed and sse-event-payloads.json gained 76 lines (goal_progress). The test does not write the .sha256, so I wrote it myself (cce0477b...), copied the json and .sha256 to the SPA contracts, updated the digest pinned in zdr-contract-sync.test.sh, and regenerated chat-event-payloads.generated.ts.",
+    "clean": true
+   },
+   {
+    "command": "python apps/Model Plane/scripts/gen-sse-event-taxonomy.py",
+    "outcome": "FAILED. The generator stops on `unsupported #[cfg(test)] item 'Scripted(VecDeque<Vec<u8>>),'` in model-gateway/src/mcp_http.rs:142. That file is untouched by this batch, so the failure predates it. docs/sse-event-taxonomy.md was not regenerated.",
+    "clean": false
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust)",
+    "outcome": "Exit 0 with no errors. The 17 warnings are all in code this batch did not change (unused functions, unused axum::Json, an unreachable else at capability_policy.rs:367).",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (capability-core; also go/gen)",
+    "outcome": "Both clean. On the changed files with CR stripped, gofmt only flags code this batch did not change: registry_apis.go mcpServerRow alignment and the skillbundle import order in main.go.",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (run twice: after the shared edits and after the type regeneration)",
+    "outcome": "rc 0 with no errors, including no baseline error.",
+    "clean": true
+   },
+   {
+    "command": "verevonv3 gateway cargo check",
+    "outcome": "Not run: the batch touched nothing under apps/Frontend Plane/verevonv3/apps/gateway.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/deck_tool.rs",
+    "slice": "EP-5-S3 / EP-5-S8 / EP-5-S6",
+    "what": "3-way merge, keeping all sides: S3's stored_kind next to S8's from_artifact_enabled; S3's and S8's tests; one module doc with both the S8 and S6 sections; merged imports (BTreeSet, fmt::Write, OnceLock, DashMap, the full S8 deck_manifest list, deck_theme::DeckTemplateRef, SkillBundleSummary/SkillMount); the build tail uses S8's keep() and passes S6's template_line to envelope(); S6's tests follow the S3/S8 tests. CRLF kept."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx and GoalBar.test.tsx",
+    "slice": "EP-7-S2 / EP-7-S4",
+    "what": "Merged both: S2's usage line and stop reason with S4's auto(); one merged import line; both sets of describe blocks."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-5-S4 / EP-7-S4",
+    "what": "Kept both +1 comments and set toHaveLength to 295 (HEAD 293 + 1 + 1)."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/thread_goal.rs",
+    "slice": "EP-7-S4 (S2 wiring)",
+    "what": "GoalTurnLedger::bind now takes goal_auto and calls crate::goal_auto::mark on the BindGoalTurnRun request. claim_refusal passes thread_goal_pending_decision (FailedPrecondition) and thread_goal_rate_limited (ResourceExhausted, retryable) through as typed stream errors. sse.rs calls ledger.bind(&session_run.run_id, req.goal_auto)."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/session-core/src/thread_goals.rs",
+    "slice": "EP-7-S4 (S2 wiring)",
+    "what": "claim_goal_turn calls claim_guard::refuse_unsettled_claim right after the active check, inside the FOR UPDATE transaction. The BindGoalTurnRun handler reads claim_guard::goal_auto_requested(request.metadata()). bind_goal_turn_run takes goal_auto and calls stamp_goal_auto before commit. The test helper bind() passes false."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/tests/loop_fold_zdr_matrix.rs, tests/zdr_mcp_golden.rs, model-gateway/tests/zdr_mcp_observation_golden.rs",
+    "slice": "EP-5-S3",
+    "what": "ENFORCEMENT_ROWS 32 -> 33 to match the vendored matrix copies."
+   }
+  ],
+  "still_broken": [
+   "apps/Model Plane/docs/sse-event-taxonomy.md was not regenerated. scripts/gen-sse-event-taxonomy.py fails on a #[cfg(test)] item in model-gateway/src/mcp_http.rs:142. That file predates this batch, and fixing it means changing the generator. goal_progress is missing from the doc until then.",
+   "model-gateway/tests/zdr_feature_table.rs has no row for deck_template (EP-5 S7, in HEAD before this batch). every_field_has_a_row_that_matches_its_treatment will fail on deck_template. The refusal depends on SKILL_DECK_TEMPLATES_ENABLED, so a row needs a design choice; I did not add one."
+  ],
+  "shared_edits_applied": [
+   "execution-core/src/runtime_loop/mod.rs (EP-2-S10): the execute_reader_tool dispatch block before the result_query branch; render through result_handles::inline_text; the park closure now calls result_handles::hold_for_model (CRLF kept)",
+   "deploy/docker-compose.yml: EXECUTION_WEB_READER (execution-core); MODEL_GATEWAY_DECK_FROM_ARTIFACT, SKILL_DECK_TEMPLATES_ENABLED, MODEL_GATEWAY_GOAL_AUTO_CONTINUE (model-gateway); SKILL_DECK_TEMPLATES_ENABLED, SKILL_BUNDLE_READ_RULE_ENABLED (capability-core); all default false, with comments",
+   "new capability-core/migrations/0036_reader_tool_bindings.up.sql and .down.sql (EP-2-S10 seed rows for read_page and find_in_page under cap.tool.http, in the 0016 seed format)",
+   "verevonv3 src/shared/actions/model-access.ts: chat.open_deck_slide (ui_state_only, read) and chat.goal_auto_toggle (agent_cannot_self_govern, context_write)",
+   "model-gateway/src/artifact_revisions.rs: seed_from_table_heads uses crate::deck_tool::stored_kind (EP-5-S3)",
+   "docs/ZDR.md: a row for the deck manifest metadata kind (EP-5-S3) and a Thread goals / Keep going row stating that goal_id and goal_auto are refused with feature thread_goal (EP-7-S4). No thread-goal row existed, so this is a new row.",
+   "model-gateway/src/artifacts.rs (EP-5-S8): StoredArtifact.provenance, remember_provenance, provenance_of, and fork_thread copies the stamp",
+   "model-gateway/src/sse.rs: S8 provenance rehydrate (under from_artifact_enabled); S6 hold_turn_template guard before run_tool_rounds_for_model_with_attachments; S4 bind with req.goal_auto",
+   "mp-contracts/src/deck_manifest.rs (EP-5-S6): DeckManifest.template plus template: None in empty()",
+   "model-gateway/src/deck_templates.rs test literal: deck_template: false",
+   "capability-core/internal/api/registry_apis.go: ValidateDeckTemplate behind DeckTemplatesFromLookup; cmd/main.go: AuthorizeGRPCWith(BundleReadRuleFromLookup) and .WithDeckTemplates(...)",
+   "verevonv3 use-chat-controller.ts (EP-7-S2): applyGoalProgress/GoalDraft imports, onGoalProgress handler, saveGoal takes GoalDraft and passes maxTurns/tokenBudget",
+   "verevonv3 thread-goal-client.ts: tokenBudget on both inputs and in the PUT/PATCH bodies (S2); autoContinueAvailable on ThreadGoal and in normalizeGoalResponse (S4)",
+   "model-gateway/src/lib.rs: pub mod goal_auto",
+   "model-gateway/src/normalize.rs test literal: goal_auto: false",
+   "model-gateway/src/zdr_features.rs: the goal_auto FIELD_TREATMENTS row, the destructure, the names list and the refusal() check",
+   "model-gateway/tests/zdr_feature_table.rs: goal_auto true/false rows, plus goal_id rows (they were missing)",
+   "model-gateway/src/thread_goal_routes.rs: autoContinueAvailable in goal_body plus its test assert; goal_error maps thread_goal_pending_decision to 409 and thread_goal_rate_limited to 429",
+   "verevonv3 ComposerTrays.tsx and ChatPage.tsx: goalAutoContinue prop wired to GoalBar autoContinue"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/deploy/.env.example: MODEL_GATEWAY_DECK_FROM_ARTIFACT, MODEL_GATEWAY_GOAL_AUTO_CONTINUE, SKILL_DECK_TEMPLATES_ENABLED, SKILL_BUNDLE_READ_RULE_ENABLED, EXECUTION_WEB_READER (owner adds them)",
+   "Ledger and depth-register entries (the lead books them)",
+   "The seed-test migration lists (capability_tools_seed_test.go readSeedRows, execution-core tool_class_registry_parity.rs seeded_rows) do not include 0036. read_page and find_in_page are bound only while EXECUTION_WEB_READER is on, so I did not decide how the parity test should treat them.",
+   "Slice test runs the builders listed (cargo test deck_tool/deck_manifest/recorded_artifact, session-core-db-tests.sh, the pptx python unittest, vitest specs): skipped, because this step allows no tests"
+  ],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go, thread_goals.pb.go, thread_goals_grpc.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/capabilities_pb2.py",
+   "agent-action-admission.json (SPA, MP api/contracts, capability-core testdata, execution-core and model-gateway fixtures) plus its .sha256 and the zdr-contract-sync pin",
+   "zdr-posture-matrix.json: 3 fixture copies, the .sha256 files and the zdr-contract-sync pin",
+   "mp-contracts/tests/fixtures/prompt-tool-manifest.json and its .sha256",
+   "api/contracts/sse-event-payloads.json and its .sha256, the SPA copies, the zdr-contract-sync pin, and verevonv3 src/shared/api/chat-event-payloads.generated.ts"
+  ],
+  "notes": "The batch compiles. Rust workspace cargo check (all targets), capability-core and go/gen go build and vet, and the frontend tsc6 typecheck are all clean, and tsc no longer shows even its one baseline error. Per-file line endings were checked after editing and no file has mixed endings.\n\nGit writes:\n- the 7 patch applies\n- `git add` on the 4 conflict-resolved files: needed so the next 3-way apply could read the index (EP-5-S6 first failed with \"does not exist in index\")\n- one final `git reset -q`; nothing is staged\n\nJudgement calls for the lead:\n1. The posture-matrix row e_waived_deck_manifest_not_persisted passes the schema check, so I kept it. Its inputs differ from the other waived rows only by a made-up connection id (\"conn-deck\"), so it is close to the \"no feature rows\" rule.\n2. The new SettleGoalTurn RPC reuses ThreadGoalResponse, which buf lint flags. Same pattern as the existing RPCs.\n3. rustfmt --check flags most changed Rust files, but the diffs are mostly in code this batch did not touch. I did not run cargo fmt, because that would reformat whole files.\n\nThe scenario-touch gate (an eval case or replay cassette for read_page and find_in_page) is the lead's call. Migration 0036 must be applied before EXECUTION_WEB_READER is ever set to true. Scratch scripts are in C:\\Users\\ImaFernandesDaCosta\\AppData\\Local\\Temp\\w317."
+ }
+}

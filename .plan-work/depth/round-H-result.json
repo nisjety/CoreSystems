@@ -1,0 +1,53 @@
+[
+ {
+  "key": "ic-anthropic-claude-5-5-adapter",
+  "verdict": "failed",
+  "reason": "an agent died or returned nothing"
+ },
+ {
+  "key": "mp-claude-5-5-defaults",
+  "rows": [],
+  "title": "mp-claude-5-5-defaults",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\normalize.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\trajectory.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\llmreviewer\\reviewer.go",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\deploy\\docker-compose.yml",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\inference.proto"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib normalize",
+    "outcome": "ok. 24 passed; 0 failed; 2341 filtered out",
+    "passed": true
+   },
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib trajectory",
+    "outcome": "ok. 9 passed; 0 failed; 2356 filtered out (the first, quiet run hung behind a busy shared target dir and the final result came from a re-run)",
+    "passed": true
+   },
+   {
+    "command": "cd ../go/services/capability-core && go test -count=1 ./internal/llmreviewer/",
+    "outcome": "ok github.com/triodelab/model-plane/services/capability-core/internal/llmreviewer 17.086s",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "No regression test pins the literal value of llmreviewer.DefaultModel. reviewer_test.go compares against the DefaultModel symbol, and normalize.rs explicit_model_is_preserved round-trips whatever id it is given. So no test would fail if a retired id came back. That is acceptable for an id-only rename, but a one-line assertion that DefaultModel == \"claude-sonnet-5-5\" (or that it is not a retired id) would guard it.",
+   "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go line 173 still has the old example id in its comment. The lead regenerates the Go bindings, as the packet says. Comment only.",
+   "The compose comment at deploy/docker-compose.yml lines 1650-1652 ties DefaultModel to inference-core's DEFAULT_ANTHROPIC_MODEL. The sibling packet's working tree already defines that as CLAUDE_SONNET_5_5 (anthropic.rs line 41), so the comment is accurate only once both packets land together.",
+   "LEARNING_REVIEW_MODEL, DREAMING_LLM_MODEL and MEMORY_GROUNDING_MODEL still default to claude-sonnet-4-5 / claude-haiku-4-5, which are Azure deployment names. They are outside the brief's retired-id list and were correctly left alone. If those Azure deployments are later retired too, that is a separate finding.",
+   "The tester saw other modified files in the worktree from parallel packets. They were not reviewed here. The lead should stage only this packet's 5 files (7 changed lines) for its commit."
+  ],
+  "db_tests": [],
+  "needs_other_files": [
+   "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go line 173: the generated comment still reads \"claude-sonnet-4-20250514\". The lead regenerates the Go bindings after the proto comment change. Comment-only, no behaviour change.",
+   "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs line 35 (sibling packet ic-anthropic-claude-5-5-adapter, not touched here): DEFAULT_ANTHROPIC_MODEL is still \"claude-sonnet-4-20250514\". The compose comment at apps/Model Plane/deploy/docker-compose.yml lines 1650-1652 now says llmreviewer's DefaultModel is inference-core's DEFAULT_ANTHROPIC_MODEL constant. That is only true once the sibling moves the constant to claude-sonnet-5-5. Lead should re-check after both packets land."
+  ],
+  "deploy_notes": "The relayed user request also asked that Verevon use the Anthropic API with a pasted key (LLM_PROVIDER=anthropic, LLM_MODEL_NAME=claude-sonnet-5-5). That work is outside this packet's five files and was NOT done. I wrote the key to no file, read no env file, printed nothing, and made no live API call. Lead should set the key through the usual secrets path, not in tracked files, and should consider rotating it since it appeared in the relayed request text. Also carried over from the old comment and not re-verified for claude-sonnet-5-5: the claim that Azure deployment calls for this default 404 with DeploymentNotFound (AZURE_ANTHROPIC_DEPLOYMENTS is env-supplied and I did not read it). Packet file list discrepancy: the computed task text said \"Files you may edit: (none)\", but the packet record lists these five files, so I followed the packet record. No DB-backed tests were written or needed.",
+  "summary": "Moved the retired Claude 4 ids to their 5.5 successors in the five packet files, id-only with no behaviour change. normalize.rs: the explicit-model test fixture (2 occurrences, replace_all) is now claude-sonnet-5-5. trajectory.rs: the trajectory test fixture is now claude-sonnet-5-5. reviewer.go: DefaultModel is now claude-sonnet-5-5; its comment names no non-Anthropic route, so it moved. inference.proto: the InferRequest.model comment example is now claude-sonnet-5-5 (comment only). docker-compose.yml: the comment at lines 1650-1652 now names claude-sonnet-5-5 as the llmreviewer DefaultModel, and \"dated-snapshot name\" became \"model id\" because the new id has no date suffix. No default-model variable in compose held a retired id; DREAMING_LLM_MODEL, MEMORY_GROUNDING_MODEL and LEARNING_REVIEW_MODEL default to claude-haiku-4-5 / claude-sonnet-4-5, which are not in the brief's retired list, so I left them. No new switches. Verified: grep finds no retired id left in any of the five files; line endings are preserved (the four .go/.rs/.proto files are CRLF in the worktree, and docker-compose.yml is eol=lf per .gitattributes, so it was never CRLF); git diff --stat shows exactly 7 changed lines. The Go test and vet passed. The two Rust --lib test runs were still in progress when this report was written, so their outcome is NOT yet confirmed."
+ }
+]

@@ -1,0 +1,427 @@
+{
+  "ws": "WS27",
+  "header_decisions": [
+    "DEC-18",
+    "DEC-39",
+    "WS27-D1",
+    "WS27-D2",
+    "WS27-D3",
+    "WS27-D4",
+    "WS27-D5",
+    "WS27-D6",
+    "WS27-D7",
+    "WS27-D8",
+    "WS27-D9"
+  ],
+  "notes": "SOURCE: docs/plans/model-plane-chat-build-plan-2026-10-14.md lines 1441-1485 (WS27 section, slice table at 1456-1469, dependency and edit-order text at 1471-1475) with Appendix B (binding, lines 2253-2322) applied. PATH MAP: MP = apps/Model Plane; RS = apps/Model Plane/rust/services; MG = RS/model-gateway/src (MG/tests = RS/model-gateway/tests); IC = RS/inference-core/src; EC = RS/execution-core/src; SC = RS/session-core/src; FE = apps/Frontend Plane/verevonv3. CC in the WS27 section is COST-CORE (apps/Model Plane/go/services/cost-core), not capability-core as the extraction brief said; capability-core is a separate service in the same tree. Plan line numbers are stale in this worktree (for example RichEventSink is in sse_events.rs at 780, PlanProposed at sse_events.rs 320, follow_agentic_run at sse.rs 9740, build_usage_envelope at sse.rs 10661, DirectAnswer at sse.rs 7697); paths carry no line numbers, so re-locate by symbol. Bare workstream ids (WS01, WS03, WS10, WS11, WS13, WS14) are used where the plan names no slice. APPENDIX B APPLIED: (1) N4: RunUsageProgress is tag 29, not 27 (27 and 28 are QuestionAsked and QuestionAnswered in the section 4.3 final list), applied to WS27-S9. (2) N2: WS12-S2 added to the depends of the two proto-editing slices WS27-S7 and WS27-S9; their proof is a tag-number diff against git show HEAD, and buf breaking is not to be recorded as passing unless the gate is verified. (3) K3-19: WS27-S11 is optional, unscheduled and excluded from effort (its table effort 3-4 d is kept). The appendix total of 40-58 days does not match the slice figures: S0-S10 sum to 40-59 days; with S11 the sum is 43-63, while the section header says about 43-62. Reported, not corrected. (4) N1: WS27-S0 changes no runtime behaviour (ADR, ledger, characterisation tests), so its evidence is CI; other slices keep rebuilt-stack evidence. (5) N6 and N7: no migration and no new durable session-core mutation in WS27 (RunUsageProgress is counts only and is not persisted), so no revert file and no ZDR-inventory row. (6) N8(c): zdr-contract-sync.test.sh is at scripts/tests at the repository root. BUILD STATE (this worktree, HEAD 12dd8cb7, branch model-plane): git log afb83928..HEAD has no WS27 commit. NOT BUILT (absent): usage_meter.rs, run_ceiling.rs, cost_bound.rs, usage_meter_contract.rs, budget_window_test.go, RunCostMeter.tsx and its test, billing-quota.ts in actions and in api, chat-cost-meter.spec.ts. Also absent: any usage_progress or UsageProgress ChatEvent, RouteNote, RunUsageProgress, record_overhead, a ToolRounds usage field (tool_loop.rs ToolRounds at 4581), DirectAnswer cache fields, a since field in the cost-core budget check, reset_period reads, the pricing Lookup enum, priced, CategoryCost or RateSnapshot, the WS27 ledger entry, the ZDR.md in-stream line, a billing.quota action or getBillingQuota, VITE_QUOTA_READOUT, and every WS27 env flag in apps/Model Plane/deploy/docker-compose.yml. HEADER LABEL: the header tags S0, S1, S2, S5 and S8 as FINISH-BUILT-BUT-DARK, but none of their named artifacts exists in this worktree; tags are kept as written, and the built label may refer to uncommitted work in the main checkout, which was not inspected (outside this worktree). REUSABLE NOW: WS02-S1 cache keys are on the usage frame (sse_events.rs ChatEvent::Usage writes cache_read_tokens and cache_write_tokens when either is non-zero; sse.rs fills them), so S2 and S3 must reuse them, and the plan line saying ChatEvent::Usage has no cache fields is stale. Also present as call sites: RichEventSink (sse_events.rs), follow_agentic_run (sse.rs), build_usage_envelope (sse.rs, no run_id parameter yet), event_run_id (session-core orchestration_grpc.rs), publish_plan_transition (execution-core runtime_loop/agent.rs), count_for_budget (apps/Model Plane/rust/crates/mp-tokens/src/lib.rs), PlanProposed (sse_events.rs), pricing cost_usd_for, cost_from_rate and the cache-leg tests, budget.rs and org_quota.rs. PROTO TAGS: InferResponse provider_timing = 14 and InferChunk provider_timing = 15 exist, so route_note 15 (InferResponse) and 16 (InferChunk) are free; OrchestrationEvent run_parked = 24 and run_resumed = 25 exist; 26-29 are free, and 29 is the WS27 tag. BLOCKERS NOT BUILT: WS02-S3 is not built (no UsageTally; RunAgentResponse in execution.proto at line 273 has no usage field), so WS27-S9 cannot land before it. WS11-S5 is not built (no effort allowance function, no RouteNote); the plan says the first lander defines RouteNote, so WS27-S7 may define it only if the integrator agrees, and WS27-S11 waits for effort::allowance. WS12-S2: apps/Model Plane/proto/baseline.binpb is 530476 bytes in this worktree (N2 says 0 bytes at HEAD), and commit e45caa71 (make the buf breaking gate real) is in the proto path history, so the buf gate may now be real; not verified further. [L] MARKERS: zdr_features.rs, zdr_posture.rs, zdr_feature_table.rs and zdr_posture_matrix.rs exist in this worktree (ZDR wave, commit d6c8e557), so [L] is not a missing-file signal here. RULES APPLIED: (a) The WS27 edit-order text puts WS09-S2 first for chat-client.ts, use-chat-controller.ts, ChatMessages.tsx and ChatPanels.tsx, so WS09-S2 is in the depends of WS27-S2 and WS27-S3 as a soft dependency (it is not in their Deps column). (b) WS27-S11 is built only after S2-S4 produce per-run data (its row). (c) DEC-18 gates enablement only; builds proceed (decision register row 16). (d) Any slice that adds or flips a flag also touches apps/Model Plane/deploy/docker-compose.yml (common flag pattern). (e) files = Change-column paths plus NEW test files named in Tests or DoD; existing tests to extend (zdr_feature_table.rs, zdr_posture_matrix.rs, chat-client.test.ts, use-chat-controller.recovery.test.ts, ChatMessages.metrics.test.tsx, AgentRunConsole.test.tsx, verevon-ui-events.test.ts) appear only in test_commands. (f) WS27-S10 billing.rs change is conditional on product wanting a trimmed projection. (g) The S11 plan-card component is not named in the plan, so no FE file is listed for it. (h) Go regeneration: S7 writes apps/Model Plane/go/gen/model_plane/v1/inference.pb.go and S9 writes orchestration.pb.go; the _grpc.pb.go files are not expected to change for field additions. (i) cost-core store_integration_test.go (WS27-S8) needs COST_CORE_TEST_DATABASE_URL. COMMON CHECKS for every WS27 slice (not repeated per slice): cd apps/Model Plane/rust && cargo fmt --all -- --check, then cargo test -q -p model-gateway --lib (also inference-core, execution-core and session-core --lib); cd apps/Model Plane/go/services/cost-core && go test ./... && go vet ./...; python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check after every ChatEvent change; in FE: pnpm vitest run, pnpm typecheck, pnpm lint; cargo test --manifest-path apps/gateway/Cargo.toml --all-targets; node --test apps/gateway/scripts/action-surface-contract.test.mjs. For proto slices the tag-diff evidence replaces buf breaking, per N2.",
+  "slices": [
+    {
+      "id": "WS27-S0",
+      "title": "Land ADR, characterise the run-cost meter",
+      "tag": "FINISH",
+      "summary": "Records the WS27 ledger entries (one run-cost meter in model-gateway with cost-core as ledger of record; cost null when unknown, never a default row; ZDR in-stream cost proposed; per-run ceiling vs windowed budget) and the capability-ownership row, and adds a characterisation test file that pins today's unmetered tool rounds and default-row pricing so later slices flip them.",
+      "files": [
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/docs/capability-ownership-matrix.md",
+        "apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["money", "zdr"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test usage_meter_contract"
+      ]
+    },
+    {
+      "id": "WS27-S1",
+      "title": "Honest pricing primitives and pure UsageMeter",
+      "tag": "FINISH",
+      "summary": "Adds PricingCache::priced, which returns usd None for a catalogue default row instead of a confident wrong cost, a category cost breakdown whose parts sum to the total, and a pure UsageMeter that nulls the total once any metered call is unpriced; subscription calls add tokens but no USD. No wire change.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/pricing.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/usage_meter.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/usage_meter.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S0"],
+      "decisions": ["WS27-D3"],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["money"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib pricing usage_meter"
+      ]
+    },
+    {
+      "id": "WS27-S2",
+      "title": "Count tool rounds and overhead; cumulative final frame",
+      "tag": "FINISH",
+      "summary": "Meters tool-decision rounds and overhead calls that are never counted today and folds them with the answer into one turn-cumulative final usage frame (the cumulative frame ships ungated); adds calls, unpriced_calls and cost_by_category to the usage event; under MODEL_GATEWAY_TURN_USAGE_COMPLETE publishes one usage envelope per round stamped with run_id so the cost-core run endpoint is non-empty for chat. Reuses the WS02-S1 cache keys already on the frame.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/result_validation.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S1", "WS01-S0", "WS02-S1", "WS09-S2"],
+      "decisions": ["DEC-18", "WS27-D5", "WS27-D7"],
+      "flag": "MODEL_GATEWAY_TURN_USAGE_COMPLETE (default false; the cumulative final frame is ungated)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Control Plane confirms billing attribution for metered tool rounds (DEC-18 D5) before MODEL_GATEWAY_TURN_USAGE_COMPLETE is enabled; the ledger total jumps on enablement",
+      "risk": ["money", "audit", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib tool_loop usage sse_events",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test usage_meter_contract",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test zdr_feature_table",
+        "cd \"apps/Model Plane/go/services/cost-core\" && go test ./...",
+        "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run chat-client.test.ts use-chat-controller.recovery.test.ts"
+      ]
+    },
+    {
+      "id": "WS27-S3",
+      "title": "usage_progress frame, gateway to SPA parse",
+      "tag": "BUILD",
+      "summary": "Adds a usage_progress ChatEvent with closed keys only (call count, phase, token counts, cost_usd or null, cost_basis, unpriced_calls; ceiling and routing keys come later), emitted once per provider call from RichEventSink, parsed by the BFF and the SPA; the final usage frame remains the terminal authority. Gated by MODEL_GATEWAY_USAGE_PROGRESS.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/docs/sse-event-taxonomy.md",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S2", "WS01-S0", "WS12-S7", "WS09-S2"],
+      "decisions": [],
+      "flag": "MODEL_GATEWAY_USAGE_PROGRESS (default false until the S4 DoD, then true)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 3,
+      "effort_days_high": 5,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib sse_events",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test zdr_feature_table",
+        "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts",
+        "cd \"apps/Frontend Plane/verevonv3\" && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets"
+      ]
+    },
+    {
+      "id": "WS27-S4",
+      "title": "SPA run-cost meter",
+      "tag": "BUILD",
+      "summary": "Adds the RunCostMeter component to the work panel and the agent run console, fed by usage_progress with a monotonic guard: it shows tokens in and out, the cache read share when non-zero, a cost or 'price unavailable' or 'included in subscription' (never $0), the last call phase and an expandable breakdown by category; a warning chip announces through aria-live only when the warning changes. Flips the progress flag default to true at DoD.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-cost-meter.spec.ts",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.test.tsx",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-cost-meter.spec.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S3", "WS09-S2"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Frontend Plane", "Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["money"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/RunCostMeter.test.tsx ChatMessages.metrics.test.tsx src/features/agents/components/AgentRunConsole.test.tsx",
+        "playwright tests/e2e/chat-cost-meter.spec.ts (runner command not named in the plan)"
+      ]
+    },
+    {
+      "id": "WS27-S5",
+      "title": "ZDR in-stream cost",
+      "tag": "FINISH",
+      "summary": "Gives ZDR answer turns a stated cost in-stream: DirectAnswer carries the cache read and write counts, zdr_answer_stream takes a value pre-priced in zdr_direct_stream (numbers only, nothing stored, no usage envelope, no ledger row), and a new test zdr_usage_states_cost_but_publishes_no_envelope in zdr_posture_matrix.rs pins it. The ZDR feature-table comment and ZDR.md are updated so the ledger gap stays explicit (DEF-Z-06b).",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+        "apps/Model Plane/docs/ZDR.md",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S1", "WS01"],
+      "decisions": ["DEC-18", "WS27-D4"],
+      "flag": "MODEL_GATEWAY_ZDR_STREAM_COST (default false)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Owner decision DEC-18 D4 (ZDR turns state an ephemeral cost, reversing 'no cost is stated'); a working ZDR-TEST org with an attested provider from WS01 for the live proof",
+      "risk": ["zdr", "money"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test zdr_feature_table --test zdr_posture_matrix",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib zdr",
+        "bash scripts/tests/zdr-contract-sync.test.sh"
+      ]
+    },
+    {
+      "id": "WS27-S6",
+      "title": "Per-run ceiling, 80/100% warnings, optional enforcement",
+      "tag": "BUILD",
+      "summary": "Adds RunCeiling resolution (request cap wins, org limits fill unset, token cap counts metered tokens only, subscription exempt) with the warnings run_ceiling_80 and run_ceiling_reached, each emitted once per run and attached to usage_progress. With MODEL_GATEWAY_RUN_CEILING_ENFORCE on, the tool phase ends before the next round once the ceiling is reached and the answer still streams; the meter shows a ceiling bar.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/run_ceiling.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/run_ceiling.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S3"],
+      "decisions": ["DEC-18", "WS27-D1", "WS27-D6"],
+      "flag": "MODEL_GATEWAY_RUN_CEILING_WARN (default false, then true after S4); MODEL_GATEWAY_RUN_CEILING_ENFORCE (default false)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Owner decision DEC-18 D1 and D6 before MODEL_GATEWAY_RUN_CEILING_ENFORCE is enabled (warn-only needs none)",
+      "risk": ["money", "policy"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib run_ceiling budget org_quota",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/RunCostMeter.test.tsx"
+      ]
+    },
+    {
+      "id": "WS27-S7",
+      "title": "Surface the silent budget downgrade",
+      "tag": "BUILD",
+      "summary": "Adds a RouteNote message (budget_posture, tier_shifted, cheap_fallback_forced, applied_effort) as InferResponse.route_note = 15 and InferChunk.route_note = 16, stamped in inference-core fallback after intent resolution and copied through the gateway, which sets routing tier_shifted or cheap_fallback on usage_progress only when the posture is Constrained or Exhausted; the SPA shows one calm line. Gated by INFERENCE_ROUTE_NOTE. The message is shared with WS11.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go",
+        "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+        "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/inference-core/src/streaming.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S3", "WS11-S5", "WS12-S2"],
+      "decisions": ["DEC-39", "WS27-D8"],
+      "flag": "INFERENCE_ROUTE_NOTE (default false; inference-core deploys first)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": true,
+      "needs_live_stack": true,
+      "needs_external": "Integrator confirms tags InferResponse.route_note = 15 and InferChunk.route_note = 16 (DEC-39, section 4.3 final); the shared RouteNote owner is WS11",
+      "risk": ["policy"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p inference-core --lib intent fallback",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p inference-core --test fallback_test"
+      ]
+    },
+    {
+      "id": "WS27-S8",
+      "title": "Windowed org budget",
+      "tag": "FINISH",
+      "summary": "Makes the cost-core budget check window-aware: an optional since timestamp (RFC 3339) on the budget check, with per-user and org-wide totals read through the ledger's existing Since filter; the gateway reads reset_period from the org quota row and sends the UTC window start (daily or monthly; none sends nothing), so a capped org is admitted again next period. Absent since keeps lifetime behaviour. Gated by MODEL_GATEWAY_BUDGET_WINDOW; cost-core must deploy before the gateway.",
+      "files": [
+        "apps/Model Plane/go/services/cost-core/internal/server/server.go",
+        "apps/Model Plane/go/services/cost-core/internal/server/budget_window_test.go",
+        "apps/Model Plane/rust/services/model-gateway/src/org_quota.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/budget.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/cost-core/internal/server/budget_window_test.go"
+      ],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": ["DEC-18", "WS27-D1", "WS27-D2"],
+      "flag": "MODEL_GATEWAY_BUDGET_WINDOW (default false)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Control confirms the windowed semantics (DEC-18 D2) before the gate changes behaviour for capped orgs; Control owns the reset_period rule in org-core",
+      "risk": ["money", "authority"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Model Plane/go/services/cost-core\" && go test ./...",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway reset_period_daily_sends_start_of_utc_day"
+      ]
+    },
+    {
+      "id": "WS27-S9",
+      "title": "Do-run per-round progress",
+      "tag": "BUILD",
+      "summary": "Streams cumulative per-round usage for Do runs: adds RunUsageProgress (counts and ids only, not persisted) as OrchestrationEvent tag 29, published best-effort from execution-core after each round and passed through session-core's event broadcast; the gateway's follow_agentic_run maps it to usage_progress with a snapshot priced once. The final usage comes from RunAgentResponse.usage (WS02-S3). Gated by EXECUTION_RUN_USAGE_PROGRESS.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+        "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S3", "WS02-S3", "WS03", "WS12-S2"],
+      "decisions": ["DEC-39", "WS02-D1"],
+      "flag": "EXECUTION_RUN_USAGE_PROGRESS (default false; deploy execution-core and session-core before the gateway)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": true,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["money", "zdr"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --lib",
+        "cd \"apps/Model Plane/rust\" && cargo test -p session-core --lib event_run_id",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib orchestration_event_to_sse follow_agentic_run"
+      ]
+    },
+    {
+      "id": "WS27-S10",
+      "title": "Member quota readout",
+      "tag": "BUILD",
+      "summary": "Adds a member-visible allowance line: a billing.quota.read action contract registered beside billing.allowances.read, a typed client over the existing BFF route GET /api/v1/billing/quotas/{metric} that parses QuotaStatus (limit, used, remaining, is_exceeded, utilization), and a secondary RunCostMeter line that warns at utilization 0.8 or when exceeded, labelled as organisation-wide. No model-gateway change; per-user allowance is out of scope.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/billing-quota.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/billing-quota.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/billing-quota.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/billing.rs"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/billing-quota.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/billing-quota.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/billing-quota.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S4"],
+      "decisions": ["WS27-D9"],
+      "flag": "VITE_QUOTA_READOUT (name not fixed by the plan; default off)",
+      "migration": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Control billing-core owner: the allowance metric name (WS27-D9, org-configured) and whether non-admins see a coarse projection only",
+      "risk": ["auth", "policy"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/api/billing-quota.test.ts src/features/chat/components/RunCostMeter.test.tsx",
+        "cd \"apps/Frontend Plane/verevonv3\" && node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+        "cd \"apps/Frontend Plane/verevonv3\" && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets"
+      ]
+    },
+    {
+      "id": "WS27-S11",
+      "title": "Plan-card upper bound (gated, not scheduled)",
+      "tag": "BUILD",
+      "summary": "Adds an optional labelled upper bound to the plan proposal (PlanProposed.cost_bound with max_usd, max_tokens, rounds and basis upper_bound), computed from the run budget's max rounds times context tokens and a per-round output ceiling widened by the WS11 effort allowance; max_usd is null when the model is unpriced or the route is subscription. The plan card shows it as an upper bound, never as cost. Gated by MODEL_GATEWAY_PLAN_COST_BOUND.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/cost_bound.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/cost_bound.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS27-S1", "WS27-S3", "WS11", "WS13", "WS14", "WS10"],
+      "decisions": [],
+      "flag": "MODEL_GATEWAY_PLAN_COST_BOUND (default false)",
+      "migration": false,
+      "optional": true,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "WS13 and WS14 owners agree the plan-card ownership and the wording of the labelled upper bound (PlanProposed is shared with their work)",
+      "risk": ["money"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib cost_bound"
+      ]
+    }
+  ]
+}

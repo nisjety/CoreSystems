@@ -1,0 +1,1903 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx
+index 53fb3947e..d73f00e5c 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx	
+@@ -1,10 +1,17 @@
+ import { For, Match, Show, Switch } from 'solid-js'
+-import type { AutonomyRung, ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
++import type {
++  AutonomyRung,
++  ChatQuestionAnswer,
++  ChatResearchPlanEvent,
++  ChatUserQuestionEvent,
++  ResearchPlanEdit,
++} from '@/shared/api/chat-client'
+ import type { ApprovalDecision, PlanStepEdit } from '@/shared/api/orchestration-client'
+ import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
+ import { useI18n } from '@/shared/i18n'
+ import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
+ import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
++import { ResearchPlanCard } from './ResearchPlanCard'
+ 
+ const TRAY_NAME: Record<DockedTrayKind, { no: string; en: string }> = {
+   approval: { no: 'godkjenning', en: 'approval' },
+@@ -36,6 +43,10 @@ export function ComposerTrays(props: {
+   questionError?: string | null
+   onAnswerQuestion?: (answer: ChatQuestionAnswer) => void
+   onSkipQuestion?: () => void
++  /** A deep-research plan waiting for Start (EP-2 S5). It waits behind an approval and a question, ahead of a plan. */
++  researchPlan?: ChatResearchPlanEvent
++  onStartResearchPlan?: (edit: ResearchPlanEdit) => void
++  onCancelResearchPlan?: () => void
+ }) {
+   const i18n = useI18n()
+   const active = () => props.trays[0]
+@@ -45,6 +56,7 @@ export function ComposerTrays(props: {
+   }
+   // The question takes the tray unless an approval is waiting first: the order the dock is read in.
+   const questionShown = () => props.question !== undefined && approval() === undefined
++  const researchPlanShown = () => props.researchPlan !== undefined && approval() === undefined && !questionShown()
+   const plan = () => {
+     const tray = active()
+     return tray?.kind === 'plan' ? tray : undefined
+@@ -53,12 +65,12 @@ export function ComposerTrays(props: {
+     const tray = active()
+     return tray?.kind === 'queue' ? tray : undefined
+   }
+-  const others = () => (questionShown() ? props.trays : props.trays.slice(1))
++  const others = () => (questionShown() || researchPlanShown() ? props.trays : props.trays.slice(1))
+ 
+   return (
+     <div
+       class="verevon-chat-composer-trays"
+-      data-empty={props.trays.length === 0 && !props.question ? '' : undefined}
++      data-empty={props.trays.length === 0 && !props.question && !props.researchPlan ? '' : undefined}
+       role="region"
+       aria-live="polite"
+       aria-label={i18n.tr('Venter på deg', 'Waiting for you')}
+@@ -86,6 +98,20 @@ export function ComposerTrays(props: {
+             />
+           )}
+         </Match>
++        <Match when={researchPlanShown() && props.researchPlan}>
++          {(researchPlan) => (
++            // Keyed on the frame, so a new plan seeds a fresh card instead of keeping the last one's edits.
++            <Show when={researchPlan()} keyed>
++              {(current) => (
++                <ResearchPlanCard
++                  plan={current}
++                  onStart={(edit) => props.onStartResearchPlan?.(edit)}
++                  onCancel={() => props.onCancelResearchPlan?.()}
++                />
++              )}
++            </Show>
++          )}
++        </Match>
+         <Match when={plan()}>
+           {(tray) => (
+             // Keyed on the plan, so a different proposal starts a fresh control
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.test.tsx
+new file mode 100644
+index 000000000..0cc57b156
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.test.tsx	
+@@ -0,0 +1,145 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { buildChatWireBody, type ChatResearchPlanEvent } from '@/shared/api/chat-client'
++import { ResearchPlanCard, researchPlanEdit, researchPlanTurnEnabled } from './ResearchPlanCard'
++
++// Without a provider the card renders in its default locale, Norwegian.
++
++afterEach(() => {
++  cleanup()
++  vi.unstubAllEnvs()
++  vi.restoreAllMocks()
++})
++
++const plan = (overrides: Partial<ChatResearchPlanEvent> = {}): ChatResearchPlanEvent => ({
++  subQueries: ['lakselus 2026', 'havbruk Vestland'],
++  questions: ['Hvilken periode?'],
++  maxSubQueries: 3,
++  ...overrides,
++})
++
++function one<T extends Element>(container: HTMLElement, selector: string): T {
++  const found = container.querySelector<T>(selector)
++  if (!found) throw new Error(`${selector} is not rendered`)
++  return found
++}
++
++function queryInputs(container: HTMLElement): HTMLInputElement[] {
++  return [...container.querySelectorAll<HTMLInputElement>('.verevon-research-plan__query input')]
++}
++
++describe('research plan edit', () => {
++  it('sends trimmed, non-blank sub-queries up to the cap and only the answered questions', () => {
++    expect(
++      researchPlanEdit([' a ', '', 'b', 'c', 'd'], ['Q1', 'Q2'], ['  svar ', '   '], 3),
++    ).toEqual({ subQueries: ['a', 'b', 'c'], answers: [{ question: 'Q1', answer: 'svar' }] })
++    expect(researchPlanEdit(['x'.repeat(250)], [], [], 9).subQueries[0]).toHaveLength(200)
++  })
++
++  it('asks for a plan only while VITE_DEEP_RESEARCH_PLAN_TURN is the literal true', () => {
++    for (const value of ['', '1', 'TRUE', 'yes']) {
++      vi.stubEnv('VITE_DEEP_RESEARCH_PLAN_TURN', value)
++      expect(researchPlanTurnEnabled()).toBe(false)
++    }
++    vi.stubEnv('VITE_DEEP_RESEARCH_PLAN_TURN', 'true')
++    expect(researchPlanTurnEnabled()).toBe(true)
++  })
++})
++
++describe('the research phase on the wire', () => {
++  const base = { content: 'Hva skjer med lakselus?', model: 'm', deepResearch: true }
++
++  it('is absent unless the turn asks for a phase, so every other body is unchanged', () => {
++    const body = buildChatWireBody(base)
++    expect(body).not.toHaveProperty('research_phase')
++    expect(body).not.toHaveProperty('research_plan')
++  })
++
++  it('names the plan turn, and the run turn with its edited plan', () => {
++    expect(buildChatWireBody({ ...base, researchPhase: 'plan' })).toMatchObject({ research_phase: 'plan' })
++    expect(buildChatWireBody({ ...base, researchPhase: 'plan' })).not.toHaveProperty('research_plan')
++    expect(
++      buildChatWireBody({
++        ...base,
++        researchPhase: 'run',
++        researchPlan: { subQueries: [' a ', ''], answers: [{ question: 'Q', answer: ' svar ' }, { question: 'R', answer: '' }] },
++      }),
++    ).toMatchObject({
++      research_phase: 'run',
++      research_plan: { sub_queries: ['a'], answers: [{ question: 'Q', answer: 'svar' }] },
++    })
++  })
++
++  it('is never sent on a zero-retention turn or a turn that is not deep research', () => {
++    expect(buildChatWireBody({ ...base, researchPhase: 'plan', zdr: true })).not.toHaveProperty('research_phase')
++    expect(buildChatWireBody({ ...base, deepResearch: false, researchPhase: 'plan' })).not.toHaveProperty(
++      'research_phase',
++    )
++  })
++})
++
++describe('ResearchPlanCard', () => {
++  it('starts with exactly the edited plan', () => {
++    const onStart = vi.fn()
++    const { container } = render(() => <ResearchPlanCard plan={plan()} onStart={onStart} onCancel={vi.fn()} />)
++    const [first] = queryInputs(container)
++    fireEvent.input(first as HTMLInputElement, { target: { value: 'lakselus Nordland' } })
++    fireEvent.click(one(container, '.verevon-research-plan__remove'))
++    // The first row went; the second is now the only one. Re-read after the removal.
++    expect(queryInputs(container).map((input) => input.value)).toEqual(['havbruk Vestland'])
++    fireEvent.click(one(container, '.verevon-research-plan__add'))
++    const added = queryInputs(container)[1] as HTMLInputElement
++    fireEvent.input(added, { target: { value: 'rensefisk' } })
++    const answer = one<HTMLInputElement>(container, '.verevon-research-plan__question input')
++    fireEvent.input(answer, { target: { value: '2025–2026' } })
++    fireEvent.click(one(container, '.verevon-research-plan__start'))
++    expect(onStart).toHaveBeenCalledWith({
++      subQueries: ['havbruk Vestland', 'rensefisk'],
++      answers: [{ question: 'Hvilken periode?', answer: '2025–2026' }],
++    })
++  })
++
++  it('stops adding at the cap', () => {
++    const { container } = render(() => (
++      <ResearchPlanCard plan={plan({ maxSubQueries: 3 })} onStart={vi.fn()} onCancel={vi.fn()} />
++    ))
++    const add = one<HTMLButtonElement>(container, '.verevon-research-plan__add')
++    fireEvent.click(add)
++    expect(queryInputs(container)).toHaveLength(3)
++    expect(add.disabled).toBe(true)
++    fireEvent.click(add)
++    expect(queryInputs(container)).toHaveLength(3)
++  })
++
++  it('seeds no more rows than the cap even when the frame carries more', () => {
++    const { container } = render(() => (
++      <ResearchPlanCard plan={plan({ subQueries: ['a', 'b', 'c', 'd'], maxSubQueries: 2 })} onStart={vi.fn()} onCancel={vi.fn()} />
++    ))
++    expect(queryInputs(container).map((input) => input.value)).toEqual(['a', 'b'])
++  })
++
++  it('offers no Start for an empty plan, and Cancel sends nothing', () => {
++    const onStart = vi.fn()
++    const onCancel = vi.fn()
++    const { container } = render(() => (
++      <ResearchPlanCard plan={plan({ subQueries: [], questions: [] })} onStart={onStart} onCancel={onCancel} />
++    ))
++    expect(one<HTMLButtonElement>(container, '.verevon-research-plan__start').disabled).toBe(true)
++    expect(container.querySelector('.verevon-research-plan__questions')).toBeNull()
++    fireEvent.click(one(container, '.verevon-research-plan__cancel'))
++    expect(onCancel).toHaveBeenCalledTimes(1)
++    expect(onStart).not.toHaveBeenCalled()
++  })
++
++  it('shows a plan whose run already went out read-only, with no actions', () => {
++    const { container } = render(() => (
++      <ResearchPlanCard plan={plan()} readOnly onStart={vi.fn()} onCancel={vi.fn()} />
++    ))
++    expect(queryInputs(container).every((input) => input.readOnly)).toBe(true)
++    expect(container.querySelector('.verevon-research-plan__start')).toBeNull()
++    expect(container.querySelector('.verevon-research-plan__add')).toBeNull()
++    expect(container.querySelector('.verevon-research-plan__remove')).toBeNull()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.tsx
+new file mode 100644
+index 000000000..71505bc46
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.tsx	
+@@ -0,0 +1,163 @@
++/**
++ * The plan card of a two-turn deep research (EP-2 S5). A "Dyp research" send first gets the plan:
++ * the sub-queries model-gateway would search and up to three clarifying questions. The person edits,
++ * removes or adds sub-queries up to the gateway's cap and answers what they like; Start sends the run
++ * turn (`chat.research_plan_start`) with exactly that plan, and Cancel closes the card
++ * (`chat.research_plan_cancel`). Nothing waits on the server between the two turns, so a dismissed
++ * plan leaves nothing behind, and the gateway re-clamps whatever Start sends.
++ *
++ * Docked with the composer trays, behind an approval and a run's question. Shown only while
++ * `VITE_DEEP_RESEARCH_PLAN_TURN` is the literal `true`, flipped together with the gateway's
++ * `DEEP_RESEARCH_PLAN_TURN`.
++ */
++
++import { createSignal, For, Show } from 'solid-js'
++import type { ChatResearchPlanEvent, ResearchPlanEdit } from '@/shared/api/chat-client'
++import { useI18n } from '@/shared/i18n'
++
++/** Longest sub-query the card accepts: the gateway cuts at the same length. */
++export const RESEARCH_PLAN_MAX_QUERY_CHARS = 200
++
++/** Longest answer the card accepts: the gateway bounds the whole answers line at this. */
++export const RESEARCH_PLAN_MAX_ANSWER_CHARS = 1000
++
++/** Whether deep research asks for a plan first. Read at call time so a test can pin it. */
++export const researchPlanTurnEnabled = (): boolean =>
++  import.meta.env.VITE_DEEP_RESEARCH_PLAN_TURN === 'true'
++
++/**
++ * The plan Start sends: non-blank sub-queries, trimmed, cut to the gateway's length and at most
++ * `maxSubQueries`, and the answered questions only.
++ */
++export function researchPlanEdit(
++  subQueries: readonly string[],
++  questions: readonly string[],
++  answers: readonly string[],
++  maxSubQueries: number,
++): ResearchPlanEdit {
++  return {
++    subQueries: subQueries
++      .map((query) => query.trim().slice(0, RESEARCH_PLAN_MAX_QUERY_CHARS))
++      .filter((query) => query.length > 0)
++      .slice(0, maxSubQueries),
++    answers: questions
++      .map((question, index) => ({
++        question,
++        answer: (answers[index] ?? '').trim().slice(0, RESEARCH_PLAN_MAX_ANSWER_CHARS),
++      }))
++      .filter((entry) => entry.answer.length > 0),
++  }
++}
++
++export function ResearchPlanCard(props: {
++  plan: ChatResearchPlanEvent
++  /** A plan whose run turn already went out: shown, not edited. */
++  readOnly?: boolean
++  onStart: (edit: ResearchPlanEdit) => void
++  onCancel: () => void
++}) {
++  const i18n = useI18n()
++  // Rows are keyed by a stable id so editing one never rebuilds its field (and loses the cursor).
++  let nextRow = 0
++  const seed = props.plan.subQueries.slice(0, props.plan.maxSubQueries)
++  const [rows, setRows] = createSignal<number[]>(seed.map(() => nextRow++))
++  const [texts, setTexts] = createSignal<Record<number, string>>(
++    Object.fromEntries(seed.map((query, index) => [index, query])),
++  )
++  const [answers, setAnswers] = createSignal<string[]>(props.plan.questions.map(() => ''))
++
++  const queries = () => rows().map((row) => texts()[row] ?? '')
++  const edit = () => researchPlanEdit(queries(), props.plan.questions, answers(), props.plan.maxSubQueries)
++  const full = () => rows().length >= props.plan.maxSubQueries
++  const locked = () => props.readOnly === true
++
++  const setText = (row: number, value: string) => setTexts((current) => ({ ...current, [row]: value }))
++  const remove = (row: number) => setRows((current) => current.filter((candidate) => candidate !== row))
++  const add = () => {
++    if (full()) return
++    const row = nextRow++
++    setTexts((current) => ({ ...current, [row]: '' }))
++    setRows((current) => [...current, row])
++  }
++  const setAnswer = (index: number, value: string) =>
++    setAnswers((current) => current.map((answer, at) => (at === index ? value : answer)))
++
++  return (
++    <section
++      class="verevon-research-plan"
++      aria-label={i18n.tr('Plan for dyp research', 'Deep research plan')}
++      data-readonly={props.readOnly ? '' : undefined}
++    >
++      <h3 class="verevon-research-plan__title">{i18n.tr('Plan for dyp research', 'Deep research plan')}</h3>
++      <ol class="verevon-research-plan__queries">
++        <For each={rows()}>
++          {(row, index) => (
++            <li class="verevon-research-plan__query">
++              <input
++                type="text"
++                aria-label={i18n.tr(`Delspørsmål ${index() + 1}`, `Sub-query ${index() + 1}`)}
++                maxlength={RESEARCH_PLAN_MAX_QUERY_CHARS}
++                value={texts()[row] ?? ''}
++                readonly={locked()}
++                onInput={(event) => setText(row, event.currentTarget.value)}
++              />
++              <Show when={!locked()}>
++                <button
++                  type="button"
++                  class="verevon-research-plan__remove"
++                  aria-label={i18n.tr(`Fjern delspørsmål ${index() + 1}`, `Remove sub-query ${index() + 1}`)}
++                  onClick={() => remove(row)}
++                >
++                  {i18n.tr('Fjern', 'Remove')}
++                </button>
++              </Show>
++            </li>
++          )}
++        </For>
++      </ol>
++      <Show when={!locked()}>
++        <button type="button" class="verevon-research-plan__add" disabled={full()} onClick={add}>
++          {full()
++            ? i18n.tr(
++                `Maks ${props.plan.maxSubQueries} delspørsmål`,
++                `At most ${props.plan.maxSubQueries} sub-queries`,
++              )
++            : i18n.tr('Legg til delspørsmål', 'Add a sub-query')}
++        </button>
++      </Show>
++      <Show when={props.plan.questions.length > 0}>
++        <div class="verevon-research-plan__questions">
++          <For each={props.plan.questions}>
++            {(question, index) => (
++              <label class="verevon-research-plan__question">
++                <span>{question}</span>
++                <input
++                  type="text"
++                  maxlength={RESEARCH_PLAN_MAX_ANSWER_CHARS}
++                  value={answers()[index()] ?? ''}
++                  readonly={locked()}
++                  onInput={(event) => setAnswer(index(), event.currentTarget.value)}
++                />
++              </label>
++            )}
++          </For>
++        </div>
++      </Show>
++      <Show when={!locked()}>
++        <div class="verevon-research-plan__actions">
++          <button
++            type="button"
++            class="verevon-research-plan__start"
++            disabled={edit().subQueries.length === 0}
++            onClick={() => props.onStart(edit())}
++          >
++            {i18n.tr('Start research', 'Start research')}
++          </button>
++          <button type="button" class="verevon-research-plan__cancel" onClick={() => props.onCancel()}>
++            {i18n.tr('Avbryt', 'Cancel')}
++          </button>
++        </div>
++      </Show>
++    </section>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts
+index 0e426e86b..e9de0d764 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
+@@ -115,7 +115,13 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
+ import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
+ import { getSession } from '@/shared/session/session-store'
+ import { blobToDataUrl } from '@/shared/lib/blob-data'
+-import type { ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
++import type {
++  ChatQuestionAnswer,
++  ChatResearchPlanEvent,
++  ChatUserQuestionEvent,
++  ResearchPlanEdit,
++} from '@/shared/api/chat-client'
++import { researchPlanTurnEnabled } from './ResearchPlanCard'
+ import { useI18n } from '@/shared/i18n'
+ import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
+ import {
+@@ -1363,6 +1369,8 @@ export function useChatController() {
+     // card over. This thread's own question, if it still waits, comes back with its run (`hydrateRunQuestions`).
+     setPendingQuestion(null)
+     setQuestionError(null)
++    // A research plan waiting for Start is that thread's too, and nothing on the server keeps it (EP-2 S5).
++    setPendingResearchPlan(null)
+     // A project thread's scope is recorded before `threadId` moves into state, so the
+     // project chip reads it from the first render of the thread. With the switch off the
+     // branch is never taken: `scopedThreadRefs` can already hold the Space of an origin=space
+@@ -2276,6 +2284,7 @@ export function useChatController() {
+     // A waiting question, and a refusal left on its card, belong to the thread that asked: a fresh chat has neither.
+     setPendingQuestion(null)
+     setQuestionError(null)
++    setPendingResearchPlan(null)
+     // Each fresh chat starts with Temporary Chat off — a user re-enables it
+     // deliberately per conversation rather than it silently staying on.
+     setTemporaryChat(false)
+@@ -2546,6 +2555,32 @@ export function useChatController() {
+   const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
+   const [questionPending, setQuestionPending] = createSignal(false)
+   const [questionError, setQuestionError] = createSignal<string | null>(null)
++  // A deep-research plan waiting for Start (EP-2 S5), with the question and model of the send that asked for
++  // it. Session-only: no research state waits on the server between the plan turn and the run turn, so a
++  // plan that is never started leaves nothing behind.
++  const [pendingResearchPlan, setPendingResearchPlan] = createSignal<
++    { plan: ChatResearchPlanEvent; question: string; model: string } | null
++  >(null)
++
++  /**
++   * Starts the waiting research plan (`chat.research_plan_start`): the run turn of the same question,
++   * carrying the edited plan. The card goes at once; the run's own steps show its progress.
++   */
++  const startResearchPlan = async (edit: ResearchPlanEdit) => {
++    const waiting = pendingResearchPlan()
++    if (!waiting) return
++    setPendingResearchPlan(null)
++    await sendContent(waiting.question, waiting.model, {
++      browseWeb: true,
++      deepResearch: true,
++      tools: ['research'],
++      researchPhase: 'run',
++      researchPlan: edit,
++    })
++  }
++
++  /** Dismisses the waiting research plan (`chat.research_plan_cancel`). Nothing is sent. */
++  const cancelResearchPlan = () => setPendingResearchPlan(null)
+ 
+   /**
+    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
+@@ -2928,7 +2963,10 @@ export function useChatController() {
+     rawContent: string,
+     modelOverride?: string,
+     // `approvedPlanId` is the WS14 S2 approve-then-execute plan; only `sendApprovedPlanNow` sets it.
+-    options: SendOptions & ServerVersionTarget & { approvedPlanId?: string } = {},
++    // `researchPhase`/`researchPlan` are the deep-research plan and run turns (EP-2 S5).
++    options: SendOptions &
++      ServerVersionTarget &
++      Pick<ChatInvokeRequest, 'researchPhase' | 'researchPlan'> & { approvedPlanId?: string } = {},
+   ) => {
+     const content = rawContent.trim()
+     if (!content) return
+@@ -3307,6 +3345,8 @@ export function useChatController() {
+           connectorScope: options.connectorScope,
+           agentMode: options.agentMode,
+           deepResearch: options.deepResearch,
++          researchPhase: options.researchPhase,
++          researchPlan: options.researchPlan,
+           generateImage: options.generateImage,
+           attachments: options.attachments,
+           actions: options.actions,
+@@ -3463,6 +3503,11 @@ export function useChatController() {
+             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
+             setPendingQuestion(question)
+           },
++          onResearchPlan: (plan) => {
++            // EP-2 S5. Only a plan this build asked for gets a card; a temporary chat never has one.
++            if (!researchPlanTurnEnabled() || isTemporaryThread(state.threadId ?? activeThreadId)) return
++            setPendingResearchPlan({ plan, question: content, model })
++          },
+           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
+             settleDraft?.('accepted')
+             settled = true
+@@ -3683,6 +3728,10 @@ export function useChatController() {
+       connectorScope: payload.connectorScope,
+       agentMode: payload.agentMode,
+       deepResearch: payload.tools.includes('research'),
++      // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.
++      ...(payload.tools.includes('research') && researchPlanTurnEnabled() && !payload.zdr
++        ? { researchPhase: 'plan' as const }
++        : {}),
+       displayAttachments,
+       generateImage: payload.tools.includes('image'),
+       tools: payload.tools,
+@@ -4837,6 +4886,9 @@ export function useChatController() {
+     questionError,
+     answerPendingQuestion,
+     skipPendingQuestion,
++    pendingResearchPlan: () => pendingResearchPlan()?.plan,
++    startResearchPlan,
++    cancelResearchPlan,
+     rejectTurnPlan,
+     planApprovalPending,
+     planApprovalError,
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 6a99b4a43..8a1344418 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1133,6 +1133,29 @@ const chatWideResearchStartInput = z
+   })
+   .strict()
+ 
++// The Start of a deep-research plan card (EP-2 S5): the edited sub-queries and the answers to the
++// plan's questions, sent back as the run turn. The bounds are the card's; model-gateway re-clamps
++// every entry to its own cap and length, so nothing here can widen a run.
++const chatResearchPlanStartInput = z
++  .object({
++    subQueries: z.array(z.string().trim().min(1).max(200)).max(10),
++    answers: z
++      .array(
++        z
++          .object({
++            question: z.string().max(300),
++            answer: z.string().max(1000),
++          })
++          .strict(),
++      )
++      .max(3)
++      .optional(),
++  })
++  .strict()
++
++// Dismissing a plan card sends nothing: no research state waits on the server between the turns.
++const chatResearchPlanCancelInput = z.object({}).strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4110,6 +4133,28 @@ export const actionRegistry = [
+     inputSchema: chatWideResearchStartInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.research_plan_start',
++    label: 'Start deep research from the plan',
++    description: 'Run a deep research exactly as the person edited its plan: the plan card\'s sub-queries (edited, removed or added up to the cap) and the answers to its clarifying questions are sent as the run turn. Model-gateway re-clamps the plan (length, count, duplicates) before anything is searched; a zero-retention session never gets a plan card. Never model-executable: a model does not start research that searches and spends on the person\'s behalf.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: chatResearchPlanStartInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'chat.research_plan_cancel',
++    label: 'Dismiss a deep research plan',
++    description: 'Close a deep research plan card without running it. Nothing is sent: no research state waits on the server between the plan turn and the run turn, so a dismissed plan leaves nothing behind.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatResearchPlanCancelInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 4dfffda0f..c1920f1c5 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -64,6 +64,46 @@ export function parseWideResearchItems(text: string): string[] {
+     .map((line) => line.slice(0, WIDE_RESEARCH_MAX_ITEM_CHARS))
+ }
+ 
++/** One answer the person gave to a deep-research plan question (EP-2 S5). */
++export type ResearchPlanAnswer = { question: string; answer: string }
++
++/** The plan a deep-research run turn sends back (EP-2 S5): the edited sub-queries and the answers. */
++export type ResearchPlanEdit = { subQueries: string[]; answers: ResearchPlanAnswer[] }
++
++/** The editable plan a deep-research plan turn ends with (`research_plan`, EP-2 S5). */
++export type ChatResearchPlanEvent = {
++  subQueries: string[]
++  questions: string[]
++  /** The most sub-queries a run turn keeps; the card stops adding at it. */
++  maxSubQueries: number
++  requestId?: string
++}
++
++/** The cap the gateway ships by default, for a frame that names none. */
++export const RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES = 9
++
++function researchPhaseWire(
++  phase: 'plan' | 'run',
++  plan: ResearchPlanEdit | undefined,
++): { research_phase: 'plan' | 'run'; research_plan?: { sub_queries: string[]; answers: ResearchPlanAnswer[] } } {
++  if (phase === 'plan') return { research_phase: 'plan' }
++  return {
++    research_phase: 'run',
++    research_plan: {
++      sub_queries: (plan?.subQueries ?? []).map((query) => query.trim()).filter((query) => query.length > 0),
++      answers: (plan?.answers ?? [])
++        .map(({ question, answer }) => ({ question: question.trim(), answer: answer.trim() }))
++        .filter((entry) => entry.answer.length > 0),
++    },
++  }
++}
++
++function stringList(value: unknown): string[] {
++  return Array.isArray(value)
++    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
++    : []
++}
++
+ function wideResearchWire(start: WideResearchStart): { item_cap?: number; items?: string[] } {
+   const items = (start.items ?? []).slice(0, WIDE_RESEARCH_MAX_ITEMS)
+   const itemCap =
+@@ -234,6 +274,14 @@ export type ChatInvokeRequest = {
+   browseWeb?: boolean
+   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
+   deepResearch?: boolean
++  /**
++   * Which turn of a two-turn deep research this is (EP-2 S5): `plan` ends with an editable plan and
++   * searches nothing, `run` runs `researchPlan`. Sent only with `deepResearch` on a turn that keeps
++   * data; model-gateway ignores both while DEEP_RESEARCH_PLAN_TURN is off and re-clamps the plan.
++   */
++  researchPhase?: 'plan' | 'run'
++  /** The edited plan a `run` turn carries. */
++  researchPlan?: ResearchPlanEdit
+   /**
+    * Wide research from the composer's "Bred forskning" entry (EP-2 S8): the items to research, or
+    * only a count when the model should split the question itself. Sent as `wide_research` only on
+@@ -1136,6 +1184,8 @@ export type ChatStreamHandlers = {
+   onPlanProposed?: (event: ChatPlanProposedEvent) => void
+   /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
+   onUserQuestion?: (event: ChatUserQuestionEvent) => void
++  /** See `ChatResearchPlanEvent`. Ungated: the plan card is the plan turn's whole answer. */
++  onResearchPlan?: (event: ChatResearchPlanEvent) => void
+   onStopped?: (event: ChatStoppedEvent) => void
+   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
+   onVerification?: (event: ChatVerificationEvent) => void
+@@ -1938,6 +1988,16 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
+     // Search turn — the same failure planMode had. The gateway keys the
+     // multi-round research pipeline off this flag.
+     deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
++    // Present only on a deep-research turn that keeps data (EP-2 S5), so every other body is
++    // byte-identical to what it was before the plan turn existed.
++    ...(request.researchPhase &&
++    request.deepResearch &&
++    !conversationOnly &&
++    !supportReadOnly &&
++    !subscriptionBacked &&
++    !request.zdr
++      ? researchPhaseWire(request.researchPhase, request.researchPlan)
++      : {}),
+     // Present only on an agentic turn that keeps data (EP-2 S8), so every other body is
+     // byte-identical to what it was before wide research had an entry.
+     ...(request.wideResearch && features.has('agentic') && !request.zdr
+@@ -2562,6 +2622,21 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
+       }
+       break
+     }
++    case 'research_plan': {
++      // The plan card of a deep-research plan turn (EP-2 S5). An empty plan still shows the card,
++      // where the person can add a sub-query; a cap the frame does not state is the gateway default.
++      const capValue = num(objectValue(payload.caps)?.max_sub_queries)
++      handlers.onResearchPlan?.({
++        subQueries: stringList(payload.sub_queries),
++        questions: stringList(payload.questions),
++        maxSubQueries:
++          capValue !== undefined && Number.isInteger(capValue) && capValue > 0
++            ? capValue
++            : RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES,
++        requestId: str(payload.request_id),
++      })
++      break
++    }
+     case 'verification': {
+       // Only the three verdicts the backend defines. An unrecognized one is a
+       // contract drift, and rendering "checked" from a value we cannot read
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts
+index bf447a862..f23e4c741 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts	
+@@ -115,6 +115,13 @@ export type ChatEventPayloads = {
+     delta: string
+     request_id: string
+   }
++  /** Rust variants: ResearchPlan. */
++  research_plan: {
++    caps: Record<string, unknown>
++    questions: unknown[]
++    request_id: string
++    sub_queries: unknown[]
++  }
+   /** Rust variants: ResultReceipt. */
+   result_receipt: {
+     receipt: Record<string, unknown>
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json
+index a18e82069..0fa3889f8 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json	
+@@ -546,6 +546,38 @@
+         }
+       }
+     },
++    "research_plan": {
++      "family": null,
++      "variants": [
++        "ResearchPlan"
++      ],
++      "keys": {
++        "caps": {
++          "types": [
++            "object"
++          ],
++          "presence": "always"
++        },
++        "questions": {
++          "types": [
++            "array"
++          ],
++          "presence": "always"
++        },
++        "request_id": {
++          "types": [
++            "string"
++          ],
++          "presence": "always"
++        },
++        "sub_queries": {
++          "types": [
++            "array"
++          ],
++          "presence": "always"
++        }
++      }
++    },
+     "result_receipt": {
+       "family": "usage",
+       "variants": [
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256 b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256
+index 640dc94f5..a49ff03f5 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256	
+@@ -1 +1 @@
+-ab385cc9d0ab3385c59a1755ebe54920ece933e8ed55b7830674d07dfed3cb7f *sse-event-payloads.json
++86fdd057d9881c6896f0f1677b51aa299e0e87bec6813ff5c55b6ccdf2507535 *sse-event-payloads.json
+diff --git a/apps/Model Plane/api/contracts/sse-event-payloads.json b/apps/Model Plane/api/contracts/sse-event-payloads.json
+index a18e82069..0fa3889f8 100644
+--- a/apps/Model Plane/api/contracts/sse-event-payloads.json	
++++ b/apps/Model Plane/api/contracts/sse-event-payloads.json	
+@@ -546,6 +546,38 @@
+         }
+       }
+     },
++    "research_plan": {
++      "family": null,
++      "variants": [
++        "ResearchPlan"
++      ],
++      "keys": {
++        "caps": {
++          "types": [
++            "object"
++          ],
++          "presence": "always"
++        },
++        "questions": {
++          "types": [
++            "array"
++          ],
++          "presence": "always"
++        },
++        "request_id": {
++          "types": [
++            "string"
++          ],
++          "presence": "always"
++        },
++        "sub_queries": {
++          "types": [
++            "array"
++          ],
++          "presence": "always"
++        }
++      }
++    },
+     "result_receipt": {
+       "family": "usage",
+       "variants": [
+diff --git a/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 b/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256
+index 640dc94f5..a49ff03f5 100644
+--- a/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256	
++++ b/apps/Model Plane/api/contracts/sse-event-payloads.json.sha256	
+@@ -1 +1 @@
+-ab385cc9d0ab3385c59a1755ebe54920ece933e8ed55b7830674d07dfed3cb7f *sse-event-payloads.json
++86fdd057d9881c6896f0f1677b51aa299e0e87bec6813ff5c55b6ccdf2507535 *sse-event-payloads.json
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs b/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs
+index e0887295d..41d7d5e3d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs	
+@@ -935,6 +935,287 @@ fn plan_prompt(question: &str, max: usize) -> String {
+     )
+ }
+ 
++// ---------------------------------------------------------------------------
++// Plan turn (Wave 3 EP-2 S5, pure)
++//
++// With the switch on, "Dyp research" can be two ordinary turns: the plan turn shows the plan and
++// up to three clarifying questions and searches nothing; the run turn sends the edited plan back.
++// No research state waits between them (D1): the plan travels to the client in a `research_plan`
++// event and back in the run request, where it is re-clamped exactly like a model's plan, because
++// a client can send anything.
++// ---------------------------------------------------------------------------
++
++/// The plan-turn switch. Opt-in: only the literal `true` enables it. Off, `research_phase` and
++/// `research_plan` are never read, so a deep-research turn is the one-shot it was before.
++pub const DEEP_RESEARCH_PLAN_TURN_ENV: &str = "DEEP_RESEARCH_PLAN_TURN";
++
++/// Whether the plan turn is on in this process.
++#[must_use]
++pub fn plan_turn_enabled() -> bool {
++    plan_turn_enabled_with(&|key| std::env::var(key).ok())
++}
++
++fn plan_turn_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
++    get(DEEP_RESEARCH_PLAN_TURN_ENV).is_some_and(|value| value.trim() == "true")
++}
++
++/// Clarifying questions one plan may ask (D7). They live in the plan card, not the WS14 question
++/// store: no run exists to pause between the two turns.
++const MAX_PLAN_QUESTIONS: usize = 3;
++
++/// Longest clarifying question kept, in characters.
++const MAX_PLAN_QUESTION_CHARS: usize = 300;
++
++/// Longest answer line the run turn adds to the synthesis prompt, in characters. The answers are
++/// the user's own words, but they ride beside a large corpus and must not crowd it out.
++const MAX_CLARIFICATION_CHARS: usize = 1_000;
++
++/// Raw entries read from a client plan list before the clamp. Bounds the work a hostile body can
++/// ask for; the kept count is bounded separately by [`max_sub_queries`].
++const MAX_CLIENT_PLAN_ENTRIES: usize = 64;
++
++/// Version of the `research_plan` record kept in message metadata.
++const RESEARCH_PLAN_RECORD_VERSION: u32 = 1;
++
++/// The re-clamped plan a run turn carries.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct ClientPlan {
++    /// Normalized, plausible, distinct sub-queries, at most [`max_sub_queries`]. Empty means the
++    /// model plans, as on a one-shot turn.
++    pub sub_queries: Vec<String>,
++    /// The user's answers to the plan's questions as one bounded line, or `None` when none was
++    /// answered.
++    pub clarifications: Option<String>,
++}
++
++/// Which turn of a deep research this is.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum ResearchPhase {
++    /// Today's single turn: plan, search, read and write the report.
++    OneShot,
++    /// Plan only: the turn ends with the editable plan and searches nothing.
++    Plan,
++    /// Run the user's edited plan.
++    Run(ClientPlan),
++}
++
++impl ResearchPhase {
++    /// The run turn's plan, when this is one.
++    #[must_use]
++    pub fn client_plan(&self) -> Option<&ClientPlan> {
++        match self {
++            Self::Run(plan) => Some(plan),
++            Self::OneShot | Self::Plan => None,
++        }
++    }
++}
++
++/// The phase a request asks for. `OneShot` with the switch off, on a turn that is not deep
++/// research, and for an absent or unknown phase, so a stray field never changes a turn.
++/// `redact_pii` is the turn's own PII posture: the answers are user text and get the treatment the
++/// message itself gets.
++#[must_use]
++pub fn research_phase(
++    enabled: bool,
++    deep_research: bool,
++    phase: Option<&Value>,
++    plan: Option<&Value>,
++    max_sub_queries: usize,
++    redact_pii: bool,
++) -> ResearchPhase {
++    if !enabled || !deep_research {
++        return ResearchPhase::OneShot;
++    }
++    match phase.and_then(Value::as_str).map(str::trim) {
++        Some("plan") => ResearchPhase::Plan,
++        Some("run") => ResearchPhase::Run(clamp_client_plan(plan, max_sub_queries, redact_pii)),
++        _ => ResearchPhase::OneShot,
++    }
++}
++
++/// Re-clamp a client plan with the rules a model's plan meets: each entry normalized and cut to
++/// [`MAX_SUB_QUERY_CHARS`], implausible ones dropped, duplicates dropped case-insensitively, at
++/// most `max` kept. Answers become one bounded line.
++#[must_use]
++pub fn clamp_client_plan(raw: Option<&Value>, max: usize, redact_pii: bool) -> ClientPlan {
++    let list = |key: &str| {
++        raw.and_then(|plan| plan.get(key))
++            .and_then(Value::as_array)
++            .map(|items| items.iter().take(MAX_CLIENT_PLAN_ENTRIES).collect::<Vec<_>>())
++            .unwrap_or_default()
++    };
++
++    let mut seen: BTreeSet<String> = BTreeSet::new();
++    let mut sub_queries: Vec<String> = Vec::new();
++    for entry in list("sub_queries").into_iter().filter_map(Value::as_str) {
++        if sub_queries.len() >= max {
++            break;
++        }
++        let normalized = normalize_sub_query(entry);
++        if normalized.is_empty() || !is_plausible_query(&normalized) {
++            continue;
++        }
++        if seen.insert(normalized.to_lowercase()) {
++            sub_queries.push(normalized);
++        }
++    }
++
++    let answered: Vec<String> = list("answers")
++        .into_iter()
++        .take(MAX_PLAN_QUESTIONS)
++        .filter_map(|entry| {
++            let question = entry
++                .get("question")
++                .and_then(Value::as_str)
++                .map(collapse_whitespace)
++                .unwrap_or_default();
++            let answer = collapse_whitespace(entry.get("answer").and_then(Value::as_str)?);
++            (!answer.is_empty()).then(|| {
++                if question.is_empty() {
++                    answer
++                } else {
++                    format!("{question} – {answer}")
++                }
++            })
++        })
++        .collect();
++    let clarifications = (!answered.is_empty()).then(|| {
++        let line = format!("Brukerens presiseringer: {}", answered.join("; "));
++        let line = if redact_pii {
++            crate::moderation::redact_pii(&line).0
++        } else {
++            line
++        };
++        line.chars().take(MAX_CLARIFICATION_CHARS).collect()
++    });
++
++    ClientPlan {
++        sub_queries,
++        clarifications,
++    }
++}
++
++/// The sub-queries a run turn searches instead of planning: the user's edited plan runs as sent,
++/// so no plan inference is paid for a second time. A plan the clamp emptied plans with the model.
++fn edited_sub_queries(client_plan: Option<&ClientPlan>) -> Option<&[String]> {
++    client_plan
++        .map(|client| client.sub_queries.as_slice())
++        .filter(|queries| !queries.is_empty())
++}
++
++/// The question the synthesis prompt answers: the user's question, then the answers line when the
++/// run turn carried one.
++fn with_clarifications(question: &str, clarifications: Option<&str>) -> String {
++    match clarifications {
++        Some(line) => format!("{question}\n\n{line}"),
++        None => question.to_owned(),
++    }
++}
++
++fn collapse_whitespace(text: &str) -> String {
++    text.split_whitespace().collect::<Vec<_>>().join(" ")
++}
++
++/// The plan turn's instruction: the same decomposition as [`plan_prompt`], as a JSON object that
++/// may also ask what the question leaves open.
++fn plan_prompt_with_questions(question: &str, max: usize) -> String {
++    let base = plan_prompt(question, max);
++    let plan = base
++        .split("Answer with ONLY")
++        .next()
++        .unwrap_or(&base)
++        .trim_end();
++    format!(
++        "{plan}\n\n\
++          If the question leaves something open that would change which sources matter (a region, \
++          a period, a product, a purpose), also ask up to {MAX_PLAN_QUESTIONS} short clarifying \
++          questions in the question's language. Ask none when the question is clear.\n\n\
++          Answer with ONLY a JSON object: {{\"queries\": [strings], \"questions\": [strings]}}. No \
++          prose, no explanation, no code fence.\n\n\
++          Question: {question}"
++    )
++}
++
++/// The clarifying questions in a plan-turn answer: the `questions` array of its JSON object,
++/// normalized, distinct, at most [`MAX_PLAN_QUESTIONS`]. Anything else asks nothing.
++#[must_use]
++pub fn parse_plan_questions(raw: &str) -> Vec<String> {
++    let Ok(value) = serde_json::from_str::<Value>(&strip_code_fence(raw)) else {
++        return Vec::new();
++    };
++    let mut seen: BTreeSet<String> = BTreeSet::new();
++    value
++        .get("questions")
++        .and_then(Value::as_array)
++        .into_iter()
++        .flatten()
++        .filter_map(Value::as_str)
++        .map(|text| {
++            collapse_whitespace(text)
++                .chars()
++                .take(MAX_PLAN_QUESTION_CHARS)
++                .collect::<String>()
++        })
++        .filter(|text| is_plausible_query(text) && seen.insert(text.to_lowercase()))
++        .take(MAX_PLAN_QUESTIONS)
++        .collect()
++}
++
++/// What a plan turn produced.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ResearchPlan {
++    pub sub_queries: Vec<String>,
++    pub questions: Vec<String>,
++    /// The plan inference produced nothing and the plan is the question as asked.
++    pub degraded: bool,
++}
++
++impl ResearchPlan {
++    /// The `research_plan` control event the card renders.
++    #[must_use]
++    pub fn event(&self, max_sub_queries: usize) -> ChatEvent {
++        ChatEvent::ResearchPlan {
++            sub_queries: self.sub_queries.clone(),
++            questions: self.questions.clone(),
++            max_sub_queries,
++        }
++    }
++
++    /// The `research_plan` record kept in the assistant message's metadata, so a reopened thread
++    /// shows the plan card. Plan text only: no source, page or answer is in it.
++    #[must_use]
++    pub fn record(&self, max_sub_queries: usize) -> Value {
++        serde_json::json!({
++            "version": RESEARCH_PLAN_RECORD_VERSION,
++            "sub_queries": self.sub_queries,
++            "questions": self.questions,
++            "caps": { "max_sub_queries": max_sub_queries },
++        })
++    }
++
++    /// The note the plan turn's answer is written from: a short line pointing at the card, and no
++    /// answer to the question, which nothing has been searched for yet.
++    #[must_use]
++    pub fn context_message(&self) -> ChatMessage {
++        let mut content = String::from(
++            "[Dyp research – plan] A research plan is shown to the user as an editable card. Reply \
++             with one or two short sentences in the user's language (Norwegian: start with \"Her er \
++             planen\") saying the plan is ready to edit and that research starts when they press \
++             Start. Do not answer the question and do not list the sub-queries again: nothing has \
++             been searched yet.",
++        );
++        if !self.questions.is_empty() {
++            content.push_str(" Mention that the card asks a few clarifying questions.");
++        }
++        ChatMessage {
++            compaction_summary: String::new(),
++            role: "user".to_owned(),
++            content,
++            name: String::new(),
++        }
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // Phase 2 — dedupe (pure)
+ // ---------------------------------------------------------------------------
+@@ -2536,6 +2817,10 @@ fn extract_from_fetch_output(output: &str) -> Option<String> {
+ 
+ /// The whole pipeline: plan → search → read → synthesize → emit.
+ ///
++/// `client_plan` is the run turn of a two-turn research (EP-2 S5), already re-clamped by
++/// [`research_phase`]: its sub-queries replace the plan inference, and its clarifications reach the
++/// synthesis prompt. `None`, or a plan the clamp emptied, plans with the model as before.
++///
+ /// # Errors
+ ///
+ /// Returns `Err` only when a tool action could not be durably audited — the same
+@@ -2560,6 +2845,7 @@ pub async fn run_deep_research(
+     model: &str,
+     base_messages: Vec<ChatMessage>,
+     question: &str,
++    client_plan: Option<&ClientPlan>,
+     cancel: &AtomicBool,
+     sink: Option<&crate::sse_events::RichEventSink>,
+ ) -> Result<DeepResearchOutcome, &'static str> {
+@@ -2611,22 +2897,28 @@ pub async fn run_deep_research(
+         )
+         .await;
+     let plan_limit = max_sub_queries();
+-    let planned = guarded(
+-        cancel,
+-        deadline,
+-        plan_sub_queries(
+-            state,
+-            request_id,
+-            org_id,
+-            inference_bearer,
+-            zdr,
+-            min_privacy_tier,
+-            question,
+-            plan_limit,
+-            model,
+-        ),
+-    )
+-    .await;
++    let edited_plan = edited_sub_queries(client_plan);
++    let planned = match edited_plan {
++        Some(queries) => Ok((queries.to_vec(), false)),
++        None => {
++            guarded(
++                cancel,
++                deadline,
++                plan_sub_queries(
++                    state,
++                    request_id,
++                    org_id,
++                    inference_bearer,
++                    zdr,
++                    min_privacy_tier,
++                    question,
++                    plan_limit,
++                    model,
++                ),
++            )
++            .await
++        }
++    };
+     let (plan, plan_degraded) = match planned {
+         Ok(result) => result,
+         Err(StopReason::Cancelled) => {
+@@ -2649,6 +2941,8 @@ pub async fn run_deep_research(
+         plan.len(),
+         if plan_degraded {
+             "planning degraded; searching the question as asked"
++        } else if edited_plan.is_some() {
++            "edited plan accepted"
+         } else {
+             "plan accepted"
+         },
+@@ -2662,6 +2956,8 @@ pub async fn run_deep_research(
+                     "Planleggingen feilet – søker på spørsmålet direkte: {}",
+                     plan.join(" · ")
+                 )
++            } else if edited_plan.is_some() {
++                format!("{} delspørsmål fra planen din: {}", plan.len(), plan.join(" · "))
+             } else {
+                 format!("{} delspørsmål: {}", plan.len(), plan.join(" · "))
+             },
+@@ -3001,7 +3297,14 @@ pub async fn run_deep_research(
+             "active",
+         )
+         .await;
+-    let prompt = synthesis_prompt(question, &sources, &coverage);
++    let prompt = synthesis_prompt(
++        &with_clarifications(
++            question,
++            client_plan.and_then(|client| client.clarifications.as_deref()),
++        ),
++        &sources,
++        &coverage,
++    );
+     let synthesized = guarded(
+         cancel,
+         deadline,
+@@ -3233,6 +3536,96 @@ async fn plan_sub_queries(
+     limit: usize,
+     turn_model: &str,
+ ) -> (Vec<String>, bool) {
++    let (raw, degraded) = plan_raw(
++        state,
++        request_id,
++        org_id,
++        inference_bearer,
++        zdr,
++        min_privacy_tier,
++        question,
++        limit,
++        turn_model,
++        false,
++    )
++    .await;
++    (parse_sub_queries(&raw, question, limit), degraded)
++}
++
++/// The plan turn (EP-2 S5): one planning inference, which may also ask clarifying questions, and
++/// nothing else. No search, read or synthesis runs and no tool action is audited, so a user who
++/// never presses Start has spent one plan call and left nothing behind.
++#[allow(clippy::too_many_arguments)] // request context, mirrors run_deep_research
++pub async fn plan_only(
++    state: &AppState,
++    request_id: &str,
++    org_id: &str,
++    inference_bearer: &str,
++    zdr: bool,
++    min_privacy_tier: i32,
++    model: &str,
++    question: &str,
++    sink: &crate::sse_events::RichEventSink,
++) -> ResearchPlan {
++    let mut events = ResearchEvents::Live(sink);
++    events
++        .step(
++            STEP_PLAN,
++            "Planlegger research",
++            "Deler spørsmålet i delspørsmål.",
++            "active",
++        )
++        .await;
++    let limit = max_sub_queries();
++    let (raw, degraded) = plan_raw(
++        state,
++        request_id,
++        org_id,
++        inference_bearer,
++        zdr,
++        min_privacy_tier,
++        question,
++        limit,
++        model,
++        true,
++    )
++    .await;
++    let plan = ResearchPlan {
++        sub_queries: parse_sub_queries(&raw, question, limit),
++        questions: parse_plan_questions(&raw),
++        degraded,
++    };
++    events
++        .step(
++            STEP_PLAN,
++            "Planlegger research",
++            &if plan.degraded {
++                "Planleggingen feilet – planen er spørsmålet slik det ble stilt.".to_owned()
++            } else {
++                format!("{} delspørsmål klare til redigering.", plan.sub_queries.len())
++            },
++            "done",
++        )
++        .await;
++    plan
++}
++
++/// The planning inference's raw answer and whether it degraded to nothing, with the one retry on
++/// the turn's model. `with_questions` asks for the plan turn's JSON object, which may carry
++/// clarifying questions beside the queries (EP-2 S5).
++#[allow(clippy::too_many_arguments)] // request context, mirrors plan_sub_queries
++async fn plan_raw(
++    state: &AppState,
++    request_id: &str,
++    org_id: &str,
++    inference_bearer: &str,
++    zdr: bool,
++    min_privacy_tier: i32,
++    question: &str,
++    limit: usize,
++    turn_model: &str,
++    with_questions: bool,
++) -> (String, bool) {
+     let configured =
+         std::env::var("DEEP_RESEARCH_PLAN_MODEL").unwrap_or_else(|_| PLAN_MODEL.to_owned());
+ 
+@@ -3246,6 +3639,7 @@ async fn plan_sub_queries(
+         question,
+         limit,
+         &configured,
++        with_questions,
+     )
+     .await;
+ 
+@@ -3271,6 +3665,7 @@ async fn plan_sub_queries(
+             question,
+             limit,
+             turn_model,
++            with_questions,
+         )
+         .await;
+     }
+@@ -3284,7 +3679,7 @@ async fn plan_sub_queries(
+             "deep research planning degraded; searching the question as asked"
+         );
+     }
+-    (parse_sub_queries(&raw, question, limit), degraded)
++    (raw, degraded)
+ }
+ 
+ /// Whether an empty plan warrants one retry on the turn's own model.
+@@ -3309,6 +3704,7 @@ async fn plan_once(
+     question: &str,
+     limit: usize,
+     model: &str,
++    with_questions: bool,
+ ) -> String {
+     // With role routing on the plan asks the role table, and the configured plan model is the fallback the
+     // table tries after its own candidates; with it off the plan names that model exactly as before.
+@@ -3327,7 +3723,11 @@ async fn plan_once(
+                 messages: vec![ChatMessage {
+                     compaction_summary: String::new(),
+                     role: "user".to_owned(),
+-                    content: plan_prompt(question, limit),
++                    content: if with_questions {
++                        plan_prompt_with_questions(question, limit)
++                    } else {
++                        plan_prompt(question, limit)
++                    },
+                     name: String::new(),
+                 }],
+                 // Low temperature: a plan should be a stable decomposition, not
+@@ -5510,4 +5910,204 @@ mod tests {
+         stamp_provenance(&mut step, ResearchProvenance::sample());
+         assert_eq!(step, before);
+     }
++
++    /// EP-2 S5: the plan turn and the re-clamp of the plan a run turn sends back.
++    mod plan_turn {
++        use serde_json::json;
++
++        use super::super::*;
++
++        fn run_phase(plan: &Value) -> ResearchPhase {
++            research_phase(true, true, Some(&json!("run")), Some(plan), 9, false)
++        }
++
++        fn run_plan(plan: &Value) -> ClientPlan {
++            run_phase(plan).client_plan().cloned().expect("a run turn carries a plan")
++        }
++
++        #[test]
++        fn only_the_literal_true_turns_the_switch_on() {
++            let with = |value: Option<&'static str>| {
++                plan_turn_enabled_with(&move |key| {
++                    assert_eq!(key, DEEP_RESEARCH_PLAN_TURN_ENV);
++                    value.map(str::to_owned)
++                })
++            };
++            assert!(!with(None));
++            assert!(!with(Some("")));
++            assert!(!with(Some("1")));
++            assert!(!with(Some("TRUE")));
++            assert!(!with(Some("yes")));
++            assert!(with(Some("true")));
++        }
++
++        #[test]
++        fn switch_off_ignores_both_fields() {
++            let plan = json!({ "sub_queries": ["a"], "answers": [] });
++            for phase in ["plan", "run"] {
++                assert_eq!(
++                    research_phase(false, true, Some(&json!(phase)), Some(&plan), 9, false),
++                    ResearchPhase::OneShot,
++                    "{phase} with the switch off"
++                );
++                // A turn that is not deep research has no phase either.
++                assert_eq!(
++                    research_phase(true, false, Some(&json!(phase)), Some(&plan), 9, false),
++                    ResearchPhase::OneShot
++                );
++            }
++            // An absent, unknown or non-string phase is today's one-shot.
++            for phase in [None, Some(json!("later")), Some(json!(1)), Some(Value::Null)] {
++                assert_eq!(
++                    research_phase(true, true, phase.as_ref(), Some(&plan), 9, false),
++                    ResearchPhase::OneShot
++                );
++            }
++            assert_eq!(
++                research_phase(true, true, Some(&json!(" plan ")), None, 9, false),
++                ResearchPhase::Plan
++            );
++        }
++
++        #[test]
++        fn eleven_queries_are_clamped_to_the_cap() {
++            let queries: Vec<String> = (0..11).map(|n| format!("query {n}")).collect();
++            let plan = run_plan(&json!({ "sub_queries": queries }));
++            assert_eq!(plan.sub_queries.len(), 9);
++            assert_eq!(plan.sub_queries[0], "query 0");
++            assert_eq!(plan.sub_queries[8], "query 8");
++        }
++
++        #[test]
++        fn a_long_query_is_cut_and_junk_and_duplicates_are_dropped() {
++            let long = "ø".repeat(500);
++            let plan = run_plan(&json!({
++                "sub_queries": [long, "  Lakselus   tiltak ", "lakselus tiltak", "{}", "", 7, "- 2. havbruk"],
++            }));
++            assert_eq!(plan.sub_queries.len(), 3);
++            assert_eq!(plan.sub_queries[0].chars().count(), MAX_SUB_QUERY_CHARS);
++            assert_eq!(plan.sub_queries[1], "Lakselus tiltak");
++            assert_eq!(plan.sub_queries[2], "2. havbruk");
++        }
++
++        #[test]
++        fn an_empty_plan_falls_back_to_the_model_plan() {
++            for raw in [json!({}), json!({ "sub_queries": [] }), json!({ "sub_queries": ["{}", "  "] })] {
++                let plan = run_plan(&raw);
++                assert!(plan.sub_queries.is_empty(), "{raw}");
++                assert_eq!(edited_sub_queries(Some(&plan)), None, "{raw}");
++            }
++            assert_eq!(edited_sub_queries(None), None);
++            // A missing plan body on a run turn is the same empty plan, not a refusal.
++            assert_eq!(
++                research_phase(true, true, Some(&json!("run")), None, 9, false),
++                ResearchPhase::Run(ClientPlan::default())
++            );
++        }
++
++        #[test]
++        fn a_run_turn_searches_its_edited_plan_without_planning() {
++            let plan = run_plan(&json!({ "sub_queries": ["a phrase", "another phrase"] }));
++            assert_eq!(
++                edited_sub_queries(Some(&plan)),
++                Some(["a phrase".to_owned(), "another phrase".to_owned()].as_slice())
++            );
++            // The plan turn and the one-shot carry no client plan, so both plan with the model.
++            assert_eq!(ResearchPhase::Plan.client_plan(), None);
++            assert_eq!(ResearchPhase::OneShot.client_plan(), None);
++        }
++
++        #[test]
++        fn answers_become_one_bounded_line() {
++            let plan = run_plan(&json!({
++                "sub_queries": ["a"],
++                "answers": [
++                    { "question": "Hvilken region?", "answer": "  Vestland  " },
++                    { "question": "Hvilken periode?", "answer": "" },
++                    { "answer": "bare oppdrett" },
++                    { "question": "Q4", "answer": "fourth is past the cap" },
++                ],
++            }));
++            assert_eq!(
++                plan.clarifications.as_deref(),
++                Some("Brukerens presiseringer: Hvilken region? – Vestland; bare oppdrett")
++            );
++
++            let long = run_plan(&json!({
++                "answers": [{ "question": "Q", "answer": "x".repeat(5_000) }],
++            }));
++            assert_eq!(
++                long.clarifications.map(|line| line.chars().count()),
++                Some(MAX_CLARIFICATION_CHARS)
++            );
++
++            let none = run_plan(&json!({ "answers": [{ "question": "Q", "answer": "   " }] }));
++            assert_eq!(none.clarifications, None);
++        }
++
++        #[test]
++        fn answers_are_redacted_like_the_message_when_the_turn_redacts() {
++            let plan = json!({ "answers": [{ "question": "Kontakt?", "answer": "alice@example.com" }] });
++            let redacted = research_phase(true, true, Some(&json!("run")), Some(&plan), 9, true);
++            let line = redacted.client_plan().and_then(|plan| plan.clarifications.clone());
++            assert!(line.is_some_and(|line| !line.contains("alice@example.com")));
++            let kept = run_plan(&plan).clarifications.unwrap_or_default();
++            assert!(kept.contains("alice@example.com"));
++        }
++
++        #[test]
++        fn clarifications_reach_only_the_synthesis_question() {
++            assert_eq!(with_clarifications("Q?", None), "Q?");
++            assert_eq!(
++                with_clarifications("Q?", Some("Brukerens presiseringer: X")),
++                "Q?\n\nBrukerens presiseringer: X"
++            );
++        }
++
++        #[test]
++        fn a_plan_answer_yields_queries_and_at_most_three_questions() {
++            let raw = r#"```json
++{"queries": ["a", "b", "a"], "questions": ["Region?", "region?", "Periode?", "Formål?", "Fjerde?", "{}"]}
++```"#;
++            assert_eq!(parse_sub_queries(raw, "q", 9), vec!["a", "b"]);
++            assert_eq!(parse_plan_questions(raw), vec!["Region?", "Periode?", "Formål?"]);
++            // A plain list or prose asks nothing.
++            assert!(parse_plan_questions("- a\n- b").is_empty());
++            assert!(parse_plan_questions(r#"["a", "b"]"#).is_empty());
++            let prompt = plan_prompt_with_questions("Hva koster laks?", 9);
++            assert!(prompt.contains("\"questions\""));
++            assert!(prompt.ends_with("Question: Hva koster laks?"));
++            assert_eq!(prompt.matches("Question:").count(), 1);
++        }
++
++        #[test]
++        fn the_plan_event_record_and_note_carry_the_plan_and_nothing_else() {
++            let plan = ResearchPlan {
++                sub_queries: vec!["a".into(), "b".into()],
++                questions: vec!["Region?".into()],
++                degraded: false,
++            };
++            assert_eq!(
++                plan.event(9),
++                ChatEvent::ResearchPlan {
++                    sub_queries: vec!["a".into(), "b".into()],
++                    questions: vec!["Region?".into()],
++                    max_sub_queries: 9,
++                }
++            );
++            assert_eq!(
++                plan.record(9),
++                json!({
++                    "version": 1,
++                    "sub_queries": ["a", "b"],
++                    "questions": ["Region?"],
++                    "caps": { "max_sub_queries": 9 },
++                })
++            );
++            let note = plan.context_message();
++            assert_eq!(note.role, "user");
++            assert!(note.content.contains("Do not answer the question"));
++            assert!(note.content.contains("clarifying questions"));
++        }
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index cd449ad52..94a18d7d2 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -9745,6 +9745,18 @@ pub struct InvokeRequest {
+     /// its tool set, whether or not the Search toggle is also on.
+     #[serde(default, alias = "deepResearch")]
+     pub deep_research: bool,
++    /// Wave 3 EP-2 S5 — which turn of a two-turn deep research this is: `"plan"` ends with an
++    /// editable plan and searches nothing, `"run"` runs the plan in `research_plan`. Absent is
++    /// today's one-shot. Kept as raw JSON and read only on a deep-research turn while
++    /// `DEEP_RESEARCH_PLAN_TURN` is on (`deep_research::research_phase`), so a body carrying it is
++    /// parsed exactly as before with the switch off.
++    #[serde(default, alias = "researchPhase")]
++    pub research_phase: Option<serde_json::Value>,
++    /// Wave 3 EP-2 S5 — the edited plan a run turn carries:
++    /// `{sub_queries: [string], answers: [{question, answer}]}`. Untrusted: the gateway re-clamps
++    /// every sub-query and bounds the answers before anything is searched.
++    #[serde(default, alias = "researchPlan")]
++    pub research_plan: Option<serde_json::Value>,
+     /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
+     /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
+     /// when `conversation_only` is in effect — that mode already excludes both
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs
+index 47110147f..bdbdcce69 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
+@@ -2393,6 +2393,27 @@ pub(crate) fn with_work_summary(
+     Some(metadata)
+ }
+ 
++/// The metadata key a deep-research plan turn's plan is stored under (Wave 3 EP-2 S5).
++pub(crate) const RESEARCH_PLAN_KEY: &str = "research_plan";
++
++/// Save a plan turn's plan (`deep_research::ResearchPlan::record`) with its answer, so a reopened
++/// thread shows the plan card. A field of the message that already exists: no table, no column,
++/// and the message's GDPR erase removes it. Nothing is written for a ZDR or waived turn (D12),
++/// which streamed the plan, or when there is no plan; the metadata is then returned exactly as it
++/// was.
++pub(crate) fn with_research_plan(
++    metadata: Option<prost_types::Struct>,
++    plan: Option<&serde_json::Value>,
++    zdr_or_waived: bool,
++) -> Option<prost_types::Struct> {
++    let Some(plan) = plan.filter(|_| !zdr_or_waived) else {
++        return metadata;
++    };
++    let mut metadata = metadata.unwrap_or_default();
++    metadata.fields.insert(RESEARCH_PLAN_KEY.to_owned(), json_to_prost_value(plan));
++    Some(metadata)
++}
++
+ /// The metadata key a declined retrieval's notice code is stored under (D1-242).
+ pub(crate) const RETRIEVAL_DECLINED_KEY: &str = "retrievalDeclined";
+ 
+@@ -2594,6 +2615,20 @@ impl StringExt for String {
+ 
+ #[cfg(test)]
+ mod tests {
++    /// EP-2 S5 (D12): a plan turn stores its plan beside the answer, except on a ZDR or waived turn,
++    /// and a turn with no plan leaves the metadata exactly as it was.
++    #[test]
++    fn a_research_plan_is_stored_only_on_a_retained_turn() {
++        let plan = serde_json::json!({ "version": 1, "sub_queries": ["a"], "questions": [] });
++        let stored = super::with_research_plan(None, Some(&plan), false).expect("stored");
++        assert!(stored.fields.contains_key(super::RESEARCH_PLAN_KEY));
++        assert_eq!(super::with_research_plan(None, Some(&plan), true), None);
++        assert_eq!(super::with_research_plan(None, None, false), None);
++        let existing = super::with_research_plan(Some(stored.clone()), None, false);
++        assert_eq!(existing, Some(stored.clone()));
++        assert_eq!(super::with_research_plan(Some(stored.clone()), Some(&plan), true), Some(stored));
++    }
++
+     /// A send names itself to the transcript only with the switch on, only when the turn keeps a
+     /// transcript at all, and never when it restates the previous question on purpose.
+     #[test]
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index 6705992ee..53c47e026 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -3702,6 +3702,16 @@ pub async fn invoke_stream_sse(
+     // searches, and the loop afterwards must be able to close a named gap the
+     // report could not fill.
+     let deep_research_requested = req.deep_research;
++    // Which turn of a two-turn deep research this is (EP-2 S5). With `DEEP_RESEARCH_PLAN_TURN` off
++    // both fields are ignored and the turn is the one-shot it always was.
++    let research_phase = crate::deep_research::research_phase(
++        crate::deep_research::plan_turn_enabled(),
++        deep_research_requested,
++        req.research_phase.as_ref(),
++        req.research_plan.as_ref(),
++        crate::deep_research::max_sub_queries(),
++        pii_redaction_required,
++    );
+     let web_search_available = !conversation_only
+         && retrieval_scope != crate::normalize::RetrievalScope::KnowledgeOnly
+         && (retrieval_scope == crate::normalize::RetrievalScope::WebOnly
+@@ -4196,7 +4206,35 @@ pub async fn invoke_stream_sse(
+         // failure inside it degrades into a stated fact in the context rather
+         // than failing the turn.
+         let mut deep_research_ran = false;
+-        if deep_research_requested {
++        // The plan a plan turn stores with its answer (EP-2 S5); `None` on every other turn.
++        let mut research_plan_record: Option<serde_json::Value> = None;
++        if deep_research_requested
++            && matches!(research_phase, crate::deep_research::ResearchPhase::Plan)
++        {
++            // The plan turn: one plan inference, the editable plan, and a short answer pointing at
++            // it. It searches nothing, so the forced search below is skipped and the tool rounds
++            // get no tools; the run turn sends the edited plan back.
++            seq = sink.sync_cursor(seq).await;
++            let max_sub_queries = crate::deep_research::max_sub_queries();
++            let plan = crate::deep_research::plan_only(
++                &session_state,
++                &req_id,
++                &org_clone,
++                inference_bearer.as_str(),
++                effective_zdr,
++                min_privacy_tier_wire,
++                &model_clone,
++                &tool_phase_query,
++                &sink,
++            )
++            .await;
++            sink.emit(plan.event(max_sub_queries)).await;
++            seq = sink.sync_cursor(seq).await;
++            research_plan_record = Some(plan.record(max_sub_queries));
++            messages.push(plan.context_message());
++            tool_defs.clear();
++            deep_research_ran = true;
++        } else if deep_research_requested {
+             seq = sink.sync_cursor(seq).await;
+             let research = crate::deep_research::run_deep_research(
+                 &session_state,
+@@ -4212,6 +4250,7 @@ pub async fn invoke_stream_sse(
+                 &model_clone,
+                 messages,
+                 &tool_phase_query,
++                research_phase.client_plan(),
+                 cancel_flag.as_ref(),
+                 Some(&sink),
+             )
+@@ -5811,6 +5850,9 @@ pub async fn invoke_stream_sse(
+                                                     // Why Control declined retrieval for this turn (D1-242) is
+                                                     // stored as its typed code beside the evidence, so a thread
+                                                     // reopened later says what the live stream said.
++                                                    // A plan turn's plan rides beside it, except on a ZDR
++                                                    // or waived turn (EP-2 S5, D12).
++                                                    crate::session_flow::with_research_plan(
+                                                     crate::session_flow::with_retrieval_decline(
+                                                     // A ZDR or waived turn streamed its passages and
+                                                     // stamps but stores neither (D12).
+@@ -5845,6 +5887,9 @@ pub async fn invoke_stream_sse(
+                                                     ),
+                                                     retrieval_decline,
+                                                     ),
++                                                    research_plan_record.as_ref(),
++                                                    effective_zdr || retention_class.is_some(),
++                                                    ),
+                                                     result_receipt
+                                                         .lock()
+                                                         .ok()
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index d9d94fda4..ef0982312 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -449,6 +449,18 @@ pub enum ChatEvent {
+         expires_at: Option<String>,
+         items: Value,
+     },
++    /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
++    /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
++    /// point, so a client that opted into nothing still has to see it. The run turn sends the edited
++    /// plan back and the gateway re-clamps it, so nothing here is trusted on the way back.
++    ResearchPlan {
++        /// The planned search phrases, already normalized and capped.
++        sub_queries: Vec<String>,
++        /// Up to three clarifying questions the plan inference asked; answers travel in the run turn.
++        questions: Vec<String>,
++        /// The most sub-queries a run turn keeps, so the card can stop the user adding past it.
++        max_sub_queries: usize,
++    },
+     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
+     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
+     /// answer streams, when long-term memory was actually injected into the
+@@ -681,7 +693,9 @@ impl ChatEvent {
+             | ChatEvent::ContextChange { .. }
+             | ChatEvent::RunParked { .. }
+             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
+-            | ChatEvent::UserQuestion { .. } => None,
++            | ChatEvent::UserQuestion { .. }
++            // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
++            | ChatEvent::ResearchPlan { .. } => None,
+         }
+     }
+ 
+@@ -725,6 +739,7 @@ impl ChatEvent {
+             ChatEvent::FollowUps { .. } => "follow_ups",
+             ChatEvent::PlanProposed { .. } => "plan_proposed",
+             ChatEvent::UserQuestion { .. } => "user_question",
++            ChatEvent::ResearchPlan { .. } => "research_plan",
+             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
+             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
+             // ---- usage progress (WS27) ----
+@@ -987,6 +1002,16 @@ impl ChatEvent {
+                 "items": items,
+                 "request_id": request_id,
+             }),
++            ChatEvent::ResearchPlan {
++                sub_queries,
++                questions,
++                max_sub_queries,
++            } => json!({
++                "sub_queries": sub_queries,
++                "questions": questions,
++                "caps": { "max_sub_queries": max_sub_queries },
++                "request_id": request_id,
++            }),
+             ChatEvent::QueuedInput { messages } => {
+                 json!({ "messages": messages, "request_id": request_id })
+             }
+@@ -3407,6 +3432,7 @@ mod payload_contract {
+         "FollowUps",
+         "PlanProposed",
+         "UserQuestion",
++        "ResearchPlan",
+         "Verification",
+         "MemoryRecall",
+         "QueuedInput",
+@@ -3443,6 +3469,7 @@ mod payload_contract {
+             ChatEvent::FollowUps { .. } => "FollowUps",
+             ChatEvent::PlanProposed { .. } => "PlanProposed",
+             ChatEvent::UserQuestion { .. } => "UserQuestion",
++            ChatEvent::ResearchPlan { .. } => "ResearchPlan",
+             ChatEvent::Verification { .. } => "Verification",
+             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
+             ChatEvent::QueuedInput { .. } => "QueuedInput",
+@@ -3825,6 +3852,12 @@ mod payload_contract {
+                     "allow_other": true,
+                 }]),
+             },
++            ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
++            ChatEvent::ResearchPlan {
++                sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
++                questions: vec![s("Hvilken region?")],
++                max_sub_queries: 9,
++            },
+             ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
+             ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
+             memory_recall(false),
+@@ -4043,6 +4076,26 @@ mod payload_contract {
+         assert_eq!(payload["request_id"], "req-4");
+     }
+ 
++    /// `research_plan` is a control event carrying the plan, the questions and the cap the card
++    /// enforces, and nothing else (EP-2 S5).
++    #[test]
++    fn research_plan_is_a_control_event_with_the_card_keys() {
++        let event = ChatEvent::ResearchPlan {
++            sub_queries: vec!["a".into(), "b".into()],
++            questions: vec!["Which year?".into()],
++            max_sub_queries: 9,
++        };
++        assert_eq!(event.name(), "research_plan");
++        assert!(event.family().is_none(), "the plan card is never feature-gated");
++        assert!(event.should_emit(&[]));
++        let payload = event.payload("req-5");
++        assert_eq!(payload["sub_queries"], json!(["a", "b"]));
++        assert_eq!(payload["questions"], json!(["Which year?"]));
++        assert_eq!(payload["caps"], json!({ "max_sub_queries": 9 }));
++        assert_eq!(payload["request_id"], "req-5");
++        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
++    }
++
+     #[test]
+     fn every_variant_has_a_minimal_and_a_full_sample() {
+         let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs
+index d049c61c1..842d5e398 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
+@@ -107,6 +107,17 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
+     ("browse_web", refused_feature("web_search")),
+     ("skill_ids", refused_feature("skills")),
+     ("deep_research", refused_feature("deep_research")),
++    // EP-2 S5: the plan and run turns of a two-turn deep research. Both only shape a deep-research
++    // turn, which `deep_research` refuses before either phase, so a plan turn under ZDR gets the
++    // same refusal and neither field has anything to do on its own.
++    (
++        "research_phase",
++        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
++    ),
++    (
++        "research_plan",
++        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
++    ),
+     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
+     // then reads org knowledge only, and no web source was asked for.
+     ("retrieval_scope", refused_feature("web_search")),
+@@ -259,6 +270,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         browse_web: _,
+         skill_ids: _,
+         deep_research: _,
++        research_phase: _,
++        research_plan: _,
+         retrieval_scope: _,
+         connector_scope: _,
+         regenerated: _,
+@@ -316,6 +329,8 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         "browse_web",
+         "skill_ids",
+         "deep_research",
++        "research_phase",
++        "research_plan",
+         "retrieval_scope",
+         "connector_scope",
+         "regenerated",
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs
+index 2dbe8ab5d..3cea334e5 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
+@@ -138,6 +138,27 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
+             with("deep_research", json!(true)),
+             refused("deep_research"),
+         ),
++        // EP-2 S5: the phase and plan fields alone change nothing on a ZDR turn; a plan turn rides on
++        // `deep_research`, which is refused before either phase runs.
++        ("research_phase", with("research_phase", json!("plan")), None),
++        ("research_plan", with("research_plan", json!({"sub_queries": ["a"]})), None),
++        // e_zdr_token_deep_research_plan_turn_refused: the plan turn itself, refused for
++        // `deep_research` before any plan inference.
++        (
++            "research_phase",
++            json!({"content": "hello", "deep_research": true, "research_phase": "plan"}),
++            refused("deep_research"),
++        ),
++        (
++            "research_plan",
++            json!({
++                "content": "hello",
++                "deep_research": true,
++                "research_phase": "run",
++                "research_plan": {"sub_queries": ["a"], "answers": []},
++            }),
++            refused("deep_research"),
++        ),
+         (
+             "retrieval_scope",
+             with("retrieval_scope", json!("web_only")),

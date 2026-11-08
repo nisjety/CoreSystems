@@ -1,0 +1,87 @@
+   Compiling session-core v0.1.0 (C:\dev\CoresSystem\.claude\worktrees\epic-shaw-4d613b\apps\Model Plane\rust\services\session-core)
+warning: variant `Erased` is never constructed
+   --> services\session-core\src\retention_sweeper.rs:381:5
+    |
+380 | pub(crate) enum WorkspaceErasure {
+    |                 ---------------- variant in this enum
+381 |     Erased,
+    |     ^^^^^^
+    |
+    = note: `WorkspaceErasure` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `start_managed_run_inner` is never used
+   --> services\session-core\src\terminalization.rs:751:21
+    |
+751 | pub(crate) async fn start_managed_run_inner(
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `session-core` (bin "session-core") generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 17s
+     Running unittests src\main.rs (target\debug\deps\session_core-b02e528f8c630e16.exe)
+
+running 7 tests
+test thread_export::tests::export_is_refused_while_the_switch_is_off ... ok
+test thread_export::tests::export_lists_active_branch_only ... ok
+test thread_export::tests::other_owner_is_not_found ... ok
+test thread_export::tests::run_summary_carries_origin ... ok
+test thread_export::tests::space_thread_is_not_exportable ... ok
+test thread_export::tests::thread_with_waived_run_is_not_exportable ... ok
+test thread_export::tests::thread_with_zdr_run_is_not_exportable ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1704 filtered out; finished in 7.51s
+
+     Running tests\attention_acl_contract.rs (target\debug\deps\attention_acl_contract-703b5efb263906e8.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests\attention_zdr_matrix.rs (target\debug\deps\attention_zdr_matrix-1d082b0e56e44c7c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests\metric_label_guard.rs (target\debug\deps\metric_label_guard-1cd184b86ab35875.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests\outbox_emission.rs (target\debug\deps\outbox_emission-7e5e4b3001f5040e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests\replay_deterministic.rs (target\debug\deps\replay_deterministic-6cfec5eb4e6ca137.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests\runtime_lifecycle.rs (target\debug\deps\runtime_lifecycle-4f523af0a7f587e2.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests\skill_drafts.rs (target\debug\deps\skill_drafts-b05a327a377ef8a3.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests\space_services_registered.rs (target\debug\deps\space_services_registered-a74abb6fc0770d62.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests\zdr_refusal_inventory.rs (target\debug\deps\zdr_refusal_inventory-5db867d8ae193631.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+

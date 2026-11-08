@@ -1,0 +1,536 @@
+[
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 50,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.UserProfileResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 50,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"UserProfileResponse\" should be named \"GetUserProfileResponse\" or \"MemoryServiceGetUserProfileResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 56,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.UserProfileResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 56,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"UserProfileResponse\" should be named \"SetUserProfileResponse\" or \"MemoryServiceSetUserProfileResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 61,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.UserProfileResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 61,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"UserProfileResponse\" should be named \"RebuildUserProfileResponse\" or \"MemoryServiceRebuildUserProfileResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 333,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"MEMORY_STATE_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 346,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetMemoryControlsRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 354,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SetMemoryControlsRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 402,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetMemoryControlsResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 403,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"controls\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 406,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SetMemoryControlsResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 407,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"controls\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 410,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResetMemoryRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 422,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResetMemoryResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 463,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetUserProfileRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 471,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SetUserProfileRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 485,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RebuildUserProfileRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+  "line": 496,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"UserProfileResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 123,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"CancelRunAsRoomManagerRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 130,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_control_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 137,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"CancelRunAsRoomManagerResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 144,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"owner_user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 147,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"AuthorizeRoomRunAttachRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 157,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"AuthorizeRoomRunAttachResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 174,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"connection\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 197,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"contract_digest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 198,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"contract_expires_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 327,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"approval_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 335,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"approval_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 358,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_resource_authorization_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "line": 393,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"contract_expires_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 254,
+  "type": "SERVICE_SUFFIX",
+  "message": "Service name \"ThreadAutonomy\" should be suffixed with \"Service\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 276,
+  "type": "SERVICE_SUFFIX",
+  "message": "Service name \"MessageSearch\" should be suffixed with \"Service\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 436,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"subject_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 437,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 438,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"wake_state\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 442,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"ordinal\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 639,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"contract_digest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 640,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"contract_expires_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1111,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"review_state\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1115,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"source_thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1116,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"proposal_reason\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1172,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"source_run_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1173,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"source_thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1174,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"proposal_reason\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1326,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1327,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"version\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1328,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"link_previews\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1333,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"url\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1334,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"final_url\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1335,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"host\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1338,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"site_name\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1339,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"fetched_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1344,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ReviseMessageRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1378,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ReviseMessageResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1385,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"revised_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1392,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResolveMessageTargetRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1406,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResolveMessageTargetResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1812,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"output\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1815,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"rounds_executed\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1816,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"withheld_effects\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1817,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"tool_calls\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1818,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"input_tokens\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1819,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"output_tokens\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1827,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1863,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetThreadGrantRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1870,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetThreadGrantResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1886,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"BindGrantToRunRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 1896,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"BindGrantToRunResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2060,
+  "type": "ENUM_ZERO_VALUE_SUFFIX",
+  "message": "Enum zero value name \"SEARCH_PURPOSE_UI\" should be suffixed with \"_UNSPECIFIED\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2133,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"SKILL_DECISION_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2134,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"SKILL_DECISION_ACCEPT\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2135,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"SKILL_DECISION_REJECT\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2144,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"decision\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2170,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"skill_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2199,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"skill_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2200,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"skill_name\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2205,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"actor_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2208,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"reason\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "line": 2212,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"after_json\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 216,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.ThreadGoalResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 216,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"ThreadGoalResponse\" should be named \"SetThreadGoalResponse\" or \"ThreadGoalServiceSetThreadGoalResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 218,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.ThreadGoalResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 218,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"ThreadGoalResponse\" should be named \"GetThreadGoalResponse\" or \"ThreadGoalServiceGetThreadGoalResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 220,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.ThreadGoalResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 220,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"ThreadGoalResponse\" should be named \"UpdateThreadGoalResponse\" or \"ThreadGoalServiceUpdateThreadGoalResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 226,
+  "type": "RPC_REQUEST_RESPONSE_UNIQUE",
+  "message": "\"model_plane.v1.ThreadGoalResponse\" is used as the request or response type for multiple RPCs."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/thread_goals.proto",
+  "line": 226,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"ThreadGoalResponse\" should be named \"SettleGoalTurnResponse\" or \"ThreadGoalServiceSettleGoalTurnResponse\"."
+ }
+]

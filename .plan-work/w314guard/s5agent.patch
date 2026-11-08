@@ -1,0 +1,146 @@
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index ad5d59a48..6d6b125d1 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -4540,21 +4540,28 @@ async fn run_rounds(
+                         });
+                     // EP-1 S1: the browser call a takeover paused runs only once the person has given
+                     // the browser back. While Quarry still says the person holds it, the call is not
+-                    // dispatched and the model reads that the person is using the browser.
+-                    let still_taken_over = match browser.as_ref() {
+-                        Some(browser)
+-                            if is_release
+-                                && crate::browser_session::is_do_tool(&call.name)
+-                                && crate::browser_session::takeover_pause_enabled() =>
+-                        {
+-                            released_browser_call_still_held(ctx, browser).await
++                    // dispatched and the model reads that the person is using the browser. EP-1 S5:
++                    // after the give-back it also needs a grant that outlived the takeover, read back
++                    // under the person's click-time bearer; a run whose wait ran out is told so.
++                    let handback_refusal = if is_release
++                        && crate::browser_session::is_do_tool(&call.name)
++                        && crate::browser_session::takeover_pause_enabled()
++                    {
++                        match browser.as_ref() {
++                            Some(browser) => released_browser_call_refusal(ctx, browser).await,
++                            None if !zdr && ctx.depth == 0 && req.space_id.is_empty() => {
++                                crate::browser_session::handback_without_bearer(
++                                    ctx.state,
++                                    &req.run_id,
++                                )
++                            }
++                            None => None,
+                         }
+-                        _ => false,
++                    } else {
++                        None
+                     };
+-                    let outcome = if still_taken_over {
+-                        Some(StepOutcome::failed(
+-                            &crate::browser_session::TAKEN_OVER.text(),
+-                        ))
++                    let outcome = if let Some(refusal) = handback_refusal {
++                        Some(StepOutcome::failed(&refusal.text()))
+                     } else {
+                         Some(
+                         runtime_loop::retry::run_attempts(
+@@ -4985,7 +4992,19 @@ async fn run_rounds(
+             // EP-1 S1: the page the person holds outlives this request, so the give-back resumes the
+             // run on it; and the run's events say the browser is with the person.
+             if pending.cause == CauseCode::BrowserHumanAssist {
+-                crate::browser_session::hold_for_person(&req.run_id);
++                let hold = crate::browser_session::hold_for_person(&req.run_id);
++                // EP-1 S5: a page the person never gives back is closed once the approval's wait
++                // runs out, so the takeover cannot hold a Quarry run and a grant without end.
++                if let Some(bearer) = ctx.browser_bearer {
++                    crate::browser_session::expire_hold_after(
++                        ctx.state,
++                        bearer,
++                        &req.org_id,
++                        &req.run_id,
++                        hold,
++                        approval_ttl_seconds(pending.cause),
++                    );
++                }
+                 let epoch = taken_over_epoch(ctx).await;
+                 publish_browser_takeover(ctx, true, epoch).await;
+             }
+@@ -8450,6 +8469,19 @@ fn approval_cause_for_pause(
+     stored
+ }
+ 
++/// How long an ordinary pause's approval waits for a decision.
++const APPROVAL_TTL_SECONDS: u32 = 3600;
++
++/// The TTL of a pause's approval. A takeover waits the configured assist wait (EP-1 S5), since the
++/// person holds a live page and its grant meanwhile; every other pause waits the hour.
++fn approval_ttl_seconds(cause: CauseCode) -> u32 {
++    if cause == CauseCode::BrowserHumanAssist {
++        crate::browser_session::assist_ttl_seconds()
++    } else {
++        APPROVAL_TTL_SECONDS
++    }
++}
++
+ /// HITL pause: mint a durable approval for the gated tool (same shape as the
+ /// `ExecuteStep` RPC), then flip the run `AwaitingApproval` and return an
+ /// `awaiting_approval` response. A persistence failure returns `unavailable`
+@@ -8550,7 +8582,7 @@ async fn pause_for_approval(
+             org_id: req.org_id.clone(),
+             user_id: req.user_id.clone(),
+             reason: approval_reason_for_call(gate, tool_name, tool_input),
+-            expires_in_seconds: 3600,
++            expires_in_seconds: approval_ttl_seconds(cause),
+             // Let session-core mint the durable approval id (matrix §4.1).
+             client_approval_id: String::new(),
+             // Stable per-(run, step) idempotency key (D-1): a re-paused step
+@@ -9499,6 +9531,23 @@ async fn taken_over_epoch(ctx: &LoopContext<'_>) -> u64 {
+         .map_or(0, |control| control.control_epoch)
+ }
+ 
++/// What stops a released Do browser call after a takeover, `None` to dispatch it: a wait that ran out
++/// (EP-1 S5), the person still holding the browser (S1), or a grant the give-back finds lapsed (S5).
++/// The timeout is read first, because ending the hold forgets it.
++async fn released_browser_call_refusal(
++    ctx: &LoopContext<'_>,
++    browser: &crate::browser_session::BrowserDispatch<'_>,
++) -> Option<crate::browser_session::Refusal> {
++    if let Some(timed_out) = crate::browser_session::take_help_timed_out(browser.run_id) {
++        return Some(timed_out);
++    }
++    if released_browser_call_still_held(ctx, browser).await {
++        return Some(crate::browser_session::TAKEN_OVER);
++    }
++    let quarry = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
++    crate::browser_session::revalidate_after_handback(browser, quarry.as_ref()).await
++}
++
+ /// Whether the browser call a takeover paused must stay held: Quarry says the person still holds the
+ /// browser (EP-1 S1). Once it is given back the hold ends and the give-back is published. A control
+ /// that cannot be read releases the call: Quarry's own gate still refuses an agent step while the
+@@ -16614,6 +16663,25 @@ mod tests {
+         for id in ["grant-1", "run-q1", "lease-q1"] {
+             assert!(!format!("{cause:?}").contains(id), "{id} is in the cause: {cause:?}");
+         }
++        assert_eq!(
++            rec.approval_requests[0].expires_in_seconds,
++            crate::browser_session::assist_ttl_seconds(),
++            "a takeover waits the assist wait, not the hour (EP-1 S5)"
++        );
++    }
++
++    /// EP-1 S5: only a takeover pause waits the configured assist wait; every other cause keeps the
++    /// hour, so the setting changes nothing while no takeover pauses.
++    #[test]
++    fn only_a_takeover_pause_waits_the_assist_ttl() {
++        let assist = crate::browser_session::assist_ttl_seconds();
++        assert!((300..=3600).contains(&assist), "{assist}");
++        assert_eq!(approval_ttl_seconds(CauseCode::BrowserHumanAssist), assist);
++        for cause in CauseCode::ALL {
++            if cause != CauseCode::BrowserHumanAssist {
++                assert_eq!(approval_ttl_seconds(cause), 3600, "{cause:?}");
++            }
++        }
+     }
+ 
+     #[tokio::test]

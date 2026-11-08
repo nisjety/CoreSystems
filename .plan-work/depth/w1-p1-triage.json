@@ -1,0 +1,1178 @@
+{
+ "packets": [
+  {
+   "key": "ws06-org-core-siem-seal-boot",
+   "rows": [
+    "D1-185",
+    "D1-189",
+    "D1-194",
+    "D1-198",
+    "D1-203",
+    "D1-207"
+   ],
+   "title": "org-core: refuse to start when ORG_SIEM_DESTINATIONS_ENABLED is on and the SIEM seal key is missing or invalid",
+   "brief": "Defect: with ORG_SIEM_DESTINATIONS_ENABLED=1 (or true) and ORG_CORE_SIEM_SEAL_KEY missing or invalid, org-core boots anyway. internal/http/server.go:74-86 only log.Printf's the NewSIEMSealerFromEnv error, so the SIEM routes stay mounted and answer 503 forever. The fix is boot validation. (1) In internal/http/siem_handlers.go, add an exported func ValidateSIEMDestinationsConfig(getenv func(string) string) error. When siemDestinationsEnabled(getenv) is false it returns nil and reads nothing else. When the flag is on it returns the error from orgcore.NewSIEMSealerFromEnv(getenv), wrapped with the flag name and never including the key value. (2) In cmd/server/main.go, call it right after the existing ValidateRequiredServiceCredentialRegistry check at the top of main(), using os.Getenv, and log.Fatalf(\"[org-core startup] SIEM destinations validation failed: %v\", err) on error, the same way the credential-registry check fails. Keep NewServer's runtime fallback (log plus 503) untouched as defence in depth. Regression tests go in internal/http/siem_handlers_test.go and need a fake getenv: flag off with no key returns nil; flag \"1\" with no key returns an error; flag on with a malformed key (wrong length or non-base64) returns an error; flag on with a valid 32-byte base64 key returns nil; the error text never contains the key material. Must NOT change: the switch stays default off, and with it off the boot behaviour is identical (no new env read is required). Never log or print the seal key. The files are CRLF, so keep their line endings. Don't touch docker-compose.yml or the scripts.",
+   "files": [
+    "apps/Control Plane/org-core/cmd/server/main.go",
+    "apps/Control Plane/org-core/internal/http/siem_handlers.go",
+    "apps/Control Plane/org-core/internal/http/siem_handlers_test.go"
+   ],
+   "tests": [
+    "go test ./internal/http/ -run SIEM -count=1",
+    "go build ./...",
+    "go vet ./cmd/server/ ./internal/http/"
+   ],
+   "cwd": "apps/Control Plane/org-core",
+   "severity": "high"
+  },
+  {
+   "key": "ws06-audit-verify-signed-manifest-range",
+   "rows": [
+    "D1-346",
+    "D1-383",
+    "D1-385"
+   ],
+   "title": "audit-verify CLI: verify the manifest signature and support a sub-range export",
+   "brief": "Defect: cmd/audit-verify/main.go only reads org_id, last_seq, last_row_hash, checkpoint, attestation and legacy_unchained_rows from the manifest (struct at main.go:97-104). It never checks the manifest signature that the server now produces. That signature is internal/store/compliance.go ComplianceManifest plus ManifestPayload at :254-277, signed via chain.KeyRing.SignPayload at internal/chain/sign.go:209, verifiable with KeyRing.VerifyPayload at sign.go:214. The CLI also always treats manifest last_seq as the chain head (main.go:192-194), so a sub-range export (the manifest's last_seq < head_seq, which the API produces for since/until) is reported broken or truncated_below_attestation even when the rows are intact. The fix: (1) Extend the CLI manifest struct with generated_at, first_seq, count, first_prev_hash, head_seq, head_hash, key_id and signature. Unknown fields are already allowed. (2) When key_id and signature are present, rebuild the payload with store.ManifestPayload (import internal/store and do not duplicate the byte format) and verify it with ring.VerifyPayload. On an invalid signature, exit 2 (broken) with a clear stderr line. On an unknown key id, exit 3 (unverifiable). With no signature, print \"manifest: unsigned\" in the report and keep today's exit behaviour for full-range exports. (3) Range mode applies when the manifest has head_seq > last_seq. Require a valid manifest signature, otherwise exit 3. Verify the rows from first_seq with FromSeq=first_seq and FromHash=first_prev_hash. Use Head={last_seq,last_row_hash} as the range end. Don't pass a newest attestation above last_seq: it would falsely report truncation. Check that the row count equals manifest count. Print that the range is anchored by the signed manifest rather than by an attestation. Never print a bare \"verified\" for a range that no signature anchors. Must NOT change: full-range verification results and exit codes for existing inputs (the current main_test.go cases must pass unchanged), the export row format, and anything under internal/store or internal/verifier. The files may be CRLF, so keep their line endings. Add table tests to cmd/audit-verify/main_test.go: signed full manifest verifies; tampered manifest field (for example last_seq or legacy count) gives exit 2; unknown key id gives exit 3; signed sub-range verifies (exit 0) where the old code reported broken; unsigned sub-range gives exit 3; existing unsigned full manifest is unchanged.",
+   "files": [
+    "apps/Control Plane/audit-core/cmd/audit-verify/main.go",
+    "apps/Control Plane/audit-core/cmd/audit-verify/main_test.go"
+   ],
+   "tests": [
+    "go test ./cmd/audit-verify/ -count=1",
+    "go vet ./cmd/audit-verify/",
+    "go build ./..."
+   ],
+   "cwd": "apps/Control Plane/audit-core",
+   "severity": "normal"
+  },
+  {
+   "key": "ws06-audit-chain-purge-blocked-metric",
+   "rows": [
+    "D1-311",
+    "D1-315",
+    "D1-338",
+    "D1-342"
+   ],
+   "title": "audit-core: count blocked chain purges and alert on them",
+   "brief": "Defect: a blocked chained purge only writes an audit_chain_incidents row and a log line (internal/store/attest.go blockPurge at :326-339). No metric counts it, so nothing alerts. A blocked org also writes a new incident row on every daily sweep. The fix: (1) In internal/metrics/server.go, add an unlabelled-by-org counter audit_core_chain_purge_blocked_total with a single label \"kind\" (the bounded incident kinds in attest.go:41-49). Register it in init() and expose RecordChainPurgeBlocked(kind string). Keep the no-org-label rule stated in the comment at server.go:77-78. (2) In internal/store/attest.go blockPurge, call metrics.RecordChainPurgeBlocked(kind) after the incident insert succeeds. This fires in both dry-run and enabled modes, matching the incident row. (3) In apps/Control Plane/observability/rules/audit-core.rules.yml, add an alert ControlAuditChainPurgeBlocked: expr increase(audit_core_chain_purge_blocked_total[25h]) > 0, severity critical, plane control. The 25h window covers the daily sweep. Add a matching case to audit-core.rules.test.yml in the same style as the ControlAuditChainBroken cases. (4) Regression test: in internal/store/purge_chain_test.go, TestPurgeRefusesATamperedPrefixAndDeletesNothing (or a new test beside it) asserts that the counter for the incident kind rose by exactly 1 per blocked org. Reuse the counterValue helper pattern from chain_insert_test.go. Must NOT change: purge behaviour, incident rows, the switches (AUDIT_CHAIN_PRUNE_ENABLED and DRYRUN stay default off), and no org id, row content or details may go into any label. ZDR: the series is content-free. The files may be CRLF, so keep their line endings.",
+   "files": [
+    "apps/Control Plane/audit-core/internal/metrics/server.go",
+    "apps/Control Plane/audit-core/internal/store/attest.go",
+    "apps/Control Plane/audit-core/internal/store/purge_chain_test.go",
+    "apps/Control Plane/observability/rules/audit-core.rules.yml",
+    "apps/Control Plane/observability/rules/audit-core.rules.test.yml"
+   ],
+   "tests": [
+    "go build ./... && go vet ./internal/metrics/ ./internal/store/",
+    "go test ./internal/metrics/ ./internal/store/ -run 'Purge|DetailsGuard' -count=1  (the DB-backed purge tests need the audit-core Postgres test harness; they skip without it)"
+   ],
+   "cwd": "apps/Control Plane/audit-core",
+   "severity": "normal"
+  },
+  {
+   "key": "ws06-audit-verifier-cursor-above-head",
+   "rows": [
+    "D1-347"
+   ],
+   "title": "audit-core verifier loop: a saved cursor above the chain head (after a restore) must reset, not report head_behind_chain",
+   "brief": "Defect: after audit tables are restored from an older copy, audit_chain_verifications.verified_through_seq can exceed the restored head. verifier.verifyOrg (internal/verifier/verifier.go:580-629) resumes from st.ThroughSeq (:593-594). Verify then reads no rows, so rangeEnd = FromSeq-1 > Head.Seq, and it returns broken/head_behind_chain (:380-381) with no real defect. Two things keep it there: the broken branch keeps the cursor (:605-609), and :620 only ever raises ThroughSeq, so every later pass repeats the false break. The fix, inside verifyOrg only: when the report is broken with ReasonHeadBehindChain and the run resumed from a stored cursor (opts.FromSeq > 0), log a warning (org id and the two sequence numbers only) and re-run once from the trust base (Options with FromSeq/FromHash zero and the same MaxRows). Use that report from then on. On a non-broken result, when the run started from the trust base and rep.Complete, set next.ThroughSeq/ThroughHash to rep's values even if they are lower than st.ThroughSeq, so the stale cursor is replaced. Keep the existing raise-only rule for incremental runs. A genuine head_behind_chain (rows beyond the head) must still end broken after the re-run, and verifyFailures must be incremented exactly once per pass. Regression tests go in internal/verifier/verifier_test.go using the existing fakeSource (around :600-720): the state has ThroughSeq above the fake head, a clean chain ends verified with ThroughSeq reset to the head and no failure counted, and a chain whose rows really extend past the head still ends broken with head_behind_chain and counts one failure. Must NOT change: the Verify() rules, the store package, the switches, or the broken-chain cursor behaviour for every other reason. The files may be CRLF, so keep their line endings.",
+   "files": [
+    "apps/Control Plane/audit-core/internal/verifier/verifier.go",
+    "apps/Control Plane/audit-core/internal/verifier/verifier_test.go"
+   ],
+   "tests": [
+    "go test ./internal/verifier/ -count=1",
+    "go vet ./internal/verifier/"
+   ],
+   "cwd": "apps/Control Plane/audit-core",
+   "severity": "normal"
+  },
+  {
+   "key": "ws07-memory-grpc-thread-gate-reset-learning-policy",
+   "rows": [
+    "D1-573",
+    "D1-574",
+    "D1-597",
+    "D1-552"
+   ],
+   "title": "session-core: thread-aware SearchMemory/IndexMemory/learning announce, real org_learning_policy, Reset reaches Letta-only memories",
+   "brief": "Service: apps/Model Plane/rust/services/session-core (files are LF, keep LF). Four defects, all confirmed in the current tree.\n\n(1) D1-573/D1-574 thread memory mode ignored by readers. memory_grpc.rs search_memory (call at ~line 383) and index_memory (calls at ~503 and ~524) use the user-level crate::memory_control::resolve(&self.pool,false,org,&owner_user_id). A thread whose threads.memory_mode='off' (WS07-S6) therefore still returns the user's rows from SearchMemory and still accepts IndexMemory. Change all three to crate::memory_control::resolve_for_thread(&self.pool,false,req.org_id.trim(),&owner_user_id,req.thread_id.trim()) (it already exists in memory_control.rs:409 and is a no-op when MEMORY_CONTROLS_ENABLED is falsey). Do NOT edit memory_control.rs or dreaming.rs (another packet owns them; the under-lock check inside dreaming::index_agent_memory is handled there).\n   learning_events.rs enqueue_row (~line 330-344): inside the existing `if crate::memory_control::controls_enabled()` branch, after the user-level resolve, when identity.thread_id is Some, read the thread's mode on the same savepoint executor with `SELECT memory_mode FROM threads WHERE id = $1 AND org_id = $2` (fetch_optional) and fold it with the existing pub(crate) helpers: mode = value.map_or(ThreadMemoryMode::Inherit, |v| ThreadMemoryMode::from_wire(&v).unwrap_or(ThreadMemoryMode::Off)); decision = crate::memory_control::apply_thread_mode(decision, mode); if !decision.learning_allowed return Ok(Enqueued::SkippedMemoryState). Keep the lock-free read (no FOR UPDATE). The existing source-guard test around learning_events.rs:669 must keep passing.\n\n(2) D1-597 GetMemoryControls reports org_learning_policy as \"\" (memory_grpc.rs:980). Add to org_policy.rs a pure fn `pub(crate) fn learning_policy_label(row: Option<&MirrorRow>, now: DateTime<Utc>, settings: &GateSettings) -> &'static str` returning: \"\" when !settings.governed (behaviour identical to today when the org policy is not configured); \"unavailable\" when view_from_row(...).memory == OrgMemoryPolicy::Unavailable; otherwise \"proposals\" if view_from_row(...).learning_review else \"disabled\". In memory_controls_view (memory_grpc.rs ~939): for a ZDR caller keep \"\"; else when controls_enabled() and settings().governed, read crate::org_policy::mirror_row(pool, org_id) and set org_learning_policy to the label; otherwise \"\". Do not change the proto (its comment already says the field is filled once the mirror exists).\n\n(3) D1-552 ResetMemory leaves Letta-only memories. reset_memory (memory_grpc.rs ~865-920) erases only the semantic twins of durable ids returned by dreaming::reset_user_memory, but ListMemory (same file ~628-650) also shows Letta entries with no durable row, and those survive a 'Reset all memory'. After the durable reset and before erase_semantic_copies: when self.letta is Some, call letta.list_detailed(org_id, user_id, crate::memory_erasure::MAX_SEMANTIC_DELETES as u32); collect entries with a non-empty memory_id that are not already in `erased` (factor this into a pure helper, e.g. `fn semantic_only_ids(erased: &[String], listed: &[MemoryEntry]) -> Vec<String>`), insert them into forgotten_memory_ids (org_id, user_id, memory_id) ON CONFLICT DO NOTHING so recall stays suppressed even if a delete degrades, and append them to erased_rows (owner = user_id) so erase_semantic_copies deletes them. If the list itself is degraded (outcome.degradation_reason is Some), the response must report degraded=true with that reason (do not claim completeness). durable_deleted stays the durable count. Reset must remain user-only (service callers refused), confirm-required, and allowed for ZDR callers; no new content is written anywhere.\n\nTests to add (unit, no database): in org_policy.rs tests: learning_policy_label returns \"\" ungoverned, \"unavailable\" for fail-closed missing/stale row, \"disabled\" for memory_allowed=false or learning_mode='disabled', \"proposals\" for allowed+proposals. In memory_grpc.rs tests: semantic_only_ids excludes already-erased and empty ids and de-duplicates. Add a source-guard test in memory_grpc.rs asserting search_memory and index_memory bodies call memory_control::resolve_for_thread( and not memory_control::resolve( . Optionally an #[ignore] DATABASE_URL test that a thread set off gets empty SearchMemory with skip_reason thread_off and IndexMemory failed_precondition. Must NOT change: MEMORY_CONTROLS_ENABLED default-on semantics and its kill-switch behaviour, ORG_POLICY_* defaults, ZDR handling, delete paths staying ungated.",
+   "files": [
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+    "apps/Model Plane/rust/services/session-core/src/org_policy.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p session-core --all-targets",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --lib -- memory_grpc org_policy learning_events memory_control"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws07-thread-resume-watermark",
+   "rows": [
+    "D1-570"
+   ],
+   "title": "session-core: per-thread resume watermark so messages written while a thread was off are never mined; IndexMemory under-lock thread check",
+   "brief": "Service: apps/Model Plane/rust/services/session-core (files are LF, keep LF). Defect: switching a thread's memory_mode from 'off' back to 'inherit' (UpdateThreadPresentation, grpc.rs ~7679-7721) moves no watermark. Dreaming's load_pending_messages and load_preceding_context (dreaming.rs ~1270-1360) only filter on user_memory_controls.extract_after, and memory_control::permits_extraction (memory_control.rs ~553-574) only checks the CURRENT memory_mode, so messages written while the thread was off are mined after it resumes. The user-level resume bumps extract_after; the thread toggle must behave the same.\n\nFix: (a) new migration migrations/0068_thread_memory_resumed_at.sql (next free session-core number per plan section 4.4; additive, idempotent): `ALTER TABLE threads ADD COLUMN IF NOT EXISTS memory_resumed_at TIMESTAMPTZ NULL;` plus migrations/revert/0068_thread_memory_resumed_at.down.sql dropping it (follow 0067's style). (b) grpc.rs update_thread_presentation UPDATE: add `memory_resumed_at = CASE WHEN $13 AND memory_mode = 'off' AND $14 = 'inherit' THEN clock_timestamp() ELSE memory_resumed_at END` (SET expressions see the old row, so this fires only on an off->inherit transition); keep the existing lock_user call and event. (c) memory_control.rs permits_extraction SQL: add `AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at)` ($4 is controls_enabled()). (d) dreaming.rs load_pending_messages and load_preceding_context: add the same conjunct gated on the controls_enabled bind they already have ($2 / $4 respectively), so the extractor neither reads nor is shown off-period turns. (e) Related D1-573 under-lock half: dreaming::index_agent_memory (~line 1646) calls memory_control::resolve_in_tx(&mut tx,false,org_id,owner_user_id); change to resolve_in_tx_for_thread(&mut tx,false,org_id,owner_user_id,thread_id) so a thread set off between the handler check and the write is refused under the lock; update the gates array in memory_control.rs every_agent_memory_writer_calls_the_gate (~line 1035-1039) from \"resolve_in_tx(\" to \"resolve_in_tx_for_thread(\" for that entry point. Do NOT edit memory_grpc.rs or learning_events.rs (another packet owns them).\n\nTests: unit/source-guard in memory_control.rs that permits_extraction's SQL contains memory_resumed_at; a test that the migration and its revert exist with the expected statements (pattern of org_policy.rs:590-595); an #[ignore = \"requires DATABASE_URL to a disposable Postgres\"] test in grpc.rs next to thread_off_blocks_read_and_write_for_that_thread_only (~line 4193): set a thread off, append a user message, set it back to inherit, append another, assert memory_resumed_at is set and permits_extraction is false for the first message and true for the second. Must NOT change: kill switch MEMORY_CONTROLS_ENABLED falsey restores old behaviour (all new conjuncts gated on it), inherit->off and inherit->inherit leave memory_resumed_at untouched, ZDR refusal of memory_mode unchanged, gateway still does not send memory_mode (http_routes.rs:9403 stays None). Also run the full session-core lib tests: this proves the WS07-S8 code (grpc.rs skill RPCs, gdpr.rs) now compiles and passes (D1-642).",
+   "files": [
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_control.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs"
+   ],
+   "new_files": [
+    "apps/Model Plane/rust/services/session-core/migrations/0068_thread_memory_resumed_at.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0068_thread_memory_resumed_at.down.sql"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p session-core --all-targets",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --lib"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws08-ws09-gateway-ask-staging-and-vision-refusal",
+   "rows": [
+    "D1-507",
+    "D1-606",
+    "D1-610",
+    "D1-535",
+    "D1-536",
+    "D1-635",
+    "D1-636"
+   ],
+   "title": "model-gateway: stage Ask-turn files into code_interpreter, type the vision_unsupported refusal, and filter the vision check by provider",
+   "brief": "Three confirmed gaps in model-gateway's Ask (non-agentic) stream path, all in sse.rs.\n\n(1) Files are accepted, then dropped. With CHAT_SANDBOX_ATTACHMENTS_ENABLED=true, attachment_policy.rs:174/264/296 accepts kind:\"file\" and declares modes.sandbox_files=true. But nothing calls turn_attachments::sandbox_staging_enabled() (turn_attachments.rs:32), and sse.rs:2913 calls tool_loop::run_tool_rounds_for_model. That wrapper (tool_loop.rs:6782-6812) always passes ValidatedAttachments::none(), so files validate and are silently ignored. Fix: in invoke_stream_sse, before any durable run is prepared (next to the image_parts/do_attachments admission at sse.rs:1543-1617, and only when the turn is not agentic), build `crate::turn_attachments::ValidatedAttachments::from_invoke(&req.attachments, crate::turn_attachments::sandbox_staging_enabled(), effective_zdr || retention_class.is_some())`. On Err(refusal), return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false), the same as the Do path at sse.rs:1601-1611. Move the value into the spawned task. At sse.rs:2913, call crate::tool_loop::run_tool_rounds_for_model_with_attachments(..., &staged, &image_parts) instead. Files must never be dropped silently: when staged is non-empty and the turn offers no code_interpreter tool (tool_defs empty, or no tool named code_interpreter), end the turn with a typed attachment refusal (AttachmentCode::MediaUnsupported, retryable false), not a silent drop. Put that check before the run is prepared if tool_defs is known there, otherwise as a prepared failure.\n\n(2) vision_unsupported reads as an outage. inference-core refuses an image turn with FAILED_PRECONDITION plus the trailer x-mp-provider-error=vision_unsupported (inference-core grpc.rs:1700/1837). The gateway's direct-inference failure arm at sse.rs:7650-7671 only knows subscription failures and model_entitlement, so the refusal becomes code model_plane_unavailable with retryable:true, and terminal_code stays inference_unavailable (sse.rs:7611-7613). Fix: add a small helper in sse.rs that reads the trailer (crate::compaction::PROVIDER_ERROR_KIND_TRAILER) and recognises exactly \"vision_unsupported\". Use it to emit ChatEvent::Error { code: \"vision_unsupported\", message: a fixed sentence (the selected model cannot read images; pick a model that reads images or remove the image), retryable: false }, and use the same code as the terminal code. Do not change any other mapping.\n\n(3) The vision check ignores the picked provider. The vision-capability check at sse.rs:1560-1566 sends ListModelsRequest::default(). Org model-access policy is already applied by inference-core (grpc.rs:518-525 filters chat models by the caller's principal), but the user's picked provider is not, so for a Verevon mode any listed vision model counts. Fix: set ListModelsRequest.provider to the turn's provider hint when one is non-empty (default otherwise). Check that the variable is in scope at that point; if it is not, derive it the same way the rest of the handler does.\n\nMust NOT change: CHAT_SANDBOX_ATTACHMENTS_ENABLED, CHAT_VISION_AS_PARTS_ENABLED and CHAT_DO_ATTACHMENTS_ENABLED stay default off; with the sandbox switch off, from_invoke returns none() and behaviour is byte-identical; a ZDR or waived turn never stages a file (refused); the Do-path admission is unchanged; no bytes or file names are logged (counts and sizes only, as turn_attachments.rs does); context_recovery_contract.rs must keep finding run_tool_rounds_for_model_with_attachments. Do not edit attachment_policy.rs, vision_parts.rs or tool_loop.rs (other packets own them). Files are CRLF: preserve line endings.\n\nRegression tests in sse.rs's test module:\n(a) A pure helper test: switch on with a file attachment yields a non-empty ValidatedAttachments; switch off yields empty; ZDR or waived yields a refusal.\n(b) The trailer helper maps a Status with x-mp-provider-error=vision_unsupported to code vision_unsupported, retryable false; another kind and a missing trailer map to None.\n(c) The ListModelsRequest builder carries the provider hint when set and is the default when empty.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib sse::",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib turn_attachments",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --test context_recovery_contract",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --test cross_service_loop_contract"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws08-ws09-exec-run-inputs-children-ttl-expiry",
+   "rows": [
+    "D1-655",
+    "D1-651",
+    "D1-653",
+    "D1-656",
+    "D1-652"
+   ],
+   "title": "execution-core: children get no attached files, RunInputs lives as long as the run, resumed runs refuse with attachments_expired",
+   "brief": "Three confirmed defects in how execution-core holds a Do run's attached files (all behind CHAT_DO_ATTACHMENTS_ENABLED, which stays default off).\n\n(1) Children inherit the parent's files. The code_interpreter arm of execute_step_inner reads `crate::run_inputs::global().get(org_id, run_id)` with no depth check (runtime_loop/mod.rs:893). A delegated child runs with the parent's run_id (agent.rs:5360, `req: parent.req`), so the child's code_interpreter stages the parent's attachments/. The plan says children do not inherit attachments, and the existing test children_do_not_inherit_attachments (agent.rs:26826) covers only images and the note. Fix: add a `read_run_inputs: bool` parameter to execute_step_with_result_handles and execute_step_inner (mod.rs:583/647). The agent loop call at agent.rs:3984 passes `ctx.depth == 0`. Every other caller (execute_step, execute_step_with_browser_grant, execute_step_with_subagent, and the test at mod.rs:2375) passes true, so their behaviour is identical. At mod.rs:893 write it as `let ro_inputs = if read_run_inputs { crate::run_inputs::global().get(org_id, run_id) } else { None };` so the literal `run_inputs::global().get(org_id, run_id)` that tests/cross_service_loop_contract.rs:463/545 pins is still present.\n\n(2) The registry sweeps a live run's files. run_inputs.rs sweeps every entry older than DEFAULT_TTL (15 min, run_inputs.rs:32 and 267-278) on the next registration, even while the run's guard is alive, so a Do run longer than 15 minutes loses its files mid-run. Fix: store a per-entry expiry. Add `register_until(org_id, run_id, attachments, ttl: Duration)` and keep `register` as `register_until(.., self.ttl)`, so grpc.rs:1045 (ExecuteStep) is unchanged. The sweep compares against each entry's own expiry. register_run_inputs (agent.rs:2338, called at agent.rs:1609 inside the driver that has `deadline: RunDeadline`) passes the run deadline's remaining time from deadline.remaining_at(Instant::now()), never less than the default 15 min, and with a hard ceiling (for example 24 h) when the deadline has no limit, so a leaked guard is still evicted.\n\n(3) A resumed run is told about files it no longer has. A parked, in-place-resumed or continuation Do run loses its files, because the guard lives only inside run_agent. The restored or parked messages (agent.rs:2531-2545) still hold the sandbox note that says attachments/ exists. The plan (build plan WS08-S6 row) says a resumed Do run re-requests attachments, with refusal reason `attachments_expired`, rather than persisting them. Fix:\n- In mp-contracts attachments.rs, add `pub const ATTACHMENTS_EXPIRED: &str = \"attachments_expired\";` and `pub fn is_sandbox_note(content: &str) -> bool`, which matches the fixed first sentence that sandbox_note writes.\n- In run_rounds, on the restored and parked branches, when any restored message is a system message for which is_sandbox_note is true and the request carries no file attachments (split_attachments(&req.attachments).0 is empty), return Err(tonic::Status::failed_precondition(ATTACHMENTS_EXPIRED)) before the first inference round. Do this before any tool runs.\n- Check that this refusal does not consume a granted approval a second time and leaves the run as the other resume refusals do. If the refusal can only be raised after the approval is consumed, raise it there and record that in a comment.\n\nMust NOT change: the switch stays default off; a run without attachments behaves byte-identically (no note, nothing registered, no refusal); ZDR runs never carry files; no bytes or names are logged; register's public behaviour for ExecuteStep is unchanged. Files are CRLF: preserve line endings.\n\nTests to add:\n(a) In agent.rs: a child that calls code_interpreter sees no ro_inputs (extend children_do_not_inherit_attachments, or add a_child_code_interpreter_step_sees_no_attached_files, asserting the registry lookup is skipped at depth 1).\n(b) In run_inputs.rs: an entry registered with a long TTL survives a sweep_at(now + 16 min), and a default entry does not.\n(c) In agent.rs: an in-place or parked resume whose restored messages hold the sandbox note, with no attachments on the request, fails with attachments_expired; the same resume without the note proceeds.\n(d) In mp-contracts: is_sandbox_note is true for sandbox_note output and false for arbitrary text.",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/run_inputs.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/attachments.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --lib run_inputs",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --lib runtime_loop::agent",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --lib runtime_loop::tests",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --test cross_service_loop_contract",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p mp-contracts --lib attachments"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws08-ws09-staged-inputs-symlink-safe",
+   "rows": [
+    "D1-609",
+    "D1-608"
+   ],
+   "title": "execution-core code_interpreter: do not chmod through a planted attachments symlink in a persistent Space root",
+   "brief": "code_interpreter.rs stages attached files into <root>/attachments. StagedInputs::stage (code_interpreter.rs:686-725) first calls remove_staged_dir(root/attachments) (line 706). remove_staged_dir (lines 736-745) calls set_mode(dir, 0o755), which is std::fs::set_permissions and follows symlinks, then remove_dir_all. In a persistent Space root (run_in_root with persistent=true, line 577; reached from the Do-attachments path), a program from an earlier call of the same run can plant `attachments` as a symlink to a host path. The next staging call then chmods the target as the execution-core user.\n\nFix remove_staged_dir: first read std::fs::symlink_metadata(dir).\n- NotFound: return quietly.\n- A symlink or any non-directory: std::fs::remove_file it, with no chmod.\n- A real directory: chmod and remove as today.\nAlso make Drop for StagedInputs and the create_dir path safe: create_dir must fail rather than follow a symlink that reappears (it already does on unix, since create_dir does not follow a final symlink; keep it so). Do not change the reserved-name rule (files_in may not be named attachments, line 288).\n\nMust NOT change: the ephemeral path; read-only modes 0o444/0o555; staging is still refused where the OS sandbox is unavailable; nothing logs file content. Files are CRLF: preserve line endings.\n\nTests to add, in code_interpreter.rs tests and #[cfg(unix)] because they need symlinks and modes:\n(a) remove_staged_dir on a symlink `attachments` that points to a directory with mode 0o500: the link is removed and the target's mode is unchanged.\n(b) remove_staged_dir on a regular file named attachments removes it.\n(c) remove_staged_dir on a staged read-only directory removes it.\n(d) A persistent-root test (D1-608): two successive stagings into the same root both succeed, the second after a leftover attachments directory.\nNote for the tester: these tests compile to nothing on Windows; run them on Linux (the rust:1 Docker recipe) or record them as unix-only.",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --lib code_interpreter",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --test cross_service_loop_contract"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws08-ws09-declared-attachment-modes",
+   "rows": [
+    "D1-654",
+    "D1-634"
+   ],
+   "title": "Declare vision_as_parts and do_attachments in /v1/models and let the FE read them, plus compose pass-through",
+   "brief": "The client gates image-as-parts and Do attachments on build-time VITE switches: attachment-policy.ts:41-53, visionAsPartsEnabled() reads VITE_CHAT_VISION_AS_PARTS_ENABLED and doAttachmentsEnabled() reads VITE_CHAT_DO_ATTACHMENTS_ENABLED. These only mirror the server switches CHAT_VISION_AS_PARTS_ENABLED (vision_parts.rs:38) and CHAT_DO_ATTACHMENTS_ENABLED (sse.rs:122), so the two sides can drift. The server-declared policy has only modes {vision, sandbox_files} (attachment_policy.rs:254-266 and 448-455). deploy/docker-compose.yml passes CHAT_VISION_AS_PARTS_ENABLED to model-gateway (line 319) but not CHAT_DO_ATTACHMENTS_ENABLED.\n\nFix, server side:\n- Add `vision_as_parts: bool` and `do_attachments: bool` to AttachmentModes. Fill them in AttachmentPolicy::from_getter from \"CHAT_VISION_AS_PARTS_ENABLED\" and \"CHAT_DO_ATTACHMENTS_ENABLED\": only a trimmed literal `true` enables them, the same rule the existing switches use.\n- Make vision_parts.rs's ENABLED_VAR pub and reuse it, rather than duplicating that literal.\n- Add a pub const in attachment_policy.rs for the Do variable, with a comment that sse.rs's DO_ATTACHMENTS_VAR must equal it. Do NOT edit sse.rs, which belongs to another packet.\n- Update the_declared_policy_is_the_documented_json (attachment_policy.rs:778) and tests/attachment_policy_contract.rs if it pins the modes shape.\n\nFix, client side:\n- parseAttachmentPolicy (chat-client.ts:2979-3006) reads the two new fields as OPTIONAL booleans: absent means false, so an older server still parses. Expose them as modes.visionAsParts and modes.doAttachments.\n- In attachment-policy.ts, visionAsPartsEnabled and doAttachmentsEnabled take the declared policy (or its modes) as an optional argument. They return the declared value when a policy is loaded and fall back to the VITE switch otherwise. Update their callers to pass the loaded declared policy (find them with grep).\n\nCompose: add `CHAT_DO_ATTACHMENTS_ENABLED: ${CHAT_DO_ATTACHMENTS_ENABLED:-}` next to line 319 in the model-gateway service. Check whether the services at ~986 and ~1366 are model-gateway variants that also need it.\n\nMust NOT change: both switches stay default off (empty or absent means off); with no policy loaded the FE behaves exactly as today; the five attachment codes are unchanged; sandbox_files keeps its meaning. Files are CRLF: preserve line endings.\n\nTests to add:\n- Rust unit tests: the declared modes follow each env var, including that only the literal `true` enables them.\n- Vitest in chat-client.attachment-policy.test.ts: the new fields are parsed, and a policy without them parses as false.\n- A vitest showing that the gate functions prefer the declared policy over the VITE value.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/attachment_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/vision_parts.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/attachment_policy_contract.rs",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.attachment-policy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib attachment_policy (cwd apps/Model Plane/rust)",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib vision_parts (cwd apps/Model Plane/rust)",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --test attachment_policy_contract (cwd apps/Model Plane/rust)",
+    "pnpm vitest run src/shared/api/chat-client.attachment-policy.test.ts src/features/chat/lib (cwd apps/Frontend Plane/verevonv3)",
+    "pnpm typecheck (cwd apps/Frontend Plane/verevonv3)"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "normal"
+  },
+  {
+   "key": "ws08-ws09-composer-reload-guard",
+   "rows": [
+    "D1-165"
+   ],
+   "title": "DashboardComposer registers a stale-build reload guard for unsent attachments",
+   "brief": "WS09-S5 chunk recovery (src/app/chunk-recovery.ts) reloads the page once when a lazy chunk 404s after a deploy. It is on by default: only VITE_CHUNK_RECOVERY_DISABLED=true turns it off. Features that hold state only in memory must call registerReloadGuard(isDirty) (chunk-recovery.ts:42) so the reload is replaced by a notice. Only use-chat-controller.ts:455 registers one, and it covers only streaming and input text. DashboardComposer.tsx holds unsent attached files in its own `files` signal (line 1010) and registers no guard, so a stale-build reload silently discards attachments that have not been sent, on both Home and Chat.\n\nFix: in DashboardComposer, import registerReloadGuard from '@/app/chunk-recovery' and call `onCleanup(registerReloadGuard(() => files().length > 0))` in the component body (onCleanup is already imported, line 65). Optionally include an in-flight handoff (handoffPending()).\n\nMust NOT change: the composer's behaviour otherwise; chunk-recovery.ts itself; the existing controller guard. Files are CRLF: preserve line endings.\n\nTest: add DashboardComposer.reload-guard.test.tsx. Render the composer, add a file through the existing paste or attach test path (see DashboardComposer.paste-attachment.test.tsx), and assert that a vite:preloadError dispatch does not reload but shows staleBuildNotice; with no files it does reload. Mock window.location.reload as chunk-recovery.test.ts does.",
+   "files": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx"
+   ],
+   "new_files": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.reload-guard.test.tsx"
+   ],
+   "tests": [
+    "pnpm vitest run src/features/dashboard/home/DashboardComposer.reload-guard.test.tsx src/app/chunk-recovery.test.ts",
+    "pnpm typecheck"
+   ],
+   "cwd": "apps/Frontend Plane/verevonv3",
+   "severity": "high"
+  },
+  {
+   "key": "ws10-ws11-inference-effort-ceilings",
+   "rows": [
+    "D1-032",
+    "D1-033",
+    "D1-499"
+   ],
+   "title": "inference-core: effort ceilings also bound the legacy thinking budget, and the org policy max_effort is applied at the PEP (covers the agentic path)",
+   "brief": "Two effort ceilings in inference-core leave holes.\n\n(1) Budget clamp, legacy budget (D1-032/033). In `apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs`, `resolve_intent` (around lines 1079-1098) clamps only `rewritten.reasoning_effort` (an `Option<effort::Level>`) to `decision.effort_cap` when `effort::budget_clamp_enabled()` (env `INFERENCE_CORE_EFFORT_BUDGET_CLAMP`, only the literal `true`). The first half of the row (reasoning_effort never reaching InferRequest) is fixed: model-gateway now sets it (`thinking.rs`, `sse.rs:3068`, `http_routes.rs:10519`) and `grpc.rs:1230` maps it. What is still wrong: when `reasoning_effort` is `None` (gateway ladder switch `MODEL_GATEWAY_EFFORT_LADDER` off), the request carries the legacy `thinking_budget_tokens` and that is never clamped, so an exhausted-budget org still spends the full legacy budget. Fix: when the clamp is on and `decision.effort_cap` is `Some(cap)` and `reasoning_effort` is `None` and `thinking_budget_tokens > 0`, set `thinking_budget_tokens = min(thinking_budget_tokens, effort::allowance(cap))` and log it with the same content-free `clamped = true` info line. Put the arithmetic in a small pure helper in `provider/effort.rs` (e.g. `pub fn cap_legacy_budget(budget: i32, cap: Option<Level>) -> i32`: never raises, `None` cap and `budget <= 0` return the input unchanged) so it is unit-testable.\n\n(2) Org policy max_effort is not applied at the PEP (D1-499). Only model-gateway clamps the effort to the policy's `max_effort` (`model_access.rs` `Admitted::clamp_effort`, called from `sse.rs:1197` and `http_routes.rs:10474`). execution-core's agent loop calls inference-core directly (RunAgentRequest path), so a role capped at e.g. `low` can still run a deep agent loop. inference-core is the enforcement point and already carries the caller's entitlement on `InferRequest.access` (`Option<Arc<RequestAccess>>`, set by `with_access` in grpc.rs). Fix in fallback.rs: add one helper applied in BOTH `infer_with_response_cache` (after `pinned_model`/`resolve_intent`, line ~1303-1309) and `infer_stream` (line ~1721-1723), BEFORE the response-cache lookup (the cache key hashes the effort level): when `req.access` is `Some(access)` and `access.enforced()` and the resolved policy has a non-empty `max_effort` (use `access.resolved().clamp_effort(name)` from `mp_contracts::model_entitlement::ResolvedAccess`, or `Level::from_name` + `effort::clamp_to_cap`), lower `reasoning_effort` to the ceiling, and when `reasoning_effort` is `None` cap `thinking_budget_tokens` with the same `cap_legacy_budget` helper. Clamp down only, never up; an unknown ceiling name leaves the request alone (it is validated at write time by org-core). Since `req` is `&InferRequest`, clone only when a change is needed.\n\nMust NOT change: with `INFERENCE_CORE_EFFORT_BUDGET_CLAMP` unset and `MODEL_ENTITLEMENT_MODE` off/shadow the request is byte-identical to today (no clamp, no clone visible in behaviour); a service principal (access None / exempt) is never clamped; no content in logs (ids, level names, numbers only). Keep the files' existing line endings (check CRLF vs LF before editing).\n\nRegression tests (unit, in the files' existing `#[cfg(test)]` modules): effort.rs `cap_legacy_budget` cases (4096 capped to 1024 by Low, 512 under Low unchanged, 0 and negative unchanged, None cap unchanged); fallback.rs: a request with `access` enforced and a policy max_effort `low` and `reasoning_effort = Some(High)` reaches the provider (use the existing mock provider pattern in fallback.rs tests, e.g. the tests near `preserves_explicitly_pinned_model` / `the_streaming_path_honors_a_pinned_model`) with `Low`; the same with `reasoning_effort = None, thinking_budget_tokens = 4096` reaches it with 1024; the same request under shadow (not enforced) reaches it unchanged; one streaming-path case.",
+   "files": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/effort.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib provider::effort",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib provider::fallback",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws10-ws11-model-access-route",
+   "rows": [
+    "D1-491",
+    "D1-490"
+   ],
+   "title": "model-gateway serves POST /v1/models/access (label tiers mapped to the enum) and verdicts carry zdr_attested so the BFF ZDR write guard stops depending on the admin's own filtered catalogue",
+   "brief": "The Verevon BFF ZDR write guard (`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/model_entitlement.rs`, `zdr_write_refusal`, lines ~476-541) POSTs `{ \"draft\": <ModelPolicyDoc JSON>, \"include_catalogue\": true }` to model-gateway `POST /v1/models/access` and reads `catalogue[{id, entitled}]`. model-gateway has NO such route (only `.route(\"/v1/models\", get(list_models))` at `apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:269`), so for every ZDR org with a restricting layer the guard gets a 404 and answers 503 `model_policy_guard_unavailable`: an admin can never save such a policy.\n\nPart 1 (D1-491): add the route in http_routes.rs next to `/v1/models`, modelled on `list_models` (lines ~8882-8942: `Extension(Claims)`, `VerifiedInferenceBearer`, `authenticated_inference_request`). It calls inference-core `GetModelAccess` with the org id from the verified claims (never from the body), `include_catalogue` and `model`/`surface` from the body, and `draft` mapped from JSON to `ModelPolicyDoc`: `allow_mode`, `allow`, `deny`, `max_effort` as strings, `defaults` as `{surface: {model, effort}}` -> `SurfaceDefault` map, and `min_privacy_tier` given as org-core's lower-case LABEL (`\"\"`, `global`, `eu_resident`, `zdr_contractual`, `sovereign`) mapped to the `PrivacyTier` enum (empty = UNSPECIFIED; an unknown label is a 400 typed error envelope, never silently UNSPECIFIED). Reject unknown top-level fields. Answer JSON: `state, enforced, revision, role, restricted, model_allowed, reason, default_model, default_effort, max_effort, min_privacy_tier` (as label, reuse `privacy_tier_label`), `can_manage`, and `catalogue: [{id, provider, entitled, reason, zdr_attested}]`. Errors: an entitlement `Refusal::from_status` -> `crate::model_access::http(&refusal)` (403/503 typed), PERMISSION_DENIED -> 403 typed envelope, anything else -> 502 typed envelope `{error:{code,message}}`; never echo the inference-core status message. Put the JSON<->proto mapping in `model_access.rs` as pure functions so it is unit-testable.\n\nPart 2 (D1-490): the guard takes the attested set from `GET /v1/models` as the acting admin, which is filtered by that admin's own stored policy under enforce, so a model the admin cannot see but the draft would allow is not counted (refuses a legitimate ZDR policy). Add `bool zdr_attested = 5;` to `message ModelAccessEntry` in `apps/Model Plane/proto/model_plane/v1/inference.proto` (comment: whether the model's deployment carries a zero-retention attestation for chat; independent of the policy), fill it in inference-core `grpc.rs` `model_access_response` (around line 1401-1412) from the unfiltered `chat` list: true when the model's `features` contain `\"zdr\"` (pushed in `provider/mod.rs:~820`) or its `privacy_tier` is ZdrContractual or Sovereign (mirror `model_attests_zdr_for_chat` in the BFF `domains/orgs/settings.rs:36`). Regenerate the Go bindings with buf (`apps/Model Plane/go/gen/model_plane/v1/inference.pb.go`; do not touch the pre-existing local change in `go/gen/go.sum`). In the BFF guard, read attestation from the verdict's `zdr_attested` when every verdict carries it, and fall back to today's catalogue set only when the field is absent (older model-gateway); keep the fail-closed 503 for any unreadable answer. Update the `/v1/models/access` row in `apps/Frontend Plane/verevonv3/docs/endpoint-map.md` (it says 'until then').\n\nMust NOT change: the BFF guard stays fail-closed; the route is unreachable for a non-manager (inference-core already refuses a draft/include_catalogue from a non-manager with PERMISSION_DENIED and with entitlement off answers `model_entitlement_unavailable` -> 503, keep both); `GET /v1/models` shape unchanged; nothing in the gateway decides entitlement itself; no content in logs; preserve each file's line endings. If adding the field changes the inference-core status golden, it should not (it is a response field) — if `the_committed_status_contract_is_what_the_code_produces` fails, stop and report.\n\nTests: model-gateway unit tests for the mapping (each tier label -> enum, empty -> UNSPECIFIED, unknown label -> 400, defaults map, unknown field refused) and a route test with a fake InferenceCore (the pattern in `http_routes.rs` tests around line 13448 `get_model_access`) asserting org id comes from claims, draft and include_catalogue are forwarded, the catalogue JSON carries `zdr_attested`, and a typed entitlement refusal maps to its 403/503; inference-core unit test in grpc.rs that `model_access_response` sets `zdr_attested` from features/tier on an unfiltered catalogue even when the draft refuses the model; BFF test in model_entitlement.rs: an attested model absent from the admin's filtered catalogue but `zdr_attested: true` and `entitled: true` in the verdicts lets the PUT through, and the existing guard tests stay green.",
+   "files": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/inference.pb.go",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/model_access.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/model_entitlement.rs",
+    "apps/Frontend Plane/verevonv3/docs/endpoint-map.md"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib grpc",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib model_access",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib http_routes",
+    "cd ../go/gen && go build ./... && go vet ./...",
+    "cargo test --manifest-path \"../../Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets model_entitlement"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws10-ws11-org-core-reject-intent-ids",
+   "rows": [
+    "D1-474",
+    "D1-477"
+   ],
+   "title": "org-core refuses verevon-* intent ids in allow/deny lists",
+   "brief": "A model policy entry naming a Verevon intent id (`verevon-budget`, `verevon-balance`, `verevon-genius`, any `verevon-*`) is never matched by inference-core: intent ids pass the entitlement check as an unspecified model and an Auto request is judged only on the concrete model the intent layer resolves (`inference-core/src/provider/fallback.rs` `pinned_model`/`resolve_intent`). So an admin who denies `verevon-genius` believes they blocked it and nothing happens. org-core's validator (`apps/Control Plane/org-core/internal/modelentitlement/validate.go`, `normalizeEntry` lines 210-234, used by `entries` for both `allow` and `deny`) accepts such entries today. Fix: in `entries` (allow and deny only), refuse an entry whose normalised form starts with `verevon-` with a new stable code `CodeIntentIDNotAllowed = \"intent_id_not_allowed\"` (add it to the const block at lines 22-42) and a message saying intent modes are not models and the policy judges the concrete model they resolve to. Do NOT refuse it as a surface default model (`defaults` path, a default of an intent id is a legitimate Auto default) and do not touch `provider:` selectors. Add table cases to `validate_test.go`: `verevon-genius` in allow (listed) and in deny refused with that code at the right JSON path (`org_default.deny[0]`, `roles.x.allow[1]`), `VEREVON-Budget ` (case/space folded) refused, a model id that merely contains `verevon` later in the string accepted, and a defaults model `verevon-balance` still accepted. If `testdata/model-entitlement-matrix.json` is a shared golden pinned elsewhere, do not edit it. Keep the file's existing line endings. The Auto/no_entitled_route part of D1-477 is accepted by the plan row and needs a live proof, not code.",
+   "files": [
+    "apps/Control Plane/org-core/internal/modelentitlement/validate.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/validate_test.go"
+   ],
+   "tests": [
+    "go test ./internal/modelentitlement/...",
+    "go vet ./internal/modelentitlement/..."
+   ],
+   "cwd": "apps/Control Plane/org-core",
+   "severity": "normal"
+  },
+  {
+   "key": "ws10-ws11-sidebar-model-access-nav",
+   "rows": [
+    "D1-517",
+    "D1-519",
+    "D0-016"
+   ],
+   "title": "Verevon v3: Model access settings tab reachable from the sidebar when the BFF switch is on; picker notice gets a class rule",
+   "brief": "The `/settings/model-access` route works by URL but no navigation shows it. (a) `apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx:107` calls `applyDemoModeNavGate(sidebarSections)` with no options, and `applyDemoModeNavGate` (`src/features/core/lib/sidebar-navigation.ts:425-430`) hides item `settings-model-access` unless `options.modelAccessEnabled === true`. (b) The expanded settings panel (`src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx`, `settingsSidebarSections` lines 44-60) has no Model access link at all. Fix: read the BFF flag the same way `src/features/settings/components/OrgModelAccessSection.tsx:78-85` does: `createResource(() => (hasWorkspaceAdminAccess(session) && session.activeOrg?.id ? session.activeOrg.id : undefined), (id) => getModelEntitlement(id))` from `@/shared/api/model-entitlement-client`, with `enabled === true` as the flag; any error, a non-admin or a missing org means false (members get 403 from the BFF when the switch is on, so never fetch for them). Pass `{ modelAccessEnabled }` to `applyDemoModeNavGate` in CoreSidebar.tsx, and add a `{ id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' }` entry to the settings panel shown only under the same flag (thread the flag in as a prop or share one small accessor; do not fetch twice per render; keep `getSettingsActiveSectionId` resolving `/settings/model-access` to `model-access`). (c) `src/shared/components/AiModelPicker.tsx:32-37,183` styles `.verevon-ai-model-picker__notice` with an inline `POLICY_NOTICE_STYLE`; move those four declarations into a `.verevon-ai-model-picker__notice` rule next to the other `.verevon-ai-model-picker` rules in `src/styles/global.css` and drop the inline style. Must NOT change: the tab stays hidden with the switch off (`{enabled:false}`), for non-admins, and on fetch failure; no build-time flag; demo-mode hidden ids unchanged. Tests: a vitest for the gate wiring (e.g. extend `CoreSidebar.home-tab.test.tsx` or a new `CoreSidebar.model-access.test.tsx`) mocking `getModelEntitlement` to `{enabled:true,...}` (link visible for an admin), `{enabled:false}` (hidden), rejected promise (hidden), and a member session (never called). The Playwright spec `tests/e2e/model-entitlement.spec.ts` needs a second Vite dev server and is a live proof, not part of this packet. Note: :5173 is a container that does not see host edits; verify with tests, not the running app.",
+   "files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css"
+   ],
+   "new_files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.model-access.test.tsx"
+   ],
+   "tests": [
+    "pnpm vitest run src/features/core/components/CoreSidebar.model-access.test.tsx src/features/core/components/CoreSidebar.home-tab.test.tsx",
+    "pnpm typecheck"
+   ],
+   "cwd": "apps/Frontend Plane/verevonv3",
+   "severity": "normal"
+  },
+  {
+   "key": "ws01-ws02-ws03-crash-park-round-markers",
+   "rows": [
+    "D1-543",
+    "D1-549",
+    "D1-544"
+   ],
+   "title": "execution-core: write the four park markers on run_parkable round folds and stop a parkable loop at its first stale/closed fold save",
+   "brief": "Context: session-core's crash park (WS03-S8, switch SESSION_CORE_CRASH_PARK_ENABLED, default off) re-seals a dead loop's last ROUND fold as a park and refuses any fold that lacks the route markers: session-core/src/loop_checkpoint.rs:793-799 returns `route_unrecorded` when `route_model_in`, `route_connection_in` or `child_ceiling_in` (non-zero) is missing, and crash_park_fold (loop_checkpoint.rs:814-828) takes the next park number from `parks_in(fold)`.\n\nDefect 1 (D1-543/D1-549): execution-core writes the four markers (lf::EXT_PARKS, EXT_ROUTE_MODEL, EXT_ROUTE_CONNECTION, EXT_CHILD_CEILING) only in `park::park_fold` (runtime_loop/park.rs:368-395, doc comment says 'written here and nowhere else'). The round fold built at runtime_loop/agent.rs ~4348-4369 (`fold::build_fold(...)` then `folds.save_round(fold)`) carries none, so with the crash-park switch on every crash park is refused as route_unrecorded. Fix: when (and only when) the loop's `park_gate.run_parkable` is true (agent.rs ~2648, ParkGate), add the four markers to the round fold before `save_round`: EXT_PARKS = park_gate.parks_so_far (the resumed run's count from the claimed fold, so the park cap holds across crash resumes; a fresh loop writes 0), EXT_ROUTE_MODEL = ctx.route.model(), EXT_ROUTE_CONNECTION = ctx.route.subscription_connection_id(), EXT_CHILD_CEILING = the same child ceiling value the park site (ParkSite.child_ceiling) uses. Factor one helper in park.rs (e.g. `insert_route_markers(fold: &mut LoopFoldV1, site/route values, parks: u32)`) and make park_fold use it too, so both folds write identical keys; update the park.rs doc comment. Never write the markers on a non-parkable run: run_parkable already excludes approval continuations (holds_release), client/MCP-tool runs (tools_derivable false), ZDR, waived, Space, non-root and unpinned runs - reuse that one decision, do not add a second. Never write them on pre_effect, pause, fence or tombstone folds. Never copy session-core's `thread_watermark` extension into any executor-written fold (build_fold must keep starting from a fresh extensions map; session-core stamps round folds itself).\n\nDefect 2 (D1-544, zombie loop): FoldWriter::apply (runtime_loop/fold.rs:1034-1051) marks the writer Failed on SaveError::Stale/Closed, and the loop only holds effectful calls afterwards (agent.rs ~3654-3672); it keeps running read-only rounds and can append a final answer. When session-core crash parks a loop that was merely slow, the live loop's next save goes stale and a continuation can run beside it, so two loops answer one run. Fix: for a run_parkable loop only, when a round/pre-effect save returns Stale or Closed (expose a narrow accessor on FoldWriter such as `lost_fence() -> bool` that is true only for State::Failed(SaveError::Stale|SaveError::Closed), not for Refused), stop the loop at that point before any further inference, append, receipt or tool dispatch, and end the RunAgent call with a typed status (e.g. Status::aborted(\"loop_checkpoint_superseded\")) without reporting an answer. Check after save_round at the end of a round and wherever save_pre_effect returns Hold. Non-parkable runs must keep today's behaviour exactly (held effects, loop continues).\n\nMust not change: behaviour with parking off or the crash-park switch off is byte-identical (markers only when run_parkable, which is false with parking off); no new switch; ZDR/waived runs never write folds; files are CRLF in this worktree - preserve line endings.\n\nTests to add (in the existing #[cfg(test)] modules using the session-core double already in agent.rs, which records loop_saves with their fold JSON): (a) a parkable run's round fold carries the four keys with parks=0 fresh and parks=N on a park resume seeded with N; (b) a non-parkable run (approval continuation / tools not derivable / parking off) round fold carries none of the four keys; (c) a park fold and a round fold of a run resumed from a session-core crash park (claimed fold containing extensions.thread_watermark) contain no thread_watermark key; (d) a parkable loop whose round save answers Status::aborted(\"loop_checkpoint_stale\") (and failed_precondition loop_checkpoint_closed) makes no further infer call and reports no answer, while the same script on a non-parkable run keeps today's outcome; (e) a session-core-side-shaped check: the round fold JSON passes the same field rules as loop_checkpoint.rs:793-799 (non-empty route model/connection, child ceiling > 0).",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib runtime_loop::",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy -p execution-core --lib --tests -- -D warnings"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws01-ws02-ws03-zdr-attestation-alerts",
+   "rows": [
+    "D1-139",
+    "D1-143",
+    "D1-375"
+   ],
+   "title": "Prometheus: ZDR attestation review-due / lapsed alerts, promtool tests, inference-core :8082 scrape",
+   "brief": "inference-core publishes gauge `mp_inference_zdr_attestation_review_by_timestamp_seconds{surface=...}` (rust/services/inference-core/src/metrics.rs:53-58, 247-257): Unix seconds at the START of the review-by UTC day; the attestation stops granting ZDR after that day; absent for a surface with no ZDR claim. No alert rule reads it and Prometheus does not scrape inference-core, so a lapse is visible only in logs.\n\nDo: (1) Add scrape job `model-inference-core` to apps/Control Plane/observability/prometheus.yml, metrics_path /metrics, target `model-plane-inference-core-1:8082` (the plane-unique inter-plane-bus alias declared in apps/Model Plane/deploy/docker-compose.yml:1146-1151; the bare `inference-core` alias also exists but follow the existing model-* pattern), labels { service: inference-core, plane: model }, placed next to the model-session-core/model-gateway jobs with a one-line comment. (2) New rules file apps/Control Plane/observability/rules/zdr-attestation.rules.yml (picked up by the existing `rule_files: /etc/prometheus/rules/*.rules.yml`), group `model-zdr-attestation`, in the style of audit-delivery.rules.yml: ZdrAttestationReviewDue warning when `min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) - time() < 14*86400`, critical when `< 3*86400` (two rules or two severities - make the critical one not double-fire the warning wording; keep label plane: model and a runbook annotation); ZdrAttestationLapsed critical when `time() - min by (surface) (mp_inference_zdr_attestation_review_by_timestamp_seconds) > 86400`. Header comment: why, no pager yet (decision D1), series are content-free. (3) New promtool test file rules/zdr-attestation.rules.test.yml with firing and quiet cases: far-future review-by stays quiet; 10 days out fires warning only; 2 days out fires critical; review-by 2 days in the past fires Lapsed; no series = no alerts. Use `eval_time` and constant series values computed from the test's time origin (promtool time starts at 0, so time() at eval_time 10m is 600). (4) Add a short `## Attestation lapse alerts` section with an anchor to apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md naming the three alerts and what to do (renew the attestation, re-sign the policy), and point the runbook annotations there.\n\nMust not change: existing jobs and rules; no Alertmanager wiring. prometheus.yml is CRLF in this worktree (attr eol=lf) - preserve the existing line endings; new rule files LF like their siblings.",
+   "files": [
+    "apps/Control Plane/observability/prometheus.yml",
+    "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md"
+   ],
+   "new_files": [
+    "apps/Control Plane/observability/rules/zdr-attestation.rules.yml",
+    "apps/Control Plane/observability/rules/zdr-attestation.rules.test.yml"
+   ],
+   "tests": [
+    "promtool check rules rules/zdr-attestation.rules.yml",
+    "promtool test rules rules/zdr-attestation.rules.test.yml",
+    "promtool test rules rules/audit-delivery.rules.test.yml rules/audit-core.rules.test.yml"
+   ],
+   "cwd": "apps/Control Plane/observability",
+   "severity": "high"
+  },
+  {
+   "key": "ws01-ws02-ws03-preflight-rg-fail-closed",
+   "rows": [
+    "D1-300"
+   ],
+   "title": "cross-plane preflight: fail closed when rg is missing or errors",
+   "brief": "scripts/coresystem-cross-plane-preflight.sh check_evidence_open (lines 156-167) runs `rg -q -- \"$pattern\" \"$MODEL_EVIDENCE\"` in an elif; when rg is not installed (exit 127) or errors (exit 2) the else branch prints `state=recorded` and adds no blocker, so a missing tool reads as release evidence recorded (fail open). Fix: (1) right after argument parsing and BEFORE the docker check (line ~31), add `command -v rg >/dev/null 2>&1 || { echo \"BLOCKED rg: command is unavailable\"; exit 2; }` mirroring the docker check; (2) in check_evidence_open capture rg's status explicitly (the script runs set -euo pipefail, so use `set +e`/`rc=$?` or `if rg ...; then ... else rc=$?` pattern): 0 -> state=open + `${label}_evidence_open`; 1 -> state=recorded; anything else -> state=unreadable + blocker `${label}_evidence_unreadable`. Regression test in scripts/tests/coresystem-cross-plane-preflight-test.sh, placed BEFORE the existing live-stack section: build a temp bin dir containing only a symlink/copy of `dirname` (the only external the script needs before the new rg check), run `PATH=\"$tmpbin\" \"$BASH\" \"$COMMAND\"` and assert exit 2 and output contains `BLOCKED rg`; clean up with trap. Must not change: any other check, exit codes 0/2/64, read-only/no-secret behaviour. Files are LF (attr eol=lf). Note the rest of the test needs a running stack; the coder proves the new case alone (it runs first and exits on failure) and reports the live part as not run.",
+   "files": [
+    "scripts/coresystem-cross-plane-preflight.sh",
+    "scripts/tests/coresystem-cross-plane-preflight-test.sh"
+   ],
+   "tests": [
+    "bash -n scripts/coresystem-cross-plane-preflight.sh",
+    "bash scripts/tests/coresystem-cross-plane-preflight-test.sh"
+   ],
+   "cwd": "",
+   "severity": "high"
+  },
+  {
+   "key": "ws01-ws02-ws03-rehearsal-digest-binding",
+   "rows": [
+    "D1-237"
+   ],
+   "title": "conformance gate: tie a PASSED rollback rehearsal to the candidate and rollback artifacts under review",
+   "brief": "rollback-rehearsal.sh already records both digests in the evidence file (apps/Model Plane/scripts/rollback-rehearsal.sh:288-289: lines `candidate: revision <rev>, root manifest sha256 <hex>` and `rollback: revision <rev>, root manifest sha256 <hex>`), but scripts/coresystem-conformance.sh (rehearsal block lines ~185-216) only checks `result PASSED` on line 1 and the file date, so a rehearsal of any other artifacts passes the gate. Fix in coresystem-conformance.sh: when MODEL_PLANE_CANDIDATE_ARTIFACT_DIR and MODEL_PLANE_ROLLBACK_ARTIFACT_DIR are both set and the rehearsal state would be `passed`, compute sha256 of \"$candidate_dir/artifact-manifest.tsv\" and \"$rollback_dir/artifact-manifest.tsv\" (sha256sum, fall back to `shasum -a 256` if absent; strip CR when reading the evidence file) and require the evidence file's candidate and rollback lines to name exactly those digests; otherwise set rehearsal_state=mismatch and add blocker `rollback_rehearsal_artifact_mismatch` (an empty/missing digest line is a mismatch). Add `rollback_rehearsal_artifact_mismatch` to the unwaivable set in the embedded python (`unwaivable()`, ~line 335) because a rehearsal of other artifacts is not evidence. When either artifact dir is unset keep today's behaviour (the artifact_missing blockers already block). Update the --help text's runtime profile line to say the rehearsal must match the artifacts. Tests in scripts/tests/coresystem-conformance-artifact-test.sh, next to the existing rehearsal cases (~lines 172-185): create good-candidate/good-rollback artifact-manifest.tsv fixtures (if not already present), write a PASSED evidence file with matching digest lines and assert checks.rollback_rehearsal == passed with artifact dirs set; a file with a wrong candidate digest -> `rollback_rehearsal_artifact_mismatch` in blockers and not waivable by a waiver row; a PASSED file without digest lines and artifact dirs set -> mismatch; the existing no-artifact rehearsal cases keep their current expectations. Must not change: rollback-rehearsal.sh output format, other blockers, JSON shape apart from the new state/blocker value. Files are LF (attr eol=lf).",
+   "files": [
+    "scripts/coresystem-conformance.sh",
+    "scripts/tests/coresystem-conformance-artifact-test.sh"
+   ],
+   "tests": [
+    "bash -n scripts/coresystem-conformance.sh",
+    "bash scripts/tests/coresystem-conformance-artifact-test.sh"
+   ],
+   "cwd": "",
+   "severity": "high"
+  },
+  {
+   "key": "ws01-ws02-ws03-capability-ledger-rows",
+   "rows": [
+    "D1-301"
+   ],
+   "title": "CAPABILITY_PROMOTION_LEDGER.tsv: add the capability IDs seeded by capability-core migrations",
+   "brief": "apps/Model Plane/scripts/tests/capability-promotion-ledger-test.sh requires the ledger IDs to equal exactly the `'cap.*` IDs seeded in go/services/capability-core/migrations/*.sql; conformance (scripts/coresystem-conformance.sh:218-235) reports capability_promotion_ledger_invalid when it fails. A diff today shows SIX IDs missing from apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv (the row named five; cap.result.query has since been added by migration 0013): cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.result.query, cap.skill.summarize. Add one row each with state source_only and the source_only shape the test enforces: `<id>\\tsource_only\\tworking-tree\\t-\\t-\\t-\\t-\\t-\\tNo immutable candidate or live owner evidence.` (9 tab-separated columns), keeping the file's existing ordering convention. Re-derive the list with the test's own rg command before editing in case more were added. Second, the test reads the header with `head -n 1` and compares it byte-for-byte; the ledger is stored LF but checked out CRLF in this worktree (no eol attribute), so the header carries a trailing CR and the test reports 'header drifted' on Windows checkouts: make the test strip CR (`header=\"$(head -n 1 \"$LEDGER\" | tr -d '\\r')\"` and feed `tr -d '\\r' < \"$LEDGER\"` to the awk) so it is EOL-agnostic. Must not change: any existing row's state, the cap.tool.ticket.create source_only rule, the header. Preserve the ledger's existing line endings (CRLF in the worktree).",
+   "files": [
+    "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+    "apps/Model Plane/scripts/tests/capability-promotion-ledger-test.sh"
+   ],
+   "tests": [
+    "bash scripts/tests/capability-promotion-ledger-test.sh"
+   ],
+   "cwd": "apps/Model Plane",
+   "severity": "normal"
+  },
+  {
+   "key": "ws01-ws02-ws03-zdr-pass2-spec",
+   "rows": [
+    "D1-328"
+   ],
+   "title": "ZDR live-turn spec: script pass 2 (attested model answers, catalogue lists zdr)",
+   "brief": "apps/Frontend Plane/verevonv3/tests/e2e/zdr-live-turn.spec.ts only scripts pass 1 (typed refusal); with ZDR_LIVE_TURN_EXPECT=answer it just skips. The runbook (apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md:96-98) says pass 2 expects /api/v1/models to list `zdr` on the covered model and the turn to stream an answer, with the same zero-delta proof from zdr-live-proof.sh (--phase before/after already asserts every counter unchanged, which is exactly pass 2's persistence claim, so the shell script needs no new phase; it has no browser session to call the authenticated /api/v1/models, so the catalogue assertion belongs in the spec). Add a second test in the same describe (rename describe to 'ZDR live turn (Z-60)'): skipped unless ZDR_LIVE_TURN=1 AND ZDR_LIVE_TURN_EXPECT=answer; reuses the same ZDR-TEST org guard (factor the org check and stream capture into local helpers shared by both tests); asserts at least one `modality === 'chat'` model in /api/v1/models carries feature `zdr` (else fail with a message that this is pass 1 territory); selects that model if the composer exposes a model choice the existing e2e specs already drive, otherwise relies on the default; sends one turn; asserts no RUN_ERROR/error frame with a code, at least one content frame, HTTP status < 400. Update the file header comment and runbook line 98 ('spec extended then' -> name the test). Must not change pass 1's assertions or its opt-in guards; never send a turn for a non ZDR-TEST org. File is LF.",
+   "files": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/zdr-live-turn.spec.ts",
+    "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md"
+   ],
+   "tests": [
+    "pnpm exec playwright test tests/e2e/zdr-live-turn.spec.ts --list",
+    "pnpm exec eslint tests/e2e/zdr-live-turn.spec.ts"
+   ],
+   "cwd": "apps/Frontend Plane/verevonv3",
+   "severity": "normal"
+  },
+  {
+   "key": "ws01-ws02-ws03-gateway-prompt-tier-plan",
+   "rows": [
+    "D1-445",
+    "D1-446"
+   ],
+   "title": "model-gateway: carry the composer's prompt tier plan into the inline chat tool rounds and answer call",
+   "brief": "WS02-S9 tiered Anthropic system blocks (inference-core switch INFERENCE_ANTHROPIC_TIERED_SYSTEM, default false) only reach the Do loop: execution-core sets InferRequest.prompt_tiers (runtime_loop/agent.rs:2407-2426, 2909). The inline chat path never sends one: sse.rs:2447 calls `prompt.render(cache_options.prompt_order())`, discarding the tiers, and tool_loop.rs:7202 hard-codes `prompt_tiers: None` in the decision-round InferRequest; the answer InferRequest at sse.rs:3051-3070 leaves it Default (None). Fix: (1) in sse.rs, when `cache_options.prompt_order()` is PromptOrder::StablePrefix use `prompt.render_tiered(order)` (prompt_context.rs:278) to get messages + `TieredPrompt::plan()` (mp_contracts::prompt_tier::PromptTierPlan {stable, context}); Legacy keeps `render` and no plan (byte-identical). Convert to `pb::PromptTierPlan { stable_messages, context_messages }` as Some only when stable+context > 0 and the turn is not ZDR (effective_zdr: keep a ZDR request unchanged). (2) Add a trailing parameter `prompt_tiers: Option<pb::PromptTierPlan>` to `run_tool_rounds_for_model` (tool_loop.rs:6751) and thread it through `run_tool_rounds_for_model_with_attachments` and the inner function to the decision InferRequest at ~7202. (3) Set it on the answer InferRequest at sse.rs:3051. (4) A plan is only true for the exact leading messages it was computed on: add one helper in prompt_context.rs, e.g. `fn plan_for(plan, composed: &[ChatMessage], outgoing: &[ChatMessage]) -> Option<pb::PromptTierPlan>` that returns the plan only if the first stable+context messages of `outgoing` equal those of the composed prompt (role and content) and are all role system; use it at both call sites (tool_decision_messages and retries/compaction may rewrite the list - when they do, send None). Must not change: legacy order output, any request when stable order is off, ZDR requests, the separate refusal boundary between gateway dispatch_tool and execution-core (do not touch dispatch logic). inference-core already validates the plan and ignores it with its switch off (provider/anthropic.rs:271-300). Tests: in prompt_context.rs tests - plan_for returns the plan for an unchanged prefix, None when a leading message changed, was removed, or a non-system message sits inside the counted range; in tool_loop.rs tests (existing inference double that records InferRequests) - the decision request carries the passed plan when the prefix is intact and None when the param is None; Legacy order yields None. Files may be CRLF in this worktree; preserve line endings.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs"
+   ],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib prompt_context::",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib tool_loop::",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy -p model-gateway --lib --tests -- -D warnings"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "normal"
+  },
+  {
+   "key": "ws04-ws05-ws12-capability-core-tool-policy-wiring",
+   "rows": [
+    "D1-175",
+    "D1-179"
+   ],
+   "title": "capability-core: wire stored tool policies into EvaluatePolicy and main (switch stays off)",
+   "brief": "Context: WS05-S5 built per-tool policies in capability-core (`internal/policy/engine.go` EvaluateTool / DecideWithPolicies / WithToolPolicies / ToolPolicyEnforcedFromLookup, and the HTTP API `internal/api/tool_policies.go` NewToolPoliciesHandler, which also implements policy.ToolPolicySource via ActiveToolPolicies). None of it is wired: `internal/server/server.go` EvaluatePolicy (about lines 503-555) still calls `s.policy.EvaluateCapability(...)` then `policy.Decide(result, binding)`, `cmd/main.go` builds `pol := policy.New(reg).WithScopeResolver(scopeStore)` (about line 166) and never registers the tool-policies handler, and deploy compose has no TOOL_POLICY_ENFORCED line.\n\nDo:\n1. cmd/main.go: construct `toolPolicies := api.NewToolPoliciesHandler(pool)`; call `toolPolicies.Register(protectedMux)` next to the other `api.New...Handler(pool).Register(protectedMux)` calls (about lines 280-330); and change the engine to `policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, policy.ToolPolicyEnforcedFromLookup(os.Getenv))` (the handler must exist before the engine; reorder minimally). Log once at boot whether tool policies are enforced.\n2. internal/server/server.go EvaluatePolicy: replace the EvaluateCapability + Decide pair with `result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)` and return `s.policyResponse(req, orgID, capability, result, binding)`. Keep every earlier early return (tool_not_bound, capabilityPolicyBlockReason) exactly as is. With the switch off EvaluateTool equals gate + Decide(riskResult, binding), so decisions and signed evidence must be byte-identical to today.\n3. Same function: before evaluating, refuse a non-service caller that asserts someone else's user_id, exactly like ResolveToolBindings does (server.go about line 798): `principal.PrincipalType != \"service\" && req.GetUserId() != \"\" && req.GetUserId() != principal.ActorID` -> codes.PermissionDenied. (Use verifiedPrincipal instead of verifiedOrganizationID at the top.) Without this, once policies are enforced a person could load another person's `allow` policies by naming their id.\n4. apps/Model Plane/deploy/docker-compose.yml, capability-core service environment: add `TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}` with a one-line comment (WS05-S5: only the literal `true` enables; off = stored and ignored). The file is CRLF and has other people's uncommitted edits: change only your lines, preserve CRLF.\n5. apps/Model Plane/proto/model_plane/v1/capabilities.proto EvaluatePolicyResponse.policy_source comment (about line 219): add the three values \"tool_policy_never\", \"tool_policy_ask\", \"tool_policy_allow\" (a stored per-tool policy produced it; only with TOOL_POLICY_ENFORCED on). Mirror the identical comment text on the PolicySource field doc comment in apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go (comment only; do not touch descriptor bytes or anything else in the generated file).\n\nTests (add to internal/server, e.g. a new evaluate_policy_tool_policies_test.go using the existing fakes in the package): (a) with WithToolPolicies(fakeSource, false) a stored `never` policy does not change the decision and the fake source is never called; (b) with enforced=true a `never` policy denies with policy_source tool_policy_never; (c) a user principal asserting another user_id gets PermissionDenied, a service principal may assert it. Add a cmd/ wiring test like the existing *_wiring_test.go files if a seam exists; otherwise skip it.\n\nMust NOT change: switch default off; decisions with the switch off; the signed-evidence digest input (policy-v2 line around server.go:591); no new env names besides TOOL_POLICY_ENFORCED.",
+   "files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go"
+   ],
+   "new_files": [
+    "apps/Model Plane/go/services/capability-core/internal/server/evaluate_policy_tool_policies_test.go"
+   ],
+   "tests": [
+    "go test ./internal/server/ ./internal/policy/ ./internal/api/ ./cmd/",
+    "go vet ./..."
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-execution-core-owner-marker-rungate",
+   "rows": [
+    "D1-274",
+    "D1-275"
+   ],
+   "title": "execution-core: owner-approval marker call sites follow TOOL_CLASS_GATE via RunGate (never weaker)",
+   "brief": "Context: WS05-S6 added `permission::RunGate` and `requires_durable_owner_approval_with` / `requires_consent_to_disclose_with` (apps/Model Plane/rust/services/execution-core/src/permission/mod.rs about lines 564-685). The posture path already uses RunGate, but these production sites still call the NAME predicate `crate::permission::requires_durable_owner_approval(tool_name)`, so a registry row with the durable_owner floor (e.g. an MCP tool) is not treated as an owner action even under TOOL_CLASS_GATE=enforce:\n- src/grpc.rs `reject_direct_owner_action` (about line 1196, used by ExecuteStep at about 1372)\n- src/runtime_loop/agent.rs `continuation_descriptor` (about line 7082: forces permission_mode \"ask\")\n- src/runtime_loop/mod.rs `permission_pause_cause` (about line 363, callers at about 751 and 815)\n- src/runtime_loop/resume.rs `releasable` (about line 121, callers about 162 and 500)\n\nDo: give each site the run's org and run id (all four have them in scope at the caller: RunAgentRequest req.org_id/req.run_id, ExecuteStep request, the step context) and make the OWNER marker = `name_predicate(tool) || RunGate::for_run(org, run).requires_durable_owner_approval(tool)`. The OR is deliberate: these sites reduce authority (refuse a direct call, refuse a release, force ask), so a declared view may ADD the owner marker but never remove it from a name the legacy predicate reserves (tickets.create etc.). For permission_pause_cause use the RunGate answer for the owner branch the same way (OR with the name). Thread the extra parameters through the function signatures and update the existing unit tests' call sites (grpc.rs tests at about 2250-2259, resume tests, agent tests).\n\nLeave the DISCLOSURE marker sites on the name predicate: approval_kind_for / approval_reason_for (agent.rs about 6893-6912) and the consent branch of permission_pause_cause. Row D1-273 (an `ask` floor reads as a disclosure under enforce) is an open owner decision; switching those sites would make that mislabel live.\n\nRegression tests: (1) with `RunGate::with_gate(ToolClassGate::Enforce, org, run)` and a recorded view (see `record_run_views` / ToolClassView usage in runtime_loop/effect.rs tests about 584-620) giving `mcp__srv__pay` floor DurableOwner: reject_direct_owner_action refuses it, releasable is false, the pause cause is OwnerEffectReserved, continuation_descriptor forces ask. (2) With the gate Off the same tool is treated exactly as today (not an owner action). (3) Under Enforce with a view that gives `tickets.create` floor None, it is STILL an owner action at all four sites. Since tool_class_gate() is Off under cfg(test), tests must construct RunGate::with_gate explicitly: add a small internal variant taking a RunGate where needed rather than reading the env.\n\nMust NOT change: behaviour with TOOL_CLASS_GATE off or shadow (byte-identical; by_gate returns legacy there); the two-loop separation; no new env vars. Files are CRLF: preserve line endings.",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib permission",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib runtime_loop",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib grpc"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-gateway-grant-fallback-and-probe-scope",
+   "rows": [
+    "D1-026",
+    "D1-463"
+   ],
+   "title": "model-gateway: narrower in-memory grant wins over an older durable one; probe reply carries conversation_only",
+   "brief": "Two independent model-gateway fixes merged because they share http_routes.rs.\n\nA) D1-026 (durable grant switch, WS04-S4). `with_local_fallback` in src/sse.rs (about line 9439) consults this replica's in-memory grant (`PlanModeStore::granted_rung`, coordinator.rs about 390) only when Session Core answered with NO grant. The memory copy is written only when an approval's SetRunMode failed transiently or the credential was waived (http_routes.rs about 8357-8371). So: older broad durable grant (DangerFullAccess) + newer narrower approval whose write failed (WorkspaceWrite in memory) -> the broad durable grant wins for up to 24 h. Fix in with_local_fallback: keep `read_failed` passthrough and the no-grant fallback exactly as now; when Session Core holds a rung AND memory holds one for the same org/thread, return the NARROWER by `mp_contracts::autonomy::rank` (on a tie keep Session Core's grant unchanged); when memory's is narrower, take memory's rung, `peek_approved_plan` and `grant_expires_at` (as the no-grant branch does) and log the same kind of info line (ids and rung label only). To stop a stale narrower copy from shadowing a later successful approval: add `PlanModeStore::clear_grant(&self, org_id, thread_id)` in coordinator.rs (org-checked: removes the entry only if its org matches) and call it in http_routes.rs plan approval when `durable_grant && durably_recorded` (right after line ~8339's computation). Do not touch model-gateway src/grpc.rs (it has someone else's uncommitted edits); its fallback record path stays as is. Tests (sse.rs test module near `this_replicas_unrecorded_grant_is_honoured_only_when_session_core_holds_none`, about line 19989): keep that test passing (Session Core ReadOnly still wins over memory WorkspaceWrite); add: Session Core DangerFullAccess + memory WorkspaceWrite -> WorkspaceWrite with memory's plan id; equal rungs -> Session Core's grant unchanged; other org's memory entry ignored. coordinator.rs test: clear_grant removes own org's entry, leaves another org's.\n\nB) D1-463 (send receipts on, bus on). For a stream on another replica `queued_input::stream_thread` (queued_input.rs about 492) returns `StreamThread::Peer(thread_id)` without the stream's conversation_only scope, so `queue_input_with_receipts` (http_routes.rs about 8835-8844) persists under a guessed ordinary scope and retries as conversation-only on FAILED_PRECONDITION. Fix: add `#[serde(default, skip_serializing_if = \"Option::is_none\")] pub conversation_only: Option<bool>` to `RunControlReply` (run_control.rs about 183); the owner fills it for a probe from the queued-input registry (run_control.rs about 857 fills thread_id via `queued_inputs.thread_for`; use the registry's `stream_for`, which returns (thread_id, conversation_only)); change `StreamThread::Peer` to carry `{ thread_id, conversation_only: Option<bool> }`; in http_routes use the known scope when Some and keep the existing guess-and-retry ONLY when None (an older replica that does not send the field). Update the field-set pin test (run_control.rs about 1263-1271) to include the optional key when set; PROTOCOL_VERSION stays the same (additive optional field). Add a test that a probe reply for a conversation-only stream carries conversation_only=true and that the receipts path persists once, without the retry, when the scope is known (use the existing fake/two-registry test setups in run_control.rs/http_routes.rs tests).\n\nMust NOT change: switches default off (durable grant switch, MODEL_GATEWAY_SEND_RECEIPTS, MODEL_GATEWAY_RUN_CONTROL_BUS); behaviour with those off; no message text or bearer on the bus (the reply carries ids and a bool only); ZDR gate untouched. sse.rs is a size-ratchet hot file: add as few lines as possible. Preserve CRLF.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib grant",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib run_control",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib queued_input",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib http_routes"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-shared-idempotency-claim-renewal",
+   "rows": [
+    "D1-481"
+   ],
+   "title": "model-gateway: renew the shared Pending idempotency claim while the owning stream runs",
+   "brief": "With MODEL_GATEWAY_SHARED_IDEMPOTENCY on (WS04-S7), `CommitGuard::claim_shared` (src/idempotency_registry.rs about 431) takes a Redis `SET NX PX` claim for PENDING_TTL = 120 s (about line 68 and 554) and nothing renews it. A stream that runs longer than 120 s lets a duplicate send on another replica win a fresh claim and start a second run.\n\nFix: add `fn renew<'a>(&'a self, key: &'a str, request_id: &'a str) -> BoxFuture<'a, bool>` to the `SharedClaimStore` trait: extend the key's TTL to PENDING_TTL only while the stored value is still this request's Pending claim (same read-then-write pattern as `settle`, using `PEXPIRE key ttl_ms`; return false if the key is gone or belongs to another request). Implement it for RedisClaimStore and for the test fake `FakeShared` (about line 879). In claim_shared's `Won` branch spawn a renewal task (tokio, only when a runtime is present) that every PENDING_TTL/3 calls renew and stops when renew returns false; keep its `JoinHandle`/abort handle in `SharedRelease` and abort it in `CommitGuard::drop` before spawning `settle`, so a Done or deleted claim is never re-extended. A renewal failure is logged by operation only (never the key: it holds org and user ids) through the existing `run` breaker.\n\nTests (idempotency_registry.rs test module, with the fake and tokio time pause): the claim's fake TTL is extended while the guard lives; after the guard drops no further renew is issued and settle runs; renew does nothing for a key now owned by another request_id.\n\nMust NOT change: switch default off and the local registry's behaviour (PENDING_TTL for the local map stays as is); `SharedClaimValue` shape (ids and state only, never answer text); DONE_TTL semantics. Preserve CRLF.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib idempotency_registry"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-core-gateway-dsn-literal",
+   "rows": [
+    "D1-213",
+    "D1-216"
+   ],
+   "title": "Infra core-gateway: remove the default Postgres DSN that embeds a literal password",
+   "brief": "apps/Infra Plane/core-gateway/internal/config/config.go line ~233 sets `viper.SetDefault(\"database.postgresurl\", \"postgres://coresystem:<literal password>@postgres:5432/coresystem?sslmode=disable\")`. It names the legacy coresystem database and puts a credential in source; it applies whenever DATABASE_POSTGRESURL is unset (configs/config.yaml already says postgres_url is set via that env var). Do not print or copy the password anywhere (commit message, test, log).\n\nFix: delete that SetDefault line (no default DSN). Then make the only consumer safe with an empty URL: internal/health/checker.go `CheckPostgreSQL` (about line 55) must not call sql.Open with an empty DSN (lib/pq would then dial localhost from PG* env); when `d.postgresURL` is empty return a PostgreSQLHealth with Status \"not_configured\" and no error string, without opening a connection. Check cmd/gateway/main.go (about line 111) still compiles unchanged.\n\nTests: new internal/config/config_test.go asserting that after setDefaults() `viper.GetString(\"database.postgresurl\")` is empty and that the file contains no `postgres://` literal with userinfo (read config.go and assert no match for `postgres(ql)?://[^/@\\s]+:[^/@\\s]+@`); new internal/health/checker_test.go asserting CheckPostgreSQL with an empty URL returns \"not_configured\" quickly. Note for the lead (not code): the removed password must be treated as exposed and rotated wherever that legacy database still runs.\n\nMust NOT change: other defaults, validate() rules, any other service. Preserve line endings.",
+   "files": [
+    "apps/Infra Plane/core-gateway/internal/config/config.go",
+    "apps/Infra Plane/core-gateway/internal/health/checker.go"
+   ],
+   "new_files": [
+    "apps/Infra Plane/core-gateway/internal/config/config_test.go",
+    "apps/Infra Plane/core-gateway/internal/health/checker_test.go"
+   ],
+   "tests": [
+    "go test ./internal/config/ ./internal/health/",
+    "go vet ./..."
+   ],
+   "cwd": "apps/Infra Plane/core-gateway",
+   "severity": "normal"
+  },
+  {
+   "key": "ws04-ws05-ws12-plane-boundary-base-ref",
+   "rows": [
+    "D1-214"
+   ],
+   "title": "plane-boundary gate: --base-ref fails a change that relaxes the allowlist",
+   "brief": "scripts/gates/plane-boundary.py reads scripts/gates/plane-boundary.json (keys local_hosts, planes[*].db_hosts, shared_hosts, db_exceptions, manifest_exceptions) and has no base comparison, so the same change that adds a cross-plane reference can add the exception that hides it. scripts/gates/size-ratchet.py already has the pattern to copy (`--base-ref`, `compare_with_base`, git show of the base file, fail closed when the ref does not resolve, skip with a note when the base has no config file).\n\nDo: add `--base-ref REF` to plane-boundary.py's --check. Load the policy at the base with `git show REF:scripts/gates/plane-boundary.json` (through the existing Policy validator) and report a problem for every relaxation: a new (file, host) in db_exceptions or (file, target) in manifest_exceptions; a host added to any plane's db_hosts; a new shared_hosts key; a new local_hosts entry; a plane newly listed. Removals and reason-text edits are not relaxations. Also detect a change to the rule constants a change could loosen (SOURCE_SUFFIXES dropping a suffix, TEST_DIRS gaining an entry, CROSS_DB_LINKS losing a pattern) by reading them from the base script with ast, as size-ratchet's policy_at does. Exit codes unchanged (1 problems, 2 cannot run).\n\nWire it in .github/workflows/repo-gates.yml plane-boundary job exactly like the size-ratchet job: checkout with fetch-depth 0, and a bash step that passes --base-ref \"origin/$BASE_REF\" on pull_request, \"$BEFORE_SHA\" on push when it resolves, else plain --check. Keep `continue-on-error: true` (rollout convention).\n\nTests in scripts/tests/test_plane_boundary.py using a throwaway git repo (copy the Repo helper approach from scripts/tests/test_size_ratchet.py): a change adding a db_exception fails against the base; adding a host to a plane fails; removing an exception passes; an unknown base ref exits 2; a base without the config file is not compared. Keep `--self-test` fixtures passing.\n\nOut of scope (owner decision, DEC-39 D2): a CODEOWNERS entry; the repository has no CODEOWNERS file today. Must NOT change: the R1-R3 rules or their output for --check without --base-ref.",
+   "files": [
+    "scripts/gates/plane-boundary.py",
+    "scripts/tests/test_plane_boundary.py",
+    ".github/workflows/repo-gates.yml"
+   ],
+   "new_files": [],
+   "tests": [
+    "python -m unittest scripts/tests/test_plane_boundary.py",
+    "python scripts/gates/plane-boundary.py --self-test"
+   ],
+   "cwd": "",
+   "severity": "normal"
+  },
+  {
+   "key": "ws04-ws05-ws12-size-ratchet-rename-escape",
+   "rows": [
+    "D1-158"
+   ],
+   "title": "size-ratchet: a baselined file renamed out of the count fails against the base",
+   "brief": "scripts/gates/size-ratchet.py `relaxations`/`compare_with_base` (about lines 170-200) compares ceilings by path. A file that has a ceiling at the base and is `git mv`-ed into a `gen/` directory, under `target`/`dist`/`node_modules`, or to an uncounted suffix simply disappears from the count; --update drops its entry and the base comparison sees no raise, so the file escapes the ratchet. The docstring admits it (\"A rename that moves a file out of the count is not detected\").\n\nFix: in compare_with_base, for each path in the BASE baseline that is no longer a counted file now (`counts.get(path) is None`), ask git for renames between the base and the tree being checked: `git diff --name-status -z -M <base_ref>` against the working tree (or `<base_ref> <ref>` when --ref is given). If the path was renamed (R status) to a destination that is not counted (not in counts, or counts[dest] is None as generated), report `<old>: renamed to <new>, which is not counted; a baselined file cannot leave the count by moving`. A destination that IS counted is handled by the existing rules (it is over the cap with no ceiling unless the baseline moves with it — and a new entry for it must not exceed the old ceiling: treat a renamed entry's allowance as the old path's ceiling in the raise check). A plain deletion (D) stays allowed. Update the module docstring sentence accordingly.\n\nTests in scripts/tests/test_size_ratchet.py (use the existing Repo helper): a baselined file git-mv'ed into gen/ fails with --base-ref; renamed to an uncounted suffix fails; renamed to another counted path with its ceiling carried over passes; deleted outright passes.\n\nMust NOT change: CAP, counted suffixes, --update/--init behaviour, exit codes.",
+   "files": [
+    "scripts/gates/size-ratchet.py",
+    "scripts/tests/test_size_ratchet.py"
+   ],
+   "new_files": [],
+   "tests": [
+    "python -m unittest scripts/tests/test_size_ratchet.py"
+   ],
+   "cwd": "",
+   "severity": "normal"
+  },
+  {
+   "key": "ws04-ws05-ws12-vitest-exclude-node-test",
+   "rows": [
+    "D1-246"
+   ],
+   "title": "verevonv3: keep vitest from collecting the node:test bundle-budget test",
+   "brief": "apps/Frontend Plane/verevonv3/scripts/check-bundle-budget.test.mjs (WS12-S12) is a node:test file run by CI with `node --test` (.github/workflows/verevonv3-ci.yml about line 198). vite.config.ts test.exclude (about lines 83-104) excludes 'apps/gateway/scripts/**/*.test.mjs' but not 'scripts/**/*.test.mjs', and vitest's default include matches .test.mjs, so `pnpm test` (vitest run) collects it and fails. Fix: add `'scripts/**/*.test.mjs',` to test.exclude with a one-line comment (node:test file, run by `node --test` in CI). Nothing else changes.\n\nProof: `pnpm exec vitest run scripts/check-bundle-budget.test.mjs --passWithNoTests` reports no test files collected (before the fix it collects and fails), and `node --test scripts/check-bundle-budget.test.mjs` still passes. Preserve line endings.",
+   "files": [
+    "apps/Frontend Plane/verevonv3/vite.config.ts"
+   ],
+   "new_files": [],
+   "tests": [
+    "pnpm exec vitest run scripts/check-bundle-budget.test.mjs --passWithNoTests",
+    "node --test scripts/check-bundle-budget.test.mjs"
+   ],
+   "cwd": "apps/Frontend Plane/verevonv3",
+   "severity": "normal"
+  }
+ ],
+ "clashes": [
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: ws08-ws09-exec-run-inputs-children-ttl-expiry / ws01-ws02-ws03-crash-park-round-markers",
+  "apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md: ws01-ws02-ws03-zdr-attestation-alerts / ws01-ws02-ws03-zdr-pass2-spec",
+  "apps/Model Plane/rust/services/model-gateway/src/sse.rs: ws08-ws09-gateway-ask-staging-and-vision-refusal / ws01-ws02-ws03-gateway-prompt-tier-plan",
+  "apps/Model Plane/deploy/docker-compose.yml: ws08-ws09-declared-attachment-modes / ws04-ws05-ws12-capability-core-tool-policy-wiring",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: ws08-ws09-exec-run-inputs-children-ttl-expiry / ws04-ws05-ws12-execution-core-owner-marker-rungate",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: ws08-ws09-exec-run-inputs-children-ttl-expiry / ws04-ws05-ws12-execution-core-owner-marker-rungate",
+  "apps/Model Plane/rust/services/model-gateway/src/sse.rs: ws08-ws09-gateway-ask-staging-and-vision-refusal / ws04-ws05-ws12-gateway-grant-fallback-and-probe-scope",
+  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: ws10-ws11-model-access-route / ws04-ws05-ws12-gateway-grant-fallback-and-probe-scope"
+ ],
+ "already_fixed": [
+  {
+   "row": "D1-184",
+   "evidence": "apps/Control Plane/org-core/cmd/server/main.go:122 starts go runSIEMAuditOutbox(ctx, orgService, 5*time.Second); defined at main.go:294-307 calling service.FlushSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-188",
+   "evidence": "Same as D1-184: org-core/cmd/server/main.go:122 wires runSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-193",
+   "evidence": "Same as D1-184: org-core/cmd/server/main.go:122 wires runSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-197",
+   "evidence": "Same as D1-184: org-core/cmd/server/main.go:122 wires runSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-202",
+   "evidence": "Same as D1-184: org-core/cmd/server/main.go:122 wires runSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-206",
+   "evidence": "Same as D1-184: org-core/cmd/server/main.go:122 wires runSIEMAuditOutbox"
+  },
+  {
+   "row": "D1-291",
+   "evidence": "S3 chain-safe purge shipped: audit-core/internal/store/store.go:322 Purge calls s.purgeChained; attest.go:158-314 deletes the verified chained prefix and writes a signed checkpoint (off unless AUDIT_CHAIN_PRUNE_ENABLED)"
+  },
+  {
+   "row": "D1-313",
+   "evidence": "The verifier and the CLI both check checkpoints through chain.KeyRing.VerifyCheckpoint (verifier.go:274, used by cmd/audit-verify via verifier.Verify), whose payload formats created_at with SignedTimeLayout in UTC (internal/chain/chain.go:39,161)"
+  },
+  {
+   "row": "D1-382",
+   "evidence": "apps/Control Plane/docker-compose.yml:843 grants verevon-gateway the scopes [\"audit:read:self\",\"audit:compliance:read:self\"] for audience audit-core"
+  },
+  {
+   "row": "D1-384",
+   "evidence": "audit-core/internal/chain/sign.go:208-215 adds KeyRing.SignPayload and VerifyPayload; store/compliance.go:282-298 SignManifest treats ErrNoSigningKey as unsigned; compose grant at docker-compose.yml:843"
+  },
+  {
+   "row": "D1-526",
+   "evidence": "Org mirror is wired: memory_control.rs:327-336 decide_with_org folds org_policy::view_from_row into the decision; resolve (340-357) and resolve_in_tx (362-380, mirror_row at 378) use it; fail-closed staleness in org_policy.rs:139-141."
+  },
+  {
+   "row": "D1-530",
+   "evidence": "Same as D1-526: resolve/resolve_in_tx no longer hard-code OrgMemoryPolicy::Allow except for the ZDR short-circuit (memory_control.rs:350,370); org mirror applied at 355-356 and 378-379."
+  },
+  {
+   "row": "D1-527",
+   "evidence": "capability-core /api/v1/memory proxy is now gated (WS07-S5): internal/api/workplane_apis.go:40-62 memory controls reader, WithMemoryControls wired at cmd/main.go:315, covered by internal/api/memory_gate_test.go. memory_dedup only retires rows; session-core memory_grpc.rs INSERTs are all inside the test module (after line 1015)."
+  },
+  {
+   "row": "D1-531",
+   "evidence": "Duplicate of D1-527, closed by the same S5 gate (workplane_apis.go:40-62, cmd/main.go:315, memory_gate_test.go)."
+  },
+  {
+   "row": "D1-553",
+   "evidence": "model-gateway route exists: rust/services/model-gateway/src/http_routes.rs:266 .route(\"/v1/memories/reset\", post(reset_memory)) and handler at 10380; frontend action memory.reset in src/shared/actions/model-access.ts:198; mock stub in model-gateway/src/grpc.rs:3823."
+  },
+  {
+   "row": "D1-562",
+   "evidence": "get_memory_controls now authorizes with MEMORY_CONTROLS_READ_SCOPE = \"session:memory-controls:read\" (session-core/src/memory_grpc.rs:27, 808)."
+  },
+  {
+   "row": "D1-600",
+   "evidence": "capability-core cmd/main.go:222 appends sessionreview.WithMemoryControls(memoryClient) to the learning consumer options, so the pre-read org/user gate is on."
+  },
+  {
+   "row": "D1-617",
+   "evidence": "Same wiring: capability-core cmd/main.go:222 sessionreview.WithMemoryControls(memoryClient)."
+  },
+  {
+   "row": "D1-616",
+   "evidence": "capability-core internal/learning/reviewer.go:123 decodes `Reason string json:\"reason\"` and :142 sets Reason: strings.TrimSpace(s.Reason); internal/skillsink/sink.go:86 stores it as ProposalReason."
+  },
+  {
+   "row": "D1-621",
+   "evidence": "Duplicate of D1-616; reviewer.go:123,142 parse reason."
+  },
+  {
+   "row": "D1-620",
+   "evidence": "Accept/reject path exists: session-core/src/grpc.rs:9847 decide_skill_proposal (S8 DecideSkillProposal). The up-to-60 s gateway cache lag is the documented SKILL_CACHE_TTL_SECONDS design, not a defect."
+  },
+  {
+   "row": "D1-625",
+   "evidence": "Frontend Plane/verevonv3/src/shared/actions/model-access.ts:197-199 rows for memory.set_state, memory.reset, memory.remember; admission golden src/shared/api/contracts/agent-action-admission.json:1272-1298 contains all three."
+  },
+  {
+   "row": "D1-626",
+   "evidence": "Duplicate of D1-625; rows and golden present (model-access.ts:197-199, agent-action-admission.json:1272-1298)."
+  },
+  {
+   "row": "D1-580",
+   "evidence": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:45 imports consumePendingChatLaunchAsync and line 2049 awaits it (pending-chat-launch.ts:151-152 restores the attachment bytes from IndexedDB), so a reload after a launch with attachments no longer loses the launch."
+  },
+  {
+   "row": "D1-454",
+   "evidence": "The SPA handles the typed 403 refusal: apps/Frontend Plane/verevonv3/src/shared/api/model-entitlement-refusals.ts:15,48,85 (model_not_entitled + deployment_allowlist reason), vendored contract src/shared/api/contracts/model-entitlement-refusals.json:5,48, translateApiError covered by src/shared/i18n/errors.model-entitlement.test.ts:13; model-gateway normalize.rs:97-114,396 emits it; tested at normalize.rs:468-469."
+  },
+  {
+   "row": "D1-471",
+   "evidence": "The WS10-S5 write guard treats an unresolvable draft as fail-closed 503: apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/model_entitlement.rs:393-401 guard_unavailable, :537 (no verdict -> 503), test the_zdr_guard_fails_closed_when_it_cannot_decide at :1086-1125; inference-core refuses draft while off as unavailable at inference-core/src/grpc.rs:1367-1369."
+  },
+  {
+   "row": "D1-473",
+   "evidence": "Golden, pin and both Data Plane copies agree: sha256 c5223c46... for apps/Model Plane/api/contracts/infer-statuses.json, Data Plane v2/services/inference-client-rs/tests/fixtures/inference-core/infer-statuses.json (+ .sha256) and embedding-engine-rs/tests/fixtures/contracts/infer-statuses.json; pinned in scripts/tests/zdr-contract-sync.test.sh:53,196,202. Data Plane decoder maps PERMISSION_DENIED to Auth (inference-client-rs/src/status.rs:316). The entitlement reason trailer is documented in the entitlement contract api/contracts/model-entitlement-refusals.json:59 (grpc_reason_trailer) and mp-contracts model_entitlement.rs:50, so its absence from infer-statuses trailer_keys (grpc.rs:2960-2964) is not a gap."
+  },
+  {
+   "row": "D1-500",
+   "evidence": "Typed run failure built: execution-core/src/runtime_loop/agent.rs:2944-2946 calls subscription_refusal::entitlement_refusal_from_status; subscription_refusal.rs:65-67,149-150; test a_model_entitlement_refusal_is_typed_terminal_and_never_run_wide at subscription_refusal.rs:398."
+  },
+  {
+   "row": "D1-501",
+   "evidence": "Same as D1-500, plus the contract test execution-core/tests/model_entitlement_refusal_contract.rs:1-29 pins the kind and x-mp-entitlement-reason trailers."
+  },
+  {
+   "row": "D1-518",
+   "evidence": "The Frontend gateway list_models proxies the model-gateway JSON body unchanged (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs:467-477 via shared.rs:600 proxy_model_json_with_inference); model-gateway emits the entitlement sibling at http_routes.rs:8920-8939."
+  },
+  {
+   "row": "D1-041",
+   "evidence": "Both tokens are minted by the Control Plane secret generation: apps/Control Plane/scripts/run-control-plane.sh:462 (AUDIT_ORG_CORE_SERVICE_TOKEN) and :502 (INFERENCE_ORG_CORE_SERVICE_TOKEN), validated in scripts/validate-release-credentials.sh:43; compose registry entries at docker-compose.yml:543. Rebuilding org-core's image before recreating it is a deploy step (live), not code."
+  },
+  {
+   "row": "D1-096",
+   "evidence": "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: no production line formats question/query any more (the only `%question` matches are test strings at 9728-9729); the test tracing_counts_the_question_and_query_text_and_never_formats_it (tool_loop.rs:9709-9747) scans the production part for question, turn_question and query."
+  },
+  {
+   "row": "D1-466",
+   "evidence": "QueuedInputReceipted is in api/contracts/sse-event-payloads.json (queued_input variants), its sha256 c2c6a078... matches the .sha256 and the pin at scripts/tests/zdr-contract-sync.test.sh:151; SPA vendored copy src/shared/api/contracts/sse-event-payloads.json and chat-event-payloads.generated.ts carry it; call-ins at model-gateway tool_loop.rs:7067 and sse.rs:1665 (send_receipts_enabled); compose default-off line deploy/docker-compose.yml:306 MODEL_GATEWAY_SEND_RECEIPTS:-false."
+  },
+  {
+   "row": "D1-467",
+   "evidence": "Same as D1-466: golden + pins (zdr-contract-sync.test.sh:151, 275-276), sse.rs:1665 and tool_loop.rs:7067 call-ins, and deploy/docker-compose.yml:306 default-off line all present."
+  },
+  {
+   "row": "D1-483",
+   "evidence": "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts:1448 sendClientMessageId returns undefined for regenerated, editResubmit, appendUser=false and zdr, so no idempotency_key (chat-client.ts:1315) is sent for a regenerate or edited resubmit; pinned by use-chat-controller.send-receipts.test.ts:85-94."
+  }
+ ],
+ "not_code": [
+  {
+   "row": "D1-186",
+   "why": "owner-decision",
+   "note": "Row asks the owner to choose between purging and keeping organization_siem_audit_outbox rows on erasure. 003 gdpr_hard_delete_organization still has no reference (only 022 creates the table). Extend the function in a new migration once the decision is made."
+  },
+  {
+   "row": "D1-190",
+   "why": "duplicate",
+   "note": "Duplicate of D1-186"
+  },
+  {
+   "row": "D1-195",
+   "why": "duplicate",
+   "note": "Duplicate of D1-186"
+  },
+  {
+   "row": "D1-199",
+   "why": "duplicate",
+   "note": "Duplicate of D1-186"
+  },
+  {
+   "row": "D1-204",
+   "why": "duplicate",
+   "note": "Duplicate of D1-186"
+  },
+  {
+   "row": "D1-208",
+   "why": "duplicate",
+   "note": "Duplicate of D1-186"
+  },
+  {
+   "row": "D1-292",
+   "why": "owner-decision",
+   "note": "This is a rollout procedure choice: a stop-the-world image swap or an activation grace window before AUDIT_CHAIN_ENABLED is switched on. AUDIT_CHAIN_RUNBOOK.md does not cover it yet, and the owner should pick before the chain switch is flipped."
+  },
+  {
+   "row": "D1-294",
+   "why": "not-a-defect",
+   "note": "This is intended behaviour and is documented in AUDIT_CHAIN_RUNBOOK.md §7.6: never run an audit-core image older than WS06-S2 while migration 007 is applied, so audit-core is rolled as one image."
+  },
+  {
+   "row": "D1-309",
+   "why": "not-a-defect",
+   "note": "The purge deletes only a prefix it has verified (attest.go:269-275). The retained suffix is checked by the S4 verifier loop (verifier.Pass, store.VerifyOrg) and its ControlAuditChainVerifyFailed alert, so this is by design."
+  },
+  {
+   "row": "D1-310",
+   "why": "owner-decision",
+   "note": "The attestation retention rule (for example, keep the newest per day) is undecided. No code prunes audit_chain_attestations."
+  },
+  {
+   "row": "D1-316",
+   "why": "duplicate",
+   "note": "Duplicate of D1-310"
+  },
+  {
+   "row": "D1-337",
+   "why": "duplicate",
+   "note": "Duplicate of D1-310"
+  },
+  {
+   "row": "D1-343",
+   "why": "duplicate",
+   "note": "Duplicate of D1-310"
+  },
+  {
+   "row": "D1-312",
+   "why": "not-a-defect",
+   "note": "This is by design and documented in AUDIT_CHAIN_RUNBOOK.md §6 step 3: a replica that loses the advisory lock skips that org until the next daily sweep."
+  },
+  {
+   "row": "D1-339",
+   "why": "duplicate",
+   "note": "Duplicate of D1-312"
+  },
+  {
+   "row": "D1-336",
+   "why": "duplicate",
+   "note": "Duplicate of D1-309"
+  },
+  {
+   "row": "D1-340",
+   "why": "duplicate",
+   "note": "Duplicate of D1-313, which is already fixed"
+  },
+  {
+   "row": "D1-386",
+   "why": "live-proof",
+   "note": "DB tests for the compliance SQL exist (store/compliance_test.go:181-328: paging, concurrent cursor, window range, filters, manifest, keys). They need the audit-core Postgres harness to run."
+  },
+  {
+   "row": "D1-390",
+   "why": "live-proof",
+   "note": "docker-compose.yml:843 grants audit:compliance:read:self to verevon-gateway. The gateway-delegated call still needs to be proven on a running stack."
+  },
+  {
+   "row": "D1-399",
+   "why": "owner-decision",
+   "note": "The details guard is still observe-only (store/chain.go:30-38 and :205; runbook §1 Content). Whether to enforce it before AUDIT_SIEM_EXPORT_ENABLED is the owner's call, which is the same decision as D1-428."
+  },
+  {
+   "row": "D1-401",
+   "why": "duplicate",
+   "note": "Duplicate of D1-399"
+  },
+  {
+   "row": "D1-408",
+   "why": "duplicate",
+   "note": "Duplicate of D1-399"
+  },
+  {
+   "row": "D1-410",
+   "why": "duplicate",
+   "note": "Duplicate of D1-399"
+  },
+  {
+   "row": "D1-426",
+   "why": "owner-decision",
+   "note": "There is still no repair path for a head marked broken: store/chain.go:132 is the only writer of that state. The runbook §4 step 4 and §10 assign the repair decision to the owner."
+  },
+  {
+   "row": "D1-427",
+   "why": "owner-decision",
+   "note": "There is no rotation command. The manual procedure is in AUDIT_CHAIN_RUNBOOK.md §5 and is listed as a known gap in §10. Building a command is the owner's call."
+  },
+  {
+   "row": "D1-428",
+   "why": "owner-decision",
+   "note": "The row asks for an enforce-or-observe decision before SIEM export is enabled. The guard is still count-only (chain.go:30-38, 332-335)."
+  },
+  {
+   "row": "D1-561",
+   "why": "live-proof",
+   "note": "Scope grant is in the tree (apps/Control Plane/config/plane-service-principals.json and auth-core plane-token-scopes.spec.ts contain session:memory-controls:read); what remains is the deploy order (reload Auth Core principals before rebuilding capability-core), proven only on a running stack."
+  },
+  {
+   "row": "D1-601",
+   "why": "owner-decision",
+   "note": "Row itself says to decide before production turns ORG_POLICY_FAIL_CLOSED on: pull-through at the gate vs poller-only staleness for new orgs and large fleets."
+  },
+  {
+   "row": "D1-602",
+   "why": "live-proof",
+   "note": "Rollout order (org-core scope, then SESSION_ORG_CORE_SERVICE_TOKEN, then ORG_POLICY_FAIL_CLOSED=true) is an operator/lead deployment step; code already logs an ERROR once."
+  },
+  {
+   "row": "D1-619",
+   "why": "live-proof",
+   "note": "Deploy/rollback ordering for migration 0058 (deploy session-core first; rollback needs revert file with image rollback); no code change."
+  },
+  {
+   "row": "D1-642",
+   "why": "not-a-defect",
+   "note": "Verification gap only (S8 Rust code not compiled when written). Proven by the cargo check/test commands of packet ws07-thread-resume-watermark, which compile and run all session-core lib tests including grpc.rs S8 RPCs and gdpr.rs."
+  },
+  {
+   "row": "D1-643",
+   "why": "owner-decision",
+   "note": "session-core has no per-user erasure path at all: gdpr.rs:20-27 deliberately no-ops subject_type user/user_anonymize and only purges orgs (purge_organization_data at :232). Adding user-level erasure (skills, revisions, and every other user-owned row) is a GDPR scope decision (delete vs anonymize), not a local fix."
+  },
+  {
+   "row": "D1-644",
+   "why": "not-a-defect",
+   "note": "UndoLearningEntry returns an explicit failed_precondition memory_undo_via_delete for kind=memory (grpc.rs:9979); routing the Undo button to DeleteMemory is part of the unbuilt WS07-S9 UI slice, restoring supersedes_id is a feature not a defect."
+  },
+  {
+   "row": "D1-645",
+   "why": "live-proof",
+   "note": "actor_kind 'unattributed' until capability-core is redeployed; the S10 governance check (no script exists yet under apps/Model Plane/scripts) should count unattributed revisions as failures when S10 is built."
+  },
+  {
+   "row": "D1-647",
+   "why": "duplicate",
+   "note": "Duplicate of D1-645."
+  },
+  {
+   "row": "D1-571",
+   "why": "owner-decision",
+   "note": "Exposing memory_mode on ThreadSummary/context response needs proto tags WS17 does not hold (ThreadSummary 16-19 reserved) and an integrator decision, as the row states."
+  },
+  {
+   "row": "D1-572",
+   "why": "owner-decision",
+   "note": "WS07.S6 is an optional/gated slice (plan line 1973); gateway still sends memory_mode: None (model-gateway http_routes.rs:9403). Building the gateway body, frontend route, action contract and header toggle depends on the D1-571 tag decision so the toggle can show state, and should follow the two fix packets (D1-570, D1-573)."
+  },
+  {
+   "row": "D1-575",
+   "why": "duplicate",
+   "note": "Duplicate of D1-571 + D1-572."
+  },
+  {
+   "row": "D1-508",
+   "why": "owner-decision",
+   "note": "The row asks the owner to decide whether hosted-URL images (no bytes, size 0, attachment_policy.rs:306-335) stay allowed or need an allowlist. The behaviour is unchanged and deliberate (test an_attachment_with_no_data_is_refused_unless_it_is_a_hosted_image)."
+  },
+  {
+   "row": "D1-534",
+   "why": "not-a-defect",
+   "note": "A grep of inference-core, model-gateway and execution-core runtime_loop finds no Debug-format log, panic or #[instrument] of a pb::InferRequest. The only {req:?} sites are redaction tests over the internal InferRequest (inference-core provider/mod.rs:1323/1544), which redacts ImagePart bytes. This is a latent hardening idea (prost skip_debug), not a current leak."
+  },
+  {
+   "row": "D1-579",
+   "why": "not-a-defect",
+   "note": "Precondition for a future cap raise, which is the owner's call. The client constants (attachment-policy.ts:29 1_000_000 and 3_145_728 total) match the server defaults (attachment_policy.rs:35-39) and the compose defaults today, and a loaded declared policy overrides them."
+  },
+  {
+   "row": "D1-475",
+   "why": "owner-decision",
+   "note": "Row says entitlement is chat-only per D5 and to revisit if vision/image models should be covered; scope change for the owner."
+  },
+  {
+   "row": "D1-478",
+   "why": "not-a-defect",
+   "note": "Mode::parse treating an unknown value as enforce is what the plan row specifies (fail closed); the remaining action is a deploy rule (set ORG_CORE_URL and token before enforce)."
+  },
+  {
+   "row": "D1-498",
+   "why": "owner-decision",
+   "note": "Still true (model-gateway/src/model_access.rs:151-159 lets the turn go on for a non-typed GetModelAccess error); the row asks the lead to decide whether enforce should fail closed at the gateway. inference-core still refuses at its own pre-check, so only empty rows are left behind."
+  },
+  {
+   "row": "D1-590",
+   "why": "live-proof",
+   "note": "Concerns how the WS10-S7 live proof script will report a refused member turn while D1-498 is undecided; needs a running stack."
+  },
+  {
+   "row": "D1-068",
+   "why": "live-proof",
+   "note": "Checking 0044-0048 constraint/trigger replacements against the older session-core binary needs the rollback rehearsal on a live stack (rollback-rehearsal.sh) before SESSION_CORE_MIGRATION_IGNORE_MISSING is set true; nothing to change in code now."
+  },
+  {
+   "row": "D1-070",
+   "why": "duplicate",
+   "note": "Duplicate of D1-068."
+  },
+  {
+   "row": "D1-112",
+   "why": "live-proof",
+   "note": "One-time cutover: pre-cutover VEREVON_AUDIT messages need a manual replay on the live JetStream (runbook docs/runbooks/audit-delivery-replay.md exists); operational, not a code defect."
+  },
+  {
+   "row": "D1-138",
+   "why": "external",
+   "note": "release-runtime-partition/contract/input-security tests need Linux/CI (Windows Python lacks O_NOFOLLOW); run there."
+  },
+  {
+   "row": "D1-141",
+   "why": "duplicate",
+   "note": "Duplicate of D1-138."
+  },
+  {
+   "row": "D1-148",
+   "why": "live-proof",
+   "note": "env-file quoting difference must be observed on the first live run."
+  },
+  {
+   "row": "D1-219",
+   "why": "live-proof",
+   "note": "zdr-live-proof.sh counters are stack-global; the row's fix depends on confirming org columns on threads/messages/runs/outbox in the live schema (feedback_ratings is not even in session-core migrations); mitigation is a quiet stack."
+  },
+  {
+   "row": "D1-238",
+   "why": "owner-decision",
+   "note": "Live-metric enforcement needs a 7-day live baseline and owner-approved targets before any threshold row moves to approved."
+  },
+  {
+   "row": "D1-365",
+   "why": "live-proof",
+   "note": "Write-share evidence depends on a pinned live route reporting cache-creation counts."
+  },
+  {
+   "row": "D1-368",
+   "why": "live-proof",
+   "note": "cost-core audience / cost:org:read for the capture token must be verified against the live stack before the eval run."
+  },
+  {
+   "row": "D1-444",
+   "why": "owner-decision",
+   "note": "Plan says the S2 baseline decides whether INFERENCE_ANTHROPIC_TIERED_SYSTEM ships; switch stays off."
+  },
+  {
+   "row": "D1-545",
+   "why": "owner-decision",
+   "note": "Owner must choose the park TTL or a fixed thread notice before the crash-park flip."
+  },
+  {
+   "row": "D1-548",
+   "why": "not-a-defect",
+   "note": "Executor folds never carry thread_watermark: fold::build_fold starts from a fresh extensions map (execution-core runtime_loop/fold.rs:477-497), park_fold builds on it (park.rs:368-395), and session-core stamps only kind=round saves (loop_checkpoint.rs:447-457); the claim re-check (loop_checkpoint.rs:691-710) therefore only sees the stamp on session-core's own crash-park fold. A guard test that executor folds of a crash-resumed run carry no thread_watermark is included in packet ws01-ws02-ws03-crash-park-round-markers."
+  },
+  {
+   "row": "D1-007",
+   "why": "owner-decision",
+   "note": "zdr-posture-matrix.json is a cross-language retention-decision contract (org_posture/decision/enforcement rows, each evaluated by every consumer's own function); it has no row family for MCP tool observation/offer. Adding one is a versioned contract-shape change (schema in scripts/tests/zdr-contract-schema.mjs, pins, three vendored copies, consumers). The behaviour itself is unit-tested (model-gateway capability_observation.rs:495). Owner/lead should decide whether MCP goldens extend this matrix or get their own."
+  },
+  {
+   "row": "D1-098",
+   "why": "owner-decision",
+   "note": "The concrete tool_loop.rs lines are gone and guarded by the tool_loop test (see D1-096). Widening the repo log-content gate's CONTENT_NAMES (scripts/gates/log-content.py:58-61, still without question/query/turn_question) is the DEC-39 D2 owner call the row names."
+  },
+  {
+   "row": "D1-156",
+   "why": "owner-decision",
+   "note": "All seven files are now far over their ceilings in the working tree (session-core grpc.rs 18992 vs 15066, sse.rs 20663 vs 19664, tool_loop.rs 14122 vs 13213, e2e_invoke_chain_test.rs 13277 vs 12703, spaces.rs 10092 vs 9892, terminalization.rs 4350 vs 3724, use-chat-controller.ts 4247 vs 4179). The gate is advisory (continue-on-error). Closing it is either a multi-service extraction far beyond one packet or a re-baseline, which depends on D1-157's owner decision on a reviewed raise path."
+  },
+  {
+   "row": "D1-157",
+   "why": "owner-decision",
+   "note": "The row itself says the owner must decide whether a deliberate ceiling-raise exception exists and how it is recorded."
+  },
+  {
+   "row": "D1-176",
+   "why": "live-proof",
+   "note": "Whether Control mints admin/org:admin/*:admin for org admins can only be confirmed against a live Control Plane token; not a code change here."
+  },
+  {
+   "row": "D1-177",
+   "why": "live-proof",
+   "note": "Whether the BFF-minted capability-core token for a person carries capability:write needs a live token from the running stack."
+  },
+  {
+   "row": "D1-180",
+   "why": "duplicate",
+   "note": "Duplicates D1-176 (org admin scope) and D1-177 (capability:write for personal writes)."
+  },
+  {
+   "row": "D1-229",
+   "why": "owner-decision",
+   "note": "Confirmed agentic_run_stream (sse.rs:10632-11504) registers nothing with CancelRegistry or run_control.attach, unlike the inline stream (sse.rs:2456-2459). It is WS03's open work and needs a design call first: what a stream-level cancel flag does for a run that execution-core owns (Stop must reach execution-core). Route to WS03 triage rather than a blind registration."
+  },
+  {
+   "row": "D1-273",
+   "why": "owner-decision",
+   "note": "The row asks whether the disclosure marker needs its own column before MCP rows may carry an ask floor; the execution-core packet deliberately leaves the disclosure sites on the name predicate until this is decided."
+  },
+  {
+   "row": "D1-418",
+   "why": "owner-decision",
+   "note": "Persist-then-enqueue with client_message_id exists (http_routes.rs queue_input_with_receipts, about 8751) behind MODEL_GATEWAY_SEND_RECEIPTS; the hole remains only for bus-on with receipts off. What is left is the rollout coupling rule (do not enable MODEL_GATEWAY_RUN_CONTROL_BUS in production without receipts), a switch-order decision plus live proof."
+  },
+  {
+   "row": "D1-462",
+   "why": "live-proof",
+   "note": "The row asks to measure the in-flight idempotency claim count on the product stream path before shipping; needs a running stack."
+  },
+  {
+   "row": "D1-464",
+   "why": "owner-decision",
+   "note": "The row asks to decide whether a refused/unavailable queue after persist is recorded as withdrawn (needs the WS17 marker, Wave 2) or accepted."
+  },
+  {
+   "row": "D1-465",
+   "why": "owner-decision",
+   "note": "Needs a design choice on how a lost queued_input delivery frame is reconciled before the end-of-run resend (SPA transcript check vs gateway refusing a new turn whose client_message_id was already delivered); not a confirmed single change."
+  },
+  {
+   "row": "D1-482",
+   "why": "owner-decision",
+   "note": "The row asks to decide between buffering `connected` before the claim returns and requiring the run-control bus for the shared-idempotency switch."
+  },
+  {
+   "row": "D1-247",
+   "why": "live-proof",
+   "note": "bundle-budget.json ceilings are still null; they need the first CI spa-verify measurement recorded."
+  },
+  {
+   "row": "D1-250",
+   "why": "duplicate",
+   "note": "Duplicates D1-247 (null ceilings until the first CI measurement)."
+  }
+ ],
+ "groups_failed": []
+}

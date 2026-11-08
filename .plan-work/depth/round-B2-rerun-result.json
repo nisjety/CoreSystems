@@ -1,0 +1,43 @@
+[
+ {
+  "key": "ws04-ws05-ws12-execution-core-owner-marker-rungate",
+  "rows": [],
+  "title": "ws04-ws05-ws12-execution-core-owner-marker-rungate",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\grpc.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\resume.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p execution-core --lib permission",
+    "outcome": "41 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib runtime_loop",
+    "outcome": "586 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib grpc",
+    "outcome": "37 passed, 0 failed",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The run view store is per process. Under enforce, a durable_owner MCP tool is held only on a replica that recorded the run's views. Anywhere else it falls back to the name-only answer, which matches legacy and is never weaker.",
+   "Under Shadow the decision stays legacy, but the owner_approval divergence counter now fires at four more sites, and releasable can be evaluated more than once per pause. The tool_class_divergence_total counts for point=owner_approval will rise. Metrics only, no behaviour change.",
+   "Tests only cover the cfg(test) build. No production caller uses the cfg(test) run_pause_mode wrapper (fold.rs:3229 sits inside its tests module), so the non-test build should compile, but nobody ran cargo check without cfg(test).",
+   "The disclosure sites (approval_kind_for, approval_reason_for, and the consent branch of permission_pause_cause) stay on the name predicate on purpose, as the brief requires. Row D1-273 is still an open owner decision."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No deploy or env change. TOOL_CLASS_GATE stays default off, no new env vars, and nothing was committed, stashed or reset. The lead commits the four files. Line endings are CRLF in all four (resume.rs was restored this pass). Logs are in the scratchpad: ws04_final_permission.log, ws04_final_runtime_loop.log, ws04_final_grpc.log, ws04_final_durable_owner.log and ws04_ec_check_nontest.log.",
+  "summary": "Packet ws04-ws05-ws12-execution-core-owner-marker-rungate (rows D1-274, D1-275) is implemented in the four execution-core files, completing the earlier attempt's partial work. At the four production sites the owner marker is now `name_predicate(tool) || RunGate.requires_durable_owner_approval(tool.trim())`: grpc.rs reject_direct_owner_action (ExecuteStep), agent.rs continuation_descriptor (forces \"ask\"), runtime_loop/mod.rs permission_pause_cause (OwnerEffectReserved), and resume.rs releasable (also gates ApprovedRelease::new and pause_continuation_mode). The OR means a declared durable_owner floor can add the marker but can never lift a reserved name. The gate is threaded through those signatures and their callers (agent.rs run_rounds, pause_for_approval, released_call, build_segment, restore_continuation; mod.rs execute_step_inner). run_pause_mode_with takes the gate, and a cfg(test) run_pause_mode wrapper keeps the fold.rs and resume test callers working. The disclosure sites (approval_kind_for, approval_reason_for, the consent branch of permission_pause_cause) stay on the name predicate. With the gate Off or no recorded view, every site returns the legacy answer, so decisions are unchanged. Under Shadow the decision is still legacy, but these sites now also count tool_class_divergence (point owner_approval). Four regression tests were added, one per file, each covering enforce with a mcp__srv__pay DurableOwner floor (refused, cold, forced to ask), gate off (legacy), and enforce with tickets.create floor none (still an owner action). Cleanup this pass: resume.rs had been left LF-only and is restored to CRLF to match the other three files; the RunGate import is in rustfmt order; my added lines were reflowed (none over 100 columns). Whole-file rustfmt is not applied because HEAD is not rustfmt-clean (105 pre-existing hunks in resume.rs). Deviations: the task text said files were (none), but the packet's files list names these four, which I used. Lookup uses the trimmed tool name because run_view is an exact-key lookup; the brief's literal call passed the untrimmed name. Residual gap, unchanged from today: the view store is per process, so a replica that never recorded the offer falls back to the name-only answer. That is the same as legacy, not weaker, but under enforce a durable_owner MCP tool is held only where its view was recorded."
+ }
+]

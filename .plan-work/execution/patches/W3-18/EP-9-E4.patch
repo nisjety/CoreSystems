@@ -1,0 +1,696 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx
+index 9abace782..ebccdf84b 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx	
+@@ -3,7 +3,11 @@
+ import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
+ import { flush } from 'solid-js'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+-import { ApprovalRuleProposals } from '@/features/settings/components/ApprovalRuleProposals'
++import {
++  ApprovalRuleProposals,
++  proposalLabel,
++  type RuleProposalCard,
++} from '@/features/settings/components/ApprovalRuleProposals'
+ import {
+   ruleConfirmationRequest,
+   type ApprovalRuleProposal,
+@@ -52,6 +56,28 @@ describe('ApprovalRuleProposals', () => {
+     expect(onDismiss).toHaveBeenCalledWith(proposal)
+   })
+ 
++  it('names a shell proposal by its rule, never the command it came from', () => {
++    const shell: RuleProposalCard = {
++      id: 'arp_02',
++      capabilityId: 'cap.command.shell',
++      toolName: 'shell',
++      toolDigest: '',
++      createdAt: '2026-11-04T10:00:00Z',
++      ruleText: 'git commit',
++    }
++    expect(proposalLabel(shell)).toBe('git commit')
++    expect(proposalLabel({ ...shell, ruleText: '  ' })).toBe('shell')
++    expect(proposalLabel(proposal)).toBe('mcp__notes__create_note')
++
++    render(() => (
++      <ApprovalRuleProposals proposals={[shell, proposal]} onConfirm={vi.fn()} onDismiss={vi.fn()} />
++    ))
++    flush()
++    expect(screen.getByText('git commit')).toBeTruthy()
++    expect(screen.getByText('mcp__notes__create_note')).toBeTruthy()
++    expect(screen.queryByText('shell')).toBeNull()
++  })
++
+   it('renders nothing when no rule has been proposed', () => {
+     render(() => (
+       <ApprovalRuleProposals proposals={[]} onConfirm={vi.fn()} onDismiss={vi.fn()} />
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx
+index 9cd172100..75452aaea 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx	
+@@ -3,6 +3,19 @@ import { useI18n } from '@/shared/i18n'
+ import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
+ import type { ApprovalRuleProposal } from '@/shared/api/orchestration-client'
+ 
++/**
++ * EP-9 E4: a proposal from a shell approval names a narrow rule, a program and its subcommand such
++ * as `git status`, which the server reads from closed tables and never from the command's
++ * arguments. The card names that rule; a proposal without one names its tool.
++ */
++export type RuleProposalCard = ApprovalRuleProposal & { ruleText?: string }
++
++/** What the card names for a proposal: its rule when it has one, else its tool. */
++export function proposalLabel(proposal: RuleProposalCard): string {
++  const rule = proposal.ruleText?.trim()
++  return rule ? rule : proposal.toolName
++}
++
+ /**
+  * WS13-S7: the rules an "Always" choice on an MCP tool's approval proposed, for the person to confirm
+  * here or dismiss (build plan WS13 S7). A proposal is not a rule: nothing applies until the person
+@@ -10,9 +23,9 @@ import type { ApprovalRuleProposal } from '@/shared/api/orchestration-client'
+  * card shows what was approved; the parent owns the list and performs the write.
+  */
+ export function ApprovalRuleProposals(props: {
+-  proposals: ApprovalRuleProposal[]
+-  onConfirm: (proposal: ApprovalRuleProposal) => void
+-  onDismiss: (proposal: ApprovalRuleProposal) => void
++  proposals: RuleProposalCard[]
++  onConfirm: (proposal: RuleProposalCard) => void
++  onDismiss: (proposal: RuleProposalCard) => void
+ }) {
+   const i18n = useI18n()
+   return (
+@@ -29,7 +42,7 @@ export function ApprovalRuleProposals(props: {
+           <For each={props.proposals}>
+             {(proposal) => (
+               <li>
+-                <span>{proposal.toolName}</span>
++                <span>{proposalLabel(proposal)}</span>
+                 <SettingsButton type="button" variant="primary" onClick={() => props.onConfirm(proposal)}>
+                   {i18n.tr('Bekreft regel', 'Confirm rule')}
+                 </SettingsButton>
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 6926e2981..8cf7606e2 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -33,6 +33,7 @@ pub mod run_origin;
+ pub mod run_timing;
+ pub mod sandbox_report;
+ pub mod scheduled_contract;
++pub mod shell_rule;
+ pub mod skill_bundle;
+ pub mod skill_recovery;
+ pub mod space_attention;
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/shell_rule.rs b/apps/Model Plane/rust/crates/mp-contracts/src/shell_rule.rs
+new file mode 100644
+index 000000000..ced35a5ea
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/shell_rule.rs	
+@@ -0,0 +1,444 @@
++//! The narrow rule an "Always" on a shell approval may propose (build plan EP-9 E4).
++//!
++//! A person who approves `git commit -m "Fix ø"` and chooses "Always" must be offered a rule they
++//! can read and that says less than the command did: `git commit`, never the message, a path or a
++//! host. So the rule is never cut out of the command text. It is a program and, for the programs
++//! that have them, a subcommand, both taken from the closed tables below and returned as the
++//! table's own `&'static str`; the command only selects a table row.
++//!
++//! The tokenizer is deliberately smaller than a shell. It answers "no rule" for anything it does not
++//! fully understand: pipes, `;`, `&` and `&&`, redirects, command and variable substitution, globs,
++//! escapes, comments, line breaks, an unterminated quote, an environment assignment in front of the
++//! program, a quoted or path-qualified program, an option before the subcommand and every program or
++//! subcommand outside the tables. "No rule" means the approval is offered once, as before.
++
++use std::fmt;
++
++use serde_json::Value;
++
++use crate::loop_fold::switch_from;
++
++/// The switch for shell-rule proposals. Default off; parsed by [`switch_from`] (`true` and nothing
++/// else). It only narrows what WS13-S7's proposals carry, so it is refused without that switch.
++pub const SHELL_RULE_PROPOSALS_ENV: &str = "APPROVAL_SHELL_RULE_PROPOSALS_ENABLED";
++/// WS13-S7's switch for "Always" proposals (model-gateway reads it for the decide route).
++pub const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
++/// The shell tool's name, the only tool a shell rule is proposed for.
++pub const SHELL_TOOL: &str = "shell";
++/// Longest command the tokenizer reads; a longer one has no rule.
++const MAX_COMMAND_CHARS: usize = 2000;
++/// Most words a command may have and still get a rule.
++const MAX_TOKENS: usize = 64;
++/// Punctuation an unquoted word may contain besides letters and digits. Every other character is
++/// shell syntax the tokenizer does not model, so it ends in "no rule".
++const PLAIN_PUNCTUATION: &str = "-_./:,=+@%";
++
++/// Which words a program's rule names after the program.
++enum Subcommands {
++    /// The rule is the program alone; every word after it is an argument.
++    None,
++    /// The second word must be one of these, unquoted and exact; it becomes part of the rule.
++    OneOf(&'static [&'static str]),
++}
++
++/// Programs that may be named by a rule. A program not listed has no rule, whatever follows it: an
++/// interpreter (`sh`, `python`), a wrapper that runs another command (`env`, `xargs`, `sudo`,
++/// `find -exec`) or a destructive tool (`rm`) is never proposed. Subcommands that run arbitrary
++/// configured code by name (`git config`, `npm run`) are left out for the same reason.
++const PROGRAMS: &[(&str, Subcommands)] = &[
++    (
++        "git",
++        Subcommands::OneOf(&[
++            "add", "blame", "branch", "commit", "diff", "fetch", "log", "ls-files", "pull",
++            "restore", "rev-parse", "show", "status", "switch",
++        ]),
++    ),
++    (
++        "cargo",
++        Subcommands::OneOf(&[
++            "build", "check", "clippy", "doc", "fmt", "metadata", "test", "tree",
++        ]),
++    ),
++    (
++        "go",
++        Subcommands::OneOf(&["build", "fmt", "list", "test", "vet", "version"]),
++    ),
++    ("npm", Subcommands::OneOf(&["ci", "ls", "outdated", "test"])),
++    (
++        "pnpm",
++        Subcommands::OneOf(&["install", "list", "outdated", "test"]),
++    ),
++    ("pip", Subcommands::OneOf(&["check", "freeze", "list", "show"])),
++    ("cat", Subcommands::None),
++    ("date", Subcommands::None),
++    ("df", Subcommands::None),
++    ("diff", Subcommands::None),
++    ("du", Subcommands::None),
++    ("echo", Subcommands::None),
++    ("file", Subcommands::None),
++    ("grep", Subcommands::None),
++    ("head", Subcommands::None),
++    ("ls", Subcommands::None),
++    ("pwd", Subcommands::None),
++    ("rg", Subcommands::None),
++    ("sort", Subcommands::None),
++    ("stat", Subcommands::None),
++    ("tail", Subcommands::None),
++    ("tree", Subcommands::None),
++    ("uname", Subcommands::None),
++    ("uniq", Subcommands::None),
++    ("wc", Subcommands::None),
++    ("which", Subcommands::None),
++    ("whoami", Subcommands::None),
++];
++
++/// A rule a shell approval may propose: a program and, where its table row has them, a subcommand.
++/// Both are table words, so the rule holds no text of the command it was read from.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ShellRule {
++    program: &'static str,
++    subcommand: Option<&'static str>,
++}
++
++impl ShellRule {
++    /// The program the rule names.
++    #[must_use]
++    pub const fn program(&self) -> &'static str {
++        self.program
++    }
++
++    /// The subcommand the rule names, for a program that has them.
++    #[must_use]
++    pub const fn subcommand(&self) -> Option<&'static str> {
++        self.subcommand
++    }
++
++    /// The rule as the person reads it on the proposal card, for example `git status`.
++    #[must_use]
++    pub fn text(&self) -> String {
++        match self.subcommand {
++            Some(subcommand) => format!("{} {subcommand}", self.program),
++            None => self.program.to_owned(),
++        }
++    }
++
++    /// The cause's `action_key` for a shell call the rule covers, for example `shell:git status`.
++    #[must_use]
++    pub fn action_key(&self) -> String {
++        format!("{SHELL_TOOL}:{}", self.text())
++    }
++}
++
++/// One word of a command. `quoted` is whether any part of it was inside quotes: a program or a
++/// subcommand must be written plainly, so a quoted one has no rule.
++struct Word {
++    text: String,
++    quoted: bool,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Quote {
++    None,
++    Single,
++    Double,
++}
++
++/// Split a command into words, or `None` when it uses any syntax beyond plain words, single quotes
++/// and double quotes without expansion.
++fn words(command: &str) -> Option<Vec<Word>> {
++    if command.chars().count() > MAX_COMMAND_CHARS {
++        return None;
++    }
++    let mut words = Vec::new();
++    let mut text = String::new();
++    let mut quoted = false;
++    let mut quote = Quote::None;
++    for c in command.chars() {
++        match quote {
++            Quote::None => {
++                if c == ' ' || c == '\t' {
++                    if !text.is_empty() || quoted {
++                        words.push(Word {
++                            text: std::mem::take(&mut text),
++                            quoted,
++                        });
++                        quoted = false;
++                    }
++                } else if c == '\'' {
++                    quote = Quote::Single;
++                    quoted = true;
++                } else if c == '"' {
++                    quote = Quote::Double;
++                    quoted = true;
++                } else if c.is_alphanumeric() || PLAIN_PUNCTUATION.contains(c) {
++                    text.push(c);
++                } else {
++                    return None;
++                }
++            }
++            Quote::Single => {
++                if c == '\'' {
++                    quote = Quote::None;
++                } else if c.is_control() {
++                    return None;
++                } else {
++                    text.push(c);
++                }
++            }
++            Quote::Double => {
++                if c == '"' {
++                    quote = Quote::None;
++                } else if c.is_control() || matches!(c, '$' | '`' | '\\' | '!') {
++                    return None;
++                } else {
++                    text.push(c);
++                }
++            }
++        }
++        if words.len() > MAX_TOKENS {
++            return None;
++        }
++    }
++    if quote != Quote::None {
++        return None;
++    }
++    if !text.is_empty() || quoted {
++        words.push(Word { text, quoted });
++    }
++    (words.len() <= MAX_TOKENS).then_some(words)
++}
++
++/// The rule a shell command may propose, or `None` when it has none (see the module docs).
++#[must_use]
++pub fn rule_for_command(command: &str) -> Option<ShellRule> {
++    let words = words(command)?;
++    let first = words.first()?;
++    // `NAME=value cmd` runs `cmd` under a changed environment, which a rule could not show.
++    if first.quoted || first.text.contains('=') {
++        return None;
++    }
++    let (program, subcommands) = PROGRAMS.iter().find(|(name, _)| *name == first.text)?;
++    let subcommand = match subcommands {
++        Subcommands::None => None,
++        Subcommands::OneOf(names) => {
++            let second = words.get(1).filter(|word| !word.quoted)?;
++            Some(*names.iter().find(|name| **name == second.text)?)
++        }
++    };
++    Some(ShellRule {
++        program: *program,
++        subcommand,
++    })
++}
++
++/// The rule a `shell` tool call may propose, read from its `command` argument. A call whose input
++/// is not an object with a string `command` has no rule.
++#[must_use]
++pub fn rule_for_shell_input(tool_input: &str) -> Option<ShellRule> {
++    let input = serde_json::from_str::<Value>(tool_input).ok()?;
++    rule_for_command(input.get("command")?.as_str()?)
++}
++
++/// The shell-rule switch on without WS13-S7's rule switch: a narrower proposal with no proposal
++/// path to carry it. Refused at startup rather than ignored, so the configuration is fixed.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ShellRuleSwitchRefused;
++
++impl fmt::Display for ShellRuleSwitchRefused {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "{SHELL_RULE_PROPOSALS_ENV} requires {RULE_PROPOSALS_ENV}")
++    }
++}
++
++impl std::error::Error for ShellRuleSwitchRefused {}
++
++/// Parse the two switches: the shell-rule switch's value, refused when it is on and the rule switch
++/// is not. Both are read by the one strict parser.
++///
++/// # Errors
++/// [`ShellRuleSwitchRefused`] when the shell-rule switch is on and the rule switch is not.
++pub fn shell_rule_proposals_from(
++    shell_rules: Option<&str>,
++    rule_proposals: Option<&str>,
++) -> Result<bool, ShellRuleSwitchRefused> {
++    let on = switch_from(shell_rules);
++    if on && !switch_from(rule_proposals) {
++        return Err(ShellRuleSwitchRefused);
++    }
++    Ok(on)
++}
++
++/// The switch as this process has it, for the startup check: an error refuses to start.
++///
++/// # Errors
++/// [`ShellRuleSwitchRefused`], as [`shell_rule_proposals_from`].
++pub fn shell_rule_proposals_checked() -> Result<bool, ShellRuleSwitchRefused> {
++    shell_rule_proposals_from(
++        std::env::var(SHELL_RULE_PROPOSALS_ENV).ok().as_deref(),
++        std::env::var(RULE_PROPOSALS_ENV).ok().as_deref(),
++    )
++}
++
++/// Whether shell-rule proposals are on in this process. A refused combination reads as off, so a
++/// process that skipped the startup check still proposes nothing new.
++#[must_use]
++pub fn shell_rule_proposals_enabled() -> bool {
++    shell_rule_proposals_checked().unwrap_or(false)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn rule(command: &str) -> Option<String> {
++        rule_for_command(command).map(|rule| rule.text())
++    }
++
++    #[test]
++    fn shell_rule_table() {
++        let cases: &[(&str, Option<&str>)] = &[
++            // Program and subcommand, arguments dropped.
++            ("git status", Some("git status")),
++            ("  git   status  ", Some("git status")),
++            ("git\tstatus", Some("git status")),
++            ("git status --short", Some("git status")),
++            ("git log --oneline -n 5", Some("git log")),
++            ("git commit -m \"Fiks ærlig talt små feil\"", Some("git commit")),
++            ("git commit -m 'Rettet øl og ål'", Some("git commit")),
++            ("git add src/bøker/ærfugl.rs", Some("git add")),
++            ("git diff --stat=80", Some("git diff")),
++            ("cargo test -p mp-contracts --lib shell_rule", Some("cargo test")),
++            ("go test ./...", Some("go test")),
++            ("pnpm install", Some("pnpm install")),
++            ("pip list", Some("pip list")),
++            // Programs whose rule is the program alone.
++            ("ls", Some("ls")),
++            ("ls -la Påskeferie/", Some("ls")),
++            ("cat 'Møtereferat 2026.txt'", Some("cat")),
++            ("echo \"Hei på deg, Åse\"", Some("echo")),
++            ("grep -rn TODO src", Some("grep")),
++            ("wc -l a.rs b.rs", Some("wc")),
++            // Compound commands, redirects and substitution.
++            ("git status | head", None),
++            ("git status; rm -rf /", None),
++            ("git status && git push", None),
++            ("git status & sleep 1", None),
++            ("git status > out.txt", None),
++            ("cat < in.txt", None),
++            ("git log $(whoami)", None),
++            ("git log `whoami`", None),
++            ("echo $HOME", None),
++            ("echo \"$HOME\"", None),
++            ("echo \"`id`\"", None),
++            ("echo \"a\\\"b\"", None),
++            ("ls *.rs", None),
++            ("ls ~", None),
++            ("ls \\ ", None),
++            ("git status # comment", None),
++            ("git status\nrm -rf /", None),
++            ("(git status)", None),
++            ("{ git status; }", None),
++            // Environment assignments and wrappers.
++            ("GIT_DIR=/tmp git status", None),
++            ("env git status", None),
++            ("sudo git status", None),
++            ("xargs git status", None),
++            ("sh -c 'git status'", None),
++            // Programs and subcommands outside the tables, or not written plainly.
++            ("rm -rf build", None),
++            ("python script.py", None),
++            ("/usr/bin/git status", None),
++            ("./git status", None),
++            ("'git' status", None),
++            ("git 'status'", None),
++            ("GIT status", None),
++            ("git -C repo status", None),
++            ("git config core.pager cat", None),
++            ("git push", None),
++            ("git", None),
++            ("npm run build", None),
++            ("git status 'unterminated", None),
++            ("", None),
++            ("   ", None),
++        ];
++        assert!(cases.len() >= 30);
++        for (command, expected) in cases {
++            assert_eq!(rule(command).as_deref(), *expected, "command: {command:?}");
++        }
++    }
++
++    #[test]
++    fn shell_rule_never_contains_an_argument_token() {
++        let commands = [
++            "git commit -m 'hemmelig passord ø'",
++            "git add secrets.env",
++            "cat /etc/passwd",
++            "ls Påskeferie",
++            "cargo test secret_test_name",
++            "echo token-123",
++        ];
++        for command in commands {
++            let rule = rule_for_command(command).expect("a rule");
++            let text = rule.text();
++            let named = text.split(' ').count();
++            for argument in command
++                .split([' ', '\''])
++                .filter(|word| !word.is_empty())
++                .skip(named)
++            {
++                assert!(!text.contains(argument), "{command:?} proposed {text:?}");
++            }
++            assert_eq!(rule.action_key(), format!("shell:{text}"));
++        }
++    }
++
++    #[test]
++    fn shell_rule_has_no_rule_for_compound_commands() {
++        for joiner in [" | ", "; ", " && ", " || ", " & ", " > ", " >> ", " < ", "\n"] {
++            let command = format!("git status{joiner}ls");
++            assert_eq!(rule(&command), None, "joiner {joiner:?}");
++        }
++    }
++
++    #[test]
++    fn shell_rule_reads_the_command_argument_only() {
++        assert_eq!(
++            rule_for_shell_input(r#"{"command":"git status","cwd":"/w"}"#)
++                .map(|rule| rule.action_key()),
++            Some("shell:git status".to_owned())
++        );
++        assert_eq!(rule_for_shell_input(r#"{"command":["git","status"]}"#), None);
++        assert_eq!(rule_for_shell_input(r#"{"cmd":"git status"}"#), None);
++        assert_eq!(rule_for_shell_input("git status"), None);
++    }
++
++    #[test]
++    fn shell_rule_refuses_an_overlong_command() {
++        let long = format!("ls {}", "a".repeat(MAX_COMMAND_CHARS));
++        assert_eq!(rule(&long), None);
++        let many = format!("ls{}", " a".repeat(MAX_TOKENS));
++        assert_eq!(rule(&many), None);
++        let enough = format!("ls{}", " a".repeat(MAX_TOKENS - 1));
++        assert_eq!(rule(&enough).as_deref(), Some("ls"));
++    }
++
++    #[test]
++    fn shell_rule_switch_is_strict_and_needs_the_rule_switch() {
++        assert_eq!(shell_rule_proposals_from(None, None), Ok(false));
++        assert_eq!(shell_rule_proposals_from(Some("1"), Some("true")), Ok(false));
++        assert_eq!(shell_rule_proposals_from(Some("yes"), None), Ok(false));
++        assert_eq!(shell_rule_proposals_from(None, Some("true")), Ok(false));
++        assert_eq!(
++            shell_rule_proposals_from(Some(" TRUE "), Some("true")),
++            Ok(true)
++        );
++        assert_eq!(
++            shell_rule_proposals_from(Some("true"), None),
++            Err(ShellRuleSwitchRefused)
++        );
++        assert_eq!(
++            shell_rule_proposals_from(Some("true"), Some("1")),
++            Err(ShellRuleSwitchRefused)
++        );
++    }
++}
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index 22e5610ce..5d8e5b5de 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -8823,6 +8823,125 @@ pub(crate) fn approval_cause_for_pause(
+     stored
+ }
+ 
++#[cfg(test)]
++thread_local! {
++    /// A test's override of the shell-rule proposal switch (see [`ShellRuleSwitch`]).
++    static TEST_SHELL_RULES: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
++}
++
++/// Holds the shell-rule proposal switch at a fixed value for the current test thread, then restores it.
++#[cfg(test)]
++struct ShellRuleSwitch;
++
++#[cfg(test)]
++impl ShellRuleSwitch {
++    fn set(on: bool) -> Self {
++        TEST_SHELL_RULES.with(|cell| cell.set(Some(on)));
++        Self
++    }
++}
++
++#[cfg(test)]
++impl Drop for ShellRuleSwitch {
++    fn drop(&mut self) {
++        TEST_SHELL_RULES.with(|cell| cell.set(None));
++    }
++}
++
++/// Whether shell-rule proposals are on in this process (EP-9 E4). Default off: the one strict
++/// parser is `mp_contracts::shell_rule::shell_rule_proposals_enabled`, which also reads it as off
++/// without WS13-S7's rule switch.
++fn shell_rule_proposals_on() -> bool {
++    #[cfg(test)]
++    if let Some(forced) = TEST_SHELL_RULES.with(std::cell::Cell::get) {
++        return forced;
++    }
++    mp_contracts::shell_rule::shell_rule_proposals_enabled()
++}
++
++/// The WS13-S7 proposal producer's shell hook (EP-9 E4): a shell pause's `action_key` names the
++/// narrow rule an "Always" would propose, for example `shell:git status`, instead of `shell`. The
++/// rule is a program and subcommand from mp-contracts' closed tables, never a word of the command's
++/// arguments; a command with no rule (compound, redirected, substituted, unknown) keeps `shell` and
++/// is offered once, as before. A zero-retention run keeps `shell` too: its approval row states
++/// nothing read from the command.
++fn propose_shell_rule(
++    stored: &mut mp_contracts::model_plane::v1::ApprovalCause,
++    zdr: bool,
++    tool_name: &str,
++    tool_input: &str,
++) {
++    if zdr || tool_name != mp_contracts::shell_rule::SHELL_TOOL || !shell_rule_proposals_on() {
++        return;
++    }
++    if let Some(rule) = mp_contracts::shell_rule::rule_for_shell_input(tool_input) {
++        stored.action_key = rule.action_key();
++    }
++}
++
++#[cfg(test)]
++mod shell_rule_proposals {
++    use super::*;
++
++    fn shell_cause(command: &str, zdr: bool) -> mp_contracts::model_plane::v1::ApprovalCause {
++        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
++        let mut cause =
++            approval_cause::for_call(CauseCode::RiskyEffectUnderAsk, "run_test", "shell", &input);
++        propose_shell_rule(&mut cause, zdr, "shell", &input);
++        cause
++    }
++
++    #[test]
++    fn shell_rule_switch_off_keeps_the_tool_key() {
++        let _switch = ShellRuleSwitch::set(false);
++        let cause = shell_cause("git status", false);
++        assert_eq!(cause.action_key, "shell");
++        assert_eq!(cause.scope_options, ["once"]);
++    }
++
++    #[test]
++    fn shell_rule_names_program_and_subcommand_only() {
++        let _switch = ShellRuleSwitch::set(true);
++        let command = "git commit -m 'Rettet særs viktig feil'";
++        let cause = shell_cause(command, false);
++        assert_eq!(cause.action_key, "shell:git commit");
++        assert!(!cause.action_key.contains("Rettet"));
++        // The rule changes what an "Always" would name, never which scopes the pause offers or
++        // which call the digest identifies.
++        assert_eq!(cause.scope_options, ["once"]);
++        let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
++        assert_eq!(cause.call_digest, approval_cause::call_digest("run_test", "shell", &input));
++    }
++
++    #[test]
++    fn shell_rule_no_rule_for_compound_or_unknown_commands() {
++        let _switch = ShellRuleSwitch::set(true);
++        for command in ["git status && git push", "git log | head", "rm -rf build", "FOO=1 ls"] {
++            assert_eq!(shell_cause(command, false).action_key, "shell", "{command}");
++        }
++    }
++
++    #[test]
++    fn shell_rule_not_proposed_for_a_zero_retention_run() {
++        let _switch = ShellRuleSwitch::set(true);
++        assert_eq!(shell_cause("git status", true).action_key, "shell");
++    }
++
++    #[test]
++    fn shell_rule_leaves_other_tools_alone() {
++        let _switch = ShellRuleSwitch::set(true);
++        let input = r#"{"command":"git status"}"#;
++        let mut cause = approval_cause::for_call(
++            CauseCode::RiskyEffectUnderAsk,
++            "run_test",
++            "code_interpreter",
++            input,
++        );
++        propose_shell_rule(&mut cause, false, "code_interpreter", input);
++        assert_eq!(cause.action_key, "code_interpreter");
++    }
++}
++
+ /// How long an ordinary pause's approval waits for a decision.
+ const APPROVAL_TTL_SECONDS: u32 = 3600;
+ 
+@@ -8970,7 +9089,10 @@ async fn pause_for_approval(
+         },
+         bearer,
+     );
+-    let request = request?;
++    let mut request = request?;
++    if let Some(stored) = request.get_mut().cause.as_mut() {
++        propose_shell_rule(stored, req.zdr, tool_name, tool_input);
++    }
+     // The fold of this pause is durable BEFORE the approval is visible, so a fast
+     // approve-and-continue can always claim it. It is named by the approval's own
+     // idempotency key (`{run_id}:{step_id}`, set below), which exists before

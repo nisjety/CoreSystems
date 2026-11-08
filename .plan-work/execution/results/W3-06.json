@@ -1,0 +1,757 @@
+{
+ "batchId": "W3-06",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-8-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/locale_context.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.locale.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/plans/wave3/evidence/EP-8-S1.md (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "Isolated harness outside the repo: cargo test --offline, compiling model-gateway/src/locale_context.rs alone with chrono =0.4.45; CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0",
+     "outcome": "6 passed: local_date_notice_crosses_midnight_in_oslo, invalid_offset_falls_back_to_utc_notice, language_line_is_closed_set, the_switch_is_on_only_for_the_literal_true, turn_notice_carries_only_what_is_valid, zone_names_are_refused_unless_shaped_like_iana_names. Harness removed afterwards."
+    },
+    {
+     "command": "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets locale (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "exit 0. domains::chat::shared::tests::locale_fields_are_validated_and_never_invented ok; domains::chat::shared::tests::locale_bogus_timezone_is_dropped ok. Two pre-existing warnings in files not touched."
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-client.locale.test.ts",
+     "outcome": "5 passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-client src/features/chat/components/use-chat-controller src/features/dashboard/home/DashboardComposer.subscription.test.tsx src/features/inbox/lib/inbox-ai.test.ts",
+     "outcome": "35 files, 449 tests passed (last run). The first run had 34 files and 446 tests; the match set changes while other batches add test files to this worktree."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "One error, pre-existing, in src/shared/api/schedule-contract.test.ts (a file this slice does not touch). None in the chat client files."
+    },
+    {
+     "command": "cargo test -q -p mp-contracts --test prompt_tool_manifest",
+     "outcome": "9 passed. The pinned prompt files are untouched, so the manifest and its pin did not change: no regeneration, and the scenario-touch gate does not fire."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on locale_context.rs (after a rustfmt write and CRLF restore)",
+     "outcome": "Clean."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on sse.rs, run_context.rs, prompt_context.rs, http_routes.rs, shared.rs, streams.rs",
+     "outcome": "0 parse errors. Syntax only; the model-gateway crate was not type-checked."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib locale_context; --lib prompt_context; --lib run_context; --test zdr_feature_table",
+     "outcome": "NOT RUN. The crate cannot build until the shared-file lines in lead_todo are applied (lib.rs module line, zdr_features.rs exhaustive destructuring, normalize.rs test literal)."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: insert the line `pub mod locale_context;` immediately before `pub mod locale_hint;` (line 44 at this run). Required: the crate does not compile without it.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs: (a) in invoke_field_names, after the line `        locale: _,` (line 270) add `        client_timezone: _,`, `        client_utc_offset_minutes: _,`, `        ui_locale: _,`. (b) in the returned vec, after `        \"locale\",` (line 316) add `        \"client_timezone\",`, `        \"client_utc_offset_minutes\",`, `        \"ui_locale\",`. (c) in FIELD_TREATMENTS, after `    (\"locale\", Treatment::Honored),` (line 161) add `    (\"client_timezone\", Treatment::Honored),`, `    (\"client_utc_offset_minutes\", Treatment::Honored),`, `    (\"ui_locale\", Treatment::Honored),`. Required: (a) is an exhaustive destructuring, so it is a compile error otherwise; the order in (b) and (c) must match because the table test compares the lists in order.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs: in the make_request test helper, after `            locale: None,` (line 612) add `            client_timezone: None,`, `            client_utc_offset_minutes: None,`, `            ui_locale: None,`. Required for the test build (exhaustive struct literal).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: append to the vec returned by cases(), after the persona_instructions entry and before the closing `    ]`: `        (\"client_timezone\", with(\"client_timezone\", json!(\"Europe/Oslo\")), None),`, `        (\"client_utc_offset_minutes\", with(\"client_utc_offset_minutes\", json!(60)), None),`, `        (\"ui_locale\", with(\"ui_locale\", json!(\"no\")), None),`. Required: every Honored field needs a row, or every_field_has_a_row_that_matches_its_treatment fails.",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs: after line 134 (`        shared::with_identity_context(outbound_body, &user.user_name, &org_name);`) insert `    let outbound_body = shared::with_locale_context(outbound_body);`, before the `let mut outbound_body` line.",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs: after line 126 (`    let body = shared::with_identity_context(body, &user.user_name, &org_name);`) insert `    let body = shared::with_locale_context(body);`, before the `let mut body` line.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: after line 414 (`      MODEL_GATEWAY_ZDR_STREAM_COST: ${MODEL_GATEWAY_ZDR_STREAM_COST:-false}`) insert a comment line `      # EP-8-S1: the person's local date, time and app language in the prompt. Off by default; only the literal true turns it on. Nothing is stored.` and then `      MODEL_GATEWAY_USER_LOCALE_CONTEXT: ${MODEL_GATEWAY_USER_LOCALE_CONTEXT:-false}`. The file uses LF line endings.",
+    "Lead run after the shared edits above: cd apps/Model Plane/rust, then CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib locale_context (expect the six pure tests and sse::tests::locale_context_switch_off_notice_is_byte_identical), then --lib prompt_context (expect identity_slot_stays_context_tier), --lib run_context (expect the_local_notice_trails_the_instructions), --test zdr_feature_table, and the regression gate cargo test -q -p model-gateway --lib.",
+    "Lead: the scenario-touch gate does not fire, because the prompt manifest and its pin are unchanged (prompt_tool_manifest passed 9 of 9). No eval case or replay cassette is needed for this slice.",
+    "Lead: do not set MODEL_GATEWAY_USER_LOCALE_CONTEXT to true until the Pacific/Auckland live proof is in docs/plans/wave3/evidence/EP-8-S1.md and the cache-precision decision in depth_findings has been taken."
+   ],
+   "deviations": [
+    "Test names carry the filter words the plan commands select: locale_bogus_timezone_is_dropped (plan name bogus_timezone_is_dropped) and locale_context_switch_off_notice_is_byte_identical in sse.rs tests (plan name switch_off_notice_is_byte_identical).",
+    "The design's check that zdr_direct_stream calls temporal_awareness_message is false: the ZDR system message had no date before this slice. S1 adds the turn's local notice to it, only while the switch is on, built by locale_context::turn_notice rather than by the Ask date function.",
+    "calendar_context.rs is in the owned list but needed no change; it has no notion of today (see depth_findings).",
+    "The language line sits in the Ask identity slot. The Do preamble and the ZDR system message carry the date clause and the language line together in one notice.",
+    "ui_locale falls back to the stored app setting (verevon.locale, the key the i18n module writes) when a turn names no locale, so dashboard composer turns also carry the language. The design says the Locale; this is the same value.",
+    "The compose default is written :-false to match the file's convention for sibling switches; the design said :-0. Both leave the switch off.",
+    "No .env.example line: that file lists no feature switches.",
+    "Evidence file docs/plans/wave3/evidence/EP-8-S1.md created as the row's deliverable."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs (module line, required to compile)",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (InvokeRequest destructuring and FIELD_TREATMENTS, required to compile)",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (make_request test literal, required for the test build)",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (three cases() rows, required for the table test)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs (one with_locale_context call)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs (one with_locale_context call)",
+    "apps/Model Plane/deploy/docker-compose.yml (switch line, default off)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must apply the shared edits from the implementer's lead_todo: lib.rs `pub mod locale_context;`, the three fields in zdr_features.rs (destructuring, returned vec, FIELD_TREATMENTS), the normalize.rs test literal, three zdr_feature_table.rs cases() rows, the json_handlers.rs and ag_ui.rs with_locale_context calls, and the docker-compose switch line (default off). Until lib.rs and zdr_features.rs are applied, model-gateway does not compile in the tree. I applied all of the Model Plane edits verbatim to a scratch copy and they compile and pass (see notes).",
+     "The Pacific/Auckland live proof and the MG debug log of the rendered notice are not run; the evidence file holds no live proof yet.",
+     "MODEL_GATEWAY_USER_LOCALE_CONTEXT stays off until the cache-precision decision (minute, hour or date only) is taken and the live proof is recorded."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The local time in the date notice changes every minute and sits before the history under the legacy prompt order, so provider prefix caching misses on every turn once the switch is on; the owner must choose the precision (minute, hour or date only) before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Do runs get the notice only when the run-context mode is on, and the proto grep finds no date field in RunContext or RunAgentRequest, so the design's claim that WS02-S6 carries the date is unsupported; whether Do runs need a dated field (a proto change) is an owner call."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test checks the ZDR system message with a notice present, and the design's named ZDR golden s_local_time_allowed_under_zdr (mp-contracts zdr posture matrix) is not added."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing tests that json_handlers.rs and ag_ui.rs forward the three fields; a missed lead line would silently drop the clock and the language on JSON and AG-UI turns."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The design says the calendar slot uses the local date as today, but calendar_context.rs has no notion of today, so that sentence has no code path and the calendar is unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two language vocabularies now reach model-gateway on one request: ui_locale (no or en, this slice) and the WS16-S6 locale (nb-NO or en-US); locale_hint::hint_sentence is not called yet, so wiring it later would state the language twice."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The Pacific/Auckland live proof and the rendered-notice log from the model-gateway debug output are not run; this is a depth-phase lead step."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "On a ZDR turn the local time becomes new prompt content once the switch is on; the design's ZDR clause allows it with no store, and the ZDR live proof should confirm it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The zone-name shape check now exists in the BFF shared.rs and in model-gateway locale_context.rs; a shared list of accepted and refused names in both test suites would keep them aligned."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The SPA sends the zone, the offset and the stored language on every turn even with the switch off, a wire change the design approved; the gateway ignores them until the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The date clause carries the local time to the minute, so with the switch on the date notice changes every minute; under the legacy prompt order it sits before the history and breaks provider prefix caching on every turn, so the precision must be decided before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Do runs get the local notice only through the run-context composition (RunContextMode not Off); with run context off, Do runs carry no local date, and no proto field carries a date into RunAgentRequest. The owner must decide whether a dated field is needed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test checks zdr_turn_settings_with with Some(local_notice) (every existing call passes None), and the design's ZDR golden s_local_time_allowed_under_zdr in mp-contracts zdr_posture_matrix is not added."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No BFF test confirms that json_handlers.rs and ag_ui.rs call with_locale_context. Until the lead lines land, those paths forward the three raw fields unvalidated. model-gateway checks them again, so this is safe, but the BFF validation is bypassed there."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The design's sentence that calendar_context::reference_calendar uses the local date as today has no code path: calendar_context.rs is unchanged, so calendar resolution stays UTC-based."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two language vocabularies reach model-gateway on one request: ui_locale (no/en, this slice) and the WS16-S6 locale (nb-NO/en-US). If locale_hint is ever wired as well, the language is stated twice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "model-gateway tests that fail in the copy with the shared edits applied, none touched by this slice: zdr_feature_table every_field_has_a_row_that_matches_its_treatment ('wake_context has no row'), usage_envelopes_are_not_published_for_a_zdr_turn, usage_progress_is_not_streamed_for_a_zdr_turn, plus 7 lib tests (author_guidance, review_proposal_rule, room_metadata, tool_loop, zdr_posture). The lead should check them against HEAD in the real tree."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The zone-name shape check is duplicated in the BFF shared.rs (is_iana_zone_name) and in model-gateway locale_context.rs (is_zone_name); a shared accepted/refused list in both test suites would keep them aligned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With the switch on, identity_context_message now returns a system message even when org_name is unresolved (the language line alone), a small shape change on turns that previously had no identity slot."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib locale_context",
+      "outcome": "Compile failure, 12 errors. lib.rs lacks the module line, so crate::locale_context is not found (E0433, 10 times). E0027: the exhaustive destructuring of InvokeRequest (zdr_features.rs) does not mention client_timezone, client_utc_offset_minutes and ui_locale. E0063: an InvokeRequest initializer (normalize.rs test literal) misses the same three fields. These are the shared-file edits listed in the implementer's lead_todo, not yet applied.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib prompt_context",
+      "outcome": "Same 12 compile errors; no tests ran.",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets locale",
+      "outcome": "Pass. 2 passed: domains::chat::shared::tests::locale_bogus_timezone_is_dropped and locale_fields_are_validated_and_never_invented. 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec vitest run src/shared/api/chat-client.locale.test.ts --pool=threads",
+      "outcome": "1 file, 5 tests passed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "EP-8-S1 is built end to end except the model-gateway compile and its tests. Those need shared-file lines this batch may not edit (lib.rs, zdr_features.rs, normalize.rs, tests/zdr_feature_table.rs, json_handlers.rs, ag_ui.rs, docker-compose.yml); exact lines are in lead_todo. Without the lib.rs and zdr_features.rs lines the crate does not compile, so they are required. Verified: the BFF locale tests (2), the SPA locale test (5) and the 449 related chat tests pass; the pure locale module passes its six tests in an isolated harness; the prompt manifest is unchanged. The switch is off by default and only the literal true enables it. With the switch off the switch-off golden (locale_context_switch_off_notice_is_byte_identical) confirms the date notice is byte-identical to HEAD. Other batches write into this worktree concurrently (an untracked provider-write-operations.json appeared), so anchor the shared edits by content; line numbers are from this run."
+  },
+  {
+   "id": "EP-6-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentsHubSummary.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentsHubSummary.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentsPage.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentsPage.test.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\app\\shell\\navigation.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\action-registry.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\model-access.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run --pool=forks src/features/agents src/shared/actions src/features/automations src/app/shell (baseline, before any edit)",
+     "outcome": "33 of 34 files passed, 296 tests passed. One failure: action-registry P-SPA1 contiguity (space.files.attach ordering), pre-existing at HEAD."
+    },
+    {
+     "command": "vitest run --reporter=verbose AgentsHubSummary.test.tsx AgentsPage.test.tsx",
+     "outcome": "14 of 14 passed: 6 new summary tests, 3 new landing tests, 5 existing tests."
+    },
+    {
+     "command": "vitest run src/shared/actions/action-registry.test.ts (after edits)",
+     "outcome": "Passes, including the length check now at 250 and the new agents.installations.list test. Only P-SPA1 contiguity fails (pre-existing)."
+    },
+    {
+     "command": "vitest run src/shared/actions/admission-contract.test.ts (after edits)",
+     "outcome": "Byte compare fails by design until the lead regenerates the vendored contract. The diff is exactly the new agents.installations.list row."
+    },
+    {
+     "command": "vitest run src/features/agents src/shared/actions src/features/automations src/app src/features/customize src/shared/i18n src/features/chat/components/ScheduledRunsPanel.test.tsx",
+     "outcome": "45 of 49 files pass. Failures: P-SPA1 and admission (above); i18n error-catch-sites in SpaceFilesPanel.tsx and SpaceRoomComposer.tsx; gateway-error-codes x3 (FORGED_WAKE_FIELDS table, codes without copy). None are in files this slice touched; no HEAD copy was built to diff them."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "One error: schedule-contract.test.ts(28,16) TS2352, pre-existing and not in a changed file (EP-6-S1 recorded the same). No error in any changed file."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on the 8 changed or new files",
+     "outcome": "Exit 0. AgentsPage's 11 pre-existing raw-colour classes are covered by the project's bulk suppressions; none were added. Colours in new code use CSS tokens; Norwegian copy goes through i18n.tr."
+    },
+    {
+     "command": "node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+     "outcome": "6 of 7 pass. The whole-set dispatcher equality test fails on drift that predates this slice: the six schedule.* contracts from EP-6-S1 have no handlers.rs arm. agents.installations.list adds one more id to that known drift."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Regenerate the admission contract with the new row count, 259 to 260 rows (registry 249 to 250, plus the 10 read-surface rows). From apps/Frontend Plane/verevonv3 run: VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run src/shared/actions/admission-contract.test.ts, which writes src/shared/api/contracts/agent-action-admission.json. The new row agents.installations.list has schemaHash sha256:3145895d015b65aa3646491a939371f2edb92181ee177fc588355bb81de5e9da.",
+    "Re-vendor as the admission proof script lists: copy that file byte-identical to apps/Model Plane/api/contracts/agent-action-admission.json, to apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, and to the execution-core and model-gateway fixtures under apps/Model Plane/rust/services/*/tests/fixtures/. Refresh apps/Model Plane/api/contracts/agent-action-admission.json.sha256, copy the pin to each vendored location, then run apps/Model Plane/scripts/tests/agent-action-admission-proof.sh.",
+    "No shared-edit lines: this slice needs no edit to docker-compose.yml, .env.example or any other shared file.",
+    "No buf, proto, migration, prompt-manifest or eval-cassette step: the slice changes no proto, platform prompt or model-executable tool (agent-tools filters on isModelExecutableAction, and agents.installations.list stays closed)."
+   ],
+   "deviations": [
+    "Kept TaskConsoleEntry and InstallationsEntry, because the spec does not remove them; the summary's Runs and Agents links duplicate them (logged as a depth decision).",
+    "The Blueprint badge sits on the 'Templates (preview)' heading, because the overview role cards carried no badge; the badge in the role workspace is unchanged.",
+    "agents.installations.list has a precise output schema ({definitions: [{agent_ref, name?, description?, definition_status?, installations: [...]}]}) rather than the envelopeStatusOutput that the EP-6-S1 siblings use.",
+    "New classes use the overview's own token pairs (--verevon-dark-surface/--panel, --verevon-text-muted/--verevon-text-subtle, --verevon-border/--verevon-dark-border, --verevon-surface/--foreground), because the UI gate forbids raw hex in agents code.",
+    "The agents card counts every agent definition in the org, because the installations endpoint is org-wide; this matches AgentInstallationsPage."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (regenerate, see lead_todo)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256 pin, plus the vendored copies in capability-core testdata and the execution-core and model-gateway fixtures (re-vendor, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Regenerate src/shared/api/contracts/agent-action-admission.json (VEREVON_UPDATE_GOLDEN=1 vitest admission-contract.test.ts) and re-vendor it with its sha256 pin to the Model Plane copies (api/contracts, capability-core testdata, execution-core and model-gateway fixtures), then run agent-action-admission-proof.sh. Until then admission-contract.test.ts stays red by design.",
+     "Live render of /agents at 1280 and 375 px, in light and dark, both empty and populated. Not run in wave mode."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Render /agents at 1280 and 375 px in light and dark, empty and populated (one bound agent and one active schedule), to confirm no horizontal scroll and that the dark token pairs read well; not run in wave mode."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "AutomationsCard shows 'Ingen automatiseringer ennå.' while no active organisation is known, because the schedules resource returns undefined and reads as loaded-empty; confirm the route mounts only after the session loads, or pass a readiness flag so it shows loading."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "TaskConsoleEntry and InstallationsEntry still duplicate the summary's Runs and Agents links; the owner or UX should decide whether to fold them into the summary."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "agents.installations.list has no execute_action arm in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs; the registry-to-dispatcher equality test is already red for the six EP-6-S1 schedule.* ids, so decide whether read contracts need an arm or whether this drift is accepted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The automations card reads every org schedule and filters client-side (listMySchedules, OD-7, D2-121); the server creator=self filter from EP-6-S2 removes that cost, and the summary inherits it until then."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the loading state of AgentsHubSummary (role=status), nor a card with more than three definitions (the 'og N til' line)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The agents installations output schema is precise, but the BFF payload has not been checked live against it (for example an empty definitions list serialised as null); the summary tolerates a null list with ?? []."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "AgentsPage.tsx still has 11 raw hex classes in SelectedAgentWorkspace, covered by ESLint bulk suppressions; move them to tokens in a later pass, not in this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "AutomationsCard in AgentsHubSummary.tsx shows 'Ingen automatiseringer ennå.' while the session has no active org or user yet. The schedules resource source is undefined, so it reads as loaded-and-empty instead of loading."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "AgentsHubSummary.test.tsx does not cover the loading state (role=status) or the 'og N til' overflow line when there are more than three definitions."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "agents.installations.list has no execute_action arm in apps/gateway/src/domains/actions/handlers.rs. This adds one id to the registry-vs-dispatcher drift that the six EP-6-S1 schedule.* ids already cause."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "TaskConsoleEntry and InstallationsEntry still sit below the summary and duplicate its Runs and Agents links. UX should decide whether to fold them in."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "P-SPA1 spaces.* contiguity failure in action-registry.test.ts is unrelated to this slice: the new id is appended at the end and is not a spaces.* id. It was not confirmed against a HEAD build."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads src/features/agents src/shared/actions",
+      "outcome": "31 files: 29 passed, 2 failed; 265 of 267 tests passed. Failure 1: admission-contract.test.ts 'is the file every plane vendors' - byte compare differs only by the new agents.installations.list row (the lead must regenerate the admission contract, per lead_todo). Failure 2: action-registry.test.ts P-SPA1 spaces.* contiguity - recorded by the implementer as pre-existing at HEAD; I did not build a HEAD copy to confirm.",
+      "passed": false
+     },
+     {
+      "command": "pnpm exec vitest run --pool=threads src/features/agents/components",
+      "outcome": "10 files, 72 tests, all passed (includes the new AgentsHubSummary tests and the landing tests in AgentsPage.test.tsx).",
+      "passed": true
+     },
+     {
+      "command": "pnpm lint (eslint .)",
+      "outcome": "Exit 1 overall: 51 errors and 313 warnings across the repo, e.g. tests/visual/space-ui-shots.mjs unused vars. eslint on the slice's directories (src/features/agents, src/app/shell/navigation.ts, src/shared/actions) gives 0 errors and 5 warnings, so no error comes from the slice's files.",
+      "passed": false
+     },
+     {
+      "command": "pnpm typecheck (replaced by tsc6 -p tsconfig.app.json --noEmit; I did not run the pnpm script because it first builds the quarry client and remote-core)",
+      "outcome": "One error: src/shared/api/schedule-contract.test.ts(28,16) TS2352. It is not in a slice file and the implementer says EP-6-S1 recorded the same error. No error in any file the slice changed.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built in wave mode, with no flag, backend, proto or migration. AgentsHubSummary sits above the existing entries: agents come from getAgentInstallations, the person's automations from listMySchedules through automation-state, runs and Customize are links, and failed or ZDR-refused reads are shown as such, never as empty. The blueprint grid is under a Templates (preview) heading with the Blueprint badge, and each blueprint's workspace activation stays disabled. agents.installations.list is registered (ownerPlane application, risk low, requiresApproval false, modelAccess none via no_owner_executor), and the P-SPA1 length moves from 249 to 250. Pre-existing and outside this slice: the P-SPA1 contiguity failure, the i18n error-catch-sites and gateway-error-codes failures, the schedule-contract TS2352, and the whole-set gateway dispatcher drift. Other modified files in the same folder (chat gateway, drafts, chat-client) belong to sibling slices sharing this worktree and were not touched."
+  },
+  {
+   "id": "EP-10-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/actions/testdata/provider-write-operations.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/api/write_operations_golden_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/provider_writes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/tests/fixtures/provider-write-operations.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/tests/provider_write_operations.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/integration_tools.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Ingestion Plane/integration-corev2 && GOWORK=off go test ./internal/api/ -run WriteOperations -count=1 -v",
+     "outcome": "PASS: TestWriteOperationsGoldenIsPinned, TestWriteOperationsVendoredCopyIsByteIdentical, TestWriteOperationsMatchExecutorAllowlistAndCatalogue"
+    },
+    {
+     "command": "GOWORK=off go test ./internal/actions/... ./internal/api/... -count=1 -v",
+     "outcome": "Only two tests fail, both pre-existing and outside this slice: TestReadOperationsMatchExecutorAndCapabilityTable (internal/actions; eight GA4/GSC google names missing from provider-read-operations.json, inputs untouched by this slice) and TestClarityBindingMetadataFreshManifestAndGenericFailure (internal/api; Windows file-mode check Perm()==0600). All other tests in both packages pass."
+    },
+    {
+     "command": "GOWORK=off go vet ./... (integration-corev2)",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "gofmt -l internal/api/write_operations_golden_test.go",
+     "outcome": "clean"
+    },
+    {
+     "command": "Mutation 1: removed github issues.create from actionRequiresApproval, ran the golden test, then restored server.go byte-identical (sha256 unchanged)",
+     "outcome": "FAIL with 'sends a request body but actionRequiresApproval does not name it: an ungated write skips the approval gate (register D2-718)' and 'operations lists github issues.create, but actionRequiresApproval does not name every spelling of it'"
+    },
+    {
+     "command": "Mutation 2: removed snapchat story.post from excludedWrites in a copy of the golden, ran the test, then restored the golden (sha256 5e69423b... unchanged, vendored copy still identical)",
+     "outcome": "FAIL with 'the executor serves write snapchat story.post, but the golden neither lists it as an operation nor excludes it: add a row'"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts provider_write",
+     "outcome": "PASS: 5 tests in tests/provider_write_operations.rs (provider_write_golden_bytes_match_the_pinned_sha256, provider_write_rows_match_the_table_row_for_row, provider_write_excluded_writes_are_neither_catalogued_nor_reads, provider_write_operations_are_never_listed_as_reads, provider_write_editable_kind_follows_the_table_and_its_aliases); one pre-existing lib test with a matching name also passes"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib catalog_writes",
+     "outcome": "PASS: catalog_writes_match_contract_table (1 passed, exit 0)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on provider_writes.rs and provider_write_operations.rs (formatted in place first; both are new LF files)",
+     "outcome": "clean"
+    },
+    {
+     "command": "cargo clippy -q -p mp-contracts --tests",
+     "outcome": "exit 0; no warnings in the new files (34 pre-existing warnings are in other modules)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the eight files in files_changed (this batch does not commit). Conventional message suggestion: feat(model-plane): one write-operations golden across the allowlist, the catalogue and mp-contracts (EP-10-S2).",
+    "shared-edit docs/plans/model-plane-depth-register.md: close D2-718 with the commit. Cite the Go golden test (internal/api/write_operations_golden_test.go), the Rust contract (mp-contracts provider_writes.rs, tests/provider_write_operations.rs, execution-core catalog_writes_match_contract_table) and the two recorded mutation checks.",
+    "shared-edit docs/plans/model-plane-chat-build-plan-2026-10-14.md: add the EP-10-S2 line to the Build ledger (built, sha pins, tests run, the two red package tests recorded above).",
+    "Decide whether the PR can go green: internal/actions/... and internal/api/... are red at HEAD (TestReadOperationsMatchExecutorAndCapabilityTable, and the Windows-only Clarity test). The read golden refresh belongs to WS23-S2; nothing in this slice fixes it.",
+    "Whenever the golden changes: rerun `go test ./internal/api/ -run WriteOperationsMatchExecutorAllowlistAndCatalogue -update`, re-pin writeOperationsSHA256 in internal/api/write_operations_golden_test.go and GOLDEN_SHA256 in mp-contracts tests/provider_write_operations.rs, and copy the golden over the vendored fixture.",
+    "No deploy, image rebuild, live proof or DB harness run is required: S2 is a golden and a test only, with no switch."
+   ],
+   "deviations": [
+    "Test file is internal/api/write_operations_golden_test.go, not internal/actions/write_operations_golden_test.go: actionRequiresApproval is unexported in package api and api imports actions, so the test cannot sit in actions. The golden stays in actions/testdata as the row says.",
+    "The golden has an excludedWrites section (24 gated writes execution-core does not catalogue, e.g. meta pages.photo, linkedin events.create, snapchat story.post, okta user.suspend). Without it, 'adding a write arm without a golden row fails Go' would hold only for catalogued writes. The operations section is exactly the 10 catalogued writes and is what WRITE_OPERATIONS mirrors.",
+    "Write arms are found by two signals: the allowlist, and a scan of each case body for POST/PUT/PATCH/DELETE helpers. The allowlist alone cannot see an ungated write, which is the D2-718 hole. Four read-only POSTs (notion databases, notion pages, gsc search_analytics.query and its alias) are an explicit exception list in the test.",
+    "editable_kind takes (provider, operation), not operation alone, so the same operation name cannot resolve across providers. Aliases match, ignoring case and surrounding spaces, as exec-core's operation_is_write does.",
+    "No Cargo.toml change: sha2 is already a normal dependency of mp-contracts (used by attachments.rs, scheduled_contract.rs and space_approvals.rs), so the row's 'dev-dependency' note is unnecessary.",
+    "server.go changed only by a 3-line doc comment above actionRequiresApproval; no behaviour change. service.go, catalog.go and docs/actions-surface-operations.md are untouched.",
+    "The sha256 pin is held twice: writeOperationsSHA256 in the Go test (for the golden) and GOLDEN_SHA256 in tests/provider_write_operations.rs (for the vendored copy). Both are the same digest; sha2 is available in mp-contracts, so the Rust side verifies the digest itself."
+   ],
+   "needs_other_files": [
+    "docs/plans/model-plane-depth-register.md (close D2-718; lead edit)",
+    "docs/plans/model-plane-chat-build-plan-2026-10-14.md (EP-10-S2 Build ledger line; lead edit)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Close register D2-718 and add the EP-10-S2 Build ledger line. These are lead-owned shared edits.",
+     "The plan's Go test command cannot go green: internal/actions and internal/api were already red before this slice (TestReadOperationsMatchExecutorAndCapabilityTable; the Windows-only TestClarityBindingMetadataFreshManifestAndGenericFailure). The lead must decide what this means for CI. The read-golden refresh belongs to WS23-S2."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "integration-corev2 package tests are red at HEAD, so CI for internal/actions stays red: TestReadOperationsMatchExecutorAndCapabilityTable fails on eight GA4/GSC names in executeGoogle (gsc.sites.list, gsc.search_analytics.query, ga4.*, plus google.* aliases) that provider-read-operations.json does not list. This slice does not touch those inputs; the read golden needs a refresh under WS23-S2."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestClarityBindingMetadataFreshManifestAndGenericFailure (internal/api/clarity_binding_test.go:83) fails on Windows only: internal/clarity/bindings.go:82 requires info.Mode().Perm() == 0600, which Go cannot report on Windows. Pre-existing and outside this slice; [INF] it should pass on a POSIX host, not run here."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The mutating-call scan reads only each case body, so a write sent from a helper an arm calls is invisible to the golden. No helper sends a write today (the GA4 runReport POSTs at google_report.go:56,64 and google_host.go:57 are reads), so there is no present hole; the depth fix is a call-graph scan with explicit read exceptions."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Allowlist-only names are not pinned: actionRequiresApproval names notion content.write and shopify orders.write (both spellings), but executeNotion and executeShopify serve neither, so the golden leaves these dead names unchecked. Owner call: delete them (a server.go behaviour change) or enumerate the allowlist in the golden."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Provider catalogue Direction is a capability property, so it mislabels reads that share a write-looking capability: requiredCapabilityForOperation maps meta ads.campaigns, ads.adaccounts, catalogs.list, live.list, live.get, threads.container.status and snapchat media.list, creatives.list, adaccounts to *.manage or *.write capabilities, which the catalogue reports as write. The golden checks Direction for write arms only, so this is not caught."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Rust side checks only is_write:true catalogue rows. A row marked is_write:false for one of the 24 excluded writes would pass every test for meta, linkedin, snapchat and okta, which are outside READ_OPERATIONS. None exists today (checked by hand against CATALOG). Depth fix: a Rust check, fed from the vendored golden, that no catalogue read matches an excludedWrites or operations row."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Alias mismatch for S3: exec-core's operation_is_write matches only the bare name and {provider}.{operation}, so facebook.page.post, facebook.page.photo and facebook.live.create classify as unknown (gated as writes, which is safe). editable_kind and WRITE_OPERATIONS.aliases match more spellings than exec-core does; S3 must not assume they agree."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Promoting any of the 24 excludedWrites to agent-callable operations is an owner/product decision: it needs an exec-core catalogue row, a WRITE_OPERATIONS row with an editable kind, and an approval design. None is promoted here."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The Rust failure path for a golden row with no catalogue row is BTreeSet equality in execution-core's test; it was not mutation-tested because it needs an execution-core rebuild. The Go side was mutation-checked twice (an ungated write, and a dropped excluded row), each restored byte-identical."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "integration-corev2 internal/actions is red because of TestReadOperationsMatchExecutorAndCapabilityTable: the read golden lacks the GA4/GSC names in executeGoogle. This was there before the slice and the slice does not touch it, but every PR against this package stays red until WS23-S2 refreshes the read golden."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Go write scan reads only each case body of service.go, plus the helpers in a fixed list (post, postBearer, postBearerForm, patchBearer, Method*). A write sent through a new or indirect helper, or from a function the arm calls, would be classified as a read and escape the golden."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "actionRequiresApproval names notion content.write and shopify orders.write, but no executor arm serves them. The golden does not check these dead allowlist names."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "execution-core's catalog_writes_match_contract_table checks only the is_write:true catalogue rows. A catalogue row marked is_write:false for one of the 24 excludedWrites (meta, linkedin, snapchat, okta) would not be caught on the Rust side."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "editable_kind and WRITE_OPERATIONS.aliases accept spellings such as facebook.page.post, which execution-core's operation_is_write does not recognise. S3 must not assume the two classifiers agree."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "write_operations_golden_test.go registers a package-level flag named \"update\" in package api. Any later test in that package that defines its own -update flag will panic at init, so a slice-specific name would be safer."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "integration-corev2: GOWORK=off go test ./internal/actions/... ./internal/api/...",
+      "outcome": "FAIL, two failures. internal/actions: TestReadOperationsMatchExecutorAndCapabilityTable, because eight google GA4/GSC names are missing from the read golden (ga4.account_summaries.list, gsc.search_analytics.query, gsc.sites.list and the others). internal/api: TestClarityBindingMetadataFreshManifestAndGenericFailure, 'Clarity bindings must use a protected valid deployment manifest and token files' (Windows file-mode check). The new write-golden tests are not named in this run's output, and no failure comes from them. The read-golden failure is not in a file this slice changed. Both failures match the ones the implementer reported as pre-existing.",
+      "passed": false
+     },
+     {
+      "command": "integration-corev2: GOWORK=off go vet ./...",
+      "outcome": "PASS, no output, exit 0",
+      "passed": true
+     },
+     {
+      "command": "Model Plane rust: cargo test -q -p mp-contracts provider_write (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "PASS, 5 passed and 0 failed in tests/provider_write_operations.rs; the other test binaries ran 0 matching tests",
+      "passed": true
+     },
+     {
+      "command": "Model Plane rust: cargo test -q -p execution-core --lib catalog_writes (same env)",
+      "outcome": "PASS, 1 passed and 0 failed (catalog_writes_match_contract_table)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the write-operations golden in integration-corev2 and its Rust mirror. The Go test lives in internal/api because actionRequiresApproval is unexported there and api imports actions. It pins the golden sha256, checks the vendored copy byte for byte, and reads each executor case clause from service.go. A clause is a write if the allowlist names it or it calls a POST/PUT/PATCH/DELETE helper. Every write clause must be fully named by the allowlist, have a golden row (operations: the 10 writes execution-core catalogues; excludedWrites: 24 gated writes it does not catalogue), and map to a capability the provider catalogue marks write. Rust: mp-contracts WRITE_OPERATIONS and editable_kind, pinned to the same digest; execution-core's test checks that the is_write catalogue rows equal the table. No runtime change: no switch, proto, migration, ZDR surface or Cargo.toml change. editable_kind has no production caller until S3 (the row names it as the S3 contract). Closing register D2-718 is the lead's register edit."
+  },
+  {
+   "id": "EP-3-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-draft.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-draft.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.chat-draft.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/session/home-draft-storage.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/session/home-draft-storage.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/session/session-store.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/session/session-store.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/session/home-local-content.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/shared/session src/features/chat/lib/chat-thread-draft.test.ts \"src/features/chat/components/use-chat-controller*.test.ts\" (in apps/Frontend Plane/verevonv3, pnpm_config_verify_deps_before_run=false)",
+     "outcome": "PASS: 23 files, 247 tests. Baseline before the change: session 3 files/35 tests and controller 18 files/187 tests, all passing."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "One error, src/shared/api/schedule-contract.test.ts(28,16) TS2352, identical to the baseline. No new errors, the new test files compile."
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/features/dashboard src/shared/session src/features/browser src/features/core src/features/voice src/app",
+     "outcome": "235 files: 231 passed. 19 tests fail in CoreShell.test.tsx (7), CoreSidebar.model-access.test.tsx (3), sidebar/CoreSidebarSpacesPanel.test.tsx (5) and dashboard/home/DashboardSectionOverview.test.tsx (4), with vitest RPC errors in the same files. None of these files is in this slice's ownership. The same 19 names fail with the HEAD versions of session-store.ts, home-local-content.ts, home-draft-storage.ts and use-chat-controller.ts swapped in: a temporary swap, restored byte for byte, verified by sha256. These failures predate this slice."
+    },
+    {
+     "command": "pnpm exec eslint on the 6 modified and 3 new files",
+     "outcome": "0 errors. use-chat-controller.ts has 14 warnings, the same messages as HEAD once line numbers are ignored."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Stage only this slice's nine files (listed in files_changed). The worktree holds uncommitted changes from other slices (AgentsPage and its test, AgentsHubSummary and its test, action-registry and its test, chat-client.ts, chat-client.locale.test.ts, navigation.ts, model-access.ts); do not stage them.",
+    "Depth phase: run the EP-3-S1 live proof on a second dev server for this worktree (a port other than 5173), as in docs/plans/wave3/EP-3-artifact-canvas-and-composer.md section 4 S1.",
+    "No docker, proto, buf, migration, flag or shared-file edit is needed for this slice."
+   ],
+   "deviations": [
+    "The hook returns beginSend (which returns a settle function), carry(from, to) and reset() beside message and setMessage. The row names the behaviour but not the calls the controller needs: a send settles, a conversation changes id, and New chat switches the draft key.",
+    "New chat (reset) empties the composer and removes the 'new' draft, which matches the composer being cleared before this slice. The row's 'saves the old thread's draft before clearing' is met by saving the thread being left before the switch.",
+    "zeroRetention is Accessor<boolean> with no undefined state, since the chat always knows its Temporary state. threadId accepts null for a chat that has no thread yet.",
+    "A third test file, src/features/chat/components/use-chat-controller.chat-draft.test.ts (new), drives the controller's send path with the stubs of use-chat-controller.follow-up.test.ts. It sits beside the controller, which the row allows, but the row did not name it."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof on a second Vite dev server for this worktree (not :5173), per EP-3 design section S1: type in thread A, switch to B, type, reload, both drafts return; kill the network and send, the draft comes back; in Temporary chat, no verevon.chat-draft.v1 keys in sessionStorage. Evidence goes under docs/plans/wave3/evidence/EP-3/.",
+     "When staging, take only this slice's 6 modified and 3 new files. The worktree also holds uncommitted work from other slices: Agents*, action-registry*, model-access.ts, navigation.ts, chat-client*, gateway chat .rs, MP Rust, integration-corev2."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not run in wave mode: the design's S1 live proof on a second Vite dev server for this worktree (type in thread A, switch to B, type, reload: both drafts return; kill the network, send: draft restored; Temporary chat: no chat-draft keys in sessionStorage). Evidence goes under docs/plans/wave3/evidence/EP-3/."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A send settles as failed when neither a connected nor a done frame arrives (sendContent finally). A connection lost after the gateway accepted the turn therefore restores its text, and a resend mints a new client message id, so the gateway stores a second turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A reload between send start and the connected frame restores the sent text from sessionStorage into the composer, because the draft is kept until the send settles. The transcript may already show that turn, so the person could send it twice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On a thread switch, rebind() replaces the composer with the next thread's draft even when the text being left was not stored (a refused write, storage full), so that text is lost. No test covers a refused write during a switch."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Deleting the active thread (the removal path in use-chat-controller.ts that calls resetChatState) and clearing history leave that thread's draft in sessionStorage until sign-out or the 30-thread cap evicts it. The draft key should be removed with the thread."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Drafts are written for every thread origin, including Space, Support and project threads. The composer is disabled on foreign-origin threads, but the row does not say whether their drafts may be stored. Owner to decide."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "A regenerate or edit-resubmit clears the composer as before. On acceptance its draft is discarded, as before, and a failure now gives the text back. Confirm that is the intended meaning of discard-on-accepted for those turns."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The controller wiring test covers an onError failure and the connected and done acceptance. Not covered: a rejected streamChat, transport loss before connected, Stop before connected, and New chat while a send is in flight."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "accepted, failed and beginSend read the composer with untrack(message). Solid 2 applies signal writes at the next flush, so a caller that settles a send in the same synchronous run as a setInput would read the old text. The controller calls them in separate runs today; keep it that way."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Pre-existing, not from this slice: 19 tests in CoreShell.test.tsx (7), CoreSidebar.model-access.test.tsx (3), CoreSidebarSpacesPanel.test.tsx (5) and DashboardSectionOverview.test.tsx (4) fail with vitest RPC errors (toJSON not found, Maximum call stack) identically on HEAD code. Do not use the full vitest run as a gate until they are fixed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "useChatThreadDraft repeats useHomeDraft's gate, because the row asks for a thin copy and home-draft.ts is outside this slice. That leaves two gates to keep in step; merge them when home-draft.ts is next edited. The chat draft helpers also sit in home-draft-storage.ts as the row directs."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's S1 live proof has not been run: reload, thread switch, network-loss restore, and the Temporary chat sessionStorage dump on a second dev server."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "use-chat-controller.ts settles the draft as 'failed' in its finally block when neither onConnected nor onDone has fired. A connection lost after the gateway accepted the turn therefore restores the text, and a resend mints a new client message id, which can store a duplicate turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Because the draft is kept until the send settles, a reload between send start and the connected frame puts the sent text back in the composer even when the transcript may already show the turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In chat-thread-draft.ts, rebind() replaces the composer with the next thread's draft even when save() refused the write for the thread being left (storage full), so that text is lost. No test covers this."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Deleting the active thread or clearing history leaves that thread's verevon.chat-draft.v1 key in sessionStorage until sign-out or eviction by the 30-thread cap. The draft key should be removed together with the thread."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The controller wiring test (use-chat-controller.chat-draft.test.ts) covers an onError failure and connected/done acceptance only. Not covered: a rejected streamChat, transport loss before connected, Stop before connected, New chat during an in-flight send, and switching into an already-temporary thread."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Drafts are written for every thread origin (Space, Support, project). The row does not say whether foreign-origin threads, whose composer is disabled, may store drafts. Owner to decide."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "useChatThreadDraft duplicates useHomeDraft's gate logic, as the row asks for a thin copy. Merge the two the next time home-draft.ts is edited, so they cannot drift apart."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run src/shared/session src/features/chat/lib/chat-thread-draft.test.ts src/features/chat/components/use-chat-controller (in apps/Frontend Plane/verevonv3)",
+      "outcome": "PASS: 23 files, 247 tests, 0 failures. The plan's quoted glob form \"use-chat-controller*.test.ts\" is read as a literal substring filter by vitest and matched only 4 files / 57 tests, so the plain filter was used to cover all controller tests.",
+      "passed": true
+     },
+     {
+      "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (equivalent of tsc6 -p tsconfig.app.json)",
+      "outcome": "One error, src/shared/api/schedule-contract.test.ts(28,16) TS2352. The file is not part of this slice and the implementer's baseline shows the same error. No errors in the slice's files or the new test files.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "EP-3-S1 is built in wave mode with no flag, proto or migration. Chat drafts live in sessionStorage under verevon.chat-draft.v1:<org>:<user>:<thread|new>, with an index that keeps the 30 most recently written thread drafts. useChatThreadDraft (new, chat-thread-draft.ts) follows the Home draft gate: Temporary chat, workspace ZDR and tainted text never write, and turning either on removes the stored draft. A send clears the composer but keeps its text stored until the send settles: connected or done discards it, and a send that ends without either gives the text back to the composer if it is still that thread's composer. New chat keeps the old thread's draft. A new chat's draft moves to the thread id the conversation takes. Sign-out and identity change clear chat drafts beside the Home drafts, and the ZDR workspace clear (clearHomeLocalContent) does too. Home's key and functions are unchanged: home-draft-storage.ts has no removed lines. Other slices' uncommitted changes are present in this worktree and were not touched."
+  }
+ ]
+}

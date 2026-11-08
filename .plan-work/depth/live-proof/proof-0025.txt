@@ -1,0 +1,38 @@
+== capability-core tables from 0017-0024 now present
+        table_name        | present 
+--------------------------+---------
+ tool_policies            | t
+ skill_bundles            | t
+ skill_bundle_files       | t
+ skill_bundle_blobs       | t
+ agent_action_admissions  | t
+ org_agent_policy         | t
+ org_agent_policy_history | t
+
+== 0021: the skill bundle file flag column (D1-754) is is_binary, not binary
+ column_name 
+-------------
+ is_binary
+
+== 0025: the allow-needs-digest constraint (D1-757)
+                 conname                  |                                            definition                                            | convalidated 
+------------------------------------------+--------------------------------------------------------------------------------------------------+--------------
+ tool_policies_allow_digest_check         | CHECK (((decision <> 'allow'::text) OR (pinned_digest ~ '^[0-9a-f]{64}$'::text)))                | t
+ tool_policies_allow_digest_present_check | CHECK (((decision <> 'allow'::text) OR (pinned_digest IS NOT NULL) OR (revoked_at IS NOT NULL))) | t
+
+== behaviour (rolled back): an active allow without a digest is refused, one with a digest is accepted
+BEGIN
+SAVEPOINT
+psql:/tmp/proof-0025.sql:17: ERROR:  new row for relation "tool_policies" violates check constraint "tool_policies_allow_digest_present_check"
+DETAIL:  Failing row contains (liveproof-0025-a, org-liveproof, user, user-liveproof, cap-liveproof, allow, null, , lead, 2026-10-27 00:46:24.17685+00, 2026-10-27 00:46:24.17685+00, null).
+ROLLBACK
+INSERT 0 1
+           outcome            | count 
+------------------------------+-------
+ digest-pinned allow accepted |     1
+
+ROLLBACK
+           check            | count 
+----------------------------+-------
+ left behind after rollback |     0
+

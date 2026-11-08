@@ -1,0 +1,85 @@
+[
+ {
+  "key": "capcore-0021-binary-reserved-word",
+  "rows": [],
+  "title": "capcore-0021-binary-reserved-word",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0021_skill_bundles.up.sql",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\store.go",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\migration_reserved_words_test.go (new)"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go build ./...",
+    "outcome": "exit 0",
+    "passed": true
+   },
+   {
+    "command": "go vet ./...",
+    "outcome": "exit 0",
+    "passed": true
+   },
+   {
+    "command": "go vet -tags integration ./...",
+    "outcome": "exit 0",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/skillbundle/ ./internal/api/ ./internal/registry/ ./internal/server/",
+    "outcome": "all four packages ok (skillbundle, api, registry, server)",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The PostgreSQL integration tests have not run. The lead needs to run go test -tags integration -count=1 ./internal/skillbundle/ ./internal/api/ ./internal/registry/ ./internal/server/ to show that 0021 now applies and that the renamed INSERT/unnest and Manifest SELECT work. Those tests will also be the first PostgreSQL check of 0022 to 0024, which never ran because the chain stopped at 0021.",
+   "The reserved-word scanner is regex-based. It covers CREATE TABLE column lists and ALTER TABLE ADD clauses only. It does not cover other reserved-word uses such as index expressions or view columns, and nested $tag$ bodies other than $$ are not stripped. That is enough for this finding but is not a full SQL parser.",
+   "The old-code failure of TestMigrationColumnsAreNotReservedWords was reported by the coder and not re-run here. TestMigrationColumnScanner does pin that a 'binary' column is flagged, so the regression protection holds.",
+   "store.go shows a git autocrlf warning (LF in the worktree). The diff touches only four SQL lines, so the existing line-ending style is kept."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "1) docker-entrypoint.sh applies each up file with psql -v ON_ERROR_STOP=1, one statement at a time, so a database that the old run stopped at 0021 may already hold skill_bundles and its index. Every statement in 0021 is IF NOT EXISTS, so the re-run is safe. 2) Migrations 0022 to 0024 have never been applied by the integration tests, because the chain stopped at 0021. The integration run is their first PostgreSQL check. The reserved-word scan passes them but does not check other syntax. 3) Line endings: the touched files are LF in the index and the worktree (git ls-files --eol shows i/lf w/lf), so the new test file is LF too. The packet's CRLF note does not apply to these files. 4) git status also shows internal/taskexec/workflow_dispatcher_template_digest_integration_test.go as modified. That matches sibling packet capcore-taskexec-template-digest-scratch-schema; I did not touch it, so stage only the three paths above.",
+  "summary": "Renamed the skill bundle file flag column from binary (a PostgreSQL reserved word) to is_binary in 0021 and in the four SQL lines of store.go; the Go and API field names are unchanged. 0021 is edited in place because no database can have applied it, and docker-entrypoint.sh applies it statement by statement with IF NOT EXISTS, so a database that stopped at 0021 re-runs it safely. No checksum pins its bytes. New migration_reserved_words_test.go scans every capability-core up migration for unquoted reserved words in column definitions (fails on the old 0021, passes for 0001-0024).\n\nLead proof: go test -tags integration -count=1 -p 2 ./... in capability-core (testcontainers postgres:16): before round D 5 packages failed (every test applying the migrations stopped at 0021, plus taskexec); after it 31 packages pass, including skillbundle, registry, server and taskexec, so 0021 to 0024 now apply on Postgres for the first time. The one remaining failure is a separate finding (tool_policies accepts an allow row with a NULL digest, D1-757)."
+ },
+ {
+  "key": "capcore-taskexec-template-digest-scratch-schema",
+  "rows": [],
+  "title": "capcore-taskexec-template-digest-scratch-schema",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_template_digest_integration_test.go"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "go vet -tags integration ./internal/taskexec/",
+    "outcome": "exit 0, no output (integration-tagged test compiles)",
+    "passed": true
+   },
+   {
+    "command": "go test -count=1 ./internal/taskexec/ ./internal/cron/",
+    "outcome": "ok taskexec (11.7s), ok cron (3.9s)",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Not verified against a live database here. The lead must run TestScheduleTemplateDigestSurvivesJSONB (-tags integration, testcontainers) and confirm all 11 subtests pass, each firing exactly one schedule. The fix is right only if the fire_key column was the only thing missing.",
+   "The scratch schema is still hand-copied. A future column that RunOnce writes would break the test the same silent way. The new header comment warns about this, but nothing enforces it.",
+   "sweeper.go throws away the error from every tx.Exec with `_, _ =` (lines 139, 145, 155-156, 161, 258-259, 263-264). It also never checks rows.Err() after the scan loop at line 128. So the first failing statement never shows up, only 'commit unexpectedly resulted in rollback'. The coder correctly listed these under needs_other_files for a later packet.",
+   "All due schedules (LIMIT 100) share one transaction, so one bad fire rolls back the whole batch. This is a design issue that was reported and is outside this packet's scope.",
+   "The scratch cron_fires.error column is nullable, while 0004 has NOT NULL DEFAULT ''. This is harmless today because the sweeper always writes a value there."
+  ],
+  "db_tests": [],
+  "needs_other_files": [
+   "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:263-265 (also 258-260, 161-163 and 139-156): each `_, _ = tx.Exec(` discards its error, so the first failing statement is never returned or logged, and RunOnce reports only the commit rollback (sweeper.go:166-168). Suggested one-line change: have fireOne return the error of its INSERT and have RunOnce return it wrapped with the schedule id, instead of `_, _ =`.",
+   "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:120-129: rows.Err() is never checked after the scan loop, so a failure while streaming due rows yields a short batch with no error. Suggested one-line change: return rows.Err() after the loop at line 128, closing rows first.",
+   "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:106-170 (design, not a one-line fix): all due schedules share one transaction (LIMIT 100), so one failing fire rolls back every schedule in the batch, and that schedule stays due and blocks the sweep on every tick. A SAVEPOINT per fire would contain the failure."
+  ],
+  "deploy_notes": "The sweeper writes cron_fires.fire_key unconditionally (sweeper.go:258-265, with no switch around it), so session-core migration 0056 must be applied to the database the sweeper writes to before the capability-core build containing this sweeper runs. Against a database without 0056, any fire fails, and the sweep's transaction rolls back, even with SESSION_CORE_SCHEDULED_RESULT_PERSIST off.",
+  "summary": "Root cause: the sweeper's success-path cron_fires INSERT names fire_key (session-core migration 0056, WS20-S1), which the scratch schema lacked; the sweeper discards that error, so the transaction aborts silently, COMMIT rolls back, the schedule stays due and poisons the next subtest (the 25P02 lines). Added fire_key TEXT NOT NULL DEFAULT '' to the scratch cron_fires and named 0004, 0028 and 0056 in the header; every other column RunOnce names exists in a real migration with the same type. The sweeper itself is untouched; its discarded errors and one-transaction batch are logged as D1-756.\n\nLead proof: go test -tags integration -count=1 -p 2 ./... in capability-core (testcontainers postgres:16): before round D 5 packages failed (every test applying the migrations stopped at 0021, plus taskexec); after it 31 packages pass, including skillbundle, registry, server and taskexec, so 0021 to 0024 now apply on Postgres for the first time. The one remaining failure is a separate finding (tool_policies accepts an allow row with a NULL digest, D1-757)."
+ }
+]

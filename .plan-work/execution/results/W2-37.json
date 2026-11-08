@@ -1,0 +1,587 @@
+{
+ "batchId": "W2-37",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS15-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\orchestration.proto",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\gen\\model_plane\\v1\\orchestration.pb.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_retry.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\tool_retry_contract.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\retry.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\orchestration_grpc.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- a_transient_failure_emits_one_retry_scheduled_per_extra_attempt buffered_events_mode_emits_none retry_frame_never_contains_the_error_text a_non_transient_failure_is_never_retried_or_announced every_transient_marker_names_a_closed_reason the_reason_names_the_class_of_a_real_failure a_tool_retry_is_a_lifecycle_notice_and_never_a_step",
+     "outcome": "7 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "full suite: 2591 passed, 0 failed, 4 ignored"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test tool_retry_contract",
+     "outcome": "5 passed, 0 failed (includes both_loops_name_a_transient_failure_with_the_same_closed_reason)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- runtime_loop::retry",
+     "outcome": "18 passed, 0 failed (includes a_retried_tool_announces_each_extra_attempt, a_risky_call_announces_no_retry)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- runtime_loop::agent::tests::a_retried_tool runtime_loop::agent::tests::a_risky_call runtime_loop::agent::tests::no_tool_retry",
+     "outcome": "3 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+     "outcome": "full suite: 1628 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p mp-orchestration --lib",
+     "outcome": "FAILS as expected: E0004 non-exhaustive ProtoEvent match at crates/mp-orchestration/src/proto_shim.rs:515 (ToolRetryScheduled not covered). Shared edit required; session-core depends on this crate"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core event_run_id_extracts_tool_retry",
+     "outcome": "NOT RUN: blocked by the mp-orchestration compile failure above"
+    },
+    {
+     "command": "cd apps/Model Plane/go/gen && go vet ./model_plane/v1/ && go test ./...",
+     "outcome": "vet clean; ok model_plane/v1 (wire-parity goldens still pass)"
+    },
+    {
+     "command": "buf generate (native buf 1.72, protoc-gen-go v1.36.12) on model_plane/v1/ids.proto, diffed against checked-in ids.pb.go",
+     "outcome": "byte-identical, so the toolchain reproduces the committed bindings; orchestration.pb.go regenerated and copied; diff reviewed as additive (no removed tags)"
+    },
+    {
+     "command": "git show HEAD:orchestration.proto vs working copy: tag-line diff",
+     "outcome": "nothing removed; added only oneof member tool_retry_scheduled = 26 and the 7 fields of ToolRetryScheduled (N2 additivity proof)"
+    },
+    {
+     "command": "buf lint apps/Model Plane/proto --error-format=json",
+     "outcome": "pre-existing findings only (exit 100 as at HEAD); zero findings on the added proto lines"
+    },
+    {
+     "command": "PYTHONUTF8=1 python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "parser and coverage checks pass; fails only on doc freshness: new row `tool_retry_scheduled | 26 | ✅` (doc not regenerated, see lead_todo)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on changed files vs HEAD copies",
+     "outcome": "no new formatting hunks in this slice's code (tool_retry.rs, retry.rs, tool_loop.rs, tests/tool_retry_contract.rs clean; agent.rs at HEAD's 412 pre-existing hunks; orchestration_grpc.rs at HEAD's 31; sse.rs none in new code)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit crates/mp-orchestration/src/proto_shim.rs (the match on ProtoEvent, around lines 638-640): add `| ProtoEvent::ToolRetryScheduled(_)` to the arm `ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) | ProtoEvent::RunUsageProgress(_) => { return Err(ShimError::UnsupportedEvent); }`. Without this, `cargo check -p mp-orchestration` fails with E0004 (verified) and session-core cannot build. Do this before committing the proto.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}` to the execution-core service environment (the Do-loop announcement reads the switch there). The file has no lifecycle switch at all today, so add it to model-gateway as well (WS15-S1's compose line is missing from the tree). Default off.",
+    "Regenerate the taxonomy doc: `PYTHONUTF8=1 python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\"` (writes apps/Model Plane/docs/sse-event-taxonomy.md with the new row `tool_retry_scheduled | 26 | ✅`), then confirm `--check` passes.",
+    "After the proto_shim edit, run `cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core event_run_id_extracts_tool_retry`. This is the only session-core check, and it has not been run.",
+    "Live proof (the row's DoD, not run): rebuild model-gateway, execution-core and session-core images (lead only); with MODEL_GATEWAY_LIFECYCLE_EVENTS=true, stop the Data Plane so knowledge_search fails transiently, then expect two retry_scheduled frames on the chat stream with the steps family and two tool_retry_scheduled events on the run stream. A plain-profile stream must show neither.",
+    "Optional: regenerate apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py (the python plugin in buf.gen.yaml uses a remote plugin). It is stale until then.",
+    "Do not commit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs with this slice: it holds WS22-S5's uncommitted thread-workspace routes from another batch."
+   ],
+   "deviations": [
+    "Both retry loops now delegate to a closure-driven helper (attempts_with_retries in tool_loop.rs; runtime_loop::retry::run_attempts in execution-core) so the attempt decision and the announcement can be unit-tested. The gates, their order and the sleeps are unchanged. The chat loop's warn line keeps its fields and moved into the helper; the Do loop's warn stays at the call site with the same fields.",
+    "execution-core also announces nothing for a ZDR run (zdr guard in announce_tool_retry), in addition to the switch. The row does not state this; session-core already refuses orchestration writes for a ZDR credential, so the guard avoids a refused write per retry.",
+    "The announcement's attempt field is the attempt about to run (2 or 3), not the attempt that failed; documented on the proto field and in the frame.",
+    "run_forced_web_search_for_model streams its tool events but passes None for retry_sink, following the plan row that lists it among the non-announcing callers. Its retries are therefore silent (see depth findings).",
+    "The raw run-events SSE gains a named arm tool_retry_scheduled in orchestration_event_to_sse, as the plan row for that function asks. The taxonomy generator counts named arms, so the doc needs regeneration (lead_todo).",
+    "session-core test is written to run as --bin session-core (binary crate), per the lead's note, although the W2-37 row says --lib.",
+    "Go bindings were regenerated natively (buf 1.72 with protoc-gen-go v1.36.12, the version the checked-in files carry) for orchestration.proto only. The full remote buf generate (Python, TypeScript) was not run."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-orchestration\\src\\proto_shim.rs (exhaustive ProtoEvent match; required for any build of session-core)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\deploy\\docker-compose.yml (MODEL_GATEWAY_LIFECYCLE_EVENTS for execution-core and model-gateway)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\sse-event-taxonomy.md (generated; check 5 of the gate)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\python\\mp-events-py\\src\\mp_events\\_gen\\model_plane\\v1\\orchestration_pb2.py (generated binding, stale)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared edit, needed before the proto can be committed: crates/mp-orchestration/src/proto_shim.rs, in the exhaustive ProtoEvent match (around lines 638-641), change `| ProtoEvent::RunUsageProgress(_) => {` to `| ProtoEvent::RunUsageProgress(_)\\n            | ProtoEvent::ToolRetryScheduled(_) => {`. Without it mp-orchestration fails with E0004 at proto_shim.rs:515, which I reproduced, so session-core cannot build. I applied this exact line in a throwaway scratch copy: mp-orchestration --lib then passed 62/62, session-core --bin event_run_id passed 2/2 (including event_run_id_extracts_tool_retry), and session-core --bin orchestration_grpc passed 93 with 17 ignored. The scratch copy is deleted.",
+     "Regenerate apps/Model Plane/docs/sse-event-taxonomy.md with `PYTHONUTF8=1 python \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\"`. The new named arm tool_retry_scheduled (26) makes `--check` fail on doc freshness until the doc is regenerated.",
+     "apps/Model Plane/deploy/docker-compose.yml does not set MODEL_GATEWAY_LIFECYCLE_EVENTS (default false) for execution-core or model-gateway. execution-core reads the switch from its own environment, so the Do-loop announcement cannot be switched on until compose wires it.",
+     "Live DoD not run. Rebuild model-gateway, execution-core and session-core. With the switch on, a Data Plane outage that makes knowledge_search fail transiently should produce two retry_scheduled frames (steps family) and then a tool_result error. One Do run with a transient tool should produce the orchestration-derived retry_scheduled frame and a tool_retry_scheduled console event. A plain-profile stream should show neither.",
+     "Optional regeneration of the Python and other non-Go bindings of orchestration.proto (only the Go output was regenerated)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "session-core is not compile-verified: event_run_id_extracts_tool_retry and the RecordOrchestrationEvent path cannot build until the proto_shim.rs arm is added (E0004 at line 515 confirmed by cargo check)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The row's live DoD is not run: needs rebuilt model-gateway, execution-core and session-core images, the compose env, and a Data Plane outage that makes knowledge_search fail transiently, with the chat and run-stream frames checked on a live stack."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No harness test drives the real run_rounds retry branch end to end, because the agent harness has no deterministic transient tool. Coverage is run_attempts with the real tool_call_is_retryable gate and the real announce over the mock session-core, not the full loop."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "run_forced_web_search_for_model streams tool events but passes None for retry_sink (plan row), so its retries are silent. Decide whether to pass sink.filter(enabled) there."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "execution-core announces nothing under ZDR (zdr guard). Confirm this, since the row's ZDR clause says Do runs are never ZDR while req.zdr is a live input to Do runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "execution-core reads MODEL_GATEWAY_LIFECYCLE_EVENTS from its own environment. Until compose wires it there, the Do-loop announcement stays off (fail-safe, but the DoD is unreachable)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No wire-parity golden for ToolRetryScheduled: the Go file go/gen/model_plane/v1/proto_wire_parity_orchestration_test.go says its hex must match the Rust GOLDEN constants in mp-orchestration/tests/proto_wire_parity.rs, which is outside this slice's ownership."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The closed reason table (REASON_MARKERS) is duplicated in model-gateway tool_retry.rs and execution-core retry.rs. Drift is caught only by tests/tool_retry_contract.rs, a source-text comparison, the same accepted pattern as the marker tables."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The raw run-events SSE now names tool_retry_scheduled (taxonomy row). Verify that the Verevon run console treats unknown or new names as no-ops before the switch is enabled."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The model-gateway frame assertions read axum Event's Debug text (escaped JSON such as \\\"attempt\\\":2). That is brittle across an axum upgrade; a typed accessor would be sturdier."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Python binding (and any other generated consumer of orchestration.proto) is stale until a full buf generate with the remote plugins is run; only the Go output was regenerated here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With this slice's proto change alone the Rust workspace does not compile (mp-orchestration E0004, so session-core does not build either); the one-line proto_shim.rs arm must land in the same commit as orchestration.proto."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Neither loop's retry announcement has been seen on a live stack, and the Do-loop half stays unreachable until compose passes MODEL_GATEWAY_LIFECYCLE_EVENTS to execution-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Do-loop tests call runtime_loop::retry::run_attempts with the real gate and announce_tool_retry, but nothing drives the run_rounds call site, so the wiring of ledger_fences_retry, is_release and step_id into the closures is checked only by reading the code."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The row's DoD item 'chat-loop frames replay on resume (buffered sink)' has no test: no test checks that a retry_scheduled emitted through RichEventSink reaches the resume buffer."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "run_forced_web_search_for_model passes retry_sink None, as the plan row lists, so its retries stay silent even on a live stream with the switch on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "announce_tool_retry announces nothing for a ZDR run, a guard the row does not ask for. It is fail-safe and avoids a refused write per retry, but the owner should confirm it, since the row's ZDR clause assumes Do runs are never ZDR."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no Rust/Go wire-parity golden for OrchestrationEvent.ToolRetryScheduled (tag 26); proto_wire_parity tests live outside the slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "orchestration_event_to_sse now emits a raw tool_retry_scheduled event name on the run-events stream; check that the Verevon run console ignores unknown names before the switch is turned on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In agent.rs tests, the new a_retried_tool_announces_each_extra_attempt block is inserted between the existing doc comment ('what routes it ... one has the rounds to finish') and the test it documented, so that doc comment now prefixes the new test and the old test has none."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The model-gateway frame assertions match on axum Event's Debug output (escaped JSON), which may break on an axum upgrade."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib tool_loop",
+      "outcome": "249 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test tool_retry_contract",
+      "outcome": "5 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib retry",
+      "outcome": "29 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib agent",
+      "outcome": "507 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core event_run_id (event_run_id_extracts_tool_retry)",
+      "outcome": "Cannot run. mp-orchestration fails to compile with E0004: non-exhaustive match, ToolRetryScheduled not covered (crates/mp-orchestration/src/proto_shim.rs). Shared edit is still missing.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p mp-orchestration --lib (compile check of the dependency session-core uses)",
+      "outcome": "Fails with the same E0004 error.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Built WS15-S3 end to end in both tool loops, all behind MODEL_GATEWAY_LIFECYCLE_EVENTS (strict literal true, off by default; with it off no frame or RPC is produced). Chat loop: attempts_with_retries in tool_loop.rs announces retry_scheduled through the live sink (steps family, closed reason, no error text); the call site passes the sink only when live and the switch is on. Do loop: runtime_loop::retry::run_attempts drives the unchanged gates (ledger fence, tool_call_is_retryable) and announce_tool_retry sends OrchestrationEvent.ToolRetryScheduled (tag 26, additive) best-effort via RecordOrchestrationEvent; session-core event_run_id routes it (not persisted); model-gateway maps it to the same retry_scheduled frame on the chat stream and to tool_retry_scheduled on the raw run stream. transient_reason returns closed tokens from RETRY_REASONS, duplicated in both crates and guarded by tests/tool_retry_contract.rs. Both full --lib suites pass. Status is partial because session-core cannot compile until the lead applies the mp-orchestration shared edit, and the live proof and taxonomy doc regeneration are lead steps. Not mine: apps/Model Plane/rust/services/model-gateway/src/http_routes.rs shows modified (WS22-S5 thread-workspace routes from another batch); it was not touched here and must not be committed with this slice."
+  },
+  {
+   "id": "WS22-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/cmd/main.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/go.mod",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/go.sum",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/server/thread_workspace_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/objectstore/objectstore.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/objectstore/objectstore_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/sweeper.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/sweeper_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/threadworkspace/sweeper_integration_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/server/thread_erasure_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/sandbox-manager/internal/server/thread_erasure_integration_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-workspace.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-workspace.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ThreadWorkspacePanel.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ThreadWorkspacePanel.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "gofmt -l on internal/threadworkspace/sweeper.go, sweeper_test.go, sweeper_integration_test.go (all LF, no normalisation needed)",
+     "outcome": "clean, no output"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/sandbox-manager && env -u GOFLAGS GOWORK=off go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "env -u GOFLAGS GOWORK=off go vet -tags integration ./...",
+     "outcome": "exit 0; the integration files compile, not run (need Docker)"
+    },
+    {
+     "command": "env -u GOFLAGS GOWORK=off go test -count=1 -v -run 'TestSweep|TestWithTiming|TestRetention|TestSweeper' ./internal/threadworkspace/",
+     "outcome": "PASS: all 10 sweeper unit tests, including the two new cases TestSweepPrunesStaleThreadLeasesOnEveryPass and TestSweepKeepsTheErasuresWhenThePruneFails"
+    },
+    {
+     "command": "env -u GOFLAGS GOWORK=off go test -count=1 ./...",
+     "outcome": "ok for cmd, authz, lease, objectstore, process, redact, server, snapshot, threadworkspace, workspace; telemetry has no test files"
+    }
+   ],
+   "db_tests_written": [
+    "TestDeleteThreadWorkspaceRemovesRowsAndPrefix (internal/server, build tag integration; Postgres 16 and MinIO RELEASE.2025-09-07T16-13-09Z containers; run: cd apps/Model Plane/go/services/sandbox-manager && GOWORK=off go test -tags integration -count=1 -run '^TestDeleteThreadWorkspaceRemovesRowsAndPrefix$' ./internal/server/)",
+    "TestEraseIdleKeepsAThreadUsedAfterTheSweepChoseIt (internal/threadworkspace, build tag integration; Postgres 16 container; run: GOWORK=off go test -tags integration -count=1 -run '^TestEraseIdleKeepsAThreadUsedAfterTheSweepChoseIt$' ./internal/threadworkspace/)",
+    "TestEraseStaleLeasesKeepsOnlyLiveAndRecentThreadLeases (internal/threadworkspace, build tag integration; Postgres 16 container, applies migrations 0002 and 0006 itself; run: GOWORK=off go test -tags integration -count=1 -run '^TestEraseStaleLeasesKeepsOnlyLiveAndRecentThreadLeases$' ./internal/threadworkspace/)"
+   ],
+   "lead_todo": [
+    "Commit the files in files_changed, including apps/Model Plane/go/services/sandbox-manager/go.mod and go.sum, after accepting the minio-go dependency (depth 12). This agent did not commit.",
+    "Run the three db_tests_written filters with Docker (Postgres 16 for all three; MinIO also for the first) and record the outcome.",
+    "Rebuild the sandbox-manager, model-gateway and verevonv3 gateway images; the sandbox-manager build now fetches minio-go v7.2.1, so confirm the Dockerfile's module step works.",
+    "Live proof on a dev stack with SANDBOX_MANAGER_THREAD_WORKSPACE=true set only there: create files through a chat turn, GET and DELETE through the BFF, confirm the thread tables and the cas/thread/<org>/<thread>/ prefix are empty for that thread, confirm a second user's DELETE is refused with nothing removed, record the evidence file, and confirm an expired thread lease row older than the window is pruned in the same pass.",
+    "Retention proof on the test stack: age last_used_at and expires_at past SANDBOX_MANAGER_THREAD_RETENTION_DAYS and confirm one hourly pass erases the idle thread's rows and blobs and removes its lease rows.",
+    "Compose: sandbox-manager already receives MINIO_ENDPOINT, MINIO_ACCESS_KEY and MINIO_SECRET_KEY; no change is needed for the default-off rollout. Reconcile OBJECT_STORAGE_BUCKET with execution-core's MINIO_BUCKET before any non-default bucket is set (depth 18).",
+    "WS17 owner: session-core's delete_thread must call DELETE /v1/threads/{id}/workspace with the user's bearer (depth 5); this gates default-on.",
+    "Owner decisions before default-on: retention policy (global or per org, DEC-23 option (b)), rollback behaviour (depth 4 and 13), and retention for agent and Space lease rows (depth 8).",
+    "Outside this round, needing an owner-approved change: refuse SnapshotSandbox for thread-scoped leases in server.go (depth 9), and decide whether the switch-off GET path should refuse before it writes a lease row (depth 7).",
+    "shared-edit apps/Model Plane/proto/model_plane/v1/sandboxes.proto: in the comment on DeleteThreadWorkspace, drop the stale 'refuses every caller until S5' wording (comment-only)."
+   ],
+   "deviations": [
+    "Go S3 client is minio-go/v7 v7.2.1 rather than a hand-rolled SigV4 client as the Rust CAS does; this adds the one Go dependency and the transitive bumps recorded in depth_findings.",
+    "Erasure refuses a thread id another owner also holds (ErrThreadShared, mapped to PermissionDenied with nothing removed), an authority refinement beyond the row text.",
+    "Startup stops when SANDBOX_MANAGER_THREAD_WORKSPACE is true, a durable database is configured, and MINIO_ENDPOINT, MINIO_ACCESS_KEY or MINIO_SECRET_KEY is absent (fail closed); the row did not specify this.",
+    "No new on/off switch: the sweeper and DELETE follow SANDBOX_MANAGER_THREAD_WORKSPACE, as the S1 contract requires (flag off returns FailedPrecondition on every new RPC). SANDBOX_MANAGER_THREAD_RETENTION_DAYS is a parameter with default 30; a malformed value fails startup.",
+    "TestDeleteThreadWorkspaceIsUnimplementedUntilRetention is replaced by TestDeleteThreadWorkspaceRefusesUntilErasureIsWired (FailedPrecondition).",
+    "The BFF handlers live in domains/chat/json_handlers.rs (inside the owned directory) rather than a new file; the SPA panel is a new file mounted in ChatPage.tsx beneath the header for non-temporary threads.",
+    "The model-gateway DELETE is not refused under ZDR because erasure must always work; the GET is refused by sandbox-manager under ZDR because it acquires a thread lease.",
+    "pnpm was not used: its workspace deps check fails in this worktree on a missing Ingestion Plane/Quarry-v2/sdks/typescript directory, so vitest and tsc were run directly from node_modules.",
+    "NEW: the lease prune is EraseStaleLeases, a method on Eraser (which holds the pool), reached through the idleEraser interface. The Sweeper holds no pool itself, NewSweeper's signature is unchanged, and internal/lease/lease.go is not touched, so lease.go is no longer in needs_other_files.",
+    "NEW: lease predicate is scope_type = 'thread' AND (state = 4 OR expires_at < cutoff) AND created_at < cutoff. 'Older' is read as the row's created_at. For live and expired rows expires_at already implies it, so created_at only bites on destroyed rows; if the owner meant expires_at for destroyed rows too, the predicate reduces to expires_at < cutoff. It is one unbounded DELETE, as process SweepStale is, not sweepBatch, because lease rows carry no blobs.",
+    "NEW: ordering. The prune runs last in each pass. A failed listing or erase ends the pass before the prune, so the prune waits for the next hourly pass. A release of an already-pruned lease now returns not found; no caller releases thread leases today (execution-core releases only its run-scoped lease)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/sandbox-manager/go.mod and go.sum: edited (outside the owned list) to add github.com/minio/minio-go/v7 v7.2.1 as a direct requirement, which the slice's new Go dependency requires; the lead must accept them in the commit.",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/store.go and memory_store.go: NOT edited; the erasure interface is declared in server.go instead.",
+    "apps/Model Plane/proto/model_plane/v1/sandboxes.proto: NOT edited; comment-only fix listed in lead_todo as a shared-edit."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the DB/MinIO integration tests with Docker: TestDeleteThreadWorkspaceRemovesRowsAndPrefix (Postgres + MinIO), TestEraseIdleKeepsAThreadUsedAfterTheSweepChoseIt, TestEraseStaleLeasesKeepsOnlyLiveAndRecentThreadLeases.",
+     "Live proof with SANDBOX_MANAGER_THREAD_WORKSPACE=true on a dev stack: create files through a chat turn, GET and DELETE through the BFF, empty thread tables and an empty cas/thread/<org>/<thread>/ prefix (mc ls), a second user refused, and a retention pass with the clock past the window.",
+     "Rebuild the sandbox-manager image (it newly fetches minio-go v7.2.1), plus the model-gateway and verevonv3 gateway images.",
+     "The owner accepts the minio-go dependency and the go.mod/go.sum edits. They are outside the listed files but the row's new Go S3 client requires them.",
+     "The WS17 thread-delete hook (session-core delete_thread calling DELETE /v1/threads/{id}/workspace with the user's bearer) still gates default-on.",
+     "Run the model-gateway unit test a_thread_id_is_a_plain_key_segment_or_it_is_refused_before_any_rpc. The implementer only compile-checked it."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "AcquireLease for a thread scope accepts any scope_id from any user with a sandbox bearer and never checks it against session-core's thread ownership, so a user can create workspace rows and blobs under another user's thread id in the same org. S5 refuses to erase a shared id, which also blocks the victim's own erase. The ownership check belongs in acquireThread before default-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The blob prefix cas/thread/<org>/<thread>/ carries no owner, and blobs are uploaded before their rows exist, so a non-owner erase could remove a first write whose header is not yet there. An owner-scoped prefix or an erasing tombstone is needed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Rows are erased before blobs, so a blob-delete failure leaves unreachable blobs with no record to retry from. A durable erasure tombstone or retry queue is needed before default-on for GDPR completeness."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "With SANDBOX_MANAGER_THREAD_WORKSPACE off, neither the sweeper nor DELETE runs, so rows and blobs written while it was on are neither expired nor erasable after a rollback. A retention-only path is needed before default-on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The WS17 thread-delete hook is not wired: session-core's delete_thread must call DELETE /v1/threads/{id}/workspace with the user's own bearer, because sandbox-manager refuses service principals for this RPC. This gates default-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "An apply that races a reset can write a row whose blob the prefix delete has just removed, since uploads precede ApplyThreadWorkspaceChanges and no erasing marker is checked."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Corrected from the previous report: GET /v1/threads/{id}/workspace acquires a thread lease with no switch check in the gateway. With the switch off, AcquireLease takes the plain Create path (INSERT, no upsert), so the first GET leaves a live row and a second GET for the same user and thread inside the TTL fails on leases_thread_live_uq. Read from code, not run. The prune removes such rows only once the switch is on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "NEW: the prune covers thread-scoped rows only. Agent-scoped leases (one per Space run, released to DESTROYED at run end) keep their owner_id and are never pruned, so they accumulate with the user link. Their retention is an owner decision and needs its own predicate."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "NEW: SnapshotSandbox does not refuse thread-scoped leases. BeginSnapshot exempts non-Space leases and snapshot.Store.Create has no scope check. Today's only caller (execution-core record_workspace_overlay) snapshots Space leases, so 'thread leases never have snapshots' holds for it but is not enforced. A snapshot row on a thread lease would survive the prune (no foreign key) with its object key. Refusing snapshots on thread leases in server.go is the fix; it is outside this round."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "NEW: leases has no index on (scope_type, expires_at), so each pass scans the table. An index needs a migration number from section 4.4; none was added this round."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "NEW: the acquire-versus-prune race relies on Postgres rechecking the predicate on a row an acquire slid forward (READ COMMITTED). The integration case covers the predicate matrix, not the race."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "minio-go/v7 v7.2.1 is the first Go object-store client in this repository and brings transitive bumps (x/crypto v0.51.0, x/sys v0.44.0, x/text v0.37.0, klauspost/compress v1.18.6) into sandbox-manager. The owner should accept it before the image is rebuilt."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner must rule whether retention is one global value (SANDBOX_MANAGER_THREAD_RETENTION_DAYS, default 30) or per-org policy under DEC-23 option (b), and what the rollback behaviour is, before default-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestDeleteThreadWorkspaceRemovesRowsAndPrefix, TestEraseIdleKeepsAThreadUsedAfterTheSweepChoseIt and TestEraseStaleLeasesKeepsOnlyLiveAndRecentThreadLeases compile under the integration tag but have not run against Postgres and MinIO."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves that a ZDR caller's GET is refused before any lease row is written, or that a ZDR DELETE erases nothing without error."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "No live proof exists for S5: the DoD evidence (files created through a chat turn, GET and DELETE through the BFF, empty thread tables and an empty MinIO prefix, a second user refused, and a retention pass past the window) is not done."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The sweeper keeps a shared-id thread forever and records only a warning per pass, with no metric or alert, so a planted foreign row silently blocks retention for that thread."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Compose gives execution-core MINIO_BUCKET from OBJECT_STORAGE_BUCKET, but workspace_cas.rs reads OBJECT_STORAGE_BUCKET, and sandbox-manager reads OBJECT_STORAGE_BUCKET; both default to model-plane-artifacts, so erasure and CAS agree only while the bucket is the default."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ThreadEraser interface sits in server.go because store.go and memory_store.go are outside this slice; fold it into store.go when that file is in scope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The comment on DeleteThreadWorkspace in apps/Model Plane/proto/model_plane/v1/sandboxes.proto still says it refuses every caller until S5, which is stale now (comment-only shared edit)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Thread files panel shows only when VITE_CHAT_THREAD_WORKSPACE is true, so a frontend build with that flag on and the backend switch off shows a load error; the two switches must move together."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "DELETE reports Internal when the bucket is missing even when no blobs exist, so an operator misconfiguration becomes a permanent retry failure with an unclear message."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Blobs live under cas/thread/<org>/<thread>/ with no owner, and the shared-id check only sees rows. Any org member whose sandbox bearer passes DELETE for a thread id with no rows yet removes another user's blobs that were uploaded before their rows were written (uploads precede ApplyThreadWorkspaceChanges), and nothing checks thread ownership against session-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "AcquireLease and DeleteThreadWorkspace accept any thread id without a session-core ownership check, so a user can plant rows under another user's thread id. ErrThreadShared then blocks the victim's own erase and keeps the thread from retention forever, logging only a warning."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Rows are erased before blobs, and a failed blob delete in the sweeper is only logged. The rows are gone, so no later pass finds the thread again and its blobs stay forever (a GDPR completeness gap) until a tombstone or retry queue exists."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "With SANDBOX_MANAGER_THREAD_WORKSPACE turned off after having been on, neither the sweeper nor DELETE runs, so rows and blobs written while it was on are never expired or erasable. Rollback needs a retention-only path before default-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "model-gateway GET /v1/threads/{id}/workspace acquires a thread lease with no switch check. With the sandbox-manager switch off this takes the plain Create path and writes a live lease row before GetThreadWorkspace refuses. A second GET for the same user and thread within the TTL can then hit leases_thread_live_uq, so with the switch off the request is not side-effect free."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SnapshotSandbox does not refuse thread-scoped leases. A snapshot row on a thread lease would survive the lease prune together with its object key."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves that a ZDR GET is refused before any lease row is written, or that a ZDR DELETE succeeds while erasing nothing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The race between an acquire and the lease prune (relying on Postgres rechecking the predicate under READ COMMITTED) is untested; the integration case covers only the predicate matrix."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Execution-core's compose block passes MINIO_BUCKET, while workspace_cas.rs and sandbox-manager read OBJECT_STORAGE_BUCKET, so the erase path and the CAS reach the same bucket only while the default model-plane-artifacts is used."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Agent-scoped (Space run) lease rows keep owner_id and are never pruned; their retention needs an owner decision."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner must rule whether retention is the global SANDBOX_MANAGER_THREAD_RETENTION_DAYS (default 30) or per-org policy under DEC-23 option (b) before default-on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ThreadWorkspacePanel calls the BFF directly and never runs parseChatWorkspaceAction, so the chat.workspace.reset contract's confirm: true guard is declared but not enforced on the UI path (the panel uses its own two-press confirm)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The comment on DeleteThreadWorkspace in sandboxes.proto still says it refuses every caller until S5 (a comment-only shared edit for the lead)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The model-gateway workspace routes return {\"error\": \"...\"} strings for a bad thread_id rather than the typed {error:{code,message,details}} envelope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The leases table has no index on (scope_type, expires_at), so each hourly prune scans the whole table."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "sandbox-manager: GOWORK=off go vet ./...",
+      "outcome": "exit 0",
+      "passed": true
+     },
+     {
+      "command": "sandbox-manager: GOWORK=off go test -count=1 ./...",
+      "outcome": "all packages ok (cmd, authz, lease, objectstore, process, redact, server, snapshot, threadworkspace, workspace); telemetry has no tests",
+      "passed": true
+     },
+     {
+      "command": "sandbox-manager: go vet -tags integration ./...",
+      "outcome": "exit 0. The integration files compile. They were not run because MinIO and Postgres need Docker.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path verevonv3/apps/gateway/Cargo.toml --all-targets",
+      "outcome": "lib 1055 passed, 0 failed, 1 ignored; other targets 1+7+13+3+1 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "vitest run --pool=threads, started as node node_modules/vitest/vitest.mjs",
+      "outcome": "111 files and 1558 tests passed, 0 failed. This ran the whole suite, not only the filtered paths, and it includes chat-workspace.test.ts and ThreadWorkspacePanel.test.tsx. The first attempt through pnpm exec failed on a dependency check (ENOENT scandir for the Quarry-v2 sdks/typescript workspace path), so I ran vitest directly.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib --tests (Model Plane rust, CARGO_INCREMENTAL=0)",
+      "outcome": "finished with 3 warnings and no errors",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "data-loss",
+    "policy",
+    "authority"
+   ],
+   "notes": "Round 2 (lease prune only): each sweep pass now runs EraseStaleLeases after the workspace erasures, so the lease half of the sweeper deliverable is built and the slice is no longer partial. Added two unit cases in sweeper_test.go and one integration case, TestEraseStaleLeasesKeepsOnlyLiveAndRecentThreadLeases, in sweeper_integration_test.go (it applies migrations 0002 and 0006 itself). Safety check from code: thread RPCs resolve their lease through GetScoped, which refuses an expired lease, and expires_at only moves forward, so the prune cannot remove the lease of a workspace used inside the retention window. Nothing committed. Integration tests and live proof are lead steps and were not run. Vitest, tsc, eslint, gateway and model-gateway suites were not re-run this round because no file in those trees changed. Items not marked NEW or corrected are carried from the previous report unchanged."
+  }
+ ]
+}

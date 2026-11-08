@@ -1,0 +1,1427 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs
+index 278d9dfcb..bad591c17 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs	
+@@ -65,6 +65,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+     } else {
+         router
+     };
++    // EP-11 S1: the answer the Skills page reads to show a member's own skills. Routed only while
++    // SKILL_MEMBER_AUTHORING is on; off, the path answers as it did before (a GET there is a 405).
++    let router = if skill_member_authoring_enabled() {
++        router.route("/api/v1/skills/authoring", get(skill_authoring))
++    } else {
++        router
++    };
+     router.route_layer(axum::middleware::from_fn_with_state(state, require_session))
+ }
+ 
+@@ -167,26 +174,132 @@ async fn list_skills(
+     .await
+ }
+ 
+-/// Create a durable org skill. Body (`name`, `description`, `content`,
++/// Whether the `SKILL_MEMBER_AUTHORING` switch (EP-11 S1) lets a member author private skills. Read
++/// strictly: only the literal `true` enables it. Read per request, like `schedule_contract_enabled`.
++fn skill_member_authoring_enabled() -> bool {
++    std::env::var("SKILL_MEMBER_AUTHORING").is_ok_and(|value| value == "true")
++}
++
++/// The fields a private skill is created with. Anything else a member sends in a create is dropped.
++const PRIVATE_SKILL_FIELDS: [&str; 7] = [
++    "name",
++    "description",
++    "content",
++    "trigger_keywords",
++    "trigger_file_patterns",
++    "tool_restrictions",
++    "enabled",
++];
++
++/// The body a member's private skill is created from, or `None` when the member may not create it.
++/// Only `scope = user` passes, with the switch on and no promotion source named: an org-wide skill
++/// stays admin-only. The body is rebuilt from the fields a private skill carries, so an org id, an
++/// owner or a review state sent by the client never reaches capability-core, which binds the owner
++/// to the verified caller anyway.
++fn member_private_skill_body(body: &Value, switch_on: bool) -> Option<Value> {
++    if !switch_on
++        || body.get("scope").and_then(Value::as_str) != Some("user")
++        || names_promotion_source(body)
++    {
++        return None;
++    }
++    let mut own = Map::new();
++    for key in PRIVATE_SKILL_FIELDS {
++        if let Some(value) = body.get(key) {
++            own.insert(key.to_owned(), value.clone());
++        }
++    }
++    own.insert("scope".to_owned(), json!("user"));
++    Some(Value::Object(own))
++}
++
++/// Whether a create names a skill to copy into the organization. Only an admin may do that.
++fn names_promotion_source(body: &Value) -> bool {
++    match body.get("promoted_from") {
++        None | Some(Value::Null) => false,
++        Some(Value::String(source)) => !source.trim().is_empty(),
++        Some(_) => true,
++    }
++}
++
++/// Whether a member may change or delete one skill: only a private skill they own. capability-core
++/// treats an org-scoped skill as open to any caller (`ensureSkillCallerMayChange`), so the owner
++/// check that keeps an org skill admin-only is made here, on the skill as model-gateway reads it.
++/// A skill the member cannot see passes through as the gateway answered it (a 404).
++async fn member_owns_skill(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    token: Option<&str>,
++    capability: &str,
++    skill_id: &str,
++) -> Result<(), (StatusCode, Json<Value>)> {
++    let url = format!(
++        "{}/v1/skills/{}",
++        state.model_gateway_url,
++        urlencoding::encode(skill_id)
++    );
++    let (status, Json(skill)) = shared::proxy_model_json_with_capability(
++        state,
++        Method::GET,
++        &url,
++        None,
++        token,
++        Some(capability),
++        user,
++    )
++    .await;
++    if status != StatusCode::OK {
++        return Err((status, Json(skill)));
++    }
++    let owned = skill.get("scope").and_then(Value::as_str) == Some("user")
++        && skill.get("owner_user_id").and_then(Value::as_str) == Some(user.user_id.as_str());
++    if owned {
++        Ok(())
++    } else {
++        Err((
++            StatusCode::FORBIDDEN,
++            Json(error(
++                "forbidden",
++                "Only the skill's owner or an organization admin can change or delete it.",
++            )),
++        ))
++    }
++}
++
++/// The answer the Skills page reads to show a member's own skills and the editor (EP-11 S1). It is
++/// routed only while the member switch is on, so the answer is the switch itself.
++async fn skill_authoring() -> Json<Value> {
++    Json(json!({"data": {"member_authoring": true}}))
++}
++
++/// Create a durable skill. Body (`name`, `description`, `content`,
+ /// `trigger_keywords`, ...) is forwarded to model-gateway `/v1/skills`
+-/// (→ capability-core `agent_skills`). Admin-gated; org id is never injected —
+-/// it is derived from the verified capability token's claims.
++/// (→ capability-core `agent_skills`). An admin creates any scope; a member creates one private
++/// skill of their own only while `SKILL_MEMBER_AUTHORING` is on (EP-11 S1). Org id is never
++/// injected — it is derived from the verified capability token's claims.
+ async fn create_skill(
+     State(state): State<AppState>,
+     Extension(user): Extension<AuthenticatedUser>,
+     headers: HeaderMap,
+     Json(body): Json<Value>,
+ ) -> impl IntoResponse {
+-    if !can_author_skills(&state, &user).await {
+-        return (
+-            StatusCode::FORBIDDEN,
+-            Json(error(
+-                "forbidden",
+-                "Only organization admins can author skills.",
+-            )),
+-        )
+-            .into_response();
+-    }
++    let forwarded = if can_author_skills(&state, &user).await {
++        body
++    } else {
++        match member_private_skill_body(&body, skill_member_authoring_enabled()) {
++            Some(own) => own,
++            None => {
++                return (
++                    StatusCode::FORBIDDEN,
++                    Json(error(
++                        "forbidden",
++                        "Only organization admins can author skills.",
++                    )),
++                )
++                    .into_response();
++            }
++        }
++    };
+     let token = shared::model_token(&state, &user, &headers).await;
+     let capability = match shared::required_capability_token(&state, &user, &headers).await {
+         Ok(token) => token,
+@@ -197,7 +310,7 @@ async fn create_skill(
+         &state,
+         Method::POST,
+         &url,
+-        Some(body),
++        Some(forwarded),
+         token.as_deref(),
+         Some(&capability),
+         &user,
+@@ -206,8 +319,9 @@ async fn create_skill(
+     .into_response()
+ }
+ 
+-/// Update a durable org skill (enable/disable, edit content/description).
+-/// Admin-gated; proxied to model-gateway `/v1/skills/{id}` (PATCH).
++/// Update a durable skill (enable/disable, edit content/description). Proxied to model-gateway
++/// `/v1/skills/{id}` (PATCH). An admin may change any skill; a member only a private skill of their
++/// own, and only while `SKILL_MEMBER_AUTHORING` is on (EP-11 S1).
+ async fn update_skill(
+     State(state): State<AppState>,
+     Extension(user): Extension<AuthenticatedUser>,
+@@ -215,7 +329,8 @@ async fn update_skill(
+     Path(skill_id): Path<String>,
+     Json(body): Json<Value>,
+ ) -> impl IntoResponse {
+-    if !can_author_skills(&state, &user).await {
++    let admin = can_author_skills(&state, &user).await;
++    if !admin && !skill_member_authoring_enabled() {
+         return (
+             StatusCode::FORBIDDEN,
+             Json(error(
+@@ -230,6 +345,13 @@ async fn update_skill(
+         Ok(token) => token,
+         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+     };
++    if !admin {
++        if let Err(refusal) =
++            member_owns_skill(&state, &user, token.as_deref(), &capability, &skill_id).await
++        {
++            return refusal.into_response();
++        }
++    }
+     let url = format!(
+         "{}/v1/skills/{}",
+         state.model_gateway_url,
+@@ -248,15 +370,17 @@ async fn update_skill(
+     .into_response()
+ }
+ 
+-/// Delete a durable org skill. Admin-gated; proxied to model-gateway
+-/// `/v1/skills/{id}` (DELETE).
++/// Delete a durable skill. Proxied to model-gateway `/v1/skills/{id}` (DELETE). An admin may delete
++/// any skill; a member only a private skill of their own, and only while `SKILL_MEMBER_AUTHORING` is
++/// on (EP-11 S1).
+ async fn delete_skill(
+     State(state): State<AppState>,
+     Extension(user): Extension<AuthenticatedUser>,
+     headers: HeaderMap,
+     Path(skill_id): Path<String>,
+ ) -> impl IntoResponse {
+-    if !can_author_skills(&state, &user).await {
++    let admin = can_author_skills(&state, &user).await;
++    if !admin && !skill_member_authoring_enabled() {
+         return (
+             StatusCode::FORBIDDEN,
+             Json(error(
+@@ -271,6 +395,13 @@ async fn delete_skill(
+         Ok(token) => token,
+         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+     };
++    if !admin {
++        if let Err(refusal) =
++            member_owns_skill(&state, &user, token.as_deref(), &capability, &skill_id).await
++        {
++            return refusal.into_response();
++        }
++    }
+     let url = format!(
+         "{}/v1/skills/{}",
+         state.model_gateway_url,
+@@ -1482,7 +1613,8 @@ mod tests {
+     use super::{
+         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
+         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
+-        draft_from_request, parse_builder_definition, version_to_api, BuilderDefinition,
++        draft_from_request, member_private_skill_body, parse_builder_definition, version_to_api,
++        BuilderDefinition,
+     };
+     use crate::middleware::AuthenticatedUser;
+     use axum::{body::Body, http::Request};
+@@ -2081,4 +2213,315 @@ mod tests {
+         assert_eq!(body["error"]["code"], "agent_builder_forbidden");
+         assert_eq!(publish_calls(&convex.received_requests().await.unwrap()), 0);
+     }
++
++    // Skill authoring (EP-11 S1). The member switch is read per request, so each test sets it, keeps it set
++    // for its whole request, and holds the env lock like the other switch tests.
++
++    /// The skill routes through the whole router. The session's org role (`role`) decides admin or member;
++    /// model-gateway answers the skill calls, and `skill_1` is the one skill it knows, with the scope and
++    /// owner the test gives it.
++    async fn skill_test_servers(role: &str, scope: &str, owner: &str) -> (MockServer, MockServer, MockServer) {
++        let auth = MockServer::start().await;
++        Mock::given(wm_method("GET"))
++            .and(wm_path("/api/auth/get-session"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
++                "session": {"activeOrganizationId": "org-1"}
++            })))
++            .mount(&auth)
++            .await;
++        for path in ["/api/model-plane/token", "/api/capability-core/token"] {
++            Mock::given(wm_method("GET"))
++                .and(wm_path(path))
++                .respond_with(
++                    ResponseTemplate::new(200).set_body_json(json!({"token": "delegated-token"})),
++                )
++                .mount(&auth)
++                .await;
++        }
++        let user_core = MockServer::start().await;
++        Mock::given(wm_method("GET"))
++            .and(wm_path("/api/v1/me/session-context"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "userId": "user-1", "orgId": "org-1", "role": role, "onboardingStatus": "COMPLETED"
++            })))
++            .mount(&user_core)
++            .await;
++        let model = MockServer::start().await;
++        Mock::given(wm_method("POST"))
++            .and(wm_path("/v1/skills"))
++            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "skill_new"})))
++            .mount(&model)
++            .await;
++        Mock::given(wm_method("GET"))
++            .and(wm_path("/v1/skills/skill_1"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                "id": "skill_1", "scope": scope, "owner_user_id": owner
++            })))
++            .mount(&model)
++            .await;
++        Mock::given(wm_method("PATCH"))
++            .and(wm_path("/v1/skills/skill_1"))
++            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "skill_1"})))
++            .mount(&model)
++            .await;
++        Mock::given(wm_method("DELETE"))
++            .and(wm_path("/v1/skills/skill_1"))
++            .respond_with(ResponseTemplate::new(204))
++            .mount(&model)
++            .await;
++        (auth, user_core, model)
++    }
++
++    /// One request through the router with `SKILL_MEMBER_AUTHORING` set to `switch`, or unset for `None`.
++    async fn skill_request(
++        servers: &(MockServer, MockServer, MockServer),
++        method: &str,
++        uri: &str,
++        body: Option<Value>,
++        switch: Option<&str>,
++    ) -> (axum::http::StatusCode, Value) {
++        let (auth, user_core, model) = servers;
++        let state = fires_test_state(auth, user_core, model);
++        match switch {
++            Some(value) => std::env::set_var("SKILL_MEMBER_AUTHORING", value),
++            None => std::env::remove_var("SKILL_MEMBER_AUTHORING"),
++        }
++        let builder = Request::builder()
++            .method(method)
++            .uri(uri)
++            .header("cookie", "better-auth.session_token=session-1");
++        let request = match body {
++            Some(payload) => builder
++                .header("content-type", "application/json")
++                .body(Body::from(payload.to_string())),
++            None => builder.body(Body::empty()),
++        }
++        .unwrap();
++        let response = crate::build_router(state).oneshot(request).await.unwrap();
++        std::env::remove_var("SKILL_MEMBER_AUTHORING");
++        let status = response.status();
++        let bytes = response.into_body().collect().await.unwrap().to_bytes();
++        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
++    }
++
++    /// The JSON bodies of the model-gateway calls with this method and path, in order.
++    async fn skill_calls(model: &MockServer, method: &str, path: &str) -> Vec<Value> {
++        model
++            .received_requests()
++            .await
++            .unwrap()
++            .iter()
++            .filter(|request| request.method.as_str() == method && request.url.path() == path)
++            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
++            .collect()
++    }
++
++    #[test]
++    fn member_private_skill_body_keeps_only_the_private_fields() {
++        let body = json!({
++            "name": "Utrulling", "description": "Kort", "content": "1. Kjør testene",
++            "trigger_keywords": ["deploy"], "enabled": false, "scope": "user",
++            "org_id": "org-forged", "owner_user_id": "user-2", "promoted_from": ""
++        });
++        assert_eq!(
++            member_private_skill_body(&body, true),
++            Some(json!({
++                "name": "Utrulling", "description": "Kort", "content": "1. Kjør testene",
++                "trigger_keywords": ["deploy"], "enabled": false, "scope": "user"
++            }))
++        );
++    }
++
++    #[test]
++    fn member_private_skill_body_refuses_org_scope_promotion_and_a_switch_off() {
++        // No scope is refused too: capability-core would default it to org.
++        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C", "scope": "org"}), true), None);
++        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C"}), true), None);
++        assert_eq!(
++            member_private_skill_body(
++                &json!({"name": "A", "content": "C", "scope": "user", "promoted_from": "skill_2"}),
++                true
++            ),
++            None
++        );
++        assert_eq!(member_private_skill_body(&json!({"name": "A", "content": "C", "scope": "user"}), false), None);
++    }
++
++    #[tokio::test]
++    async fn member_can_create_user_skill_when_switch_on() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills",
++            Some(json!({"name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user"})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::CREATED);
++        let posts = skill_calls(&servers.2, "POST", "/v1/skills").await;
++        assert_eq!(posts.len(), 1);
++        assert_eq!(posts[0]["scope"], "user");
++    }
++
++    #[tokio::test]
++    async fn member_cannot_create_org_skill() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        let (status, body) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills",
++            Some(json!({"name": "Brand", "content": "Svar kort.", "scope": "org"})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["code"], "forbidden");
++        assert!(skill_calls(&servers.2, "POST", "/v1/skills").await.is_empty());
++    }
++
++    #[tokio::test]
++    async fn switch_off_keeps_admin_only() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let member = skill_test_servers("member", "user", "user-1").await;
++        let (status, body) = skill_request(
++            &member,
++            "POST",
++            "/api/v1/skills",
++            Some(json!({"name": "Mine", "content": "x", "scope": "user"})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["message"], "Only organization admins can author skills.");
++        assert!(skill_calls(&member.2, "POST", "/v1/skills").await.is_empty());
++
++        // An admin still creates an org skill with the switch off, as before.
++        let admin = skill_test_servers("owner", "user", "user-1").await;
++        let (status, _) = skill_request(
++            &admin,
++            "POST",
++            "/api/v1/skills",
++            Some(json!({"name": "Brand", "content": "Svar kort.", "scope": "org"})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::CREATED);
++    }
++
++    #[tokio::test]
++    async fn org_id_in_body_is_ignored() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills",
++            Some(json!({
++                "name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user",
++                "org_id": "org-forged", "owner_user_id": "user-2",
++                "review_state": "accepted", "origin": "background_review"
++            })),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::CREATED);
++        let posts = skill_calls(&servers.2, "POST", "/v1/skills").await;
++        assert_eq!(
++            posts,
++            vec![json!({"name": "Utrulling", "content": "1. Kjør testene", "enabled": true, "scope": "user"})]
++        );
++    }
++
++    #[tokio::test]
++    async fn member_changes_own_private_skill_when_switch_on() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/skill_1",
++            Some(json!({"enabled": false})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert_eq!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.len(), 1);
++    }
++
++    #[tokio::test]
++    async fn member_cannot_change_an_org_skill() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "org", "").await;
++        let (status, body) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/skill_1",
++            Some(json!({"enabled": false})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["code"], "forbidden");
++        assert!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.is_empty());
++    }
++
++    #[tokio::test]
++    async fn member_cannot_delete_another_members_skill() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-2").await;
++        let (status, _) = skill_request(&servers, "DELETE", "/api/v1/skills/skill_1", None, Some("true")).await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert!(skill_calls(&servers.2, "DELETE", "/v1/skills/skill_1").await.is_empty());
++    }
++
++    #[tokio::test]
++    async fn switch_off_refuses_member_changes_before_any_lookup() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("member", "user", "user-1").await;
++        let (status, body) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/skill_1",
++            Some(json!({"enabled": false})),
++            None,
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
++        assert_eq!(body["error"]["message"], "Only organization admins can edit skills.");
++        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
++    }
++
++    #[tokio::test]
++    async fn admin_changes_any_skill_without_an_ownership_lookup() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let servers = skill_test_servers("owner", "org", "").await;
++        let (status, _) = skill_request(
++            &servers,
++            "POST",
++            "/api/v1/skills/skill_1",
++            Some(json!({"enabled": false})),
++            Some("true"),
++        )
++        .await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert!(skill_calls(&servers.2, "GET", "/v1/skills/skill_1").await.is_empty());
++        assert_eq!(skill_calls(&servers.2, "PATCH", "/v1/skills/skill_1").await.len(), 1);
++    }
++
++    #[tokio::test]
++    async fn skill_authoring_answers_only_with_the_switch_on() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let on = skill_test_servers("member", "user", "user-1").await;
++        let (status, body) = skill_request(&on, "GET", "/api/v1/skills/authoring", None, Some("true")).await;
++        assert_eq!(status, axum::http::StatusCode::OK);
++        assert_eq!(body["data"]["member_authoring"], true);
++
++        let off = skill_test_servers("member", "user", "user-1").await;
++        let (status, _) = skill_request(&off, "GET", "/api/v1/skills/authoring", None, None).await;
++        assert_ne!(status, axum::http::StatusCode::OK);
++    }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.save-as-skill.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.save-as-skill.test.tsx
+new file mode 100644
+index 000000000..419bbc446
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.save-as-skill.test.tsx	
+@@ -0,0 +1,103 @@
++// @vitest-environment jsdom
++
++/**
++ * EP-11 S1: the "Save as skill" message action. An admin sees it on a saved answer; a member sees it only
++ * while the member switch is on. A temporary (zero-retention) chat and an unsaved conversation never offer it.
++ */
++
++import { render, waitFor } from '@solidjs/testing-library'
++import { describe, expect, it, vi } from 'vitest'
++import { memberSkillAuthoring } from '@/shared/api/skills-client'
++import { AssistantMessage } from './ChatMessages'
++import type { ChatTurn } from './chat-types'
++
++const mocks = vi.hoisted(() => ({
++  role: 'member' as 'member' | 'owner',
++  memberAuthoring: false,
++}))
++
++vi.mock('@/shared/session/session-store', () => ({
++  getSession: () => ({
++    status: 'authenticated',
++    user: { id: 'user-1', role: 'member' },
++    activeOrg: { id: 'org-1', name: 'Test', role: mocks.role },
++    permissions: [],
++  }),
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return { ...actual, memberSkillAuthoring: vi.fn(async () => mocks.memberAuthoring) }
++})
++
++const SAVE_LABEL = 'Lagre som ferdighet'
++
++/** A finished assistant turn, saved in a thread unless a case says otherwise. */
++const answer = (): ChatTurn => ({
++  id: 'asst-1',
++  role: 'assistant',
++  content: 'Svaret er ferdig.',
++  createdAt: '2026-09-17T08:00:00.000Z',
++  streaming: false,
++  tools: [],
++  attachments: [],
++})
++
++function renderAnswer(options: { threadId?: string | null; temporaryChat?: boolean } = {}) {
++  return render(() => (
++    <AssistantMessage
++      copied={false}
++      message={answer()}
++      onBranch={vi.fn()}
++      onCopy={vi.fn()}
++      onFeedback={vi.fn(async () => true)}
++      onRegenerate={vi.fn()}
++      onApprovalDecision={vi.fn()}
++      onApprovePlan={vi.fn()}
++      onViewSteps={vi.fn()}
++      threadId={options.threadId === undefined ? 'thread-1' : options.threadId}
++      temporaryChat={options.temporaryChat}
++    />
++  ))
++}
++
++describe('AssistantMessage — Save as skill', () => {
++  it('save_as_skill_absent_on_zdr_thread', () => {
++    mocks.role = 'owner'
++    const { queryByLabelText, unmount } = renderAnswer({ temporaryChat: true })
++    expect(queryByLabelText(SAVE_LABEL)).toBeNull()
++    unmount()
++  })
++
++  it('offers save_as_skill to an admin on a saved answer', () => {
++    mocks.role = 'owner'
++    const { getByLabelText, unmount } = renderAnswer()
++    expect(getByLabelText(SAVE_LABEL)).toBeTruthy()
++    unmount()
++  })
++
++  it('hides save_as_skill on a conversation not yet saved', () => {
++    mocks.role = 'owner'
++    const { queryByLabelText, unmount } = renderAnswer({ threadId: null })
++    expect(queryByLabelText(SAVE_LABEL)).toBeNull()
++    unmount()
++  })
++
++  it('hides save_as_skill from a member while the member switch is off', async () => {
++    mocks.role = 'member'
++    mocks.memberAuthoring = false
++    const { queryByLabelText, unmount } = renderAnswer()
++    await waitFor(() => expect(vi.mocked(memberSkillAuthoring)).toHaveBeenCalled())
++    await new Promise((resolve) => setTimeout(resolve, 0))
++    expect(queryByLabelText(SAVE_LABEL)).toBeNull()
++    unmount()
++  })
++
++  it('offers save_as_skill to a member while the member switch is on', async () => {
++    mocks.role = 'member'
++    mocks.memberAuthoring = true
++    const { getByLabelText, unmount } = renderAnswer()
++    await waitFor(() => expect(getByLabelText(SAVE_LABEL)).toBeTruthy())
++    unmount()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index 8d4784bea..ba709e474 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -85,6 +85,11 @@ import { listNotifications, type Notification } from '@/shared/api/notifications
+ import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
+ import { answerProcessingNote } from '@/shared/api/privacy-tier'
+ import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
++import { memberSkillAuthoring } from '@/shared/api/skills-client'
++import { SaveAsSkillDialog } from '@/features/skills/components/SaveAsSkillDialog'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { hasWorkspaceAdminAccess } from '@/shared/session/access'
++import { getSession } from '@/shared/session/session-store'
+ import { ApiError } from '@/shared/api/http'
+ import {
+   For,
+@@ -604,6 +609,22 @@ export function AssistantMessage(props: {
+       setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
+     }
+   }
++  // "Lagre som ferdighet" (EP-11 S1): an admin may save a private skill from an answer, a member only while
++  // the member switch is on. A temporary chat and a conversation not yet saved never offer it. The member
++  // answer is asked only for a signed-in member on an answer that could show the action, so an anonymous
++  // or temporary render never calls the gateway.
++  const [savingSkill, setSavingSkill] = createSignal(false)
++  const skillActionShape = () =>
++    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
++  const askMemberSkillAuthoring = () =>
++    skillActionShape() && getSession().status === 'authenticated' && !hasWorkspaceAdminAccess(getSession())
++  const [memberSkills] = createResource(
++    () => (askMemberSkillAuthoring() ? true : undefined),
++    () => memberSkillAuthoring(),
++  )
++  const canSaveAsSkill = () =>
++    skillActionShape() && (hasWorkspaceAdminAccess(getSession()) || memberSkills() === true)
++
+   const toggleReadAloud = () => {
+     if (player.playingId() === props.message.id) {
+       player.stop()
+@@ -878,6 +899,14 @@ export function AssistantMessage(props: {
+                 {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+               </MessageAction>
+             </Show>
++            <Show when={canSaveAsSkill()}>
++              <MessageAction
++                label={i18n.tr('Lagre som ferdighet', 'Save as skill')}
++                onClick={() => setSavingSkill(true)}
++              >
++                <Sparkles size={14} />
++              </MessageAction>
++            </Show>
+             {/*
+               A dedicated, always-visible export button once the answer is
+               long enough to be worth a document of its own (Copilot's own
+@@ -1152,6 +1181,15 @@ export function AssistantMessage(props: {
+             )}
+           </Show>
+         </Show>
++        <Show when={savingSkill()}>
++          <SaveAsSkillDialog
++            threadId={props.threadId ?? ''}
++            messageId={props.message.id}
++            content={props.message.content}
++            temporary={props.temporaryChat}
++            onClose={() => setSavingSkill(false)}
++          />
++        </Show>
+       </div>
+     </article>
+   )
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx
+index f6bbb9521..c58ca374e 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx	
+@@ -5,6 +5,7 @@ import {
+   createSkill,
+   deleteSkill,
+   listSkills,
++  memberSkillAuthoring,
+   updateSkill,
+   type Skill,
+ } from '@/shared/api/skills-client'
+@@ -37,6 +38,15 @@ export function SkillsSection() {
+   const orgId = createMemo(() => session.activeOrg?.id ?? '')
+   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
+   const viewerId = session.user?.id ?? ''
++  // EP-11 S1: with the member switch on, a member authors private skills of their own. Org skills stay
++  // admin-only, and an admin sees and changes every skill as before.
++  const [memberAuthoring] = createResource(() => memberSkillAuthoring())
++  const authorsPrivate = createMemo(() => memberAuthoring() === true)
++  const canAuthor = createMemo(() => isAdmin() || authorsPrivate())
++  const ownSkillsView = createMemo(() => !isAdmin() && authorsPrivate())
++  const ownsSkill = (skill: Skill): boolean =>
++    skill.scope === 'user' && viewerId !== '' && skill.owner_user_id === viewerId
++  const canChange = (skill: Skill): boolean => isAdmin() || (authorsPrivate() && ownsSkill(skill))
+ 
+   const [skills, { refetch }] = createResource(
+     () => orgId() || undefined,
+@@ -60,6 +70,19 @@ export function SkillsSection() {
+     ),
+   )
+ 
++  // A member with the member switch on sees their own private skills under "My skills" and the rest
++  // under the organization's; everyone else sees one list, as before.
++  const skillGroups = createMemo((): Array<{ title?: string; skills: Skill[] }> => {
++    if (!ownSkillsView()) return [{ skills: list() }]
++    return [
++      { title: i18n.tr('Mine ferdigheter', 'My skills'), skills: list().filter(ownsSkill) },
++      {
++        title: i18n.tr('Organisasjonens ferdigheter', 'Organization skills'),
++        skills: list().filter((skill) => !ownsSkill(skill)),
++      },
++    ].filter((group) => group.skills.length > 0)
++  })
++
+   const resetForm = () => {
+     setName('')
+     setDescription('')
+@@ -88,6 +111,8 @@ export function SkillsSection() {
+         content: trimmedContent,
+         trigger_keywords: parseKeywords(keywords()),
+         enabled: true,
++        // A member with the member switch on creates a private skill of their own (EP-11 S1).
++        scope: isAdmin() ? undefined : 'user',
+       })
+       resetForm()
+       await refetch()
+@@ -216,80 +241,89 @@ export function SkillsSection() {
+             </div>
+           }
+         >
+-          <div class="verevon-settings-list-card">
+-            <For each={list()}>
+-              {(skill) => (
+-                <div class="verevon-settings-integration-row">
+-                  <div>
+-                    <p>
+-                      {skill.name}{' '}
+-                      <span class="verevon-trust-chip" aria-label={`Status: ${skill.enabled ? 'aktiv' : 'deaktivert'}`}>
+-                        {skill.enabled ? 'aktiv' : 'deaktivert'}
+-                      </span>
+-                      <Show when={skill.origin === 'background_review'}>
+-                        {' '}
+-                        <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
+-                      </Show>
+-                    </p>
+-                    <Show when={skill.description.trim().length > 0}>
+-                      <span>{skill.description}</span>
+-                    </Show>
+-                    <Show when={skill.trigger_keywords.length > 0}>
+-                      <span class="verevon-trust-chips">
+-                        <For each={skill.trigger_keywords}>
+-                          {(keyword) => <span class="verevon-trust-chip">{keyword}</span>}
+-                        </For>
+-                      </span>
+-                    </Show>
+-                  </div>
+-                  <Show when={isAdmin()}>
+-                    <div>
+-                      <Show when={canPromote(skill)}>
+-                        <SettingsButton
+-                          settingsSize="sm"
+-                          disabled={busySkillId() === skill.id}
+-                          onClick={() => void handlePromote(skill)}
+-                          aria-label={i18n.tr(
+-                            `Kopier ${skill.name} til organisasjonen`,
+-                            `Copy ${skill.name} to the organization`,
+-                          )}
+-                        >
+-                          {i18n.tr('Kopier til organisasjonen', 'Copy to the organization')}
+-                        </SettingsButton>{' '}
+-                      </Show>
+-                      <SettingsButton
+-                        settingsSize="sm"
+-                        disabled={busySkillId() === skill.id}
+-                        onClick={() => void handleToggle(skill)}
+-                        aria-label={`${skill.enabled ? 'Deaktiver' : 'Aktiver'} ${skill.name}`}
+-                      >
+-                        <Show
+-                          when={busySkillId() === skill.id}
+-                          fallback={<>{skill.enabled ? 'Deaktiver' : 'Aktiver'}</>}
+-                        >
+-                          <Loader2 size={14} aria-hidden="true" /> Lagrer…
++          <For each={skillGroups()}>
++            {(group) => (
++              <>
++                <Show when={group.title}>
++                  {(title) => <p class="verevon-settings-subnote">{title()}</p>}
++                </Show>
++                <div class="verevon-settings-list-card">
++                  <For each={group.skills}>
++                    {(skill) => (
++                      <div class="verevon-settings-integration-row">
++                        <div>
++                          <p>
++                            {skill.name}{' '}
++                            <span class="verevon-trust-chip" aria-label={`Status: ${skill.enabled ? 'aktiv' : 'deaktivert'}`}>
++                              {skill.enabled ? 'aktiv' : 'deaktivert'}
++                            </span>
++                            <Show when={skill.origin === 'background_review'}>
++                              {' '}
++                              <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
++                            </Show>
++                          </p>
++                          <Show when={skill.description.trim().length > 0}>
++                            <span>{skill.description}</span>
++                          </Show>
++                          <Show when={skill.trigger_keywords.length > 0}>
++                            <span class="verevon-trust-chips">
++                              <For each={skill.trigger_keywords}>
++                                {(keyword) => <span class="verevon-trust-chip">{keyword}</span>}
++                              </For>
++                            </span>
++                          </Show>
++                        </div>
++                        <Show when={canChange(skill)}>
++                          <div>
++                            <Show when={canPromote(skill)}>
++                              <SettingsButton
++                                settingsSize="sm"
++                                disabled={busySkillId() === skill.id}
++                                onClick={() => void handlePromote(skill)}
++                                aria-label={i18n.tr(
++                                  `Kopier ${skill.name} til organisasjonen`,
++                                  `Copy ${skill.name} to the organization`,
++                                )}
++                              >
++                                {i18n.tr('Kopier til organisasjonen', 'Copy to the organization')}
++                              </SettingsButton>{' '}
++                            </Show>
++                            <SettingsButton
++                              settingsSize="sm"
++                              disabled={busySkillId() === skill.id}
++                              onClick={() => void handleToggle(skill)}
++                              aria-label={`${skill.enabled ? 'Deaktiver' : 'Aktiver'} ${skill.name}`}
++                            >
++                              <Show
++                                when={busySkillId() === skill.id}
++                                fallback={<>{skill.enabled ? 'Deaktiver' : 'Aktiver'}</>}
++                              >
++                                <Loader2 size={14} aria-hidden="true" /> Lagrer…
++                              </Show>
++                            </SettingsButton>{' '}
++                            <SettingsButton
++                              settingsSize="sm"
++                              danger
++                              disabled={busySkillId() === skill.id}
++                              onClick={() => void handleDelete(skill)}
++                              aria-label={`Slett ${skill.name}`}
++                            >
++                              <Trash2 size={14} aria-hidden="true" /> Slett
++                            </SettingsButton>
++                          </div>
+                         </Show>
+-                      </SettingsButton>{' '}
+-                      <SettingsButton
+-                        settingsSize="sm"
+-                        danger
+-                        disabled={busySkillId() === skill.id}
+-                        onClick={() => void handleDelete(skill)}
+-                        aria-label={`Slett ${skill.name}`}
+-                      >
+-                        <Trash2 size={14} aria-hidden="true" /> Slett
+-                      </SettingsButton>
+-                    </div>
+-                  </Show>
++                      </div>
++                    )}
++                  </For>
+                 </div>
+-              )}
+-            </For>
+-          </div>
++              </>
++            )}
++          </For>
+         </Show>
+       </Show>
+ 
+       <Show
+-        when={isAdmin()}
++        when={canAuthor()}
+         fallback={
+           <p class="verevon-settings-subnote">
+             <BookOpen size={14} aria-hidden="true" /> Bare administratorer kan opprette
+@@ -356,6 +390,13 @@ export function SkillsSection() {
+             </span>
+           </label>
+ 
++          <p class="verevon-settings-help">
++            {i18n.tr(
++              'Skriv hva som skal gjøres neste gang, ikke hva som skjedde. Hold den kort; lange ferdigheter kuttes ned.',
++              'Write what to do next time, not what happened. Keep it short; long skills are cut to fit.',
++            )}
++          </p>
++
+           <Show when={formError()}>
+             {(message) => (
+               <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+@@ -379,7 +420,10 @@ export function SkillsSection() {
+ 
+       <p class="verevon-settings-subnote">
+         <BookOpen size={14} aria-hidden="true" /> Org-tilhørighet utledes fra den
+-        verifiserte økten. Ferdigheter gjelder alle i organisasjonen.
++        verifiserte økten.{' '}
++        {ownSkillsView()
++          ? 'Ferdigheter du lager gjelder bare deg.'
++          : 'Ferdigheter gjelder alle i organisasjonen.'}
+       </p>
+     </>
+   )
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx
+new file mode 100644
+index 000000000..71845853d
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.test.tsx	
+@@ -0,0 +1,85 @@
++// @vitest-environment jsdom
++
++// EP-11 S1: Save as skill. The dialog starts from the answer, never shows on a temporary chat, and saves a
++// private skill (scope user) only when the person presses save.
++
++import { fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++
++vi.mock('@/shared/session/session-store', () => ({
++  getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'member' } }),
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('@/shared/api/skills-client')>()
++  return { ...actual, createSkill: vi.fn() }
++})
++
++import { createSkill } from '@/shared/api/skills-client'
++import { SaveAsSkillDialog, suggestSkillName } from './SaveAsSkillDialog'
++
++const mockedCreate = vi.mocked(createSkill)
++const ANSWER = '# Utrulling\n\n1. Kjør testene\n2. Bygg\n3. Rull ut'
++
++function renderDialog(overrides: Partial<Parameters<typeof SaveAsSkillDialog>[0]> = {}) {
++  const onClose = vi.fn()
++  const onSaved = vi.fn()
++  const utils = render(() => (
++    <SaveAsSkillDialog
++      threadId="thread-1"
++      messageId="msg-1"
++      content={ANSWER}
++      onClose={onClose}
++      onSaved={onSaved}
++      {...overrides}
++    />
++  ))
++  return { ...utils, onClose, onSaved }
++}
++
++afterEach(() => {
++  vi.clearAllMocks()
++})
++
++describe('SaveAsSkillDialog', () => {
++  it('prefills_name_and_content', () => {
++    const { getByLabelText, getByRole, unmount } = renderDialog()
++    expect((getByLabelText('Navn') as HTMLInputElement).value).toBe('Utrulling')
++    expect((getByLabelText('Innhold') as HTMLTextAreaElement).value).toBe(ANSWER)
++    // "Use in my chats" starts on.
++    expect((getByRole('switch') as HTMLInputElement).checked).toBe(true)
++    unmount()
++  })
++
++  it('hides_on_temporary_chat', () => {
++    const { queryByRole, unmount } = renderDialog({ temporary: true })
++    expect(queryByRole('dialog')).toBeNull()
++    unmount()
++  })
++
++  it('sends_user_scope', async () => {
++    mockedCreate.mockResolvedValue({ id: 'skill_new' })
++    const { getByRole, onSaved, onClose, unmount } = renderDialog()
++    fireEvent.submit(getByRole('dialog'))
++    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1))
++    expect(mockedCreate.mock.calls[0]?.[0]).toBe('org-1')
++    expect(mockedCreate.mock.calls[0]?.[1]).toEqual({
++      name: 'Utrulling',
++      description: undefined,
++      content: ANSWER,
++      enabled: true,
++      scope: 'user',
++    })
++    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('skill_new'))
++    expect(onClose).toHaveBeenCalled()
++    unmount()
++  })
++})
++
++describe('suggestSkillName', () => {
++  it('takes the first heading, else the first line, at most 60 characters', () => {
++    expect(suggestSkillName('Intro\n# Utrulling\nmer')).toBe('Utrulling')
++    expect(suggestSkillName('Slik gjør du det\nmer tekst')).toBe('Slik gjør du det')
++    expect(suggestSkillName('x'.repeat(80))).toHaveLength(60)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx
+new file mode 100644
+index 000000000..a20b1c7bc
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SaveAsSkillDialog.tsx	
+@@ -0,0 +1,208 @@
++import { createSignal, Show } from 'solid-js'
++import { Portal } from '@solidjs/web'
++import { Sparkles, X } from '@/shared/icons'
++import { getActionDescriptor } from '@/shared/actions/action-registry'
++import { createSkill } from '@/shared/api/skills-client'
++import { getSession } from '@/shared/session/session-store'
++import { translateApiError, useI18n } from '@/shared/i18n'
++
++/**
++ * Save as skill (EP-11 S1): one of the person's own answers, saved as a private skill of theirs.
++ * The dialog starts from the answer, and nothing is saved until the person presses the button; the
++ * server binds the owner to the session. A temporary chat never shows it.
++ */
++
++/** A starting name for a skill: the answer's first heading, else its first line, at most 60 characters. */
++export function suggestSkillName(content: string): string {
++  const lines = content
++    .split('\n')
++    .map((line) => line.trim())
++    .filter((line) => line.length > 0)
++  const heading = lines.find((line) => /^#{1,6}\s/.test(line))
++  return (heading ?? lines[0] ?? '')
++    .replace(/^#{1,6}\s+/, '')
++    .replace(/[*_`]/g, '')
++    .trim()
++    .slice(0, 60)
++    .trim()
++}
++
++export function SaveAsSkillDialog(props: {
++  threadId: string
++  messageId: string
++  /** The answer's text: the skill's starting content, which the person may edit before saving. */
++  content: string
++  /** A temporary (zero-retention) chat never saves a skill from its answers, so nothing is shown. */
++  temporary?: boolean
++  onClose: () => void
++  onSaved?: (skillId: string) => void
++}) {
++  const i18n = useI18n()
++  const [name, setName] = createSignal(suggestSkillName(props.content))
++  const [description, setDescription] = createSignal('')
++  const [body, setBody] = createSignal(props.content)
++  const [enabled, setEnabled] = createSignal(true)
++  const [submitting, setSubmitting] = createSignal(false)
++  const [errorMessage, setErrorMessage] = createSignal<string | null>(null)
++
++  const close = () => {
++    if (!submitting()) props.onClose()
++  }
++
++  const onKeyDown = (event: KeyboardEvent) => {
++    if (event.key === 'Escape') {
++      event.stopPropagation()
++      close()
++    }
++  }
++
++  const save = async (event: SubmitEvent) => {
++    event.preventDefault()
++    if (submitting()) return
++    const input = {
++      threadId: props.threadId,
++      messageId: props.messageId,
++      name: name().trim(),
++      description: description().trim() || undefined,
++      content: body().trim(),
++      enabled: enabled(),
++    }
++    // The registry's contract bounds the save the way the server does, so a save the server would
++    // refuse is never sent.
++    const contract = getActionDescriptor('skills.save_from_message')?.inputSchema.safeParse(input)
++    if (!contract?.success) {
++      setErrorMessage(
++        i18n.tr(
++          'Navnet må ha 1–64 tegn, og innholdet må ha 1–32 000 tegn.',
++          'The name must be 1–64 characters and the content 1–32,000 characters.',
++        ),
++      )
++      return
++    }
++    const orgId = getSession().activeOrg?.id ?? ''
++    if (!orgId) {
++      setErrorMessage(i18n.tr('Velg en organisasjon først.', 'Choose an organization first.'))
++      return
++    }
++    setSubmitting(true)
++    setErrorMessage(null)
++    try {
++      const created = await createSkill(orgId, {
++        name: input.name,
++        description: input.description,
++        content: input.content,
++        enabled: input.enabled,
++        scope: 'user',
++      })
++      props.onSaved?.(created.id)
++      props.onClose()
++    } catch (err) {
++      setErrorMessage(
++        translateApiError(err, i18n.tr, {
++          no: 'Kunne ikke lagre ferdigheten.',
++          en: 'Could not save the skill.',
++        }),
++      )
++    } finally {
++      setSubmitting(false)
++    }
++  }
++
++  return (
++    <Show when={!props.temporary}>
++      <Portal>
++        <div
++          class="verevon-schedule-dialog"
++          role="presentation"
++          onClick={(event) => {
++            if (event.target === event.currentTarget) close()
++          }}
++        >
++          <form
++            class="verevon-schedule-dialog__dialog"
++            role="dialog"
++            aria-modal="true"
++            aria-labelledby="save-as-skill-title"
++            onSubmit={(event) => void save(event)}
++            onKeyDown={onKeyDown}
++          >
++            <header>
++              <h3 id="save-as-skill-title">
++                <Sparkles size={16} aria-hidden="true" /> {i18n.tr('Lagre som ferdighet', 'Save as skill')}
++              </h3>
++              <button type="button" onClick={close} aria-label={i18n.tr('Lukk', 'Close')}>
++                <X size={16} />
++              </button>
++            </header>
++
++            <label class="verevon-schedule-dialog__field">
++              <span>{i18n.tr('Navn', 'Name')}</span>
++              <input
++                ref={(element) => queueMicrotask(() => element.focus())}
++                value={name()}
++                maxlength={64}
++                required
++                disabled={submitting()}
++                onInput={(event) => setName(event.currentTarget.value)}
++              />
++            </label>
++
++            <label class="verevon-schedule-dialog__field">
++              <span>{i18n.tr('Beskrivelse (valgfritt)', 'Description (optional)')}</span>
++              <input
++                value={description()}
++                maxlength={300}
++                disabled={submitting()}
++                onInput={(event) => setDescription(event.currentTarget.value)}
++              />
++            </label>
++
++            <label class="verevon-schedule-dialog__field">
++              <span>{i18n.tr('Innhold', 'Content')}</span>
++              <textarea
++                value={body()}
++                maxlength={32000}
++                required
++                rows={6}
++                disabled={submitting()}
++                onInput={(event) => setBody(event.currentTarget.value)}
++              />
++            </label>
++
++            <p class="verevon-schedule-dialog__note">
++              {i18n.tr(
++                'Skriv hva som skal gjøres neste gang, ikke hva som skjedde. Hold den kort; lange ferdigheter kuttes ned.',
++                'Write what to do next time, not what happened. Keep it short; long skills are cut to fit.',
++              )}
++            </p>
++
++            <label class="verevon-schedule-dialog__policy-option">
++              <input
++                type="checkbox"
++                role="switch"
++                checked={enabled()}
++                disabled={submitting()}
++                onChange={(event) => setEnabled(event.currentTarget.checked)}
++              />
++              {i18n.tr('Bruk i mine samtaler', 'Use in my chats')}
++            </label>
++
++            <Show when={errorMessage()}>
++              {(message) => (
++                <p class="verevon-schedule-dialog__error" role="alert">
++                  {message()}
++                </p>
++              )}
++            </Show>
++
++            <footer>
++              <button type="submit" class="verevon-schedule-dialog__submit" disabled={submitting()}>
++                {submitting() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre ferdighet', 'Save skill')}
++              </button>
++            </footer>
++          </form>
++        </div>
++      </Portal>
++    </Show>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 3b856958c..c49327e7e 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1417,6 +1417,35 @@ describe('action registry', () => {
+     expect(publish?.inputSchema.safeParse({ agentRef: '' }).success).toBe(false)
+   })
+ 
++  it('registers save-as-skill as a low-risk person-only write the model cannot execute, bounded like the server (EP-11-S1)', () => {
++    const save = getActionDescriptor('skills.save_from_message')
++    expect(save?.ownerPlane).toBe('model')
++    expect(save?.risk).toBe('low')
++    expect(save?.requiresApproval).toBe(false)
++    expect(MODEL_ACCESS['skills.save_from_message'].access).toBe('none')
++    expect(MODEL_ACCESS['skills.save_from_message'].eligible).toBe(false)
++
++    const valid = {
++      threadId: 'thread-1',
++      messageId: 'msg-1',
++      name: 'Utrulling',
++      description: 'Kort',
++      content: '1. Kjør testene',
++      enabled: true,
++    }
++    expect(save?.inputSchema.safeParse(valid).success).toBe(true)
++    expect(save?.inputSchema.safeParse({ ...valid, name: ' Utrulling ' }).success).toBe(true)
++    expect(save?.inputSchema.safeParse({ ...valid, name: 'x'.repeat(65) }).success).toBe(false)
++    expect(save?.inputSchema.safeParse({ ...valid, content: '   ' }).success).toBe(false)
++    expect(save?.inputSchema.safeParse({ ...valid, content: 'x'.repeat(32_001) }).success).toBe(false)
++    expect(save?.inputSchema.safeParse({ ...valid, description: 'x'.repeat(301) }).success).toBe(false)
++    expect(save?.inputSchema.safeParse({ ...valid, messageId: '' }).success).toBe(false)
++    // The owner and the organisation come from the session, never from the body.
++    const parsed = save?.inputSchema.parse({ ...valid, orgId: 'org-forged', owner_user_id: 'user-2' }) as Record<string, unknown>
++    expect(parsed).not.toHaveProperty('orgId')
++    expect(parsed).not.toHaveProperty('owner_user_id')
++  })
++
+   it('keeps every action id unique and the spaces.* entries contiguous and in their pre-fragment order (P-SPA1)', () => {
+     const ids: string[] = actionRegistry.map((action) => action.id)
+     expect(new Set(ids).size).toBe(ids.length)
+@@ -1453,7 +1482,8 @@ describe('action registry', () => {
+     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+     // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
+     // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
+-    expect(ids).toHaveLength(295)
++    // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
++    expect(ids).toHaveLength(296)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index a557d67fe..6d4951332 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -715,6 +715,18 @@ const learningUndoInput = z.object({
+   entryId: z.string().min(1),
+ })
+ 
++// A skill the person saves from one of their own answers (EP-11 S1). The name, description and
++// content are bounded as the server bounds them, and the owner and the organisation come from the
++// verified session, never from here.
++const skillsSaveFromMessageInput = z.object({
++  threadId: z.string().min(1).max(128),
++  messageId: z.string().min(1).max(128),
++  name: z.string().trim().min(1).max(64),
++  description: z.string().trim().max(300).optional(),
++  content: z.string().trim().min(1).max(32_000),
++  enabled: z.boolean(),
++})
++
+ const settingsUpdateMeInput = z.object({
+   name: z.string().trim().optional(),
+   displayName: z.string().trim().optional(),
+@@ -3307,6 +3319,17 @@ export const actionRegistry = [
+     inputSchema: learningUndoInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'skills.save_from_message',
++    label: 'Save an answer as a skill',
++    description: 'Save one of the person\'s own answers as a private skill of theirs, used in their own matching chats. The name, description and content are the person\'s text, bounded here as the server bounds them. The owner is the verified session, and no organisation is named. Org-wide skills stay admin-only; a member needs the member authoring switch on. The button is hidden in a temporary chat (zero data retention) and in a conversation not yet saved. Never model-executable: a model does not write its own skills.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: skillsSaveFromMessageInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'settings.update_me',
+     label: 'Update profile',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts
+index 138dc74cd..2688ead48 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts	
+@@ -77,9 +77,11 @@ export function createSkill(
+     /**
+      * `org` with `promoted_from` copies a skill an admin was shared (accepted, from a
+      * member) into the organization. The server checks that the source is visible to
+-     * the caller; the copy is a new skill and the source is left as it was.
++     * the caller; the copy is a new skill and the source is left as it was. `user` makes
++     * a private skill of the caller's own (EP-11 S1); a member may do so only while the
++     * gateway's member switch is on, see `memberSkillAuthoring`.
+      */
+-    scope?: 'org'
++    scope?: 'org' | 'user'
+     promoted_from?: string
+   },
+ ): Promise<{ id: string }> {
+@@ -90,6 +92,22 @@ export function createSkill(
+   })
+ }
+ 
++let memberSkillAuthoringAnswer: Promise<boolean> | undefined
++
++/**
++ * Whether this person may author private skills here (EP-11 S1). The gateway answers only while
++ * `SKILL_MEMBER_AUTHORING` is on, so a refusal, a failure or a missing route all read as no, and
++ * members see the page they saw before. One answer serves every caller in the page.
++ */
++export function memberSkillAuthoring(): Promise<boolean> {
++  memberSkillAuthoringAnswer ??= requestJson<{ member_authoring?: boolean } | null>(
++    '/api/v1/skills/authoring',
++  )
++    .then((payload) => payload?.member_authoring === true)
++    .catch(() => false)
++  return memberSkillAuthoringAnswer
++}
++
+ /** Update a skill's enabled flag, description, or content. */
+ export function updateSkill(
+   orgId: string,

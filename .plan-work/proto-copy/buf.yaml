@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: .
+    name: buf.build/triodelab/model-plane
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+  except:
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

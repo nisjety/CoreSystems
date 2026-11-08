@@ -1,0 +1,47 @@
+{
+ "packets": [
+  {
+   "key": "ic-anthropic-claude-5-5-adapter",
+   "rows": [
+    "D1-791"
+   ],
+   "title": "inference-core: the Anthropic adapter serves the current Claude 5.5 models and sends only what they accept",
+   "brief": "PREVIOUS ATTEMPT: an earlier coder run on this packet died before reporting and left partial edits in these files (for example anthropic.rs defines CLAUDE_SONNET_5_5 near line 41). Start by reading `git diff` of the four files: keep what is correct and matches this brief, fix or finish the rest; do not start over (you may not run git checkout). Report through the structured output before you stop.\n\nContext (measured live 2026-10-27 by the lead): every chat on a Claude model fails. inference-core's Anthropic provider sends model claude-sonnet-4-20250514 and api.anthropic.com answers 404 not_found_error \"model: claude-sonnet-4-20250514\" (the API key works; the model is retired). The catalogue the SPA shows (GET /api/v1/models) offers only claude-sonnet-4-20250514, claude-opus-4-20250514 and claude-3-5-haiku-20241022, all retired. The owner orders live testing on the Anthropic API.\n\nAuthoritative reference (read the parts you need before editing; do not rely on memory, the API changed in 2025-2026): the claude-api skill files under C:/Users/IMAFER~1/AppData/Local/Temp/claude/bundled-skills/2.1.308/7c566f4138ddf6d90c90ddb6b1cd3640/claude-api/ : shared/model-migration.md (sections Migrating to Claude Opus 5.5, Migrating to Claude Sonnet 5.5, Migrating to Claude Haiku 5.5), shared/api-version-migration.md (the 2026-10-21 change: a Messages request sending temperature, top_p or top_k returns a 400; read how it is tied to the anthropic-version header before removing them), shared/prompt-caching.md (minimum cacheable prefix per model), curl/examples.md (raw HTTP request shapes; inference-core is Rust and talks raw HTTP).\n\nCurrent model ids (exact strings, never a date suffix): claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5. Request rules that matter for these three (verify each in the reference): thinking is adaptive (send {type: \"adaptive\"} or omit it); {type: \"disabled\"} and {type: \"enabled\", budget_tokens} return 400 on Opus 5.5 and Sonnet 5.5 (Sonnet 5.5 turns thinking off only with {type: \"between_tools\"} at effort high or below; Haiku 5.5 accepts disabled only at effort high or below); depth is controlled by output_config.effort (low, medium, high, xhigh, max; Opus 5.5 and Haiku 5.5 default to medium, so set it explicitly from the request's effort); sampling parameters per api-version-migration.md; forced tool_choice any or tool returns 400 on Opus 5.5 and Sonnet 5.5 (send auto); no assistant prefill; thinking blocks returned by the API are passed back unchanged on later turns; up to 128K max_tokens only when streaming.\n\nDo, in inference-core only (apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs, provider/effort.rs, provider/fallback.rs, cache.rs): (1) the provider's model list (list_models / the catalogue) offers claude-opus-5-5, claude-sonnet-5-5 and claude-haiku-5-5 with correct metadata (context window, max output, effort levels, vision), and the retired three ids are accepted on requests and mapped to their successors (claude-opus-4-20250514 -> claude-opus-5-5, claude-sonnet-4-20250514 -> claude-sonnet-5-5, claude-3-5-haiku-20241022 -> claude-haiku-5-5) so threads saved with an old id keep working, with a debug log of the mapping (no content). (2) Request building follows the rules above for these models: no budget_tokens and no disabled thinking where they 400, effort mapped from the existing effort ladder (effort.rs) into output_config.effort, sampling parameters handled per the 2026-10-21 change, forced tool_choice mapped to auto, no prefill, thinking blocks round-tripped. Keep the existing behaviour for any non-Anthropic provider and keep every switch's default (INFERENCE_ANTHROPIC_TIERED_SYSTEM, INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING, ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT): if a switch now has no meaning for 5.5 models, say so instead of deleting it. (3) Prompt caching: keep cache_control placement; use the per-model minimum cacheable prefix from the reference. (4) Fallback chains and the response-cache key: retired ids replaced by their successors; the cache key must not merge two different models. Zero data retention: nothing here may log or persist content.\n\nTests: unit tests that build the request body for each of the three models and assert: model id, no budget_tokens, no disabled thinking where it 400s, output_config.effort present and mapped, sampling parameters as the reference says, tool_choice never any/tool for Opus/Sonnet 5.5, and that a retired id is mapped to its successor; update existing tests that pin the old ids. A request-body test must fail on today's code. Do not add a live API call to the unit tests (the lead runs the live smoke test). The files are CRLF or LF: measure and preserve.",
+   "files": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/effort.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/rust/services/inference-core/src/cache.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib anthropic",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p inference-core --all-targets"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "mp-claude-5-5-defaults",
+   "rows": [],
+   "title": "Model Plane defaults and references move from the retired Claude 4 ids to claude-sonnet-5-5 / claude-opus-5-5 / claude-haiku-5-5",
+   "brief": "Context: the Claude 4 model ids claude-sonnet-4-20250514, claude-opus-4-20250514 and claude-3-5-haiku-20241022 are retired (api.anthropic.com answers 404 not_found_error, measured live 2026-10-27). A sibling packet migrates inference-core's Anthropic adapter (it maps the retired ids to their successors, so nothing here breaks if a caller still sends one). This packet moves every OTHER Model Plane reference to the current ids: claude-sonnet-4-20250514 -> claude-sonnet-5-5, claude-opus-4-20250514 -> claude-opus-5-5, claude-3-5-haiku-20241022 -> claude-haiku-5-5 (exact strings, no date suffix). Files and what to check in each: apps/Model Plane/rust/services/model-gateway/src/normalize.rs and src/trajectory.rs (defaults or test fixtures; a default model must be a current id), apps/Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go (if this is a default or allowlisted model for the learning reviewer, move it; read the comments first: if it deliberately names a non-Anthropic route, leave it), apps/Model Plane/deploy/docker-compose.yml (a default model variable), apps/Model Plane/proto/model_plane/v1/inference.proto (a comment naming an example id: update the comment only; then regenerate nothing - the lead regenerates the Go bindings). Do not change behaviour beyond the id: no new switches. Reference for the ids: C:/Users/IMAFER~1/AppData/Local/Temp/claude/bundled-skills/2.1.308/7c566f4138ddf6d90c90ddb6b1cd3640/claude-api/SKILL.md (Current Models table). Tests: the model-gateway and capability-core tests that touch these files; update fixtures that pin the old ids.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/trajectory.rs",
+    "apps/Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/proto/model_plane/v1/inference.proto"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib normalize",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib trajectory",
+    "cd ../go/services/capability-core && go test -count=1 ./internal/llmreviewer/"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  }
+ ]
+}

@@ -1,0 +1,461 @@
+diff --git a/apps/Model Plane/proto/model_plane/v1/space_attention.proto b/apps/Model Plane/proto/model_plane/v1/space_attention.proto
+index 415fcd21e..c2f578c96 100644
+--- a/apps/Model Plane/proto/model_plane/v1/space_attention.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/space_attention.proto	
+@@ -18,13 +18,18 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
+ // call. A ZDR caller gets ZDR for every Space and no query runs. Counts, ids, timestamps and
+ // closed words cross this surface; message text never does. Titles are returned only for the
+ // thread ids the caller asked for and only when the thread passes the ceiling.
++//
++// Service name kept; generated code and deployed services depend on it.
++// buf:lint:ignore SERVICE_SUFFIX
+ service SpaceAttention {
++  // Attention counts for up to 60 Spaces: unread threads, working runs, approvals, headlines.
+   rpc GetSpaceAttention(GetSpaceAttentionRequest) returns (GetSpaceAttentionResponse);
+ }
+ 
+ // Which messages count as "new for the viewer". The caller names the rule; Session Core
+ // applies it unchanged.
+ enum UnreadRule {
++  // Default value; the caller named no rule.
+   UNREAD_RULE_UNSPECIFIED = 0;
+   // A thread is unread when its latest user or assistant message is newer than `since_ms` and
+   // the thread is not owned by the viewer (the rule the SPA applied before shared rooms).
+@@ -34,7 +39,11 @@ enum UnreadRule {
+   UNREAD_RULE_LAST_AUTHOR = 2;
+ }
+ 
++// Outcome of the attention query for one Space.
+ enum AttentionStatus {
++  // The Space was read; its counts are set.
++  // Zero value name kept; renaming it would break generated code.
++  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+   ATTENTION_STATUS_OK = 0;
+   // The Space's decision did not verify, or the Space is not one the caller may read.
+   ATTENTION_STATUS_DENIED = 1;
+@@ -44,9 +53,13 @@ enum AttentionStatus {
+   ATTENTION_STATUS_ERROR = 3;
+ }
+ 
++// One Space in an attention request, with its read decision and read marker.
+ message SpaceAttentionQuery {
++  // Id of the Space to count.
+   string space_id = 1;
++  // Control `model.thread.read` decision reference for this Space.
+   string decision_ref = 2;
++  // Token for the decision named by decision_ref.
+   string decision_token = 3;
+   // The effective read marker, epoch milliseconds. Zero or negative means the caller has no
+   // marker for this Space: nothing is unread.
+@@ -55,41 +68,61 @@ message SpaceAttentionQuery {
+   repeated string headline_thread_ids = 5;
+ }
+ 
++// Request for attention counts across the Spaces listed, for one user.
+ message GetSpaceAttentionRequest {
++  // Id of the org the request runs in.
+   string org_id = 1;
++  // Id of the calling user; must equal the caller's principal id.
+   string user_id = 2;
++  // Which rule decides what counts as unread.
+   UnreadRule rule = 3;
+   // At most 60.
+   repeated SpaceAttentionQuery spaces = 4;
+ }
+ 
++// An approval addressed to the caller that is still waiting.
+ message PendingApproval {
++  // Id of the approval.
+   string approval_id = 1;
++  // Id of the run the approval belongs to.
+   string run_id = 2;
++  // Id of the thread the approval belongs to.
+   string thread_id = 3;
++  // When the approval was requested, in epoch milliseconds.
+   int64 requested_at_ms = 4;
++  // Kind of approval requested.
+   string kind = 5;
+ }
+ 
++// Display title of one thread the caller asked for.
+ message ThreadHeadline {
++  // Id of the thread.
+   string thread_id = 1;
++  // Display title of the thread.
+   string title = 2;
+ }
+ 
++// Attention counts and outcome for one Space.
+ message SpaceAttentionResult {
++  // Id of the Space this result is for.
+   string space_id = 1;
++  // Outcome of the query for this Space.
+   AttentionStatus status = 2;
++  // Threads unread for the caller; at most 100.
+   uint32 unread_threads = 3;
+   // True when more than 100 threads matched; `unread_threads` is then 100.
+   bool unread_capped = 4;
+   // Epoch milliseconds of the newest user or assistant message the caller may see; 0 = none.
+   int64 latest_activity_ms = 5;
++  // Agent runs currently working in the Space.
+   uint32 working_runs = 6;
+   // Approvals addressed to the caller, oldest first, at most 20.
+   repeated PendingApproval pending = 7;
++  // Display titles for the threads the caller asked for.
+   repeated ThreadHeadline headlines = 8;
+ }
+ 
++// Attention results, one per requested Space.
+ message GetSpaceAttentionResponse {
+   // One result per requested Space, in request order.
+   repeated SpaceAttentionResult results = 1;
+diff --git a/apps/Model Plane/proto/model_plane/v1/space_events.proto b/apps/Model Plane/proto/model_plane/v1/space_events.proto
+index 3344b65af..80e9bd3d1 100644
+--- a/apps/Model Plane/proto/model_plane/v1/space_events.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/space_events.proto	
+@@ -22,41 +22,66 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
+ // Separate file and service so that SessionCore and every mock of it stay
+ // source-compatible. The SSE form of these frames is pinned by the golden
+ // apps/Model Plane/api/contracts/space-events.json.
++//
++// Service name kept; generated code and deployed services depend on it.
++// buf:lint:ignore SERVICE_SUFFIX
+ service SpaceEvents {
+   // Opens the tail. The first frame is `connected` (or `cursor_too_old`); the stream ends
+   // after a `closing` frame, after `cursor_too_old`, or when the caller goes away.
++  // Frame type name kept; renaming it would break generated code.
++  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+   rpc StreamSpaceEvents(StreamSpaceEventsRequest) returns (stream SpaceEventFrame);
+ }
+ 
++// Request to open the event tail for one Space.
+ message StreamSpaceEventsRequest {
++  // Id of the org the stream runs in.
+   string org_id = 1;
++  // Id of the calling user; must equal the caller's principal id.
+   string user_id = 2;
++  // Id of the Space to tail.
+   string space_id = 3;
+   // Control decision, minted for service_audience "model-plane-space-stream".
+   string decision_ref = 4;
++  // Token for the decision named by decision_ref.
+   string decision_token = 5;
+   // false: live tail from the current head. true: continue after `after_seq` of
+   // `generation`; a cursor that cannot be honoured answers `cursor_too_old`.
+   bool resume = 6;
++  // Log generation that after_seq refers to.
+   int64 generation = 7;
++  // Last seq already seen; a resume continues after it.
+   int64 after_seq = 8;
+ }
+ 
++// One frame of the Space event stream.
+ message SpaceEventFrame {
++  // Which kind of frame this is.
+   oneof frame {
++    // Sent first when the stream opens.
+     SpaceStreamConnected connected = 1;
++    // One event row from the Space log.
+     SpaceEventRecord event = 2;
++    // Keep-alive carrying the current head, generation and cursor.
+     SpaceStreamHeartbeat heartbeat = 3;
++    // The cursor cannot be honoured; the stream ends after this frame.
+     SpaceStreamCursorTooOld cursor_too_old = 4;
++    // Notice that the stream is ending; the frame says whether to reconnect.
+     SpaceStreamClosing closing = 5;
+   }
+ }
+ 
++// Details sent when the stream opens.
+ message SpaceStreamConnected {
++  // Log generation the stream reads.
+   int64 generation = 1;
++  // Newest seq in the log.
+   int64 head = 2;
++  // True when the stream resumed from the caller's cursor.
+   bool resumed = 3;
++  // Length of the stream lease, in seconds.
+   int32 lease_seconds = 4;
++  // Interval between heartbeat frames, in seconds.
+   int32 heartbeat_seconds = 5;
+   // "live" or "poll_only" (a ZDR caller or decision: no rows follow).
+   string mode = 6;
+@@ -64,26 +89,37 @@ message SpaceStreamConnected {
+   int64 cursor = 7;
+ }
+ 
++// Keep-alive frame on the event stream.
+ message SpaceStreamHeartbeat {
++  // Newest seq in the log.
+   int64 head = 1;
++  // Log generation the stream reads.
+   int64 generation = 2;
+   // Highest seq fully processed. Not `head` while rows are still queued.
+   int64 cursor = 3;
+ }
+ 
++// Notice that the caller's cursor cannot be honoured.
+ message SpaceStreamCursorTooOld {
+   // "retention", "generation_changed" or "ahead_of_head".
+   string reason = 1;
++  // Newest seq in the log.
+   int64 head = 2;
++  // Current log generation.
+   int64 generation = 3;
+ }
+ 
++// Notice that the stream is ending.
+ message SpaceStreamClosing {
+   // lease_expired, reauthorize, slow_consumer, membership_revoked, zdr_poll_only.
+   string code = 1;
++  // True when the client should open a new stream.
+   bool reconnect = 2;
++  // Milliseconds to wait before reconnecting.
+   int64 retry_after_ms = 3;
++  // Log generation the stream was reading.
+   int64 generation = 4;
++  // Highest seq fully processed before the stream closed.
+   int64 cursor = 5;
+ }
+ 
+@@ -92,25 +128,38 @@ message SpaceStreamClosing {
+ // stubs `hidden` (a row this subscriber may not see) and `redacted` (an erased row). A stub
+ // carries only seq, generation, kind and at, so the client's seq stays contiguous.
+ message SpaceEventRecord {
++  // Sequence number of this row in the log.
+   int64 seq = 1;
++  // Log generation the row belongs to.
+   int64 generation = 2;
++  // Row kind; one of the kinds listed above.
+   string kind = 3;
+   // RFC 3339.
+   string at = 4;
+   // user, agent or system.
+   string actor_type = 5;
++  // Id of the actor, of the type given by actor_type.
+   string actor_id = 6;
++  // Thread the row is about.
+   string thread_id = 7;
++  // Run the row is about.
+   string run_id = 8;
++  // Message the row is about.
+   string message_id = 9;
++  // Sequence number of the message.
+   int64 message_sequence = 10;
++  // Role of the message author, such as user or assistant.
+   string role = 11;
++  // Id of the agent involved.
+   string agent_id = 12;
+   // Closed run-state word (space::events::run_state).
+   string state = 13;
++  // Run state before this change.
+   string prev_state = 14;
++  // Where the change came from.
+   string origin = 15;
+   // Closed words: title, preview, pinned, persona.
+   repeated string fields = 16;
++  // Id of the parent run, if this run has one.
+   string parent_run_id = 17;
+ }
+diff --git a/apps/Model Plane/proto/model_plane/v1/space_history.proto b/apps/Model Plane/proto/model_plane/v1/space_history.proto
+index 46dfbe151..69f426b25 100644
+--- a/apps/Model Plane/proto/model_plane/v1/space_history.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/space_history.proto	
+@@ -18,17 +18,29 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
+ // nothing is persisted, cached or logged (query text and hit ids never reach a log).
+ service SpaceHistoryService {
+   // Keyword search over the user and assistant messages of one Space.
++  // Request and response type names kept; renaming them would break generated code.
++  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
++  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+   rpc SearchMessages(SearchSpaceMessagesRequest) returns (SearchSpaceMessagesResponse);
+   // Maps a message id to its thread, under the same authority. Not found, hidden by audience,
+   // another Space and another org all answer NotFound("entry not found").
++  // Request and response type names kept; renaming them would break generated code.
++  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
++  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+   rpc ResolveMessage(ResolveSpaceMessageRequest) returns (ResolveSpaceMessageResponse);
+ }
+ 
++// Keyword search request over the messages of one Space.
+ message SearchSpaceMessagesRequest {
++  // Id of the org the search runs in.
+   string org_id = 1;
++  // Id of the calling user; must equal the caller's principal id.
+   string user_id = 2;
++  // Id of the Space to search.
+   string space_id = 3;
++  // Control read decision for this Space; without one only the caller's own threads are searched.
+   string space_read_decision_ref = 4;
++  // Token for the decision named by space_read_decision_ref.
+   string space_read_decision_token = 5;
+   // 2 to 200 characters after trim, no control characters.
+   string query = 6;
+@@ -40,7 +52,9 @@ message SearchSpaceMessagesRequest {
+   string author_subject_id = 9;
+   // "", "user" or "assistant".
+   string role = 10;
++  // Earliest message time to include, when set.
+   google.protobuf.Timestamp since = 11;
++  // Latest message time to include, when set.
+   google.protobuf.Timestamp until = 12;
+   // "recent" (default) or "relevance".
+   string sort = 13;
+@@ -52,23 +66,37 @@ message SearchSpaceMessagesRequest {
+ 
+ // One slice of a snippet. The client renders `text` as a text node, never as markup.
+ message SnippetSegment {
++  // Text of this slice; the client shows it as plain text.
+   string text = 1;
++  // True when this slice matches the query.
+   bool matched = 2;
+ }
+ 
++// One message that matched the search.
+ message SpaceMessageHit {
++  // Id of the matched message.
+   string message_id = 1;
++  // Thread the message is in.
+   string thread_id = 2;
++  // Space the message is in.
+   string space_id = 3;
++  // Role of the author, such as user or assistant.
+   string role = 4;
++  // Id of the subject who authored the message.
+   string author_subject_id = 5;
++  // Name of the agent that wrote the message, if any.
+   string agent_name = 6;
++  // When the message was created.
+   google.protobuf.Timestamp created_at = 7;
++  // Snippet of the message, as segments.
+   repeated SnippetSegment snippet = 8;
++  // Title of the thread the message is in.
+   string thread_title = 9;
+ }
+ 
++// One page of search hits.
+ message SearchSpaceMessagesResponse {
++  // Matching messages on this page.
+   repeated SpaceMessageHit hits = 1;
+   // Empty when there is no further page.
+   string next_cursor = 2;
+@@ -80,17 +108,28 @@ message SearchSpaceMessagesResponse {
+   repeated string excluded = 5;
+ }
+ 
++// Request to resolve one message id to its thread.
+ message ResolveSpaceMessageRequest {
++  // Id of the org the lookup runs in.
+   string org_id = 1;
++  // Id of the calling user; must equal the caller's principal id.
+   string user_id = 2;
++  // Id of the Space the message should be in.
+   string space_id = 3;
++  // Control `model.thread.read` decision reference for this Space.
+   string space_read_decision_ref = 4;
++  // Token for the decision named by space_read_decision_ref.
+   string space_read_decision_token = 5;
++  // Id of the message to resolve.
+   string message_id = 6;
+ }
+ 
++// The thread and Space that a message id resolves to.
+ message ResolveSpaceMessageResponse {
++  // Id of the resolved message.
+   string message_id = 1;
++  // Thread the message is in.
+   string thread_id = 2;
++  // Space the message is in.
+   string space_id = 3;
+ }
+diff --git a/apps/Model Plane/proto/model_plane/v1/space_room.proto b/apps/Model Plane/proto/model_plane/v1/space_room.proto
+index ffcd6b982..3a1f5e849 100644
+--- a/apps/Model Plane/proto/model_plane/v1/space_room.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/space_room.proto	
+@@ -33,43 +33,66 @@ service SpaceRoomReadService {
+   rpc ListSpaceTimeline(ListSpaceTimelineRequest) returns (ListSpaceTimelineResponse);
+ }
+ 
++// Request for one page of the Space's artifacts.
+ message ListSpaceArtifactsRequest {
++  // Id of the org the request runs in.
+   string org_id = 1;
++  // Id of the Space whose artifacts are listed.
+   string space_id = 2;
+   // 0 means the default of 50; clamped to 1..200.
+   uint32 limit = 3;
+   // Opaque keyset cursor from a previous response; empty for the first page.
+   string cursor = 4;
++  // Control `model.thread.read` decision reference for this Space.
+   string space_read_decision_ref = 5;
++  // Token for the decision named by space_read_decision_ref.
+   string space_read_decision_token = 6;
+ }
+ 
+ // One artifact of the room at its latest version. No content: the viewer reads
+ // the thread through the existing transcript route and its own authority.
+ message SpaceArtifactSummary {
++  // Id of the thread the artifact is in.
+   string thread_id = 1;
++  // Id of the message the artifact belongs to.
+   string message_id = 2;
++  // Id of the artifact.
+   string artifact_id = 3;
++  // Kind of artifact.
+   string kind = 4;
++  // Title of the artifact.
+   string title = 5;
++  // Latest version number of the artifact.
+   int64 version = 6;
++  // Number of versions the artifact has.
+   int64 version_count = 7;
++  // Size of the artifact content, in characters.
+   int64 size_chars = 8;
++  // Name of the agent that made the artifact.
+   string agent_name = 9;
++  // When the artifact was created.
+   string created_at = 10;
++  // Id of the Space the artifact is in.
+   string space_id = 11;
+ }
+ 
++// One page of artifact summaries.
+ message ListSpaceArtifactsResponse {
++  // Artifact summaries on this page.
+   repeated SpaceArtifactSummary artifacts = 1;
+   // Empty when there is no further page.
+   string next_cursor = 2;
+ }
+ 
++// Request for one window of the Space's posts.
+ message ListSpaceTimelineRequest {
++  // Id of the org the request runs in.
+   string org_id = 1;
++  // Id of the Space whose timeline is read.
+   string space_id = 2;
++  // Control `model.thread.read` decision reference for this Space.
+   string space_read_decision_ref = 3;
++  // Token for the decision named by space_read_decision_ref.
+   string space_read_decision_token = 4;
+   // 0 means the default of 50; clamped to 1..100.
+   uint32 limit = 5;
+@@ -85,15 +108,19 @@ message ListSpaceTimelineRequest {
+   bool include_pinned = 9;
+ }
+ 
++// One window of the Space's posts, with pinned and refreshed posts.
+ message ListSpaceTimelineResponse {
+   // The window, newest activity first.
+   repeated ThreadSummary posts = 1;
++  // Pinned posts; filled on the first page only.
+   repeated ThreadSummary pinned = 2;
++  // Summaries of the threads named in refresh_thread_ids.
+   repeated ThreadSummary refreshed = 3;
+   // True when more posts exist beyond the window in the direction asked.
+   bool has_more = 4;
+   // Smallest and largest `last_message_seq` in `posts`; 0 when the window is empty.
+   uint64 oldest_seq = 5;
++  // Largest last_message_seq in posts; 0 when the window is empty.
+   uint64 newest_seq = 6;
+   // Posts the reader may see, counted on the first page (no cursor) only; 0 otherwise.
+   uint32 total_posts = 7;

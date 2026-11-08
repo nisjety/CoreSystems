@@ -1,0 +1,1059 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index 8d4784bea..0aad381cb 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -74,7 +74,16 @@ import type { DockedNodes } from '@/shared/chat-nodes/types'
+ import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
+ // The barrel does not re-export it yet; one more line there when it next changes.
+ import { nodeKey } from '@/shared/chat-nodes/derive'
+-import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
++import type {
++  AutonomyRung,
++  ChatKnowledgeReceipt,
++  ChatPlanStep,
++  ChatSearchProviderId,
++  ChatSearchProvenanceEvent,
++  ChatSearchRoute,
++  MemoryOrigin,
++  RecalledMemory,
++} from '@/shared/api/chat-client'
+ import { isSafeLinkHref } from '../lib/safe-href'
+ import { isWidgetFence } from '../lib/inline-widget'
+ import type { SettledFold } from '../lib/settled-fold'
+@@ -315,6 +324,10 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
+       <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} knowledge={node.knowledge} />
+     ),
+   },
++  'search-provenance': {
++    kind: 'search-provenance',
++    render: (node) => <SearchProvenanceNotice provenance={node.provenance} />,
++  },
+   'lifecycle-notices': {
+     kind: 'lifecycle-notices',
+     render: (node) => <LifecycleNotices notices={node.notices} />,
+@@ -4384,6 +4397,45 @@ export function SourceScopeNotice(props: {
+   )
+ }
+ 
++/**
++ * "Searched via X" (EP-9 W1): which search providers served this turn's web searches, and the route that allowed
++ * them. The wording is keyed by the closed provider id, so a provider the server does not name shows as "other
++ * provider" and never as its raw id. Names and a reason only: no query and no URL reach this line.
++ */
++export function SearchProvenanceNotice(props: { provenance: ChatSearchProvenanceEvent }) {
++  const i18n = useI18n()
++  const providerName = (id: ChatSearchProviderId) => {
++    if (id === 'tantivy_local') return i18n.tr('Verevon-indeks', 'Verevon index')
++    if (id === 'verevon') return i18n.tr('Verevon-søk', 'Verevon search')
++    if (id === 'brave') return 'Brave Search'
++    if (id === 'serper') return i18n.tr('Serper (Google-resultater)', 'Serper (Google results)')
++    if (id === 'searxng') return 'SearXNG'
++    if (id === 'stract') return 'Stract'
++    return i18n.tr('annen leverandør', 'other provider')
++  }
++  const routeText = (route: ChatSearchRoute) => {
++    if (route === 'zdr_free_only') {
++      return i18n.tr(
++        'Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
++        'Zero data retention is on, so only free search providers were used.',
++      )
++    }
++    if (route === 'paid_allowed') {
++      return i18n.tr('Betalte søketjenester er tillatt for dette svaret.', 'Paid search providers are allowed for this answer.')
++    }
++    return i18n.tr('Bare gratis søketjenester er tillatt for dette svaret.', 'Only free search providers are allowed for this answer.')
++  }
++  return (
++    <p class="verevon-chat-source-scope-notice" role="note">
++      <Info size={12} />
++      {i18n.tr('Søkt via ', 'Searched via ')}
++      {props.provenance.providers.map((provider) => providerName(provider.id)).join(', ')}
++      {'. '}
++      {routeText(props.provenance.route)}
++    </p>
++  )
++}
++
+ export function GroundingInlineSummary(props: {
+   grounding: ChatKnowledgeGrounding
+ }) {
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/SourceScopeNotice.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/SourceScopeNotice.test.tsx
+index 2223f5d39..1cd5febe2 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/SourceScopeNotice.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/SourceScopeNotice.test.tsx	
+@@ -2,7 +2,7 @@
+ 
+ import { render } from '@solidjs/testing-library'
+ import { describe, expect, it } from 'vitest'
+-import { SourceScopeNotice } from './ChatMessages'
++import { SearchProvenanceNotice, SourceScopeNotice } from './ChatMessages'
+ 
+ /** chat-wave2 scope spec §2.2 and WS18-S3: the source filter note and the Space knowledge chip. */
+ describe('SourceScopeNotice', () => {
+@@ -63,3 +63,52 @@ describe('SourceScopeNotice', () => {
+     unmount()
+   })
+ })
++
++/** EP-9 W1: the "Searched via" line names the providers that served a turn's searches, and the route that allowed them. */
++describe('SearchProvenanceNotice', () => {
++  it('names one provider and the free-chain reason', () => {
++    const { container, unmount } = render(() => (
++      <SearchProvenanceNotice provenance={{ providers: [{ id: 'brave', hits: 3 }], route: 'free_chain' }} />
++    ))
++    expect(container.textContent).toBe('Søkt via Brave Search. Bare gratis søketjenester er tillatt for dette svaret.')
++    unmount()
++  })
++
++  it('joins two providers in the order the server sent them', () => {
++    const { container, unmount } = render(() => (
++      <SearchProvenanceNotice
++        provenance={{
++          providers: [
++            { id: 'tantivy_local', hits: 1 },
++            { id: 'brave', hits: 2 },
++          ],
++          route: 'paid_allowed',
++        }}
++      />
++    ))
++    expect(container.textContent).toBe(
++      'Søkt via Verevon-indeks, Brave Search. Betalte søketjenester er tillatt for dette svaret.',
++    )
++    unmount()
++  })
++
++  it('words a provider the SPA does not name as other provider', () => {
++    const { container, unmount } = render(() => (
++      <SearchProvenanceNotice provenance={{ providers: [{ id: 'other', hits: 1 }], route: 'free_chain' }} />
++    ))
++    expect(container.textContent).toBe(
++      'Søkt via annen leverandør. Bare gratis søketjenester er tillatt for dette svaret.',
++    )
++    unmount()
++  })
++
++  it('gives the zero-retention reason on a ZDR turn, which can only have free providers', () => {
++    const { container, unmount } = render(() => (
++      <SearchProvenanceNotice provenance={{ providers: [{ id: 'verevon', hits: 0 }], route: 'zdr_free_only' }} />
++    ))
++    expect(container.textContent).toBe(
++      'Søkt via Verevon-søk. Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
++    )
++    unmount()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts
+index c8fd08ff4..85cf7fc05 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
+@@ -596,6 +596,11 @@ export type ChatTurn = {
+    * turn's offered set did NOT include because of the filter.
+    */
+   scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
++  /**
++   * The search providers that served this turn's web searches, and the route its entitlement allowed
++   * (`search_provenance` SSE event, EP-9 W1). Live only: nothing stores it, so a reloaded turn has none.
++   */
++  searchProvenance?: import('@/shared/api/chat-client').ChatSearchProvenanceEvent
+ }
+ 
+ export type AgentTaskStep = {
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts
+index 5c39d1f9e..7f2e4b1a5 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
+@@ -302,6 +302,50 @@ describe('chat-client stream-event coverage', () => {
+     })
+   })
+ 
++  it('reads a search_provenance frame, and reads a provider the SPA does not name as other', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        sseResponse([
++          `event: search_provenance\ndata: ${JSON.stringify({
++            providers: [
++              { id: 'brave', label: 'Brave Search', hits: 2 },
++              { id: 'zzz_new_engine', label: 'zzz_new_engine', hits: 1 },
++            ],
++            route: 'free_chain',
++          })}\n\n`,
++        ]),
++      ),
++    )
++    const onSearchProvenance = vi.fn()
++    await streamChat({ content: 'hi' }, { onSearchProvenance })
++
++    expect(onSearchProvenance).toHaveBeenCalledTimes(1)
++    expect(onSearchProvenance).toHaveBeenCalledWith({
++      providers: [
++        { id: 'brave', hits: 2 },
++        { id: 'other', hits: 1 },
++      ],
++      route: 'free_chain',
++    })
++  })
++
++  it('drops a search_provenance frame with a route the SPA does not name, or with no provider', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        sseResponse([
++          `event: search_provenance\ndata: ${JSON.stringify({ providers: [{ id: 'brave', hits: 1 }], route: 'bogus' })}\n\n`,
++          `event: search_provenance\ndata: ${JSON.stringify({ providers: [], route: 'zdr_free_only' })}\n\n`,
++        ]),
++      ),
++    )
++    const onSearchProvenance = vi.fn()
++    await streamChat({ content: 'hi' }, { onSearchProvenance })
++
++    expect(onSearchProvenance).not.toHaveBeenCalled()
++  })
++
+   it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
+     vi.stubGlobal(
+       'fetch',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index b2f44df72..9a9258382 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -1145,6 +1145,18 @@ export type ChatSourceScopeAppliedEvent = {
+   excludedTools: string[]
+   knowledge?: ChatKnowledgeReceipt
+ }
++/**
++ * Which search providers served a turn's web searches, and the route its entitlement allowed (`search_provenance`,
++ * EP-9 W1). The ids are closed: a provider the SPA does not name arrives as `other`, and the line is worded by id in
++ * the SPA's own two languages, so no provider name the server sends reaches the screen unread. Consumed by the
++ * "Searched via" line beside the source-scope notice (`ChatMessages.tsx`).
++ */
++export type ChatSearchProviderId = 'tantivy_local' | 'brave' | 'serper' | 'searxng' | 'stract' | 'verevon' | 'other'
++export type ChatSearchRoute = 'free_chain' | 'paid_allowed' | 'zdr_free_only'
++export type ChatSearchProvenanceEvent = {
++  providers: { id: ChatSearchProviderId; hits: number }[]
++  route: ChatSearchRoute
++}
+ /**
+  * AI-generated thread title, emitted once by model-gateway after a thread's
+  * FIRST exchange completes (before the terminal `done`). Already sanitized
+@@ -1282,6 +1294,8 @@ export type ChatStreamHandlers = {
+   onResultReceipt?: (event: ChatResultReceiptEvent) => void
+   /** See `ChatSourceScopeAppliedEvent`. */
+   onSourceScopeApplied?: (event: ChatSourceScopeAppliedEvent) => void
++  /** See `ChatSearchProvenanceEvent`. */
++  onSearchProvenance?: (event: ChatSearchProvenanceEvent) => void
+   /**
+    * A message the user sent mid-run has reached the agent. Emitted at delivery
+    * rather than at enqueue: the POST already confirmed acceptance, and what the
+@@ -1761,6 +1775,35 @@ function sourceScopeAppliedEvent(payload: Record<string, unknown>): ChatSourceSc
+   return scope === 'auto' && knowledge ? { scope, excludedTools, knowledge } : undefined
+ }
+ 
++const SEARCH_PROVIDER_IDS: readonly ChatSearchProviderId[] = [
++  'tantivy_local',
++  'brave',
++  'serper',
++  'searxng',
++  'stract',
++  'verevon',
++  'other',
++]
++const SEARCH_ROUTES: readonly ChatSearchRoute[] = ['free_chain', 'paid_allowed', 'zdr_free_only']
++
++/**
++ * A `search_provenance` frame as the SPA reads it. A provider id the SPA does not name is read as `other`, so a
++ * provider Quarry adds later cannot reach the line under its raw name. A count that is not a whole number, a route
++ * the SPA does not name, or a frame that names no provider drops the frame.
++ */
++function searchProvenanceEvent(payload: Record<string, unknown>): ChatSearchProvenanceEvent | undefined {
++  const route = SEARCH_ROUTES.find((candidate) => candidate === payload.route)
++  if (!route || !Array.isArray(payload.providers)) return undefined
++  const providers = payload.providers.flatMap((entry) => {
++    const provider = objectValue(entry)
++    const hits = num(provider?.hits)
++    if (!provider || hits === undefined || !Number.isInteger(hits) || hits < 0) return []
++    const id = SEARCH_PROVIDER_IDS.find((candidate) => candidate === provider.id) ?? 'other'
++    return [{ id, hits }]
++  })
++  return providers.length > 0 ? { providers, route } : undefined
++}
++
+ function knowledgeReceiptValue(value: unknown): ChatKnowledgeReceipt | undefined {
+   const receipt = objectValue(value)
+   const mode = str(receipt?.mode)
+@@ -2644,6 +2687,11 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
+       if (applied) handlers.onSourceScopeApplied?.(applied)
+       break
+     }
++    case 'search_provenance': {
++      const provenance = searchProvenanceEvent(payload)
++      if (provenance) handlers.onSearchProvenance?.(provenance)
++      break
++    }
+     case 'citations':
+     case 'search_results': {
+       const citations = Array.isArray(payload.citations)
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/quarry.rs b/apps/Model Plane/rust/services/model-gateway/src/quarry.rs
+index 4edccee37..1ead130aa 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/quarry.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/quarry.rs	
+@@ -412,6 +412,10 @@ pub struct SearchReply {
+     /// `None` when the edge sent no rerank report, or said the rerank was not configured. Either
+     /// way the relevance gate has no rerank fact to report.
+     pub rerank: Option<RerankOutcome>,
++    /// The envelope's `provider`: the router or provider that answered, such as `smart_router`. A hit's own
++    /// `source` names the provider that served it, so this is read only for a hit that names none, and for a
++    /// search that returned no hits (EP-9 W1). Empty when the edge sent none.
++    pub provider: String,
+ }
+ 
+ /// One `web_search` hit as the tool loop and deep research read it back.
+@@ -1236,7 +1240,18 @@ fn reply_from_payload(payload: &Value, calibration: Option<&Calibration>) -> Sea
+             result
+         })
+         .collect();
+-    SearchReply { results, rerank }
++    // Read whole rather than per hit: the envelope names the answering router, which the disclosure line needs
++    // for a hit that names no provider of its own.
++    let provider = payload
++        .get("provider")
++        .and_then(Value::as_str)
++        .unwrap_or_default()
++        .to_owned();
++    SearchReply {
++        results,
++        rerank,
++        provider,
++    }
+ }
+ 
+ /// The rerank report Quarry sent, or `None` for an absent report or the `rerank-not-configured`
+@@ -2928,6 +2943,22 @@ mod tests {
+         assert_eq!(bare_result("https://d.no/").wire_score(), None);
+     }
+ 
++    /// The envelope's provider rides on the reply, so the disclosure line can name a search that found nothing
++    /// (EP-9 W1). An edge that names none leaves it empty.
++    #[test]
++    fn the_reply_carries_the_envelope_provider() {
++        let answered = reply_from_payload(
++            &serde_json::json!({"provider": "smart_router", "results": []}),
++            None,
++        );
++        assert_eq!(answered.provider, "smart_router");
++        assert!(answered.results.is_empty());
++        assert_eq!(
++            reply_from_payload(&serde_json::json!({"results": []}), None).provider,
++            ""
++        );
++    }
++
+     /// The legacy hit keeps the keys it always had with the same values, and what carries nothing is
+     /// omitted, so the gate can tell "the provider said nothing" from "the provider said zero".
+     #[test]
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/search_provenance.rs b/apps/Model Plane/rust/services/model-gateway/src/search_provenance.rs
+new file mode 100644
+index 000000000..cabf4e207
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/search_provenance.rs	
+@@ -0,0 +1,297 @@
++//! The "Searched via X" line (EP-9 W1): which search providers served a turn's web searches, and the route
++//! the turn's entitlement allowed them. Pure: a closed table of Quarry provider ids, the route, and the turn's
++//! record. It reads no content, so the frame names providers and counts only, never a query, URL or hit.
++
++use std::sync::Mutex;
++
++use serde::Serialize;
++
++/// The switch that turns the disclosure on for this process. Only the literal `true` enables it (vocabulary C).
++pub const SEARCH_PROVENANCE_ENV: &str = "MODEL_GATEWAY_SEARCH_PROVENANCE";
++
++/// Whether the disclosure is switched on in this process.
++#[must_use]
++pub fn enabled() -> bool {
++    parse_enabled(std::env::var(SEARCH_PROVENANCE_ENV).ok().as_deref())
++}
++
++fn parse_enabled(raw: Option<&str>) -> bool {
++    raw.map(str::trim) == Some("true")
++}
++
++/// The providers the line can name: Quarry's id, the closed id the frame carries, and the label it shows.
++///
++/// Quarry's composite labels name the router or a blend of providers, not one provider, so they show as
++/// Verevon's own search rather than as a guess at which part served the hit. A Quarry id missing from this
++/// table is never echoed (see [`OTHER`]), so a provider Quarry adds later cannot put a raw string in the line.
++const PROVIDERS: &[(&str, &str, &str)] = &[
++    ("tantivy_local", "tantivy_local", "Verevon index"),
++    ("brave", "brave", "Brave Search"),
++    ("serper", "serper", "Serper (Google results)"),
++    ("searxng", "searxng", "SearXNG metasearch"),
++    ("stract", "stract", "Stract"),
++    ("hybrid", "verevon", "Verevon search"),
++    ("reranked", "verevon", "Verevon search"),
++    ("fallback", "verevon", "Verevon search"),
++    ("smart_router", "verevon", "Verevon search"),
++];
++
++/// What an id outside [`PROVIDERS`] shows as: the closed id `other` and its generic label.
++const OTHER: (&str, &str) = ("other", "other provider");
++
++/// One provider the line names, with the hits it served.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct ProviderUse {
++    /// The closed id the SPA words its line on. `other` for an id the table does not name.
++    pub id: &'static str,
++    /// The English label of `id`. The SPA words the Norwegian and English line itself.
++    pub label: &'static str,
++    /// Hits this provider served across every search of the turn. Zero for a search that returned none.
++    pub hits: u32,
++}
++
++/// The route a turn's searches were allowed: the free chain, the paid providers, or the free providers only,
++/// because zero data retention is on.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum Route {
++    FreeChain,
++    PaidAllowed,
++    ZdrFreeOnly,
++}
++
++impl Route {
++    /// The route of a turn. Zero data retention outranks the paid grant, as it does in
++    /// `paid_providers_allowed`, so the two cannot disagree about a ZDR turn.
++    #[must_use]
++    pub fn for_turn(zdr: bool, paid_allowed: bool) -> Self {
++        match (zdr, paid_allowed) {
++            (true, _) => Self::ZdrFreeOnly,
++            (false, true) => Self::PaidAllowed,
++            (false, false) => Self::FreeChain,
++        }
++    }
++}
++
++/// What a turn's searches were served by: each provider once, in the order it first served a hit, and the route.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct SearchProvenance {
++    pub providers: Vec<ProviderUse>,
++    pub route: Route,
++}
++
++/// The searches one chat turn has run. Held for the turn and dropped with it, never stored: a turn's searches
++/// are disclosed live and then gone. Tool calls of one turn run at once, hence the lock.
++#[derive(Debug)]
++pub struct SearchProvenanceTurn {
++    route: Route,
++    state: Mutex<TurnState>,
++}
++
++#[derive(Debug, Default)]
++struct TurnState {
++    providers: Vec<ProviderUse>,
++    sent: bool,
++}
++
++impl SearchProvenanceTurn {
++    /// A record for a turn whose searches are allowed `route`.
++    #[must_use]
++    pub fn new(route: Route) -> Self {
++        Self {
++            route,
++            state: Mutex::new(TurnState::default()),
++        }
++    }
++
++    /// Records one answered search. A hit counts for the provider that served it, or for `envelope` (the
++    /// provider the edge named for the answer) when the hit names none. A search with no hits still names the
++    /// provider it asked, so the line does not lose a search that found nothing.
++    pub fn record(&self, envelope: &str, hit_sources: &[&str]) {
++        let Ok(mut state) = self.state.lock() else {
++            return;
++        };
++        if hit_sources.is_empty() {
++            bump(&mut state.providers, provider_for(envelope), 0);
++        }
++        for &source in hit_sources {
++            let provider = if source.trim().is_empty() {
++                envelope
++            } else {
++                source
++            };
++            bump(&mut state.providers, provider_for(provider), 1);
++        }
++    }
++
++    /// The turn's disclosure, once. `None` while no search has run, and again after it was taken, so a turn
++    /// sends at most one line however often its stream asks for it.
++    pub fn take_provenance(&self) -> Option<SearchProvenance> {
++        let mut state = self.state.lock().ok()?;
++        if state.sent || state.providers.is_empty() {
++            return None;
++        }
++        state.sent = true;
++        Some(SearchProvenance {
++            providers: state.providers.clone(),
++            route: self.route,
++        })
++    }
++}
++
++/// Adds `hits` to the entry for `(id, label)`, opening the entry on its first hit.
++fn bump(providers: &mut Vec<ProviderUse>, (id, label): (&'static str, &'static str), hits: u32) {
++    match providers.iter_mut().find(|provider| provider.id == id) {
++        Some(provider) => provider.hits = provider.hits.saturating_add(hits),
++        None => providers.push(ProviderUse { id, label, hits }),
++    }
++}
++
++/// The closed id and label a Quarry provider id shows as.
++fn provider_for(raw: &str) -> (&'static str, &'static str) {
++    let raw = raw.trim();
++    PROVIDERS
++        .iter()
++        .find(|(quarry, _, _)| *quarry == raw)
++        .map_or(OTHER, |&(_, id, label)| (id, label))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{parse_enabled, provider_for, ProviderUse, Route, SearchProvenanceTurn, OTHER};
++
++    #[test]
++    fn the_switch_is_on_only_for_the_literal_true() {
++        assert!(parse_enabled(Some("true")));
++        assert!(parse_enabled(Some(" true ")));
++        for raw in [None, Some(""), Some("1"), Some("yes"), Some("True"), Some("on")] {
++            assert!(!parse_enabled(raw), "{raw:?} must not switch the line on");
++        }
++    }
++
++    #[test]
++    fn every_verified_quarry_provider_has_a_label_of_its_own() {
++        for quarry in [
++            "tantivy_local",
++            "brave",
++            "serper",
++            "searxng",
++            "stract",
++            "hybrid",
++            "reranked",
++            "fallback",
++            "smart_router",
++        ] {
++            assert_ne!(provider_for(quarry), OTHER, "{quarry} is named in the table");
++        }
++        assert_eq!(provider_for("brave"), ("brave", "Brave Search"));
++        assert_eq!(provider_for("tantivy_local"), ("tantivy_local", "Verevon index"));
++    }
++
++    #[test]
++    fn a_composite_router_shows_as_verevon_search() {
++        assert_eq!(provider_for("smart_router"), ("verevon", "Verevon search"));
++        assert_eq!(provider_for(" hybrid "), ("verevon", "Verevon search"));
++    }
++
++    #[test]
++    fn an_unknown_provider_is_never_echoed() {
++        let turn = SearchProvenanceTurn::new(Route::FreeChain);
++        turn.record("zzz_new_engine", &["zzz_new_engine"]);
++        let provenance = turn.take_provenance().expect("a search ran");
++        assert_eq!(
++            provenance.providers,
++            vec![ProviderUse {
++                id: "other",
++                label: "other provider",
++                hits: 1,
++            }]
++        );
++        let wire = serde_json::to_string(&provenance).expect("the line serializes");
++        assert!(!wire.contains("zzz_new_engine"), "the raw id reached the line: {wire}");
++    }
++
++    #[test]
++    fn two_searches_in_one_turn_add_their_hits_by_provider() {
++        let turn = SearchProvenanceTurn::new(Route::PaidAllowed);
++        turn.record("smart_router", &["brave", "brave", "tantivy_local"]);
++        turn.record("smart_router", &["brave"]);
++        let provenance = turn.take_provenance().expect("searches ran");
++        assert_eq!(
++            provenance.providers,
++            vec![
++                ProviderUse {
++                    id: "brave",
++                    label: "Brave Search",
++                    hits: 3,
++                },
++                ProviderUse {
++                    id: "tantivy_local",
++                    label: "Verevon index",
++                    hits: 1,
++                },
++            ]
++        );
++        assert_eq!(provenance.route, Route::PaidAllowed);
++    }
++
++    #[test]
++    fn a_hit_without_a_source_takes_the_envelope_provider() {
++        let turn = SearchProvenanceTurn::new(Route::FreeChain);
++        turn.record("searxng", &["", "stract"]);
++        let provenance = turn.take_provenance().expect("a search ran");
++        assert_eq!(
++            provenance.providers,
++            vec![
++                ProviderUse {
++                    id: "searxng",
++                    label: "SearXNG metasearch",
++                    hits: 1,
++                },
++                ProviderUse {
++                    id: "stract",
++                    label: "Stract",
++                    hits: 1,
++                },
++            ]
++        );
++    }
++
++    #[test]
++    fn a_search_with_no_hits_still_names_the_provider_it_asked() {
++        let turn = SearchProvenanceTurn::new(Route::FreeChain);
++        turn.record("brave", &[]);
++        assert_eq!(
++            turn.take_provenance().map(|provenance| provenance.providers),
++            Some(vec![ProviderUse {
++                id: "brave",
++                label: "Brave Search",
++                hits: 0,
++            }])
++        );
++    }
++
++    #[test]
++    fn the_route_follows_zdr_before_the_paid_grant() {
++        assert_eq!(Route::for_turn(true, true), Route::ZdrFreeOnly);
++        assert_eq!(Route::for_turn(true, false), Route::ZdrFreeOnly);
++        assert_eq!(Route::for_turn(false, true), Route::PaidAllowed);
++        assert_eq!(Route::for_turn(false, false), Route::FreeChain);
++        assert_eq!(
++            serde_json::to_value(Route::ZdrFreeOnly).expect("the route serializes"),
++            "zdr_free_only"
++        );
++    }
++
++    #[test]
++    fn nothing_is_sent_without_a_search_and_the_line_is_sent_once() {
++        let turn = SearchProvenanceTurn::new(Route::FreeChain);
++        assert!(turn.take_provenance().is_none());
++        turn.record("brave", &["brave"]);
++        assert!(turn.take_provenance().is_some());
++        assert!(
++            turn.take_provenance().is_none(),
++            "a second take must not send the line again"
++        );
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index a33800ddd..6bae56e40 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -4308,6 +4308,14 @@ pub async fn invoke_stream_sse(
+         ))
+         .with_usage_progress(usage_progress_switch())
+         .with_run_ceiling(run_ceiling)
++        // The turn's web-search provenance (EP-9 W1): every answered search records here, and the one frame after
++        // the tool phase names them all. Attached only while the line is switched on.
++        .with_search_provenance(crate::search_provenance::enabled().then(|| {
++            crate::search_provenance::SearchProvenanceTurn::new(crate::search_provenance::Route::for_turn(
++                effective_zdr,
++                crate::tool_loop::paid_providers_allowed(&model_clone, effective_zdr),
++            ))
++        }))
+         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
+ 
+         // Grounding's citations were already sent on the wire above (chat-
+@@ -4741,6 +4749,15 @@ pub async fn invoke_stream_sse(
+             }
+         }
+ 
++        // The turn's web-search provenance, sent once the tool phase is over: every search it ran, forced or
++        // looped, is on the record. Only a turn with the line switched on has a record, so with the switch off
++        // the cursor is not touched at all.
++        if sink.search_provenance().is_some() {
++            seq = sink.sync_cursor(seq).await;
++            sink.emit_search_provenance().await;
++            seq = sink.sync_cursor(seq).await;
++        }
++
+         // Reasoning request, derived server-side from the client's effort
+         // profile (never a client-supplied raw budget). `standard`/unset yields
+         // none, which is byte-identical to the pre-existing request. With the
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index b26e16566..af20040be 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -343,6 +343,13 @@ pub enum ChatEvent {
+         /// scopes, so those frames stay byte-identical to before.
+         knowledge: Option<KnowledgeReceipt>,
+     },
++    /// The search providers that served this turn's web searches, and the route its entitlement allowed (EP-9 W1).
++    /// Sent once, after the tool phase, and only while `MODEL_GATEWAY_SEARCH_PROVENANCE` is on and a search ran.
++    /// Provider ids, labels and counts only: no query, URL or hit text rides it. It is a `citations`-family frame,
++    /// so it arrives beside the source-scope frame it explains.
++    SearchProvenance {
++        provenance: crate::search_provenance::SearchProvenance,
++    },
+     /// Structured internal grounding payload rendered by the chat UI.
+     Grounding {
+         grounding: crate::retrieval::Grounding,
+@@ -692,7 +699,8 @@ impl ChatEvent {
+             ChatEvent::Citation { .. }
+             | ChatEvent::Grounding { .. }
+             | ChatEvent::Verification { .. }
+-            | ChatEvent::SourceScopeApplied { .. } => Some("citations"),
++            | ChatEvent::SourceScopeApplied { .. }
++            | ChatEvent::SearchProvenance { .. } => Some("citations"),
+             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
+             ChatEvent::Usage { .. }
+             | ChatEvent::ResultReceipt { .. }
+@@ -761,6 +769,7 @@ impl ChatEvent {
+             ChatEvent::ToolResult { .. } => "tool_result",
+             ChatEvent::Citation { .. } => "citation",
+             ChatEvent::SourceScopeApplied { .. } => "source_scope_applied",
++            ChatEvent::SearchProvenance { .. } => "search_provenance",
+             ChatEvent::Grounding { .. } => "grounding",
+             ChatEvent::Artifact { .. } => "artifact",
+             ChatEvent::Attachment { .. } => "attachment",
+@@ -876,6 +885,12 @@ impl ChatEvent {
+                 }
+                 payload
+             }
++            // Closed ids, labels and counts, and the route: nothing a query, a URL or a hit carries.
++            ChatEvent::SearchProvenance { provenance } => json!({
++                "providers": provenance.providers,
++                "route": provenance.route,
++                "request_id": request_id,
++            }),
+             ChatEvent::Grounding { grounding } => {
+                 serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
+             }
+@@ -1353,6 +1368,9 @@ pub struct RichEventSink {
+     /// The connected accounts the person selected for this turn (WS23-S5), read by the Ask loop's
+     /// connected-app read. It rides here as the clock does, so the loop takes no new parameter.
+     connector_turn: Option<crate::tool_loop::connector_reads::ConnectorTurn>,
++    /// The turn's web-search provenance record (EP-9 W1), attached only while the line is switched on. Every
++    /// answered search records on it, forced or looped, so the one frame after the tool phase names them all.
++    search_provenance: Option<crate::search_provenance::SearchProvenanceTurn>,
+     /// The stream's resume buffer and its shared frame cursor, when the caller
+     /// attached them. Tool calls, tool results and steps used to go out on the
+     /// live channel only, so a reload during the tool phase, source review or
+@@ -1564,6 +1582,7 @@ impl RichEventSink {
+             tally: std::sync::Mutex::new(RunTally::default()),
+             timing: None,
+             connector_turn: None,
++            search_provenance: None,
+             resume: None,
+             subscription_failure: std::sync::Mutex::new(None),
+         }
+@@ -1632,6 +1651,35 @@ impl RichEventSink {
+         self.connector_turn.as_ref()
+     }
+ 
++    /// Attach the turn's web-search provenance record (EP-9 W1). The caller attaches one only while the line is
++    /// switched on, so with the switch off the sink never records or sends anything for it.
++    #[must_use]
++    pub fn with_search_provenance(
++        mut self,
++        turn: Option<crate::search_provenance::SearchProvenanceTurn>,
++    ) -> Self {
++        self.search_provenance = turn;
++        self
++    }
++
++    /// The turn's web-search provenance record, when the caller attached one.
++    #[must_use]
++    pub fn search_provenance(&self) -> Option<&crate::search_provenance::SearchProvenanceTurn> {
++        self.search_provenance.as_ref()
++    }
++
++    /// Send the turn's search-provenance frame, once. The caller invokes it after the tool phase, so every
++    /// search of the turn is on the record. Sends nothing while no record is attached or no search ran.
++    pub async fn emit_search_provenance(&self) {
++        if let Some(provenance) = self
++            .search_provenance
++            .as_ref()
++            .and_then(crate::search_provenance::SearchProvenanceTurn::take_provenance)
++        {
++            self.emit(ChatEvent::SearchProvenance { provenance }).await;
++        }
++    }
++
+     /// Buffer every frame this sink sends for resume, under the stream's own
+     /// `id:` sequence starting at `next_seq`. The caller hands its cursor over
+     /// and takes it back with [`sync_cursor`](Self::sync_cursor) around every
+@@ -3489,6 +3537,7 @@ mod payload_contract {
+ 
+     use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
+     use crate::knowledge_receipt::{KnowledgeMode, KnowledgeReceipt};
++    use crate::search_provenance::{ProviderUse, Route, SearchProvenance};
+ 
+     const REQUEST_ID: &str = "req-sample";
+ 
+@@ -3511,6 +3560,7 @@ mod payload_contract {
+         "ToolResult",
+         "Citation",
+         "SourceScopeApplied",
++        "SearchProvenance",
+         "Grounding",
+         "Artifact",
+         "Attachment",
+@@ -3549,6 +3599,7 @@ mod payload_contract {
+             ChatEvent::ToolResult { .. } => "ToolResult",
+             ChatEvent::Citation { .. } => "Citation",
+             ChatEvent::SourceScopeApplied { .. } => "SourceScopeApplied",
++            ChatEvent::SearchProvenance { .. } => "SearchProvenance",
+             ChatEvent::Grounding { .. } => "Grounding",
+             ChatEvent::Artifact { .. } => "Artifact",
+             ChatEvent::Attachment { .. } => "Attachment",
+@@ -3856,6 +3907,21 @@ mod payload_contract {
+                 excluded_tools: vec![s("web_search")],
+                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
+             },
++            ChatEvent::SearchProvenance {
++                provenance: SearchProvenance {
++                    providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
++                    route: Route::FreeChain,
++                },
++            },
++            ChatEvent::SearchProvenance {
++                provenance: SearchProvenance {
++                    providers: vec![
++                        ProviderUse { id: "verevon", label: "Verevon search", hits: 1 },
++                        ProviderUse { id: "other", label: "other provider", hits: 0 },
++                    ],
++                    route: Route::ZdrFreeOnly,
++                },
++            },
+             grounding(false),
+             grounding(true),
+             ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1, provenance: None, editor: None },
+@@ -4212,6 +4278,26 @@ mod payload_contract {
+         assert_eq!(payload.as_object().map(serde_json::Map::len), Some(4));
+     }
+ 
++    /// `search_provenance` is a `citations`-family frame that names providers and a route, and nothing else (EP-9 W1).
++    #[test]
++    fn search_provenance_names_providers_and_a_route_only() {
++        let event = ChatEvent::SearchProvenance {
++            provenance: SearchProvenance {
++                providers: vec![ProviderUse { id: "brave", label: "Brave Search", hits: 2 }],
++                route: Route::PaidAllowed,
++            },
++        };
++        assert_eq!(event.name(), "search_provenance");
++        assert_eq!(event.family(), Some("citations"));
++        assert!(!event.should_emit(&[]), "a client that asked for no citations does not see it");
++        assert!(event.should_emit(&["citations".to_string()]));
++        let payload = event.payload("req-w1");
++        assert_eq!(payload["providers"], json!([{ "id": "brave", "label": "Brave Search", "hits": 2 }]));
++        assert_eq!(payload["route"], "paid_allowed");
++        assert_eq!(payload["request_id"], "req-w1");
++        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(3));
++    }
++
+     #[test]
+     fn every_variant_has_a_minimal_and_a_full_sample() {
+         let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 87cd5c5fc..dfd385de0 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -3177,7 +3177,7 @@ pub async fn dispatch_tool(
+         conversation, data_plane_bearer, execution_bearer, inference_bearer,
+         session_bearer, capability_bearer, zdr, sovereign_required,
+         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
+-        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None,
++        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None, None, None,
+     ).await
+ }
+ 
+@@ -3519,6 +3519,9 @@ async fn dispatch_tool_with_cost(
+     // The turn's batched-search refs: `Some` only on a chat turn with batched web search on. `None` leaves
+     // `web_search` single-query and `fetch_url` url-only, exactly as they were.
+     turn_refs: Option<&TurnRefs>,
++    // The turn's web-search provenance record (EP-9 W1): `Some` only on a live chat stream with the line switched
++    // on. `None` leaves the `web_search` arm exactly as it was.
++    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
+ ) -> ToolOutcome {
+     if !inline_tool_allowed(&call.name) {
+         return err_outcome(
+@@ -3967,6 +3970,18 @@ async fn dispatch_tool_with_cost(
+                     Err(e) => return err_outcome(call, format!("web_search failed: {e}")),
+                 }
+             }
++            // The line names every search the turn answered, so it is recorded only once the whole call has
++            // answered: a failed batch returned above, and its hits never reached the model.
++            if let Some(provenance) = search_provenance {
++                for reply in &replies {
++                    let sources: Vec<&str> = reply
++                        .results
++                        .iter()
++                        .map(|result| result.source.as_str())
++                        .collect();
++                    provenance.record(&reply.provider, &sources);
++                }
++            }
+             // Each hit carries the rerank report the edge sent for this search, so the
+             // relevance gate can say in its coverage line what the reranker did. The keys
+             // and the rule for omitting each one live with the projection, in
+@@ -5758,6 +5773,9 @@ async fn dispatch_audited_tool(
+     retry_sink: Option<&crate::sse_events::RichEventSink>,
+     // The turn's batched-search refs (see `dispatch_tool_with_cost`). `None` for every caller but the chat loop.
+     turn_refs: Option<&TurnRefs>,
++    // The turn's web-search provenance record (see `dispatch_tool_with_cost`). `None` for every caller but the
++    // chat loop and the forced pre-loop search.
++    search_provenance: Option<&crate::search_provenance::SearchProvenanceTurn>,
+ ) -> Result<ToolOutcome, &'static str> {
+     if session_bearer.is_empty() {
+         return Err("tool audit credential unavailable");
+@@ -5824,6 +5842,7 @@ async fn dispatch_audited_tool(
+             classifier_budget,
+             connector,
+             turn_refs,
++            search_provenance,
+         )
+     });
+     let outcome = until_read_deadline(call, read_deadline, attempts).await;
+@@ -5957,6 +5976,8 @@ pub(crate) async fn dispatch_web_tool_audited(
+         None,
+         // Deep research's searches are single queries and issue no refs: batched search is a chat-turn feature.
+         None,
++        // Deep research's searches are not on the chat turn's "Searched via" line: the line is the chat turn's own.
++        None,
+     )
+     .await
+ }
+@@ -7275,6 +7296,8 @@ pub async fn run_forced_web_search_for_model(
+         None,
+         // A forced search runs before the turn's tool loop and issues no refs: batched search is a loop feature.
+         None,
++        // The forced search is one of the turn's searches, so the "Searched via" line counts it.
++        sink.and_then(crate::sse_events::RichEventSink::search_provenance),
+     )
+     .await?;
+     // Gate BEFORE anything is emitted: the citations are built from the surviving
+@@ -8587,6 +8610,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
+     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
+     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
++    // The turn's web-search provenance record, read from the sink as the connected-account selection is. Every
++    // answered search records on it, so the one line after the tool phase names them all.
++    let search_provenance = sink.and_then(crate::sse_events::RichEventSink::search_provenance);
+     // The org's connected-app policy may hold the read back to Do mode (EP-10-S7). It is read only on a turn
+     // that already offers the read, so every other turn makes no extra call.
+     let connector_offered = connector_reads::offered(
+@@ -9539,6 +9565,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+                     connector_turn,
+                     retry_sink,
+                     turn_refs_ref,
++                    search_provenance,
+                 )
+                 .await
+             },
+@@ -16711,6 +16738,7 @@ mod tests {
+             None,
+             None,
+             refs,
++            None,
+         )
+         .await
+     }
+@@ -16755,6 +16783,86 @@ mod tests {
+         (outcome, bodies)
+     }
+ 
++    /// A `web_search` call records the provider behind each answered hit on the turn's record. A hit that names
++    /// no provider of its own takes the envelope's, so the line never loses a hit to a missing key (EP-9 W1).
++    #[tokio::test]
++    async fn a_search_records_each_hits_provider_on_the_turn_record() {
++        let server = wiremock::MockServer::start().await;
++        wiremock::Mock::given(wiremock::matchers::method("POST"))
++            .and(wiremock::matchers::path("/v1/search"))
++            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
++                "provider": "smart_router",
++                "results": [
++                    {"url": "https://a.test/1", "title": "A", "snippet": "a", "source": "brave"},
++                    {"url": "https://b.test/2", "title": "B", "snippet": "b", "source": "searxng"},
++                    {"url": "https://c.test/3", "title": "C", "snippet": "c"}
++                ]
++            })))
++            .mount(&server)
++            .await;
++        let mut state = crate::state::AppState::new();
++        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
++            base_url: server.uri(),
++            token: "test-token".to_owned(),
++            timeout: std::time::Duration::from_secs(5),
++        });
++        let turn = crate::search_provenance::SearchProvenanceTurn::new(
++            crate::search_provenance::Route::FreeChain,
++        );
++        let call = tool_call("web_search", r#"{"query":"alpha query"}"#);
++        let outcome = dispatch_tool_with_cost(
++            &state,
++            "run_test",
++            "org_test",
++            "user_test",
++            "thread_test",
++            "",
++            &[],
++            "",
++            None,
++            None,
++            "",
++            "",
++            None,
++            false,
++            false,
++            false,
++            &call,
++            None,
++            None,
++            None,
++            None,
++            &crate::turn_attachments::ValidatedAttachments::none(),
++            &[],
++            None,
++            None,
++            None,
++            Some(&turn),
++        )
++        .await;
++        assert!(outcome.error.is_none(), "{:?}", outcome.error);
++        assert_eq!(
++            turn.take_provenance().map(|provenance| provenance.providers),
++            Some(vec![
++                crate::search_provenance::ProviderUse {
++                    id: "brave",
++                    label: "Brave Search",
++                    hits: 1,
++                },
++                crate::search_provenance::ProviderUse {
++                    id: "searxng",
++                    label: "SearXNG metasearch",
++                    hits: 1,
++                },
++                crate::search_provenance::ProviderUse {
++                    id: "verevon",
++                    label: "Verevon search",
++                    hits: 1,
++                },
++            ])
++        );
++    }
++
+     /// Every query of a batched call is searched with the turn's own paid-provider entitlement, and no other.
+     #[tokio::test]
+     async fn batched_search_gives_every_query_the_turns_paid_entitlement() {

@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+# quarry-orchestrator-go (Go Temporal worker: scrape/batch/crawl workflows + schedules)
+#
+# Connects to a Temporal cluster (TEMPORAL_ADDR), a quarry-control instance
+# (CONTROL_BASE_URL), and a quarry-edge runtime (RUNTIME_BASE_URL).
+# Pulls quarrycontracts + quarryotel from local pkg/ via go.mod replace.
+
+FROM golang:1.26.5-bookworm AS build
+WORKDIR /src
+ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
+ENV GOSUMDB=sum.golang.org
+
+COPY pkg ./pkg
+COPY services/quarry-orchestrator ./services/quarry-orchestrator
+
+WORKDIR /src/services/quarry-orchestrator
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
+        -ldflags="-s -w -extldflags=-static" \
+        -o /out/orchestrator ./cmd/orchestrator
+
+# ---- Runtime image -----------------------------------------------------------
+# Orchestrator is a Temporal worker — no public HTTP listener. Healthcheck
+# proves the process is up via /proc; bookworm-slim is enough.
+FROM debian:bookworm-20260623-slim
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="CoreSystem Quarry orchestrator" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -e; \
+    export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
+    apt-get update -qq; \
+    if ! apt-get install -y -qq --no-install-recommends \
+        ca-certificates \
+        procps \
+        > /tmp/apt-install.log 2>&1; then \
+        cat /tmp/apt-install.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apt-install.log; \
+    echo 'quarry:x:65532:' >> /etc/group; \
+    echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
+
+COPY --from=build --chown=quarry:quarry /out/orchestrator /app/orchestrator
+
+USER quarry
+WORKDIR /app
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD pgrep -f orchestrator >/dev/null 2>&1 || exit 1
+ENTRYPOINT ["/app/orchestrator"]

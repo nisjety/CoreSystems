@@ -1,0 +1,23 @@
+{
+ "packets": [
+  {
+   "key": "orgcore-least-privilege-021-023",
+   "rows": ["D1-751"],
+   "title": "org-core: the 021 and 023 history tables are append-only for org_core_app, and every 021-023 table gets exactly the privileges its code uses",
+   "brief": "Context: apps/Control Plane/org-core/migrations/009_rls_enforce_tenant_isolation.up.sql runs ALTER DEFAULT PRIVILEGES ... GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO org_core_app (about line 58). So every table a later migration creates gets all four privileges for org_core_app, whatever that migration's own GRANT line says; a GRANT only adds. Measured by the lead on a real Postgres 2026-10-26: TestControlLifecycleModelEntitlementRepositoryUnderRLS (internal/modelentitlement/repository_postgres_test.go about line 165) and TestControlLifecycleBrowserSitesRepositoryUnderRLS (internal/browsersites/repository_postgres_test.go about line 166) fail with 'org_core_app must not be able to run UPDATE org_..._history ...'. The audit history tables are not append-only in production either.\n\nThe tables created by the build's migrations and the grants each migration states:\n- 021_org_model_entitlements.up.sql: org_model_policies (SELECT, INSERT, UPDATE, DELETE), org_model_policy_revisions (SELECT, INSERT, UPDATE), org_model_policy_history (SELECT, INSERT; the comment says append-only).\n- 022_siem_destinations.up.sql: siem_destinations (SELECT, INSERT, UPDATE, DELETE), organization_siem_audit_outbox (SELECT, INSERT).\n- 023_org_browser_sites.up.sql: org_browser_site_policy (SELECT, INSERT, UPDATE), org_browser_site_rules (all four), user_browser_site_prefs (all four), org_browser_site_history (SELECT, INSERT).\n\nTrap: the default-privilege leak may hide an UNDER-grant the code relies on. organization_siem_audit_outbox is granted SELECT, INSERT only, yet TestControlLifecycleSIEMAuditOutboxRetriesAFailedPublish passes, so check whether the org-core code UPDATEs or DELETEs that table (grep the internal/org siem files for organization_siem_audit_outbox). Do the same check for every table above: read the SQL that touches it (internal/modelentitlement, internal/browsersites, internal/org) and decide its needed set from the code, keeping the stated grant where the code agrees.\n\nDo: add migration 024 (pick a clear name, for example 024_org_core_app_least_privilege.up.sql and its .down.sql in migrations/revert or beside it, following how 021-023 place their down files) that REVOKEs from org_core_app every privilege a table above must not have (at least UPDATE and DELETE on the two history tables, DELETE on org_model_policy_revisions and org_browser_site_policy if the code never deletes them), and GRANTs explicitly any privilege the code needs that the table's migration did not state (so the effective set no longer depends on the default-privilege leak). Comment in the migration why: the 009 default privileges. The down migration restores the previous effective state (all four on each table). Do not edit 009 or 021-023 (they are applied on live databases; RunMigrations records versions in schema_migrations). Check that RunMigrations (internal/database/migrate.go) picks the new file up by name order, and update any test or contract that lists or counts the migration files.\n\nRegression test: add one Postgres-backed test (CONTROL_LIFECYCLE_TEST_DATABASE_URL, the same VerifyLifecycleMarker + RunMigrations setup the other org-core *_postgres_test.go files use; it skips without the variable) that, for every table above, reads has_table_privilege('org_core_app', '<table>', '<priv>') for SELECT, INSERT, UPDATE and DELETE and compares it with the table's needed set. It must fail on the code before migration 024 (the history tables would show UPDATE and DELETE). The two existing RLS tests are the behavioural regression and must pass unchanged. You cannot run Postgres here: make the test compile (go vet) and list it under db_tests; the lead runs it.\n\nMust NOT change: any other table's grants, the RLS policies, migrations 009 and 021-023, any Go code outside the new test. Files are CRLF or LF: preserve each file's style; a new .sql file follows the style of 023's files.",
+   "files": [],
+   "new_files": [
+    "apps/Control Plane/org-core/migrations/024_org_core_app_least_privilege.up.sql",
+    "apps/Control Plane/org-core/migrations/024_org_core_app_least_privilege.down.sql",
+    "apps/Control Plane/org-core/internal/org/table_privileges_postgres_test.go"
+   ],
+   "tests": [
+    "go build ./...",
+    "go vet ./...",
+    "go test -count=1 ./..."
+   ],
+   "cwd": "apps/Control Plane/org-core",
+   "severity": "high"
+  }
+ ]
+}

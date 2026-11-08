@@ -1,0 +1,521 @@
+{
+ "batchId": "W2-47",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS14-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib --tests --message-format=short",
+     "outcome": "EXIT 0, no errors. Three pre-existing unused-Json warnings in browser_run.rs test code, not S2. The committed attempt's compile errors are resolved by ff412d0af."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib approve_then_execute_tests",
+     "outcome": "7 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib execute_turn_tests",
+     "outcome": "22 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core grant",
+     "outcome": "12 passed, 0 failed, 19 ignored (DB-gated, not run here). Re-run on the final grpc.rs after the formatting fix: 12 passed, 0 failed."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test orchestration_http_test an_approval_answers",
+     "outcome": "2 passed, 0 failed (the new execute_now test and the existing next_message test)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test orchestration_http_test with filters plan, grant, approval, waived, exit_event, replica, zdr_credential",
+     "outcome": "plan 13, grant 14, approval 13, waived 3, exit_event 1, replica 4, zdr_credential 3: all passed. Exercises the refactored durable_grant_harness."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+     "outcome": "12 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+     "outcome": "12 passed, 0 failed"
+    },
+    {
+     "command": "./node_modules/.bin/vitest run src/features/chat/components/use-chat-controller.plan-gate.test.ts src/shared/api/chat-client.test.ts src/shared/actions/action-registry.test.ts (verevonv3)",
+     "outcome": "3 files, 209 passed, 0 failed. No front-end source changed in this batch."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on session-core grpc.rs and orchestration_http_test.rs (read-only)",
+     "outcome": "My hunks are clean after a formatting fix. Remaining hunks are pre-existing drift outside my blocks, not touched."
+    }
+   ],
+   "db_tests_written": [
+    "bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg"
+   ],
+   "lead_todo": [
+    "Run the DB harness for the extended bind test: scripts/tests/session-core-db-tests.sh with filter bind_grant_to_run (needs DATABASE_URL). It now also asserts that a non-owner member, a zero-retention caller and a lapsed grant bind nothing.",
+    "Live proof on the proof stack only (lead; docker is lead-only): rebuild model-gateway, session-core, execution-core and the BFF. Turn on MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, MODEL_GATEWAY_PLAN_EXECUTE_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED there; compose defaults stay false. MODEL_GATEWAY_DURABLE_PLAN_GRANT already defaults to true in compose (WS04 S4), so the approval answers execute_now only when all of these hold. Approve a plan in plan mode via :8080 and capture the plan-approval JSON (continuation execute_now), both SSE transcripts, the threads grant row and the executing run's runs.metadata (autonomy_rung, approved_plan_id, grant_bound_at). Then send a second execute for the same plan and capture the typed plan_grant_unavailable refusal.",
+    "No shared-edit lines are required for this batch's behaviour. ff412d0af already applied the compose passthrough (MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, default false), the ownership matrix row 26, the DEC-04 ledger entry (docs/decisions/ledger.md:563) and the status section.",
+    "Optional shared-edit: apps/Model Plane/MODEL_PLANE_STATUS.md:256 still says the slice's behaviour tests and ZDR goldens are missing. Update that sentence once the golden decision below is taken.",
+    "Decide the ZDR posture-matrix goldens. Either extend the matrix evaluator in a follow-up (model-gateway tests/zdr_posture_matrix.rs, its fixture copy and .sha256, and ENFORCEMENT_ROWS) or accept zdr_feature_table.rs plus the bind DB test as the coverage and drop the two goldens from the row.",
+    "Decide chat.reject_plan. Adding it means the admission regeneration listed in needs_other_files. Not done here; the reject control works through rejectPlan.",
+    "Write and run the e2e spec apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts against the live dev stack with the switches on."
+   ],
+   "deviations": [
+    "The typed refusal is an SSE error frame, not HTTP 409 JSON (see depth finding 6).",
+    "chat.reject_plan not added (depth finding 4).",
+    "ZDR posture-matrix goldens not added (depth finding 3).",
+    "The e2e spec was not written (depth finding 2).",
+    "Invoke-level gateway tests were not written (depth finding 1). Instead, approve_then_execute_tests (7 pass) pins the switch parser, the continuation rule, the plan field being ignored when off, the grant-names-plan rule, the bind response mapping, and the claim, bind and dispatch order. The new orchestration test pins execute_now versus next_message across the switches.",
+    "The session-core bind test covers a zero-retention (user-level ZDR) caller only; the waiver branch is not separately tested.",
+    "The plan-approval response always carries a continuation key, next_message when off. This is additive, so it is not byte-identical to the old body."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs and apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json (plus its .sha256): needed only if the two posture-matrix goldens are added.",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts, apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json, apps/Model Plane/api/contracts/agent-action-admission.json (and its .sha256 pin if present), and apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json: needed only for chat.reject_plan."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the DB harness for bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg (needs DATABASE_URL). It is #[ignore] and was not run. It now also covers a non-owner, a zero-retention caller and a lapsed grant.",
+     "Live proof on the proof stack with MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, MODEL_GATEWAY_PLAN_EXECUTE_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on. Capture: continuation execute_now, both SSE transcripts, the threads grant row, runs.metadata (autonomy_rung, approved_plan_id, grant_bound_at), and a second execute refused with plan_grant_unavailable.",
+     "Write and run the e2e spec apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts against the live dev stack.",
+     "Owner or lead decision on the two ZDR posture-matrix goldens. The evaluator files are outside this slice's ownership.",
+     "Owner or lead decision on chat.reject_plan. Adding it needs the admission golden regeneration and model-access.ts, both outside ownership."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives an execute turn carrying approved_plan_id through the invoke stream. Not covered: the pre-run refusal (wrong plan id, no or lapsed durable grant, typed plan_grant_unavailable before any run is dispatched); two concurrent executes where exactly one wins the APPROVED to EXECUTING compare-and-swap; and the bind-then-dispatch path that must run the rung and plan block once. The execute-turn harness lives in tests/e2e_invoke_chain_test.rs, which this slice does not own. Add these before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The e2e spec apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts named by the row was not written. It needs the live dev stack, so it belongs with the live proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The two ZDR posture-matrix goldens (e_zdr_token_execute_approved_plan_refused, e_zdr_token_bind_grant_refused) are absent. The matrix evaluator in model-gateway tests/zdr_posture_matrix.rs computes only route and bearer decisions, so a feature refusal cannot be expressed without changing that evaluator, its vendored fixture copy and its ENFORCEMENT_ROWS count. Refusal coverage today: zdr_feature_table.rs (approved_plan_id refused under agentic, 12 passed) and the session-core zero-retention refusal in the DB test (not run here)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof was run; docker and live proofs are lead-only. The proof needs the approve switch, the execute switch and the approval-resume switch on in the proof stack only. The durable-grant switch already defaults on in compose (WS04 S4)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "chat.reject_plan is not in the action registry. Adding it changes a generated admission golden (schemaHash per action, regenerated with VEREVON_UPDATE_GOLDEN=1), its vendored copies, and model-access.ts, a typed Record<ActionId, ...> whose missing key would fail typecheck. The reject control already works through rejectPlan (plan-approval with decision reject, chat-client.ts:2607)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The run is prepared before the plan claim (the run exists before the spawned stream claims the plan), so a second execute that loses the compare-and-swap is refused typed but may leave a durable run record. The live proof should confirm it reaches a terminal refused state."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The typed refusal reaches the client as an SSE error frame (plan_grant_unavailable) on the invoke stream, not the HTTP 409 JSON envelope the row names. It matches the stream's other typed refusals (plan_execute_disabled, invalid_request). Owner or lead to accept or change."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "BindGrantToRun checks run ownership and org but not the thread owner. Today the human run owner is the thread owner, because the thread-mutating RPCs check thread ownership, so this is not a live hole. An explicit authorize_thread_owner check in the bind would make that independent of run creation."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt --check still reports drift outside this slice's blocks: in session-core grpc.rs (for example the pre-existing grant_bound_at assertion near line 14052) and in orchestration_http_test.rs (around the existing durable plan approval tests). Not touched."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives an execute turn carrying approved_plan_id through the invoke stream. Not covered: the pre-run plan_grant_unavailable refusal, two concurrent executes where exactly one wins the APPROVED to EXECUTING CAS, and claim, then bind, then dispatch run once. approve_then_execute_tests pins only the pure helpers. These tests are needed before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE is turned on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row's ZDR posture-matrix goldens (e_zdr_token_execute_approved_plan_refused, e_zdr_token_bind_grant_refused) are absent. Refusal coverage today: zdr_feature_table.rs, plus the zero-retention case in the ignored session-core DB test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row's new file apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts does not exist."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The waiver branch of bind_grant_to_run (caller.zdr_waiver().is_some(), session-core grpc.rs:10345) has no test. Only the user-level ZDR caller is asserted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The new test an_approval_answers_execute_now_only_when_every_switch_and_the_durable_record_hold sets a process-wide env var under #[serial]. The switch is read per request (sse.rs:11255), so a non-serial approval test running in parallel in the same binary could see continuation execute_now. All 41 tests in orchestration_http_test passed here, but the race is possible. Moving the switch onto the plan store or AppState would remove it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "bind_grant_to_run checks the run owner and the org but not the thread owner. It relies on the run owner being the thread owner, which only holds because of how runs are created."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The typed refusal reaches the client as an SSE error frame (plan_grant_unavailable), not the HTTP 409 envelope the row names. Owner or lead to accept or change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Untracked apps/Model Plane/scripts/verify-hitl.sh (mtime 2026-11-02 01:30) mentions this slice's switch but is outside the ownership set. The implementer says it did not create it. The lead should confirm where it came from before staging. apps/Control Plane/audit-core/audit-verify.exe (2026-10-26) is pre-existing."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+      "outcome": "12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib --tests",
+      "outcome": "Finished, no errors; 3 pre-existing unused Json warnings in browser_run.rs",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p session-core --bin session-core --tests",
+      "outcome": "Finished, no errors; 2 dead-code warnings (auth.rs provider, terminalization.rs start_managed_run_inner)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib approve_then_execute_tests",
+      "outcome": "7 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib execute_turn_tests",
+      "outcome": "22 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core grant",
+      "outcome": "12 passed, 0 failed, 19 ignored (DB-gated, not run)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --test orchestration_http_test an_approval_answers",
+      "outcome": "2 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --test zdr_feature_table",
+      "outcome": "12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "vitest run --pool=threads plan-gate.test.ts chat-client.test.ts action-registry.test.ts (verevonv3)",
+      "outcome": "3 files, 209 passed, 0 failed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "audit"
+   ],
+   "notes": "WS14-S2 was already built on this branch: 37563e3c4 (W2-36, PARTIAL) plus the shared-file fixes in ff412d0af. This batch verified the committed state compiles and its unit tests pass. Built and present: the additive BindGrantToRun rpc on ThreadAutonomy (proto, Rust and Go bindings); session-core bind_grant_to_run (session:write, org check, run-owner Mutate, ZDR and waiver refusal, one conditional UPDATE copying four keys into runs.metadata, no SetRunMode); the gateway approval continuation (execute_now only with the approve switch, a durable write for the plan, and both execute switches; otherwise next_message); the invoke pre-run check (execute_granted needed, durable grant must name the plan, else typed plan_grant_unavailable); the claim, then bind, then dispatch order; the SPA's one execute turn carrying approved_plan_id; the action contract chat.execute_approved_plan. Everything is off by default: MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE defaults false in compose. This batch added the missing session-core DB cases (wrong owner, zero-retention caller, lapsed grant) and an orchestration test that pins execute_now versus next_message across the switches. Not done, and recorded as deviations and depth: invoke-level gateway tests, the e2e spec, the ZDR posture-matrix goldens, and chat.reject_plan. No live proof and no DB harness run were done here. Two untracked files in git status (apps/Control Plane/audit-core/audit-verify.exe, apps/Model Plane/scripts/verify-hitl.sh) were not created or edited by this batch."
+  },
+  {
+   "id": "WS14-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/scripts/verify-hitl.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "PYTHONUTF8=1 python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+     "outcome": "PASS: 'sse taxonomy up to date (31 events)', exit 0. The committed doc is unchanged."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts user_question (in apps/Model Plane/rust)",
+     "outcome": "PASS, exit 0: 13 unit tests passed; the golden target ran 5 tests, all passed."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --test autonomy_ladder_contract",
+     "outcome": "PASS, exit 0: 12 passed, 0 failed. Warnings were pre-existing dead-code and irrefutable-pattern warnings in files this slice did not touch."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p execution-core --test cross_service_loop_contract",
+     "outcome": "PASS, exit 0: 12 passed, 0 failed. The run first waited on a build-directory lock held by other cargo processes."
+    },
+    {
+     "command": "buf lint 'apps/Model Plane/proto' --error-format=json (compared with proto/buf-lint-baseline.json)",
+     "outcome": "NOT CLEAN, exit 100: 1676 findings against 1013 in the committed ratchet. 85 unique findings (92 occurrences) are absent from the baseline. They are COMMENT_* and naming findings on fields and messages in protos earlier WS14 commits changed: sessions.proto 32, capabilities.proto 21, orchestration.proto 11, browser.proto 9, memory.proto 9, execution.proto 6, runs.proto 3, gateway.proto 1. No proto file is modified in this slice, and no baseline entry disappeared."
+    },
+    {
+     "command": "buf breaking 'apps/Model Plane/proto' --against 'apps/Model Plane/proto/baseline.binpb'",
+     "outcome": "PASS, exit 0."
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/shared/chat-nodes",
+     "outcome": "DID NOT START: pnpm's dependency status check fails in this worktree (ENOENT for the Quarry-v2 SDK path under apps/Frontend Plane), before any test runs."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat src/shared/chat-nodes (vitest 4.1.11, run directly to bypass the pnpm wrapper)",
+     "outcome": "PASS, exit 0: Test Files 125 passed (125); Tests 1714 passed (1714)."
+    },
+    {
+     "command": "pnpm lint; pnpm typecheck",
+     "outcome": "NOT RUN: same pnpm start failure. Typecheck's first step is a tsc build of the Quarry SDK, which I did not run. No frontend file changed in this slice."
+    },
+    {
+     "command": "cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1",
+     "outcome": "NOT RUN: DB-backed ignored tests, run by the lead through the DB harness."
+    },
+    {
+     "command": "bash -n 'apps/Model Plane/scripts/verify-hitl.sh'; ad hoc helper tests in the scratchpad (sample SSE and JSON frames)",
+     "outcome": "PASS: bash -n OK; 18 helper checks, 0 failures. The live walk was not run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/.env.example: append at end of file the lines below. Block: '# WS14 human-in-the-loop switches (build plan WS14). All off; only the literal true turns one on, and each is flipped in the proof stack only, from captured evidence (docs/decisions/ledger.md, WS14 entries).' / '# The approve-then-execute walk needs MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (the WS03 flip, coupled) on; MODEL_GATEWAY_DURABLE_PLAN_GRANT is already true in compose.' / '# The ask_user walk needs AGENT_ASK_USER_ENABLED on in both model-gateway and execution-core. AGENT_ASK_USER_RESUME_ENABLED stays off until the WS14-S5 gateway and SPA halves exist.' / 'MODEL_GATEWAY_PLAN_EXECUTE_ENABLED=false' / 'MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE=false' / 'AGENT_ASK_USER_ENABLED=false' / 'AGENT_ASK_USER_RESUME_ENABLED=false'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert the two entries below after the '---' at line 23 and above the line '## 2026-11-01 - The Do browser zero-retention rule is a golden over the enforcement rows, not a matrix row (WS21-S10)' (line 25). Entry A heading: '## 2026-11-02 - Plan approval starts a new Do run; a grant never widens a run in flight (WS14-S2, DEC-04 (a))'. Entry A status: 'Status: implemented in source behind MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE (off); not live-verified. The earlier proposed entry for the same decision stays proposed until its trigger, a live run on the proof stack, is recorded.' Entry A decision: 'DEC-04 (a): the SPA sends one explicit execute turn carrying approved_plan_id. That turn is a new Do run on the same thread and is not in plan mode. session-core ThreadAutonomy.BindGrantToRun binds the thread durable grant to the run server-side, once, and only while the thread still names that plan; the client never supplies a rung. A plan run is read-only, and authority narrows, never widens, for a run in flight. The approval answers continuation execute_now only when the execute switch, the approval-resume switch and the durable grant are all on; otherwise next_message keeps today behaviour. A refusal is the typed plan_grant_unavailable.' Entry A open for owner: 'A durable plan grant still covers every later run on its thread for its 24 h TTL, and the approval response carries the continuation key even with the switch off.' Entry B heading: '## 2026-11-02 - ask_user is a pause kind with its own store, not an approval (WS14-S3 to S5, DEC-05 (b))'. Entry B status: 'Status: implemented in source, dark. Built: the run_questions store and its RPCs, the ask_user tool behind AGENT_ASK_USER_ENABLED (off), and the question card. Not built: the executor input pause and the resume delivery gateway and SPA halves (S5), so AGENT_ASK_USER_RESUME_ENABLED stays off. Not live-verified.' Entry B decision: 'DEC-05 (b): a question is a pause kind of its own, with its own table run_questions, that reuses the pause machinery. It is never a row of approvals: an approval is an authority grant, and an answer must never read as one. One schema, two delivery values: next_turn ships first (the answer is the owner next message), and resume continues the same run through /continue once S5 exists. ZDR and waived runs never get the tool (max_questions is 0, DEC-06 and DEC-32), and the list and answer routes refuse a ZDR caller with 412 zdr_durable_mutation_forbidden. Limits: 3 questions per run, 4 items per call, 6 options per item, 2000 characters, 24 h TTL for next_turn.' Each entry ends with a '---' line and a blank line.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md line 26: replace the text 'behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off;' with 'behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT` (compose default `true` since the WS04-S9 proof; the gateway reads it unset as off);'. Reason: docker-compose.yml sets it to true, and the code test asserts durable_plan_grant_from(None) is false.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: insert after line 56 (the 'Plans / steps / todos / approvals / subagent-lineage' ownership row) this row: '| ask_user questions (`run_questions`, WS14 S3-S5) | **session-core** (`orchestration_store.rs`, `orchestration_grpc.rs`; migrations 0054 and 0071); execution-core offers the tool (`ask.rs`) | Postgres | gateway list and answer routes; `user_question` control event | - | ✅ one owner; an answer is information and never reads as an approval (DEC-05) |'",
+    "shared-edit apps/Model Plane/docs/ZDR.md: insert after line 98 (the '**Do mode and delegation children**' row) this row: '| **ask_user questions (`run_questions`)** | No question is offered or stored for a zero-retention or waived run: the tool is not offered (`max_questions` 0), and the list and answer routes refuse a ZDR caller with `zdr_durable_mutation_forbidden` (412) before they read anything. A question prompt and the owner answer are stored with their run and erased with it (`ON DELETE CASCADE`). | Built behind `AGENT_ASK_USER_ENABLED` (off). The ZDR matrix row `ask_user_zdr_not_offered` is not authored yet, so this is checked by code path, not by a golden. |'",
+    "no edit needed: apps/Model Plane/deploy/docker-compose.yml already carries :-false defaults for MODEL_GATEWAY_PLAN_EXECUTE_ENABLED and MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE (model-gateway block, about lines 298-300), AGENT_ASK_USER_ENABLED (model-gateway about line 385 and execution-core about line 1565), and AGENT_ASK_USER_RESUME_ENABLED (execution-core about line 1568). Line numbers are approximate.",
+    "no edit now: apps/Model Plane/MODEL_PLANE_STATUS.md. No captured evidence exists for S2 or S4 in this batch, and the W2-36 and W2-42 ledger entries say nothing is live-verified. Update the WS14 rows only from the proof-stack evidence in the next item.",
+    "proof stack (lead, after the batch is committed and the services are rebuilt from the worktree as the compose recipe says): on the proof stack only, flip together MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED to true in model-gateway and execution-core (the coupled WS03 flip), and AGENT_ASK_USER_ENABLED to true in model-gateway and execution-core. MODEL_GATEWAY_DURABLE_PLAN_GRANT stays true. In the UI, make a plan in plan mode (its run is PLAN_RUN_ID, the plan PLAN_ID, the thread PLAN_THREAD_ID) and pick an existing thread for S4_THREAD_ID. Then run: MP_GATEWAY_URL=<gateway base> MP_USER_BEARER=<owner bearer, from the environment only> SESSION_CORE_SQL='<psql command, -tAq>' PLAN_RUN_ID=<run> PLAN_ID=<plan> PLAN_THREAD_ID=<thread> S4_THREAD_ID=<thread> bash 'apps/Model Plane/scripts/verify-hitl.sh'. Evidence lands in docs/compliance/evidence/hitl-<stamp>/ (result.txt and the response bodies). If S4 prints SKIP, rerun with an ambiguous S4_PROMPT. Then switch the same set back off.",
+    "DB harness (lead): run cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1 through scripts/tests/session-core-db-tests.sh with DATABASE_URL set, as the memory notes require. This slice did not run it.",
+    "git (lead): the file was made executable in the worktree. Commit it with mode 100755, for example git add --chmod=+x 'apps/Model Plane/scripts/verify-hitl.sh'. Keep the script LF (it is).",
+    "buf lint ratchet (lead decision): refresh apps/Model Plane/proto/buf-lint-baseline.json, or add comments to the WS14 proto fields that earlier commits added. 85 unique findings are missing from the ratchet (92 occurrences, sessions.proto 32, capabilities.proto 21, orchestration.proto 11, browser.proto 9, memory.proto 9, execution.proto 6, runs.proto 3, gateway.proto 1)."
+   ],
+   "deviations": [
+    "pnpm exec, pnpm lint and pnpm typecheck cannot run in this worktree (dependency status check, ENOENT on the Quarry-v2 SDK path). Chat vitest was run as node node_modules/vitest/vitest.mjs run instead; lint and typecheck were not run.",
+    "docs/sse-event-taxonomy.md was regenerated in check mode only: the generator output already equals the committed file, so no edit was made.",
+    "The row names buf lint as a gate, but it does not pass the committed ratchet. The 85 new findings come from earlier WS14 proto commits, outside this slice's files, and were not fixed here.",
+    "The ignored session-core DB tests were not run (DB harness, lead). The live proof of verify-hitl.sh was not run.",
+    "The helper tests for verify-hitl.sh were ad hoc, in the scratchpad, and are not committed."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/.env.example (append the WS14 switch block in lead_todo)",
+    "apps/Model Plane/docs/decisions/ledger.md (insert two entries in lead_todo)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md (row 26 correction and one ownership row in lead_todo)",
+    "apps/Model Plane/docs/ZDR.md (one questions row in lead_todo)",
+    "apps/Model Plane/MODEL_PLANE_STATUS.md (no edit in this batch: no captured evidence exists)",
+    "apps/Model Plane/deploy/docker-compose.yml (no edit needed: the WS14 defaults are already present)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: run apps/Model Plane/scripts/verify-hitl.sh on the proof stack with the coupled switches on (MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, AGENT_CONTINUE_AFTER_APPROVAL_ENABLED, AGENT_ASK_USER_ENABLED in model-gateway and execution-core), capture the evidence, then switch them back off. Docker is needed, so only the lead can do this.",
+     "Apply the implementer's lead_todo shared edits to deploy/.env.example, docs/decisions/ledger.md (the DEC-04 and DEC-05 entries), docs/capability-ownership-matrix.md (row 26 correction and the run_questions row) and docs/ZDR.md (the questions row). Update MODEL_PLANE_STATUS.md only from captured evidence.",
+     "Run cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1 through the DB harness (Docker/DATABASE_URL).",
+     "pnpm lint and pnpm typecheck could not run in this worktree because pnpm's dependency-status check fails. No frontend file changed in this slice.",
+     "Commit verify-hitl.sh with mode 100755 (git add --chmod=+x); it is LF with 0 CR.",
+     "buf lint does not pass the committed ratchet. This comes from earlier WS14 proto commits, not this slice. The lead must refresh buf-lint-baseline.json or comment the fields.",
+     "The 20-prompt over-asking eval has no location in the plan, so no over-asking evidence can be produced until the owner names one."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "As recorded in the W2-45 ledger entry (not re-verified in this slice), session-core keys the approval cause and decision writes on caller.zdr(), which is false for a waiver credential, and the approval_decided outbox row has no retention check; it is unreachable while waiver minting is off, but must be fixed before ZDR_WAIVER_ENABLED or APPROVAL_AUDIT_EVENTS_ENABLED goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A durable plan grant still covers every later run on its thread for its 24 h TTL, so the rung outlives the approved run; the owner must decide the scope before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE goes on (W2-36 ledger)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The S2 behaviour tests (bound rung once, second execute refused, wrong plan refused), the ZDR posture goldens for approved_plan_id and BindGrantToRun, chat.reject_plan and the e2e spec are not written (W2-36 ledger), so the plan's named S2 tests do not exist yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The S4 answer is recorded before the turn that carries it is sent, so a failed send leaves an answered question with no turn, and answered_message_id is never linked (W2-42 ledger)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The S4 answer and skip handlers write after their await without checking the thread (W2-42 ledger; not re-verified in this slice)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The S4 transcript question node, the reload restore, the e2e ask-user spec and the ZDR golden ask_user_zdr_not_offered are not built (W2-42 ledger), so the S4 definition of done is open on those items."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under TOOL_CLASS_GATE=enforce, ask_user is unclassified until capability-core migration 0029 is applied, and a read_only Do run cannot ask under the enforced gate (W2-42 lead decision); the proof stack must apply 0029 before enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The S5 gateway continue branch, the awaiting_input frame, RunPausedForInput and the SPA answer path are not built, so resume delivery stays refused and AGENT_ASK_USER_RESUME_ENABLED must stay off (W2-45 and W2-46 ledgers)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "verify-hitl.sh is written and its helpers are tested, but its S2 and S4 live walks have not been run; the lead must run it on the proof stack with the coupled switches flipped together and capture evidence before any WS14 status line changes."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The session-core run_question ignored DB tests must be run by the lead through the DB harness, and W2-46 records that the S5 DB tests were written but not run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "verify-hitl.sh does not prove that the follow-up turn's model input contains the answer, so the next_turn delivery path is unverified end to end (the header says so)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "question_asked (27) and question_answered (28) still read not yet in docs/sse-event-taxonomy.md; the owner should decide whether they reach the SSE stream before S4 is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Compose defaults MODEL_GATEWAY_DURABLE_PLAN_GRANT to true (the WS04-S9 flip), the code reads it unset as off, and capability-ownership-matrix row 26 says default off; the approve-then-execute flip story must account for this, and the row needs the correction in lead_todo."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The buf lint ratchet is stale: 85 unique findings are missing from buf-lint-baseline.json, all COMMENT_* or naming findings on WS14 proto fields added by earlier commits; the lead must refresh the ratchet or comment the fields."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's 20-prompt over-asking eval has no location in the plan (the row says eval location not determined, do not invent), so the S7 over-asking evidence cannot be produced until an owner names one."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The S2 approval response carries the continuation key even with the switch off (the W2-36 open question; the change is additive)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "pnpm cannot start in this worktree: its dependency status check fails with ENOENT on the Quarry-v2 SDK path under apps/Frontend Plane, so pnpm lint and pnpm typecheck cannot run here and vitest had to be run via node."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new verify-hitl.sh is executable in the worktree but git may record it as 100644 unless the lead adds it with --chmod=+x."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "verify-hitl.sh has passed bash -n, and I checked its routes, request fields and response fields against the code: /v1/runs/:run_id/plan-approval with continuation, /v1/orchestration/runs/:run_id/questions with {questions:[{id,state,delivery,items}]}, /v1/orchestration/questions/:id/answer with {answers:[{item_id,option_ids,text}]}/{skip}, 409 question_already_answered, the user_question frame's question_id/items, run_questions.state/delivery TEXT, and runs.metadata approved_plan_id/autonomy_rung. It has never run live."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The S4 walk does not check that the follow-up turn's model input carries the answer, so next_turn delivery is not proven end to end. The script's header says so."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "db() splits SESSION_CORE_SQL with read -r -a, so a psql command that needs a quoted argument containing spaces (for example -c '...' or a path with spaces) is split wrongly; the header example avoids this, but the limitation is not stated."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Compose defaults MODEL_GATEWAY_DURABLE_PLAN_GRANT to true, the code reads it unset as off, and capability-ownership-matrix row 26 says default off; the lead_todo correction should be applied."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A durable plan grant still covers later runs on its thread for its 24 h TTL. The owner must decide its scope before MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE goes on, as the W2-36 ledger already records."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The S5 gateway continue branch, the awaiting_input frame and the SPA answer path are not built, so AGENT_ASK_USER_RESUME_ENABLED must stay off and the script correctly does not drive it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Two tracked modified files (session-core/src/grpc.rs, model-gateway/tests/orchestration_http_test.rs) belong to WS14-S2 in the same batch W2-47, not S7. The lead should attribute them to S2 when committing."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-contracts user_question",
+      "outcome": "PASS: 13 unit tests passed, 0 failed; the golden target ran and was ok (the implementer reports 5 passed there; my filtered view showed no failures).",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+      "outcome": "PASS: 12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test cross_service_loop_contract",
+      "outcome": "PASS: 12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "python3 gen-sse-event-taxonomy.py --check",
+      "outcome": "PASS: 'sse taxonomy up to date (31 events)', exit 0",
+      "passed": true
+     },
+     {
+      "command": "buf breaking proto --against proto/baseline.binpb",
+      "outcome": "PASS, exit 0",
+      "passed": true
+     },
+     {
+      "command": "buf lint proto",
+      "outcome": "FAIL: exit 100. The implementer reports 85 unique findings absent from the committed ratchet, in protos changed by earlier WS14 commits. This slice changed no proto file. I did not re-diff the findings against the baseline.",
+      "passed": false
+     },
+     {
+      "command": "vitest run src/features/chat src/shared/chat-nodes (run as node node_modules/vitest/vitest.mjs run --pool=threads, because pnpm exec cannot start)",
+      "outcome": "PASS: 125 test files and 1714 tests passed. The plan's pnpm exec form could not run.",
+      "passed": true
+     },
+     {
+      "command": "pnpm lint",
+      "outcome": "CANNOT RUN: pnpm fails in its dependency-status check before any script runs. The error trace appears at runDepsStatusCheck. This matches the implementer's report of ENOENT for the Quarry SDK path.",
+      "passed": false
+     },
+     {
+      "command": "pnpm typecheck",
+      "outcome": "CANNOT RUN: same pnpm dependency-status failure. I did not run it separately, and the implementer also did not run it.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1",
+      "outcome": "NOT RUN: these are DB-backed ignored tests that need the DB harness, which means Docker, and I am not allowed to run Docker. They are left to the lead.",
+      "passed": false
+     },
+     {
+      "command": "bash -n apps/Model Plane/scripts/verify-hitl.sh",
+      "outcome": "PASS: syntax OK. The live walk was not run and cannot be run without Docker.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "S7 is the flip and proof bookkeeping, so no switch changes in code. Built: apps/Model Plane/scripts/verify-hitl.sh (new, chmod +x in the worktree). It has an S2 walk (approve, expect continuation execute_now, one execute turn, exactly one bound run at the granted rung, replay refused plan_grant_unavailable with still one run) and an S4 walk (ambiguous Do turn, user_question frame, list requested/next_turn, answer, identical retry replayed, different second answer 409 question_already_answered, follow-up turn, row answered/next_turn). bash -n passes; its pure helpers passed 18 ad hoc checks in the scratchpad (not committed). The live walk has not been run. docs/sse-event-taxonomy.md needs no edit: gen-sse-event-taxonomy.py --check passes with 31 events, so the committed doc already equals the generated one. Compose already has :-false defaults for every WS14 switch in the owning services (model-gateway: MODEL_GATEWAY_PLAN_EXECUTE_ENABLED, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, AGENT_ASK_USER_ENABLED; execution-core: AGENT_ASK_USER_ENABLED, AGENT_ASK_USER_RESUME_ENABLED). S6 is dropped as optional. S5 is partial (session-core half only; the gateway continue branch, awaiting_input frame and SPA answer path are not built), so AGENT_ASK_USER_RESUME_ENABLED stays off and the script does not drive it. Tests that ran and passed: mp-contracts user_question (13 unit + 5 golden), execution-core autonomy_ladder_contract (12), execution-core cross_service_loop_contract (12), and vitest on src/features/chat and src/shared/chat-nodes (125 files, 1714 tests). That vitest ran through node because pnpm cannot start in this worktree: its dependency status check fails with ENOENT on the Quarry-v2 SDK path under apps/Frontend Plane, before any script runs. Status is partial only because pnpm lint and pnpm typecheck did not run; no frontend file changed in this slice. The session-core run_question --ignored tests need the DB harness and are left to the lead."
+  }
+ ]
+}
