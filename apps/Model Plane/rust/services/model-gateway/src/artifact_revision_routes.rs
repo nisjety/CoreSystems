@@ -284,11 +284,13 @@ pub(crate) async fn composer_capabilities(
         &crate::zdr_posture::Route::plain(false),
     )
     .unwrap_or(true);
+    let context_refs = crate::context_refs::enabled();
     Json(json!({
         "data": with_reference_switches(
             capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
-            crate::context_refs::enabled(),
-            crate::thread_reference_tools::enabled(),
+            context_refs,
+            // A thread is referenced only through a reference, so its tools need the reference switch too.
+            context_refs && crate::thread_reference_tools::enabled(),
             zdr,
         )
     }))
