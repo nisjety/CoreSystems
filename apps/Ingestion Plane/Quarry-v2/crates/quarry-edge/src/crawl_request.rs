@@ -141,6 +141,9 @@ pub struct CrawlRequestSettings {
     pub features: CrawlFeatures,
     /// W3-E3.5-3: `QUARRY_EDGE__JOB_WEBHOOK`. Off: `webhook` is a reserved key.
     pub job_webhook: bool,
+    /// CW-1: whether the pipeline's PII redaction stage is on (`QUARRY_EDGE__PII_REDACTION`).
+    /// Off, a crawl refuses `scrape_options.redact_pii: on` rather than run it unredacted.
+    pub pii_redaction: bool,
 }
 
 /// `on`, `1` or `true` (any case) turn the flag on. Anything else, including a typo, is off.
@@ -158,6 +161,12 @@ impl CrawlRequestSettings {
         let value = lookup(ENV_REQUEST_VALIDATION).map(|value| value.trim().to_ascii_lowercase());
         let features = CrawlFeatures::from_lookup(&lookup);
         let job_webhook = job_webhook_flag(lookup(ENV_JOB_WEBHOOK));
+        let pii_redaction = quarry_runtime::pipeline::PiiRedactionSettings::parse(
+            lookup(quarry_runtime::pipeline::PII_REDACTION_ENV).as_deref(),
+            None,
+        )
+        .mode
+            == quarry_runtime::pipeline::PiiRedactionMode::On;
         let strict = match value.as_deref() {
             None | Some("") | Some("lenient") => false,
             Some("strict") => true,
@@ -172,6 +181,7 @@ impl CrawlRequestSettings {
             strict,
             features,
             job_webhook,
+            pii_redaction,
         }
     }
 
@@ -1063,6 +1073,17 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
                             field: format!("{path}.{key}"),
                         });
                     }
+                    // CW-1: a crawl page is redacted by the pipeline stage, which runs only
+                    // with QUARRY_EDGE__PII_REDACTION on. Off, the request is refused.
+                    if checked.options.redact_pii == Some(quarry_core::scrape::PiiRedaction::On)
+                        && !settings.pii_redaction
+                    {
+                        invalid.push(RequestField::new(
+                            format!("{path}.redact_pii"),
+                            "unsupported_option",
+                            "is not accepted on /v1/crawl until QUARRY_EDGE__PII_REDACTION is on",
+                        ));
+                    }
                     scrape_options = Some(checked.options);
                 }
                 Err(found) => {
@@ -1210,11 +1231,21 @@ mod tests {
     use serde_json::json;
 
     fn lenient() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: false, features: CrawlFeatures::default(), job_webhook: false }
+        CrawlRequestSettings {
+            strict: false,
+            features: CrawlFeatures::default(),
+            job_webhook: false,
+            pii_redaction: false,
+        }
     }
 
     fn strict() -> CrawlRequestSettings {
-        CrawlRequestSettings { strict: true, features: CrawlFeatures::default(), job_webhook: false }
+        CrawlRequestSettings {
+            strict: true,
+            features: CrawlFeatures::default(),
+            job_webhook: false,
+            pii_redaction: false,
+        }
     }
 
     fn with_features(strict: bool, sitemap: bool, scrape_options: bool) -> CrawlRequestSettings {
@@ -1222,11 +1253,17 @@ mod tests {
             strict,
             features: CrawlFeatures { sitemap, scrape_options },
             job_webhook: false,
+            pii_redaction: false,
         }
     }
 
     fn with_job_webhook(strict: bool) -> CrawlRequestSettings {
-        CrawlRequestSettings { strict, features: CrawlFeatures::default(), job_webhook: true }
+        CrawlRequestSettings {
+            strict,
+            features: CrawlFeatures::default(),
+            job_webhook: true,
+            pii_redaction: false,
+        }
     }
 
     fn parse(body: Value, settings: CrawlRequestSettings) -> Result<ParsedCrawl, Refusal> {
@@ -1410,6 +1447,30 @@ mod tests {
         assert!(absent.scrape_options.is_none());
         let null = parse(json!({ "url": "https://e.test/", "scrape_options": null }), settings).unwrap();
         assert!(null.scrape_options.is_none());
+    }
+
+    #[test]
+    fn redact_pii_in_scrape_options_waits_for_the_stage() {
+        // CW-1: a crawl page is redacted by the pipeline stage. With the stage off the
+        // request is refused, never run unredacted; with it on the option is kept.
+        let body = json!({ "url": "https://e.test/", "scrape_options": { "redact_pii": "on" } });
+        let off = with_features(false, false, true);
+        assert_eq!(
+            codes(&parse(body.clone(), off)),
+            vec![("scrape_options.redact_pii".to_owned(), "unsupported_option")]
+        );
+        let on = CrawlRequestSettings {
+            pii_redaction: true,
+            ..with_features(false, false, true)
+        };
+        let kept = parse(body, on).unwrap();
+        assert_eq!(
+            kept.scrape_options.expect("scrape options kept").redact_pii,
+            Some(quarry_core::scrape::PiiRedaction::On)
+        );
+        let plain = json!({ "url": "https://e.test/", "scrape_options": { "redact_pii": "off" } });
+        let plain = parse(plain, off).unwrap();
+        assert!(plain.scrape_options.expect("scrape options kept").redact_pii.is_none());
     }
 
     #[test]

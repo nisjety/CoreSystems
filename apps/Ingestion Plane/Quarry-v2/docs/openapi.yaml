@@ -8742,8 +8742,11 @@ components:
             stored markdown and html artifacts of each page, and the text `ingest: true` sends to
             the Data Plane, are the cleaned content. Links are discovered from the whole page
             whatever `include_tags` and `exclude_tags` cut. A page cleaned differently from the
-            default neither reads nor writes the page cache. `data.effective.scrape_options` echoes
-            the resolved form.
+            default neither reads nor writes the page cache. `redact_pii: on` redacts each page's
+            text before anything is stored, through the pipeline stage. It needs
+            QUARRY_EDGE__PII_REDACTION on; off, it is a 400 `unsupported_option` (path
+            `scrape_options.redact_pii`). A redacted page neither reads nor writes the page cache.
+            `data.effective.scrape_options` echoes the resolved form.
           properties:
             formats:
               type: array
@@ -8800,6 +8803,11 @@ components:
             type: string
             format: uri
           description: URLs to scrape in parallel
+        redact_pii:
+          type: string
+          description: >-
+            CW-1. A batch page has no per-page scrape options, so it cannot be redacted: `on`
+            (or `redactPii: on`) is a 400 `unsupported_option`. `off` is the default.
     CachePolicy:
       type: object
       properties:

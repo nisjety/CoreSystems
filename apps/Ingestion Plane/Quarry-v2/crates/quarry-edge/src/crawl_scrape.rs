@@ -11,6 +11,8 @@
 //!   `extractor`: the cleaning that makes the markdown (and so the stored artifact
 //!   and what `ingest: true` sends to the Data Plane)
 //! - `timeout_ms`: the bound on one page's run, 1000 to 55000
+//! - `redact_pii`: `on` redacts each page's text before anything is stored, through
+//!   the pipeline stage; it needs `QUARRY_EDGE__PII_REDACTION` on (see `crawl_request`)
 //!
 //! `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`,
 //! `summary`, `question`, `highlights` and the capture or AI formats cannot apply
@@ -23,10 +25,14 @@
 //! depth: the orchestrator is trusted, a stored job param is not) and cleans with it.
 //! Behind `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS`; see `crawl_policy::CrawlFeatures`.
 
-use quarry_core::scrape::{Extractor, FieldError, ScrapeLimits, ScrapeOptions, RESERVED_REJECTED};
+use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_core::scrape::{
+    Extractor, FieldError, PiiRedaction, ScrapeLimits, ScrapeOptions, RESERVED_REJECTED,
+};
+use quarry_runtime::pipeline::PII_REDACTION_FAILED;
 use quarry_transform::clean_html::CleanOptions;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 /// The `formats` strings a crawl accepts.
 pub const SUPPORTED_FORMATS: [&str; 6] = [
@@ -44,7 +50,7 @@ const UNSUPPORTED_FORMAT_NAMES: [&str; 6] = [
 ];
 
 /// Each supported key, snake_case first and its camelCase alias.
-const KEYS: [(&str, &str); 7] = [
+const KEYS: [(&str, &str); 8] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -52,10 +58,11 @@ const KEYS: [(&str, &str); 7] = [
     ("remove_base64_images", "removeBase64Images"),
     ("extractor", "extractor"),
     ("timeout_ms", "timeoutMs"),
+    ("redact_pii", "redactPii"),
 ];
 
 /// Keys that exist on `/v1/scrape` (or are Firecrawl options) and cannot apply per page.
-const UNSUPPORTED_KEYS: [&str; 16] = [
+const UNSUPPORTED_KEYS: [&str; 14] = [
     "actions",
     "actions_on_error",
     "actionsOnError",
@@ -67,8 +74,6 @@ const UNSUPPORTED_KEYS: [&str; 16] = [
     "summary",
     "question",
     "highlights",
-    "redact_pii",
-    "redactPii",
     "render",
     "wait_for",
     "waitFor",
@@ -89,6 +94,9 @@ pub struct CrawlScrapeOptions {
     /// The bound on one page's run. Absent: the route's own limits apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// CW-1: `on` redacts each page's text before it is stored or returned. Absent for `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact_pii: Option<PiiRedaction>,
 }
 
 /// A body that passed the checks, with the keys it carried that nothing reads.
@@ -114,9 +122,10 @@ impl CrawlScrapeOptions {
     /// Whether the page cache may serve or store a page run with these options.
     /// The page cache is keyed by the page's fingerprint alone, so a page cleaned
     /// differently from the default must neither read nor write it. `formats` and
-    /// `timeout_ms` shape delivery, not the stored result.
+    /// `timeout_ms` shape delivery, not the stored result. A redacted page neither reads
+    /// nor writes it either: the entry is keyed by the page alone, not by the redaction.
     pub fn cache_admissible(&self) -> bool {
-        self.clean_options().is_default()
+        self.clean_options().is_default() && self.redact_pii.is_none()
     }
 
     /// The canonical JSON form (what is stamped and sent).
@@ -200,13 +209,23 @@ pub fn check(value: &Value, strict: bool) -> Result<Checked, Vec<FieldError>> {
         }
     }
 
-    let parsed = match ScrapeOptions::from_value(&Value::Object(accepted)) {
+    let mut parsed = match ScrapeOptions::from_value(&Value::Object(accepted)) {
         Ok(parsed) => Some(parsed),
         Err(found) => {
             errors.extend(found);
             None
         }
     };
+    // A crawl never runs under ZDR (`refuse_durable_job_under_zdr`), so the scrape route's
+    // rule that `redact_pii: on` needs ZDR would refuse every crawl. The pipeline stage
+    // redacts a crawl page instead, and `run_page` refuses it while the stage is off.
+    let redact_pii = parsed
+        .as_ref()
+        .and_then(|parsed| parsed.redact_pii)
+        .filter(|option| *option == PiiRedaction::On);
+    if let Some(parsed) = parsed.as_mut() {
+        parsed.redact_pii = None;
+    }
     let resolved = match parsed.as_ref() {
         Some(parsed) => match parsed.clone().resolve(false, &ScrapeLimits::default()) {
             Ok(resolved) => Some(resolved),
@@ -243,9 +262,37 @@ pub fn check(value: &Value, strict: bool) -> Result<Checked, Vec<FieldError>> {
             remove_base64_images: resolved.remove_base64_images,
             extractor: resolved.extractor,
             timeout_ms: parsed.timeout_ms,
+            redact_pii,
         },
         unknown,
     })
+}
+
+/// CW-1: whether a stamped `scrape` value asks for redaction, in either spelling.
+pub fn stamped_requests_redaction(value: &Value) -> bool {
+    ["redact_pii", "redactPii"]
+        .iter()
+        .any(|key| value.get(*key).and_then(Value::as_str) == Some("on"))
+}
+
+/// CW-1: the refusal of a page that asks for redaction and cannot be served with it: the
+/// crawl options are off, or the pipeline stage is off. Such a page is refused, never run
+/// unredacted. `None` when the page may run.
+pub fn redaction_refusal(
+    requested: bool,
+    scrape_options_on: bool,
+    stage_on: bool,
+) -> Option<QuarryError> {
+    if !requested || (scrape_options_on && stage_on) {
+        return None;
+    }
+    Some(
+        QuarryError::new(
+            ErrorCode::Forbidden,
+            "redact_pii cannot be served: PII redaction is not enabled on this edge (QUARRY_EDGE__PII_REDACTION)",
+        )
+        .with_details(json!({ "reason": PII_REDACTION_FAILED })),
+    )
 }
 
 #[cfg(test)]
@@ -413,16 +460,61 @@ mod tests {
     }
 
     #[test]
-    fn crawl_refuses_redact_pii_never_silently_ignores_it() {
-        // CW-1: redact_pii exists on /v1/scrape but cannot apply to every page of a
-        // crawl. In lenient mode it used to be collected as an unknown key and
-        // warned-and-ignored, so the crawl ran without the requested redaction.
+    fn redact_pii_on_is_kept_stamped_and_keeps_the_page_cache_apart() {
+        // CW-1: the pipeline stage redacts a crawl page, so `on` is accepted here (the
+        // scrape route's ZDR rule does not apply to a crawl) and carried to `run_page`.
         for key in ["redact_pii", "redactPii"] {
-            let result = check(&json!({ key: "on" }), false);
+            let checked = check(&json!({ key: "on" }), false).unwrap();
+            assert_eq!(checked.options.redact_pii, Some(PiiRedaction::On), "{key}");
+            assert!(!checked.options.cache_admissible(), "{key}");
+            let stamped = checked.options.to_value();
+            assert_eq!(stamped["redact_pii"], json!("on"), "{key}");
             assert_eq!(
-                codes(&result),
-                vec![pair(key, "unsupported_option")],
+                CrawlScrapeOptions::from_stamped(&stamped).unwrap(),
+                checked.options,
                 "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_pii_off_is_the_default_and_is_not_stamped() {
+        let off = check(&json!({ "redact_pii": "off" }), false).unwrap();
+        assert_eq!(off.options.redact_pii, None);
+        assert!(off.options.to_value().get("redact_pii").is_none());
+        assert!(off.options.cache_admissible());
+    }
+
+    #[test]
+    fn redact_pii_accepts_only_off_and_on() {
+        for key in ["redact_pii", "redactPii"] {
+            let found = codes(&check(&json!({ key: "maybe" }), false));
+            assert_eq!(found.len(), 1, "{key}");
+            assert_eq!(found[0].1, "unsupported_redact_pii", "{key}");
+        }
+    }
+
+    #[test]
+    fn stamped_redaction_is_read_in_either_spelling() {
+        assert!(stamped_requests_redaction(&json!({ "redact_pii": "on" })));
+        assert!(stamped_requests_redaction(&json!({ "redactPii": "on" })));
+        assert!(!stamped_requests_redaction(&json!({ "redact_pii": "off" })));
+        assert!(!stamped_requests_redaction(
+            &json!({ "exclude_tags": ["nav"] })
+        ));
+        assert!(!stamped_requests_redaction(&Value::Null));
+    }
+
+    #[test]
+    fn a_page_that_asks_for_redaction_is_refused_unless_both_switches_are_on() {
+        assert!(redaction_refusal(false, false, false).is_none());
+        assert!(redaction_refusal(true, true, true).is_none());
+        for (scrape_on, stage_on) in [(true, false), (false, true), (false, false)] {
+            let refusal = redaction_refusal(true, scrape_on, stage_on).expect("refused");
+            assert_eq!(refusal.code, ErrorCode::Forbidden);
+            assert_eq!(
+                refusal.details.as_ref().expect("details")["reason"],
+                PII_REDACTION_FAILED
             );
         }
     }
