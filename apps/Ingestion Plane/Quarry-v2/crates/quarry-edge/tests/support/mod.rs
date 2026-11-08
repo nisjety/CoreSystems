@@ -50,6 +50,7 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         require_browser_grants: false,
         zdr_refuse_durable_resources: false,
         profile_owner_enforce: quarry_edge::profile_guard::OwnerEnforce::Observe,
+        profile_clear_data: false,
         org_erasables: Vec::new(),
         driver,
         drivers,

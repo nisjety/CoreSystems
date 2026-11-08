@@ -369,3 +369,14 @@ A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_
 Field errors (400, in `details.fields[]`, each with a path and never a value): `invalid_locale` (at `locale`: not a language tag such as en-US or nb-NO), `invalid_timezone` (at `timezone`: not an IANA-shaped name), `out_of_range` (at `location.latitude`, `location.longitude` or `location.accuracy`), `missing_field` (at `location.latitude` or `location.longitude`), `unknown_field` (at `location.<key>`: the object takes latitude, longitude and accuracy), and `invalid_type` (at `locale`, `timezone` or `location`). While `QUARRY_EDGE__PER_PAGE_LOCALE` is off these keys are not errors at all: they are unknown fields, a warning (or `unknown_field` in strict validation), as they were before.
 
 Browser errors: 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed`, `details.field` (`locale`, `timezone` or `location`) and `details.error_class` (`invalid_value`, `already_set` or `cdp_error`), when the browser refuses a value. Any other browser failure of this kind is `DRIVER_FAILED` with the same details. The value is never in the error. No browser on the edge: 400 `BAD_REQUEST` with one field error per emulated field in `details.fields[]`, each with code `unsupported_option` (paths `locale`, `timezone` and `location`). A browser that serves the request but cannot emulate (a remote provider): 501 `UNSUPPORTED` with `details.reason` `browser_capability_unavailable`.
+## `POST /v1/profiles/:id/clear-data`: removing a stored profile's browsing data (F-t2-068)
+
+| status | code | `details.reason` | meaning | what to do |
+|---|---|---|---|---|
+| 403 | `FORBIDDEN` | none | a service principal never reaches a profile | use a person's token |
+| 404 | `NOT_FOUND` | none | no such profile, or not visible to the caller under `enforce` (a non-owner, and on a shared profile anyone but its owner) | check the id |
+| 409 | `CONFLICT` | `profile_in_use` | a live run (a browser session) holds this profile; its session would save the profile again when it closes | close the session, then clear |
+| 409 | `CONFLICT` | `profile_busy` (`retry_after_seconds`) | the profile was written while it was being cleared, on three attempts | retry |
+| 501 | `UNSUPPORTED` | `profile_clear_data_disabled` (`env`) | `QUARRY_EDGE__PROFILE_CLEAR_DATA` is off | ask the operator |
+
+A 200 with `dry_run: true` (the default) changes nothing. A ZDR organization is not refused: the route only erases what is stored.

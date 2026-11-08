@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 
 use quarry_browser::session::{
-    ProfileMetadata, ProfileScope, ProfileSummary, SaveMeta, SessionSnapshot,
+    BrowsingDataCounts, ProfileMetadata, ProfileScope, ProfileSummary, SaveMeta, SaveOutcome,
+    SessionSnapshot,
 };
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
@@ -64,6 +65,8 @@ impl ProfileSummaryResponse {
 #[derive(Debug, Serialize)]
 pub struct ListProfilesResponse {
     pub profiles: Vec<ProfileSummaryResponse>,
+    /// Whether `POST /v1/profiles/:id/clear-data` is served on this deployment (F-t2-068).
+    pub clear_data_enabled: bool,
 }
 
 /// `POST /v1/profiles/create` — explicitly create a named, scoped
@@ -571,6 +574,154 @@ pub async fn delete_profile(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /v1/profiles/:id/clear-data` (F-t2-068): removes a stored profile's browsing data
+/// (cookies, web storage, IndexedDB) and keeps the profile, its name, scope and owner. It answers
+/// 501 unless `QUARRY_EDGE__PROFILE_CLEAR_DATA` is on. `dry_run` defaults to true, so a call that
+/// does not say `dry_run: false` only counts what it would remove.
+///
+/// A profile a live run holds answers 409 `profile_in_use`: that run's browser session would save
+/// its cookies again when it closes. The clear never reads or changes a live session.
+#[derive(Debug, Deserialize)]
+pub struct ClearDataRequest {
+    #[serde(default = "dry_run_by_default")]
+    pub dry_run: bool,
+}
+
+fn dry_run_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClearDataResponse {
+    pub profile_id: String,
+    pub dry_run: bool,
+    /// True when this call removed the data. False on a dry run, and when nothing was there.
+    pub cleared: bool,
+    /// What was removed, or on a dry run what would be. Counts only, never a name or a value.
+    pub counts: BrowsingDataCounts,
+}
+
+/// Attempts at a clear when a capture lands between this call's read and its write (the store
+/// answers `IgnoredStale`). The next attempt reads the newer snapshot.
+const CLEAR_ATTEMPTS: usize = 3;
+
+pub async fn clear_profile_data(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(profile_id): Path<String>,
+    Json(req): Json<ClearDataRequest>,
+) -> Result<Json<Envelope<ClearDataResponse>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    profile_guard::precheck(&state, &claims, ProfileOp::ClearData, &request_id)?;
+    if !state.profile_clear_data {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "clearing a profile's browsing data is not enabled on this deployment",
+            )
+            .with_details(serde_json::json!({
+                "reason": "profile_clear_data_disabled",
+                "env": "QUARRY_EDGE__PROFILE_CLEAR_DATA",
+            })),
+        ));
+    }
+    let parsed = parse_id(&profile_id).map_err(|e| err_response(&request_id, e))?;
+    profile_guard::authorize(&state, &claims, &parsed, ProfileOp::ClearData)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    if profile_held_by_live_run(&state, &claims.org_id, &parsed).await {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Conflict,
+                "a browser session is open on this profile; close it before clearing the profile",
+            )
+            .with_details(serde_json::json!({ "reason": "profile_in_use" })),
+        ));
+    }
+
+    for _ in 0..CLEAR_ATTEMPTS {
+        let snapshot = state
+            .profiles
+            .load(&claims.org_id, &parsed)
+            .await
+            .map_err(|e| err_response(&request_id, e))?
+            .ok_or_else(|| profile_not_found(&request_id, &profile_id))?;
+        let counts = snapshot.browsing_data_counts();
+        let mut response = ClearDataResponse {
+            profile_id: parsed.to_string(),
+            dry_run: req.dry_run,
+            cleared: false,
+            counts,
+        };
+        if req.dry_run || counts.is_empty() {
+            return Ok(Json(Envelope::ok(request_id, response)));
+        }
+        // Stamped with the time of this write, so a capture that started before it cannot put
+        // the cleared data back; the metadata row is not touched.
+        let outcome = state
+            .profiles
+            .save(
+                &claims.org_id,
+                &parsed,
+                &snapshot.without_browsing_data(),
+                &SaveMeta::now(None),
+            )
+            .await
+            .map_err(|e| err_response(&request_id, e))?;
+        match outcome {
+            SaveOutcome::Stored { .. } => {
+                response.cleared = true;
+                return Ok(Json(Envelope::ok(request_id, response)));
+            }
+            SaveOutcome::IgnoredByTombstone => {
+                return Err(profile_not_found(&request_id, &profile_id));
+            }
+            SaveOutcome::IgnoredStale => {}
+        }
+    }
+    Err(err_response(
+        &request_id,
+        QuarryError::new(
+            ErrorCode::Conflict,
+            "the profile changed while it was being cleared; try again",
+        )
+        .with_details(serde_json::json!({ "reason": "profile_busy", "retry_after_seconds": 2 })),
+    ))
+}
+
+fn profile_not_found(request_id: &str, profile_id: &str) -> (StatusCode, Json<Envelope<()>>) {
+    err_response(
+        request_id,
+        QuarryError::new(
+            ErrorCode::NotFound,
+            format!("profile not found: {profile_id}"),
+        ),
+    )
+}
+
+/// Whether a live run of `org_id` holds `profile_id`. A run is in the registry from its start
+/// until `close::finish_run` removes it, and its browser session saves the profile again when it
+/// releases. The window between that removal and the release is not seen here.
+async fn profile_held_by_live_run(
+    state: &AppState,
+    org_id: &str,
+    profile_id: &ProfileKind,
+) -> bool {
+    let runs = match state.agent_runs.lock() {
+        Ok(inner) => inner.snapshot(),
+        Err(poisoned) => poisoned.into_inner().snapshot(),
+    };
+    for (_, handle) in runs {
+        let entry = handle.entry.lock().await;
+        if entry.org_id == org_id && entry.lease.profile_id == *profile_id {
+            return true;
+        }
+    }
+    false
+}
+
 /// Cycle 20 / cluster #13 — restore-probe endpoint.
 ///
 /// Validates that a saved profile can still drive a browser session to
@@ -722,6 +873,7 @@ pub async fn list_profiles(
                 .into_iter()
                 .map(|summary| ProfileSummaryResponse::for_caller(summary, actor))
                 .collect(),
+            clear_data_enabled: state.profile_clear_data,
         },
     )))
 }

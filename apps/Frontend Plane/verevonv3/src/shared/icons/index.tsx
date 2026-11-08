@@ -2521,6 +2521,16 @@ export const TimerReset = (props: LucideProps) => <Icon {...props} name="timer-r
   d: 'M9 17H4v5',
   key: '8t5av'
 }]]} />
+export const Eraser = (props: LucideProps) => <Icon {...props} name="eraser" iconNode={[['path', {
+  d: 'm7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21',
+  key: '182aya'
+}], ['path', {
+  d: 'M22 21H7',
+  key: 't4ddhn'
+}], ['path', {
+  d: 'm5 11 9 9',
+  key: '1mzp24'
+}]]} />
 export const Trash2 = (props: LucideProps) => <Icon {...props} name="trash-2" iconNode={[['path', {
   d: 'M10 11v6',
   key: 'nco0om'

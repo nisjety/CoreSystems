@@ -144,58 +144,6 @@ export function SearchResultCard(props: {
   )
 }
 
-export function WebPageViewer(props: { result: PreviewResult | null }) {
-  const i18n = useI18n()
-  return (
-    <section class="dashboard-webview" aria-label={i18n.tr('Websidevisning i Verevon', 'Web page view in Verevon')}>
-      <Show
-        when={props.result}
-        fallback={
-          <div class="dashboard-webview__empty">
-            <p class="dashboard-xsearch-eyebrow">{i18n.tr('Webvisning', 'Web view')}</p>
-            <h3>{i18n.tr('Velg et søkeresultat', 'Choose a search result')}</h3>
-            <p>
-              {i18n.tr(
-                'Verevon åpner siden her, slik at JavaScript og layout kan lastes uten at du forlater arbeidsflaten.',
-                'Verevon opens the page here so JavaScript and layout can load without leaving the workspace.',
-              )}
-            </p>
-          </div>
-        }
-      >
-        {(result) => (
-          <>
-            <div class="dashboard-webview__bar">
-              <div>
-                <p>{safeHostname(result().url)}</p>
-                <span>{result().title}</span>
-              </div>
-              <a href={result().url} target="_blank" rel="noopener noreferrer">
-                <ExternalLink class="size-3.5" aria-hidden="true" />
-                {i18n.tr('Ny fane', 'New tab')}
-              </a>
-            </div>
-            <iframe
-              src={result().url}
-              title={result().title}
-              class="dashboard-webview__frame"
-              loading="eager"
-              referrerpolicy="strict-origin-when-cross-origin"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation"
-            />
-            <p class="dashboard-webview__hint">
-              {i18n.tr(
-                'Hvis kilden blokkerer innebygging, bruk Ny fane. Sider som tillater iframe kjører egne scripts her inne.',
-                'If the source blocks embedding, use New tab. Pages that allow iframes run their own scripts here.',
-              )}
-            </p>
-          </>
-        )}
-      </Show>
-    </section>
-  )
-}
-
 export function ImageResultsPanel(props: {
   images: ImageHit[]
   imagesError: string | null

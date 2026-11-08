@@ -156,6 +156,76 @@ impl SessionSnapshot {
     pub fn plaintext_len(&self) -> usize {
         serde_json::to_vec(self).map_or(0, |bytes| bytes.len())
     }
+
+    /// What a clear of the browsing data would remove. Web storage is counted from the per-origin
+    /// state when the snapshot has any, because a capture v2 snapshot repeats the active origin's
+    /// storage in the flat fields. IndexedDB is counted from both: the flat entries are a legacy
+    /// shape that capture v2 never repeats in `origins`.
+    pub fn browsing_data_counts(&self) -> BrowsingDataCounts {
+        let per_origin = !self.origins.is_empty();
+        BrowsingDataCounts {
+            cookies: self.cookies.len(),
+            local_storage_entries: if per_origin {
+                self.origins
+                    .iter()
+                    .map(|state| state.local_storage.len())
+                    .sum()
+            } else {
+                self.local_storage.len()
+            },
+            session_storage_entries: if per_origin {
+                self.origins
+                    .iter()
+                    .map(|state| state.session_storage.len())
+                    .sum()
+            } else {
+                self.session_storage.len()
+            },
+            indexed_db_rows: self.indexed_db.len()
+                + self
+                    .origins
+                    .iter()
+                    .map(OriginState::idb_record_count)
+                    .sum::<usize>(),
+            origins: self
+                .origins
+                .iter()
+                .filter(|state| !state.is_empty())
+                .count(),
+        }
+    }
+
+    /// The snapshot with its browsing data removed: cookies, web storage and IndexedDB, flat and
+    /// per origin. The device settings (user agent, viewport, locale, timezone) and the capture
+    /// facts (version, capture time) stay, so the profile still restores the same device.
+    pub fn without_browsing_data(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            cookies: Vec::new(),
+            local_storage: Vec::new(),
+            session_storage: Vec::new(),
+            indexed_db: Vec::new(),
+            origins: Vec::new(),
+            ..self.clone()
+        }
+    }
+}
+
+/// What a clear of one snapshot's browsing data removes, by kind. Counts only: no name,
+/// key or value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowsingDataCounts {
+    pub cookies: usize,
+    pub local_storage_entries: usize,
+    pub session_storage_entries: usize,
+    pub indexed_db_rows: usize,
+    pub origins: usize,
+}
+
+impl BrowsingDataCounts {
+    /// Whether a clear would remove nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// One row inside an IndexedDB object store. `origin`/`database`/`store`
@@ -1559,5 +1629,135 @@ mod tests {
         let text = serde_json::to_string(&snapshot.redacted_view()).unwrap();
         assert!(!text.contains("SECRET"), "{text}");
         assert!(text.contains("\"db\"") && text.contains("\"https://a.test\""));
+    }
+
+    #[test]
+    fn browsing_data_counts_a_legacy_snapshot_by_its_flat_fields() {
+        let legacy = SessionSnapshot {
+            cookies: vec![Cookie {
+                name: "sid".into(),
+                ..Default::default()
+            }],
+            local_storage: vec![("a".into(), "1".into()), ("b".into(), "2".into())],
+            session_storage: vec![("c".into(), "3".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy.browsing_data_counts(),
+            BrowsingDataCounts {
+                cookies: 1,
+                local_storage_entries: 2,
+                session_storage_entries: 1,
+                indexed_db_rows: 0,
+                origins: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn browsing_data_counts_a_v2_snapshot_without_counting_the_flat_copy_twice() {
+        let v2 = SessionSnapshot {
+            local_storage: vec![("a".into(), "1".into())],
+            origins: vec![
+                OriginState {
+                    origin: "https://a.test".into(),
+                    local_storage: vec![("a".into(), "1".into())],
+                    ..Default::default()
+                },
+                OriginState {
+                    origin: "https://b.test".into(),
+                    session_storage: vec![("x".into(), "y".into())],
+                    ..Default::default()
+                },
+                OriginState::default(),
+            ],
+            ..Default::default()
+        };
+        let counts = v2.browsing_data_counts();
+        assert_eq!(counts.local_storage_entries, 1);
+        assert_eq!(counts.session_storage_entries, 1);
+        assert_eq!(counts.origins, 2, "an origin with no state is not counted");
+    }
+
+    #[test]
+    fn without_browsing_data_removes_site_data_and_keeps_device_settings() {
+        let snapshot = SessionSnapshot {
+            cookies: vec![Cookie {
+                name: "sid".into(),
+                value: "SECRET-COOKIE".into(),
+                ..Default::default()
+            }],
+            local_storage: vec![("k".into(), "SECRET-LS".into())],
+            session_storage: vec![("k".into(), "SECRET-SS".into())],
+            indexed_db: vec![IndexedDbEntry {
+                origin: "https://a.test".into(),
+                database: "db".into(),
+                store: "s".into(),
+                key: "k".into(),
+                value: serde_json::json!("SECRET-IDB"),
+            }],
+            origins: vec![OriginState {
+                origin: "https://a.test".into(),
+                local_storage: vec![("k".into(), "SECRET-ORIGIN".into())],
+                indexed_db: vec![IdbDatabase {
+                    name: "db".into(),
+                    version: 1,
+                    stores: vec![IdbStore {
+                        name: "s".into(),
+                        records: vec![IdbRecord {
+                            key: serde_json::json!("SECRET-KEY"),
+                            value: serde_json::json!("SECRET-VALUE"),
+                        }],
+                        ..Default::default()
+                    }],
+                }],
+                ..Default::default()
+            }],
+            user_agent: Some("Quarry/2.0 (test)".into()),
+            locale: Some("nb-NO".into()),
+            timezone: Some("Europe/Oslo".into()),
+            viewport: Some(Viewport {
+                width: 800,
+                height: 600,
+                device_scale_factor: 1.0,
+                is_mobile: false,
+            }),
+            snapshot_version: 2,
+            ..Default::default()
+        };
+        let counts = snapshot.browsing_data_counts();
+        assert_eq!(counts.cookies, 1);
+        assert_eq!(counts.local_storage_entries, 1);
+        assert_eq!(
+            counts.session_storage_entries, 0,
+            "the origin holds no session storage"
+        );
+        assert_eq!(
+            counts.indexed_db_rows, 2,
+            "one flat entry and one origin record"
+        );
+        assert_eq!(counts.origins, 1);
+
+        let cleared = snapshot.without_browsing_data();
+        assert!(!cleared.has_state());
+        assert_eq!(
+            cleared.browsing_data_counts(),
+            BrowsingDataCounts::default()
+        );
+        assert!(cleared.browsing_data_counts().is_empty());
+        assert_eq!(cleared.user_agent.as_deref(), Some("Quarry/2.0 (test)"));
+        assert_eq!(cleared.locale.as_deref(), Some("nb-NO"));
+        assert_eq!(cleared.timezone.as_deref(), Some("Europe/Oslo"));
+        assert!(cleared.viewport.is_some());
+        assert_eq!(cleared.snapshot_version, 2);
+        let text = serde_json::to_string(&cleared).unwrap();
+        assert!(!text.contains("SECRET"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_snapshot_has_nothing_to_clear() {
+        let empty = SessionSnapshot::default();
+        assert!(empty.browsing_data_counts().is_empty());
+        assert!(!empty.without_browsing_data().has_state());
     }
 }

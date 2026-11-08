@@ -116,12 +116,11 @@ impl BrowserbaseDriver {
 
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
             return Err(QuarryError::new(
                 ErrorCode::DriverFailed,
                 "browserbase session create returned error",
             )
-            .with_details(json!({ "status": status.as_u16(), "body": text })));
+            .with_details(json!({ "status": status.as_u16() })));
         }
 
         resp.json::<CreateSessionResponse>().await.map_err(|e| {
@@ -187,7 +186,6 @@ impl BrowserbaseDriver {
             .with_details(json!({
                 "status": status.as_u16(),
                 "path": path,
-                "body": String::from_utf8_lossy(&bytes).to_string(),
             })));
         }
 
@@ -385,6 +383,28 @@ mod tests {
             .await
             .expect("request log")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_session_error_does_not_echo_the_upstream_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/v1/sessions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream-probe-7f3a"))
+            .mount(&server)
+            .await;
+
+        let driver = BrowserbaseDriver::new(make_config(&server.uri()));
+        let err = match driver.create_session().await {
+            Ok(_) => panic!("a 500 from the session endpoint must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, ErrorCode::DriverFailed);
+        assert!(!err.message.contains("upstream-probe"));
+        let details = err.details.expect("status detail").to_string();
+        assert!(!details.contains("upstream-probe"));
+        assert!(details.contains("500"));
     }
 
     #[tokio::test]

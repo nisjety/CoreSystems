@@ -3718,6 +3718,73 @@ paths:
           description: A service principal, or a ZDR organization with the flag on (action probe).
         '404':
           description: Not found, or not visible to the caller under enforce.
+  /v1/profiles/{profile_id}/clear-data:
+    post:
+      operationId: clear_profile_data
+      summary: Remove a stored profile's cookies, web storage and IndexedDB (F-t2-068). Off unless QUARRY_EDGE__PROFILE_CLEAR_DATA is on.
+      description: |
+        Removes the browsing data a stored profile holds and keeps the profile, its name, scope,
+        owner, user agent, viewport, locale and timezone. `dry_run` defaults to true: a call that
+        does not send `dry_run: false` only counts what it would remove. The answer carries counts
+        only, never a name or a value.
+
+        A profile a live run holds is refused with 409 `profile_in_use` until that run closes,
+        because its browser session would save the profile again. A ZDR organization is not
+        refused (the route is a wind-down, like delete). A service principal is refused.
+      parameters:
+        - name: profile_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: The counts, and whether this call removed them.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [profile_id, dry_run, cleared, counts]
+                properties:
+                  profile_id:
+                    type: string
+                  dry_run:
+                    type: boolean
+                  cleared:
+                    type: boolean
+                    description: True when this call removed the data. False on a dry run, and when nothing was there.
+                  counts:
+                    type: object
+                    required: [cookies, local_storage_entries, session_storage_entries, indexed_db_rows, origins]
+                    properties:
+                      cookies:
+                        type: integer
+                      local_storage_entries:
+                        type: integer
+                      session_storage_entries:
+                        type: integer
+                      indexed_db_rows:
+                        type: integer
+                      origins:
+                        type: integer
+        '403':
+          description: A service principal.
+        '404':
+          description: Not found, or not visible to the caller under enforce.
+        '409':
+          description: A live run holds the profile (`profile_in_use`), or the profile was written during the clear (`profile_busy`; retry).
+        '501':
+          description: The flag is off (`profile_clear_data_disabled`).
   /v1/webhook-subscriptions:
     post:
       operationId: create_webhook_subscription

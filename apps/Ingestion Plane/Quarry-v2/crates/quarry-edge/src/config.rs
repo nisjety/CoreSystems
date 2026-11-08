@@ -309,6 +309,10 @@ pub struct EdgeConfig {
     /// 404 to a non-owner; `off` skips the check. Env: `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`.
     #[serde(default)]
     pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
+    /// F-t2-068: `POST /v1/profiles/:id/clear-data` (remove a stored profile's cookies, web storage
+    /// and IndexedDB) answers 501 unless this is on. Off by default. Env: `QUARRY_EDGE__PROFILE_CLEAR_DATA`.
+    #[serde(default)]
+    pub profile_clear_data: bool,
     /// WS17.E1: envelope encryption of profile snapshots: `off` (default), `compat` or `on`.
     /// Validated at boot (`profile_encryption.rs`). Env: `QUARRY_EDGE__PROFILE_ENCRYPTION`.
     #[serde(default)]
@@ -479,6 +483,7 @@ impl EdgeConfig {
             zdr_refuse_durable_resources: false,
             zdr_tombstone: false,
             profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+            profile_clear_data: false,
             profile_encryption: String::new(),
             profile_encryption_required: false,
             profile_key_provider: String::new(),

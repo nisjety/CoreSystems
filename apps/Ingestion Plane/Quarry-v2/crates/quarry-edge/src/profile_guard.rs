@@ -96,6 +96,8 @@ pub enum ProfileOp {
     Delete,
     /// Attaching a profile to a run (the start of a run that names a `profile_id`).
     Attach,
+    /// Removing a profile's stored browsing data (`POST /v1/profiles/:id/clear-data`, F-t2-068).
+    ClearData,
 }
 
 impl ProfileOp {
@@ -110,12 +112,13 @@ impl ProfileOp {
             Self::Probe => "probe",
             Self::Delete => "delete",
             Self::Attach => "attach",
+            Self::ClearData => "clear_data",
         }
     }
 
     /// Operations an org-shared profile reserves for its owner.
     fn owner_only_on_shared(self) -> bool {
-        matches!(self, Self::Update | Self::Delete)
+        matches!(self, Self::Update | Self::Delete | Self::ClearData)
     }
 }
 
@@ -129,11 +132,11 @@ pub const SERVICE_PRINCIPAL_MESSAGE: &str =
 
 impl ProfileOp {
     /// The matrix action label a ZDR refusal of this op carries (`docs/ERROR_REASONS.md`).
-    /// `None` for the two wind-down operations a ZDR organization keeps: list, and delete
+    /// `None` for the wind-down operations a ZDR organization keeps: list, and delete and clear
     /// (erasing what it already holds).
     pub fn zdr_action(self) -> Option<&'static str> {
         match self {
-            Self::List | Self::Delete => None,
+            Self::List | Self::Delete | Self::ClearData => None,
             Self::Create => Some("create"),
             Self::Import => Some("save"),
             Self::Read => Some("read"),
@@ -187,8 +190,8 @@ pub fn principal_refusal(claims: &Claims, op: ProfileOp) -> Option<PrincipalRefu
 /// The first gate of every `/v1/profiles*` handler (WS17.P0), before any store read: the
 /// principal check, then the ZDR posture. The ZDR half is WS4.H's helper: it observes
 /// (logs `zdr.would_refuse`, serves) until `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` is
-/// on, and then answers 403 `zdr_durable_mutation_forbidden`. List and delete are never
-/// refused on the ZDR side.
+/// on, and then answers 403 `zdr_durable_mutation_forbidden`. List, delete and clear data are
+/// never refused on the ZDR side.
 pub fn precheck(
     state: &AppState,
     claims: &Claims,
@@ -544,7 +547,7 @@ mod tests {
         }
     }
 
-    const ALL_OPS: [ProfileOp; 8] = [
+    const ALL_OPS: [ProfileOp; 9] = [
         ProfileOp::List,
         ProfileOp::Create,
         ProfileOp::Import,
@@ -553,6 +556,7 @@ mod tests {
         ProfileOp::Probe,
         ProfileOp::Delete,
         ProfileOp::Attach,
+        ProfileOp::ClearData,
     ];
 
     fn principal(service: bool, scopes: &[&str]) -> Claims {
@@ -606,13 +610,35 @@ mod tests {
     }
 
     #[test]
-    fn zdr_wind_down_is_list_and_delete_only() {
-        // The op set a ZDR organization keeps: list and delete. Every other op is refused
-        // when the flag is on (the flag half is in tests/profile_guard.rs).
+    fn zdr_wind_down_is_list_delete_and_clear() {
+        // The op set a ZDR organization keeps: list, delete and clear (erasing what it holds).
+        // Every other op is refused when the flag is on (the flag half is in tests/profile_guard.rs).
         for op in ALL_OPS {
-            let wind_down = matches!(op, ProfileOp::List | ProfileOp::Delete);
+            let wind_down = matches!(
+                op,
+                ProfileOp::List | ProfileOp::Delete | ProfileOp::ClearData
+            );
             assert_eq!(op.zdr_action().is_none(), wind_down, "{op:?}");
         }
+    }
+
+    #[test]
+    fn clear_data_is_owner_only_even_on_an_org_shared_profile() {
+        let shared = facts(ProfileScope::OrgShared, Some(OWNER));
+        assert_eq!(
+            decide(&shared, OTHER, ProfileOp::ClearData),
+            Some(DenyReason::NotOwner)
+        );
+        assert_eq!(decide(&shared, OWNER, ProfileOp::ClearData), None);
+        let private = facts(ProfileScope::UserPrivate, Some(OWNER));
+        assert_eq!(
+            decide(&private, OTHER, ProfileOp::ClearData),
+            Some(DenyReason::NotOwner)
+        );
+        // A legacy org-shared row keeps its owner-only operations open to the org, as before WS17.P2.
+        let legacy_shared = facts(ProfileScope::OrgShared, None);
+        assert_eq!(decide(&legacy_shared, OTHER, ProfileOp::ClearData), None);
+        assert_eq!(ProfileOp::ClearData.as_str(), "clear_data");
     }
 
     #[test]
