@@ -1084,9 +1084,17 @@ async fn scrape_with(
     // reaches the caller before the router's own limit drops the request.
     let run_deadline_ms =
         crate::scrape_actions::run_deadline_ms(resolved.actions.is_some(), resolved.timeout_ms);
+    // E3.6-4a: a request that asked for redaction runs the pipeline stage, which
+    // applies only while QUARRY_EDGE__PII_REDACTION is on.
     let run = tokio::time::timeout(
         Duration::from_millis(run_deadline_ms),
-        runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request),
+        runner.run_with_inline_request_redacting(
+            &run_id,
+            &url,
+            prev_fp,
+            &inline_request,
+            redact_pii,
+        ),
     )
     .await
     .unwrap_or_else(|_| {

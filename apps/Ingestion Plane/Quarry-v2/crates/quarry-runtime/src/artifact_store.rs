@@ -12,7 +12,7 @@ use quarry_core::ids::kinds::{ArtifactKind, RunKind};
 use quarry_core::ids::Id;
 use quarry_core::{error::ErrorCode, error::QuarryError, QuarryResult};
 
-use crate::pipeline::{PiiRedactionSettings, PII_REDACTION_FAILED};
+use crate::pipeline::{catch_scanner_panic, PiiRedactionSettings, PII_REDACTION_FAILED};
 
 /// Map kind string -> enum used to compute object_key.
 fn kind_from_str(kind: &str) -> QuarryResult<artifact_meta::ArtifactKind> {
@@ -237,7 +237,7 @@ pub fn check_text_redacted(text: &str) -> Result<(), SinkPiiRefusal> {
     if text.len() > SINK_PII_MAX_BYTES {
         return Err(SinkPiiRefusal::TooLarge);
     }
-    let clean = std::panic::catch_unwind(|| quarry_transform::pii::scan(text).is_empty())
+    let clean = catch_scanner_panic(|| quarry_transform::pii::scan(text).is_empty())
         .map_err(|_| SinkPiiRefusal::ScannerPanicked)?;
     if clean {
         Ok(())
