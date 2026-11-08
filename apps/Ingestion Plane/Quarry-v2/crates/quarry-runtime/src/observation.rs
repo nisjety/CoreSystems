@@ -34,6 +34,7 @@ use crate::artifact_store::ArtifactStore;
 use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
 use crate::observation_redaction::{self, Redactor, ScreenshotReport};
+use crate::pipeline::{pii_redaction_error, pii_redaction_settings, PiiRedactionFailure};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 fn agent_scroll_action(target: &str, viewport: Option<BrowserViewport>) -> Action {
@@ -666,6 +667,19 @@ impl ObservationRunner {
                     );
                 }
                 AgentAction::Screenshot { full_page } => {
+                    // CW-2: a PII-redacting run cannot keep a capture. The scrape
+                    // pipeline refuses the page with `pii_redaction_failed`
+                    // (capture_not_redactable); the agent path must do the same
+                    // instead of CAS-storing a page screenshot. ZDR-guarded
+                    // calls reach storage via `put_artifact_if_allowed` (ZDR-only check).
+                    if pii_redaction_settings()
+                        .applies(false, Some(self.org_id.as_str()))
+                    {
+                        return Err(pii_redaction_error(
+                            PiiRedactionFailure::CaptureNotRedactable,
+                            "screenshot",
+                        ));
+                    }
                     // WS12.S5: a withheld screenshot is a `SecurityBlocked` error
                     // (403) with the same reason the observation note carries.
                     let masked = self.browser.screenshot_masked(session, *full_page).await?;
@@ -688,6 +702,16 @@ impl ObservationRunner {
                     current_screenshot = Some(payload);
                 }
                 AgentAction::Pdf => {
+                    // CW-2: same refusal as the screenshot arm — a redacting run
+                    // cannot keep a PDF capture either.
+                    if pii_redaction_settings()
+                        .applies(false, Some(self.org_id.as_str()))
+                    {
+                        return Err(pii_redaction_error(
+                            PiiRedactionFailure::CaptureNotRedactable,
+                            "pdf",
+                        ));
+                    }
                     let bytes = self.browser.pdf(session).await?;
                     let _ = self
                         .put_artifact_if_allowed(
@@ -5090,5 +5114,53 @@ mod tests {
         assert_eq!(error.code, ErrorCode::SecurityBlocked);
         let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
         assert_eq!(reason, Some("screenshot_withheld:sensitive_field_unresolved"));
+    }
+
+    #[tokio::test]
+    async fn a_redacting_run_refuses_the_screenshot_and_stores_nothing() {
+        use crate::pipeline::{PiiRedactionMode, PiiRedactionSettings, TEST_PII_REDACTION};
+        crate::pipeline::TEST_PII_REDACTION.with(|slot| {
+            *slot.borrow_mut() = Some(PiiRedactionSettings {
+                mode: PiiRedactionMode::On,
+                org_default: crate::pipeline::PiiOrgDefault::All,
+            })
+        });
+        let result = async {
+            let store = Arc::new(InMemoryStore::new());
+            let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+            masked.state = quarry_core::redaction::ScreenshotState::Masked;
+            let browser = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                masked_screenshot: Some(masked),
+                visual_fidelity: true,
+                ..Default::default()
+            });
+            let runner = ObservationRunner {
+                browser: browser.clone(),
+                artifacts: Some(store.clone()),
+                events: None,
+                visual_processor: None,
+                org_id: "org_a".into(),
+            };
+            let lease = mask_test_lease();
+            let session = browser.acquire(&lease).await.unwrap();
+            let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+            let mut ctx = mask_test_ctx();
+            let error = runner.execute(&request, &session, &mut ctx).await.expect_err("a redacting run refuses the capture");
+            let listed = store
+                .list("org_a", &quarry_core::pagination::ListFilter::default())
+                .await
+                .unwrap();
+            (error, listed.items.is_empty())
+        }
+        .await;
+        crate::pipeline::TEST_PII_REDACTION.with(|slot| *slot.borrow_mut() = None);
+        let (error, no_artifacts) = result;
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some(crate::pipeline::PII_REDACTION_FAILED));
+        let cause = error.details.as_ref().and_then(|d| d["cause"].as_str());
+        assert_eq!(cause, Some("capture_not_redactable"));
+        assert!(no_artifacts, "a redacting run stores no capture");
     }
 }
