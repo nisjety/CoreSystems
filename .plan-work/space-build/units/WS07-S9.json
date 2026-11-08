@@ -1,0 +1,29 @@
+{
+ "slice": "WS07-S9",
+ "status": "built",
+ "commit": "c9b684f8d",
+ "files": [
+  "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "apps/Model Plane/rust/services/session-core/src/space/read_service.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/mod.rs",
+  "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/session-core/migrations/0085_messages_space_artifact_index.sql",
+  "apps/Model Plane/rust/services/session-core/migrations/revert/0085_messages_space_artifact_index.down.sql",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/artifacts.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/mod.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/state.rs"
+ ],
+ "compile": "ok",
+ "migrations": [
+  "session-core 0085 apps/Model Plane/rust/services/session-core/migrations/0085_messages_space_artifact_index.sql"
+ ],
+ "flags": [],
+ "tests_owed": [
+  "apps/Model Plane/rust/services/session-core/src/space/read_service.rs (cargo test -p session-core --bin session-core space_room_read -- --ignored --test-threads=1, scratch DB): decision required (absent is permission_denied); wrong space, foreign org, user mismatch, expired token, write-permission token refused; service identity refused; archived thread hidden; newer-audience message hidden with no count oracle; latest version wins and version_count right; kinds outside document/code/html excluded; cursor stable across an insert and across two artifacts in one message; EXPLAIN uses idx_messages_space_artifacts; ZDR caller gets an empty page",
+  "apps/Model Plane/rust/services/session-core/migrations: 0085 applies on a scratch DB (no-transaction CONCURRENTLY) and the revert file drops it",
+  "apps/Model Plane/rust/services/session-core/src/grpc.rs: HEALTH_SERVICE_NAMES unchanged; ListSpaceArtifacts reachable through the interceptor",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/artifacts.rs: statuses mapped (401/403 space_read_not_authorized/400/503), no decision in logs, null next_cursor on last page, service principal refused",
+  "apps/Model Plane/rust/services/model-gateway/tests/support/offline_downstreams.rs: offline guard covers space_room_read_client"
+ ],
+ "notes": "Model Plane half built and committed (proto RPC, session-core handler, index 0085, model-gateway route and state client); cargo check -p session-core -p model-gateway green. NOT built (outside lock group): gateway BFF room_artifacts.rs + SPACE_ROOM_ARTIFACTS_API flag + retention/shared_read fields, SPA getSpaceArtifacts, Go/Python proto regen. Keyset adds artifact_id (deviation, see depth file). | LEGS CLOSED by WS07-S9.gw, WS07-S9.spa, WS07-S9.regen (see their unit files)."
+}

@@ -1,0 +1,7 @@
+- P2 deviation: DEVIATION: SpaceRoomReadService is registered in grpc.rs serve() (the real add_service site), not main.rs; main.rs only gets `mod space;`.
+- P2 deviation: DEVIATION: AppendAs::Member is refused (permission_denied) inside append_message_in_tx_as, a tiny fail-closed addition to an otherwise pure move; WS01-S3 replaces it with authorize_append.
+- P2 follow-up: Go bindings (apps/Model Plane/go/gen/model_plane/v1) and mp-events-py _gen were not regenerated for space_room.proto; L0 buf generate owed.
+- P3 decision: authz.rs holds only AppendAs; authorize_append and member_append_denial are WS01-S3 per plan.
+- P3 decision: space_routes/ holds only mod.rs (merges space_sse::router); posts.rs, artifacts.rs, timeline.rs are created by their slices.
+- P2 risk: HEALTH_SERVICE_NAMES grew to 10; the standard health test array was updated to match (MessageSearch and LearningGovernance remain unlisted, pre-existing).
+- P3 test-gap: memory_control.rs include_str! test relies on the wrapper preceding append_message_in_tx_as; keep that order.

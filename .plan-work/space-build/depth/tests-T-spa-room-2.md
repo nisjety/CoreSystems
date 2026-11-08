@@ -1,0 +1,8 @@
+- P1 test-fail: DEPTH-SPA-2 SpaceConnectivityBanner / watchBrowserConnectivity(): the first sync() writes a signal inside the component body, so with the banner switched on it throws REACTIVE_WRITE_IN_OWNED_SCOPE (Solid 2) and halts reactivity; 7 banner cases and 1 lib case skipped. Fix: start the watcher from onMount or an effect.
+- P2 test-gap: apps/Application Plane/convex-core has no convex/_generated/server in this tree, so test/*.test.cjs cannot run in-package; space-read-markers cases were verified against a scratch extraction only.
+- P2 deferred: tests/e2e/space-realtime.spec.ts (4 tests: 1.5 s p95 and no 6 s timer, Last-Event-ID resume, session-core stop to degraded within 35 s, ZDR stays on poll); needs seeded fixtures, E2E_SPACE_STOP/START_SESSION_CORE_CMD and E2E_SPACE_REF_ZDR.
+- P2 deferred: tests/e2e/space-human-posts.spec.ts reply count and unread badge on A's own thread after B replies from the pane; needs the live fixtures.
+- P3 test-gap: SpaceRoomSettings: a room_details_invalid ApiError whose details carry any string reason (even an unknown one) is read as a typed Space denial and shows the generic denial sentence instead of the code's own copy; only details with no reason key reach the catalogue text.
+- P3 test-gap: people-search 429 shows the shared rate_limited copy, which talks about the room refreshing more slowly, not about the search.
+- P3 pre-existing: src/shared/api/quarry-client.test.ts fails to resolve @quarry/client; action-surface-contract whole-set equality test fails on registry/handler drift predating W1.
+- P3 test-gap: parseSpaceStreamCursor accepts a seq of whitespace ('g. ') as 0 because Number(' ') is 0; harmless for server-minted ids.

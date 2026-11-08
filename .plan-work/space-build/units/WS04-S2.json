@@ -1,0 +1,20 @@
+{
+ "slice": "WS04-S2",
+ "status": "built",
+ "commit": "35f118a18",
+ "files": [
+  "apps/Application Plane/convex-core/convex/spaceRoomRules.ts",
+  "apps/Application Plane/convex-core/convex/spaces.ts",
+  "apps/Application Plane/convex-core/convex/schema/spaces.ts",
+  "apps/Application Plane/convex-core/convex/_generated/api.d.ts"
+ ],
+ "compile": "ok: tsc --noEmit clean on convex-core in a scratch copy (node_modules junctioned from the main checkout)",
+ "migrations": [],
+ "flags": [],
+ "tests_owed": [
+  "apps/Application Plane/convex-core/test/space-room-details.test.cjs: normalizeRoomDetails table (NFC, trim, inner whitespace collapse, name 1-120 and topic 0-250 by code point, empty topic -> null, name-only leaves topic absent, control chars and U+202A-202E/U+2066-2069 rejected, not_a_string); spaces.ts updateRoomDetailsForGateway error codes by source scan or mock ctx (space_not_found, space_kind_not_editable, room_not_active, room_details_invalid:<field>:<reason>)",
+  "gateway (owed to the gw lock group): PATCH /api/v1/spaces/{space_ref} viewer refused before any Convex request; typed errors; zdr_org_room_admin_never_calls_the_model_plane",
+  "SPA (owed to spa-room lock group): SpaceRoomSettings.test.tsx owner/manager form shown, editor/viewer absent; action-surface-contract covers spaces.update_room_details"
+ ],
+ "notes": "Application leg only (lock group): topic column, pure normalizer, updateRoomDetailsForGateway (throws stable messages: room_details_invalid:<field>:<reason>, space_not_found, space_kind_not_editable, room_not_active), spacesForOrgForGateway returns topic. NOT built (other lock groups): gateway room_admin.rs PATCH route + flag space_room_details_ui + actions dispatcher, and SPA ws04.ts action, spaces-client, errors.ts, SpaceRoomSettings.tsx, SpacePage topic header. Live codegen/deploy not run. | LEGS CLOSED by WS04-S2.gw, WS04-S2.spa (see their unit files)."
+}

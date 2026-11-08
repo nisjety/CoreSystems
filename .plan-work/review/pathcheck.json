@@ -1,0 +1,2770 @@
+{
+ "MISSING-UNEXPLAINED": [
+  {
+   "line": 3,
+   "path": "docs/plans/space-hybrid-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 182,
+   "path": "scripts/tests/space-content-free-canary.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 185,
+   "path": "scripts/verify-deprovision.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 862,
+   "path": "apps/gateway/src/upstream.rs",
+   "l1": "1698",
+   "l2": "1866",
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 950,
+   "path": "apps/gateway/src/domains/orgs/shared.rs",
+   "l1": "35",
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1034,
+   "path": "apps/Application Plane/convex-core/convex/crons.ts",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1192,
+   "path": "docs/COMPLETION_PHASES.md",
+   "l1": "181",
+   "l2": "198",
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1192,
+   "path": "docs/PROVIDER_BLUEPRINT.md",
+   "l1": "77",
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1252,
+   "path": "scripts/verify-deprovision.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1380,
+   "path": "apps/Model Plane/scripts/verify-sandbox-isolation.sh --production-profile",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1637,
+   "path": "apps/gateway",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1882,
+   "path": "apps/Frontend Plane/verevonv3/tests/e2e/space-run-live.mock.spec.ts",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 1990,
+   "path": "apps/Frontend Plane/verevonv3/tests/e2e/space-approvals.spec.ts",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 2362,
+   "path": "scripts/run-control-plane.sh up -d --build user-core",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 2585,
+   "path": "scripts/run-control-plane.sh up -d --build user-core",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 2907,
+   "path": "scripts/auth-regression-matrix.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 3415,
+   "path": "docs/plans/evidence",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 3843,
+   "path": "scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 4713,
+   "path": "scripts/verify-deprovision.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 4765,
+   "path": "scripts/smoke-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 4773,
+   "path": "scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  },
+  {
+   "line": 4948,
+   "path": "scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "MISSING-UNEXPLAINED"
+  }
+ ],
+ "ok": [
+  {
+   "line": 124,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 124,
+   "path": "apps/Model Plane/api/contracts/zdr-refusals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 124,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 125,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 126,
+   "path": "apps/Model Plane/rust/services/session-core/src/retention_receipt.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 126,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/retention.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 130,
+   "path": "apps/Data Plane v2/services/retrieval-engine-rs/src/egress_attestation.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 131,
+   "path": "apps/Frontend Plane/verevonv3",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 224,
+   "path": "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 317,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 342,
+   "path": "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 365,
+   "path": "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 388,
+   "path": "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 739,
+   "path": "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+   "l1": "376",
+   "l2": "402",
+   "status": "ok"
+  },
+  {
+   "line": 740,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "l1": "177",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 741,
+   "path": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 743,
+   "path": "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go",
+   "l1": "313",
+   "l2": "380",
+   "status": "ok"
+  },
+  {
+   "line": 745,
+   "path": "apps/Application Plane/convex-core/convex/spaceReadMarkers.ts",
+   "l1": "50",
+   "l2": "67",
+   "status": "ok"
+  },
+  {
+   "line": 769,
+   "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 776,
+   "path": "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 784,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 790,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 795,
+   "path": "apps/Frontend Plane/verevonv3/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 833,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 858,
+   "path": "apps/Application Plane/convex-core/convex/spacePresence.ts",
+   "l1": "42",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 859,
+   "path": "apps/Model Plane/rust/crates/mp-events/src/envelope.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 860,
+   "path": "apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go",
+   "l1": "41",
+   "l2": "52",
+   "status": "ok"
+  },
+  {
+   "line": 887,
+   "path": ".github/workflows/model-plane-rust-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 888,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 889,
+   "path": "apps/Control Plane/user-core/internal/spaces/shared_thread_read_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 893,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 893,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 893,
+   "path": "apps/Model Plane/api/openapi.yaml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 944,
+   "path": "apps/Control Plane/user-core/internal/spaces/repository.go",
+   "l1": "19",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 946,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 946,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": "450",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 966,
+   "path": "apps/Control Plane/user-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 975,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 979,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 979,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 982,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 985,
+   "path": "apps/Frontend Plane/verevonv3/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 988,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1032,
+   "path": "apps/Control Plane/user-core/internal/http/server.go",
+   "l1": "352",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1032,
+   "path": "apps/Application Plane/convex-core/convex/spaceMembershipSync.ts",
+   "l1": "109",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1036,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "l1": "649",
+   "l2": "736",
+   "status": "ok"
+  },
+  {
+   "line": 1036,
+   "path": "apps/Control Plane/org-core/internal/http/handlers.go",
+   "l1": "988",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1060,
+   "path": "apps/Control Plane/user-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1060,
+   "path": "apps/Application Plane/convex-core/convex",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1060,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1060,
+   "path": "apps/Frontend Plane/verevonv3/src",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1064,
+   "path": "apps/Application Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1067,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1072,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1077,
+   "path": "apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1077,
+   "path": "apps/Frontend Plane/verevonv3/docs/SPACE_PAGE_AUDIT_2026-09-06.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1081,
+   "path": "apps/Model Plane/rust/services/session-core/src/space_membership_nats.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1131,
+   "path": "apps/Control Plane/scripts/seed-verified-test-user.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1147,
+   "path": "apps/Frontend Plane/verevonv3",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1147,
+   "path": "apps/Control Plane/user-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1147,
+   "path": "apps/Application Plane/convex-core/convex",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1147,
+   "path": "apps/Model Plane",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1154,
+   "path": "apps/Control Plane/audit-core/internal/api/api.go",
+   "l1": "197",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1157,
+   "path": "apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+   "l1": "1237",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1183,
+   "path": "apps/Control Plane/audit-core/internal/api/api.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1186,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": "829",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1189,
+   "path": "apps/Ingestion Plane/integration-corev2/internal/api/server.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1193,
+   "path": "apps/Control Plane/auth-core/src/auth/auth.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1195,
+   "path": "apps/Control Plane/user-core/internal/http/service_auth.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1198,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": "829",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1209,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1230,
+   "path": "apps/Control Plane/scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1285,
+   "path": "apps/Model Plane/rust/services/session-core/src/auth.rs",
+   "l1": "276",
+   "l2": "281",
+   "status": "ok"
+  },
+  {
+   "line": 1332,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1332,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1335,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1342,
+   "path": ".github/workflows/model-plane-rust-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1366,
+   "path": "apps/Model Plane/rust",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1388,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1423,
+   "path": ".github/workflows/verevonv3-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1460,
+   "path": ".github/workflows/verevonv3-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1466,
+   "path": "apps/Application Plane/convex-core/test/space-agent-registry.test.cjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1500,
+   "path": "apps/Frontend Plane/verevonv3",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1607,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1687,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1698,
+   "path": "apps/Model Plane/go/services/capability-core/internal/notifyclient/client.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1719,
+   "path": "apps/Control Plane/user-core/internal/http/service_auth.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1721,
+   "path": "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1726,
+   "path": "apps/Frontend Plane/verevon/src/lib/model-plane/gen",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1727,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1736,
+   "path": "apps/Application Plane/convex-core/convex/schema.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1831,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1832,
+   "path": ".github/workflows/model-plane-rust-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1832,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1839,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1841,
+   "path": "apps/Model Plane/proto/model_plane/v1/runs.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1876,
+   "path": "apps/Model Plane/docs/sse-event-taxonomy.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1944,
+   "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1948,
+   "path": "apps/Model Plane/api/openapi.yaml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1954,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": "425",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1988,
+   "path": ".github/workflows/model-plane-rust-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 1991,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2029,
+   "path": "apps/Model Plane/deploy/nats.conf",
+   "l1": "34",
+   "l2": "53",
+   "status": "ok"
+  },
+  {
+   "line": 2056,
+   "path": "apps/Control Plane/user-core/internal/http/spaces.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2061,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2062,
+   "path": "apps/Application Plane/convex-core/convex/schema.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2068,
+   "path": "apps/Model Plane/go/services/nats-provisioner/main.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2068,
+   "path": "apps/Model Plane/deploy/nats.conf",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2072,
+   "path": "apps/Application Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Control Plane/user-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Application Plane/convex-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Model Plane",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Model Plane/rust/services/session-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Model Plane/rust/services/model-gateway",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Model Plane/rust/crates/mp-contracts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Frontend Plane/verevonv3",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Data Plane v2/services/documents-api-go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Data Plane v2/services/retrieval-engine-rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2137,
+   "path": "apps/Ingestion Plane/imports-core",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2205,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2241,
+   "path": "apps/Model Plane/proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2399,
+   "path": "scripts/lint-resource-taxonomy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2399,
+   "path": ".github/workflows/user-service.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2430,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2430,
+   "path": "scripts/coresystem-cross-plane-preflight.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2430,
+   "path": ".github/workflows/user-service.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2669,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2670,
+   "path": "apps/Control Plane/user-core/internal/spaces/decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2671,
+   "path": "apps/Model Plane/proto/model_plane/v1/memory.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2673,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/memory-client.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2677,
+   "path": "apps/Model Plane/go/services/letta-bridge/internal/server/auth.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2682,
+   "path": "apps/Application Plane/convex-core/convex/spaceAgents.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2683,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2683,
+   "path": "apps/Control Plane/config/plane-service-principals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2689,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2693,
+   "path": "apps/Data Plane v2/services/retrieval-engine-rs/src/space_scope.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2753,
+   "path": "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+   "l1": "29",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2779,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2785,
+   "path": "apps/Model Plane/go/services/capability-core/internal/api/model_action_view.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2786,
+   "path": "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2787,
+   "path": "apps/Control Plane/config/plane-service-principals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2790,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2793,
+   "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2799,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2843,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2874,
+   "path": "apps/Data Plane v2/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2874,
+   "path": "apps/Data Plane v2/openapi/d4d5.yaml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2874,
+   "path": ".github/workflows/dataplane-v2-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2899,
+   "path": ".github/workflows/dataplane-v2-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2907,
+   "path": "apps/Data Plane v2/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2913,
+   "path": "apps/Application Plane/convex-core/convex/spaceDeletionData.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2944,
+   "path": "apps/Frontend Plane/verevonv3/build-verevon-services.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 2998,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3000,
+   "path": "apps/Model Plane/deploy/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3010,
+   "path": "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3011,
+   "path": "apps/Control Plane/config/plane-service-principals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3013,
+   "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3047,
+   "path": "apps/Ingestion Plane",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3077,
+   "path": "apps/Model Plane/go/services/capability-core/internal/watch",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3079,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "l1": "4500",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3108,
+   "path": "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+   "l1": "44",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3108,
+   "path": "apps/Frontend Plane/verevonv3/src/features/spaces/lib/activity-grammar.ts",
+   "l1": "696",
+   "l2": "709",
+   "status": "ok"
+  },
+  {
+   "line": 3109,
+   "path": "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs",
+   "l1": "29",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3121,
+   "path": "apps/Model Plane/go/services/sandbox-manager/internal/process/store.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3133,
+   "path": "apps/Control Plane/user-core/internal/spaces/schedule_fire_decision.go",
+   "l1": "90",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3156,
+   "path": "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3160,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "l1": "449",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3372,
+   "path": ".github/workflows/buf.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3718,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3765,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3783,
+   "path": "apps/Model Plane/deploy/nats.conf",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3783,
+   "path": "scripts/tests/principal-registry-parity.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3785,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3788,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3800,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3866,
+   "path": "apps/Model Plane/proto",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3878,
+   "path": "apps/Model Plane/rust/services/session-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 3910,
+   "path": "apps/Control Plane/user-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4100,
+   "path": "apps/Control Plane/audit-core/internal/api/api.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4100,
+   "path": "apps/Control Plane/audit-core/.env.example",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4100,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4100,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4108,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4164,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": "868",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4194,
+   "path": "apps/Model Plane/rust/services/session-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4231,
+   "path": "apps/Control Plane/user-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4267,
+   "path": "apps/Model Plane/go/gen/model_plane/v1",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4314,
+   "path": "apps/Control Plane/config/plane-service-principals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4314,
+   "path": "apps/Model Plane/deploy/nats.conf",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4315,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4514,
+   "path": "apps/Frontend Plane/verevonv3/tests/e2e/space-shell.spec.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4517,
+   "path": "apps/Model Plane/go/go.work",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4519,
+   "path": "apps/Model Plane/rust/services/session-core/src/http_health.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4525,
+   "path": "apps/Control Plane/scripts/seed-verified-test-user.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4525,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/scripts/zdr-seed-test-org.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4526,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4536,
+   "path": "apps/Control Plane/user-core/internal/spaces/decision_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4536,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4536,
+   "path": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+   "l1": "8943",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4536,
+   "path": ".github/workflows/verevonv3-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4538,
+   "path": "apps/Application Plane/convex-core/test/space-lifecycle.test.cjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4539,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/tests/zdr_retention_matrix.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4540,
+   "path": "apps/Application Plane/convex-core/test/space-agent-registry.test.cjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4542,
+   "path": "apps/Model Plane/scripts/tests/approval-continuation-proof-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4543,
+   "path": "apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4543,
+   "path": "apps/Model Plane/scripts/tests/scheduled-step-receipt-postgres-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4544,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4544,
+   "path": "apps/Model Plane/scripts/tests/tickets-create-config-contract-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4548,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/tests/sse_relay_no_allowlist.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4548,
+   "path": "apps/Model Plane/scripts/verify-sandbox-isolation.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4549,
+   "path": "apps/Model Plane/rust/services/session-core/tests/outbox_emission.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4564,
+   "path": "apps/Model Plane/proto/baseline.binpb",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4566,
+   "path": "apps/Application Plane",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4578,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4578,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4580,
+   "path": "scripts/tests/ownership-docs-contract.test.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4615,
+   "path": "apps/Model Plane/api/contracts/zdr-refusals.json",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4615,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4615,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4632,
+   "path": ".github/workflows/verevonv3-ci.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4632,
+   "path": "scripts/tests/ownership-docs-contract.test.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4635,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4636,
+   "path": "apps/Application Plane/convex-core/convex/schema.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4653,
+   "path": "apps/Model Plane/rust/services/session-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4653,
+   "path": "apps/Control Plane/user-core/migrations",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4653,
+   "path": "apps/Data Plane v2/tools/migrator",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4658,
+   "path": "apps/Control Plane/user-core/internal/database/mail_task_addresses_migration_contract_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4663,
+   "path": "scripts/tests/zdr-contract-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4663,
+   "path": ".github/workflows/contract-goldens.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4682,
+   "path": "apps/Ingestion Plane/integration-corev2/.env",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4688,
+   "path": "apps/Control Plane/user-core/internal/http/server.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4736,
+   "path": "scripts/load_smoke.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4764,
+   "path": ".github/workflows/buf.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4764,
+   "path": "apps/Model Plane/CLAUDE.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4772,
+   "path": "apps/Ingestion Plane/Makefile",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4773,
+   "path": ".githooks/pre-commit",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4810,
+   "path": "apps/Frontend Plane/verevonv3/docs/space-defenition.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4837,
+   "path": "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4837,
+   "path": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+   "l1": "4504",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4867,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4910,
+   "path": "apps/Model Plane/api/contracts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4944,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4969,
+   "path": "apps/Control Plane/audit-core/internal/api/api.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4970,
+   "path": "apps/Control Plane/audit-core/internal/api/service_auth.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4971,
+   "path": "apps/Control Plane/audit-core/internal/api/api_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4972,
+   "path": "apps/Control Plane/audit-core/.env.example",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4972,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4973,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4974,
+   "path": "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4975,
+   "path": "apps/Frontend Plane/verevonv3/src/features/settings/components/TrustCenterSection.tsx",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4976,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/audit-client.ts",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 4999,
+   "path": "apps/Control Plane/user-core/internal/spaces/repository.go",
+   "l1": "1229",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5011,
+   "path": "apps/Control Plane/user-core/internal/spaces/repository.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5012,
+   "path": "apps/Control Plane/user-core/internal/http/spaces.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5013,
+   "path": "apps/Control Plane/user-core/internal/http/thread_read_decision_live_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5014,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5017,
+   "path": ".github/workflows/user-service.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5037,
+   "path": "apps/Frontend Plane/verevonv3",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5088,
+   "path": "apps/Control Plane/docker-compose.yml",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5095,
+   "path": "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+   "l1": "4504",
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5096,
+   "path": "apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  },
+  {
+   "line": 5152,
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "l1": null,
+   "l2": null,
+   "status": "ok"
+  }
+ ],
+ "only-on-branch:model-plane": [
+  {
+   "line": 157,
+   "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:model-plane"
+  },
+  {
+   "line": 317,
+   "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:model-plane"
+  },
+  {
+   "line": 4180,
+   "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:model-plane"
+  }
+ ],
+ "only-on-branch:quarryv2,quarryv2-next": [
+  {
+   "line": 158,
+   "path": "docs/plans/quarry-browser-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:quarryv2,quarryv2-next"
+  },
+  {
+   "line": 318,
+   "path": "docs/plans/quarry-browser-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:quarryv2,quarryv2-next"
+  },
+  {
+   "line": 4179,
+   "path": "docs/plans/quarry-browser-build-plan-2026-10-14.md",
+   "l1": null,
+   "l2": null,
+   "status": "only-on-branch:quarryv2,quarryv2-next"
+  }
+ ],
+ "proposed-new": [
+  {
+   "line": 718,
+   "path": "apps/gateway/scripts/action-surface-contract.test.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 740,
+   "path": "apps/gateway/src/config.rs",
+   "l1": "30",
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 768,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0071_message_post_kind.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 783,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/space_human_posts.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 791,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/human_posts.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 849,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 883,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0072_space_event_log.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 887,
+   "path": "apps/Model Plane/scripts/tests/space-event-log-postgres-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 890,
+   "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 893,
+   "path": "apps/Model Plane/api/contracts/space-events.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 893,
+   "path": "apps/Model Plane/docs/space-event-stream.md",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 895,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/stream.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 983,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/space_policy.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1072,
+   "path": "scripts/tests/space-contract-vectors-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1079,
+   "path": "apps/Control Plane/scripts/set-space-directory-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1186,
+   "path": ".github/workflows/audit-core.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1204,
+   "path": "apps/Control Plane/auth-core/migrations/029_sso_enforcement.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1210,
+   "path": "scripts/verify-deprovision.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1210,
+   "path": "apps/Control Plane/docs/SCIM_RUNBOOK.md",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1230,
+   "path": "scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1245,
+   "path": ".github/workflows/audit-core.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1605,
+   "path": "apps/Application Plane/convex-core/test/space-sidebar.test.cjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1717,
+   "path": "apps/Control Plane/user-core/internal/spaces/shared_run_wake_decision.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1718,
+   "path": "apps/Control Plane/user-core/internal/http/routes_run_wake.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1720,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0075_space_mentions_and_wake_origin.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1722,
+   "path": "apps/Model Plane/rust/services/session-core/src/space/mentions.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1725,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/space_mentions.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1732,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mentions.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1828,
+   "path": "apps/Model Plane/rust/services/session-core/src/space/run_phase.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1836,
+   "path": "apps/Model Plane/rust/services/model-gateway/src/room_run.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1839,
+   "path": "apps/Model Plane/api/contracts/space-room-run-frames.v1.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1839,
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/contracts/space-room-run-frames.v1.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1839,
+   "path": "apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1848,
+   "path": "apps/Control Plane/user-core/migrations/038_run_control_entitled.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1849,
+   "path": "scripts/set-space-effect-policy.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1883,
+   "path": "apps/Control Plane/scripts/set-space-effect-policy.sh --thread-create-entitled --thread-read-entitled --run-control-entitled",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1946,
+   "path": "apps/Model Plane/rust/services/execution-core/src/space_gate.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1951,
+   "path": "apps/Control Plane/user-core/migrations/039_approval_grants.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1955,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0074_approval_gate_context.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1958,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/approvals.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1961,
+   "path": "apps/Control Plane/user-core/migrations/040_space_tool_policies.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 1966,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0082_quarantined_outputs.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2058,
+   "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2072,
+   "path": "scripts/run-application-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2247,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2663,
+   "path": "apps/Model Plane/rust/services/session-core/migrations/0073_thread_space_kind.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2668,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/space_memory.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2678,
+   "path": "apps/Control Plane/user-core/migrations/044_agent_subjects_and_admissions.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2685,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/personal_agents.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2689,
+   "path": "apps/Control Plane/user-core/migrations/045_space_memory_entitlements.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2723,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2753,
+   "path": "scripts/tests/capability-promotion-ledger-test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2778,
+   "path": "apps/Model Plane/api/contracts/space-self-api-registry.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2779,
+   "path": "scripts/tests/space-self-api-registry-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2780,
+   "path": "apps/Control Plane/user-core/internal/spaces/registry/space-self-api-registry.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2782,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/space_self_api.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2788,
+   "path": "apps/Model Plane/proto/model_plane/v1/space_run.proto",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2799,
+   "path": "apps/Model Plane/scripts/tests/space-self-api-proof.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2897,
+   "path": "apps/Data Plane v2/services/wiki-store-go/internal/canvas/repo.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2900,
+   "path": "apps/Control Plane/user-core/migrations/046_space_canvas_effect_policy.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2908,
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/canvas.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2915,
+   "path": "apps/Model Plane/rust/services/execution-core/src/space_canvas_tools.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2944,
+   "path": "apps/Control Plane/scripts/run-control-plane.sh up -d --build user-core",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2995,
+   "path": "apps/Control Plane/user-core/migrations/047_space_browser_effect_policy.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 2999,
+   "path": "apps/Model Plane/rust/crates/mp-contracts/src/space_browser.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3003,
+   "path": "apps/Model Plane/proto/model_plane/v1/space_run.proto",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3408,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3408,
+   "path": "apps/Frontend Plane/verevonv3/tests/e2e/space-fixtures.ts",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3408,
+   "path": ".github/workflows/space-gate.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3718,
+   "path": ".github/workflows/space-gate.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3718,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 3743,
+   "path": "apps/Control Plane/user-core/internal/spaces/testdata",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4108,
+   "path": "apps/Control Plane/user-core/migrations/033_space_effect_policy_events.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4314,
+   "path": "scripts/run-control-plane.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4514,
+   "path": "apps/Frontend Plane/verevonv3/tests/e2e/space-fixtures.ts",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4515,
+   "path": ".github/workflows/space-gate.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4516,
+   "path": ".github/workflows/convex-core.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4525,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4536,
+   "path": "scripts/tests/space-contract-vectors-sync.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4539,
+   "path": "apps/Model Plane/api/contracts/space-surface.v1.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4560,
+   "path": "scripts/run-control-plane.sh up -d --build user-core",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4561,
+   "path": "scripts/verify-deprovision.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4561,
+   "path": ".github/workflows/audit-core.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4563,
+   "path": ".github/workflows/model-plane-go.yml",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4569,
+   "path": "scripts/run-security-coverage.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4578,
+   "path": "apps/Model Plane/api/contracts/space-surface.v1.json",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4610,
+   "path": "scripts/tests/space-authority-matrix-live.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4626,
+   "path": "scripts/tests/space-content-free-canary.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4632,
+   "path": "scripts/tests/space-plane-ownership.test.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4636,
+   "path": "apps/Application Plane/convex-core/test/space-schema-content-free.test.cjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4646,
+   "path": "scripts/tests/space-idempotency-matrix.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4652,
+   "path": "scripts/tests/migration-roundtrip.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4652,
+   "path": "scripts/tests/migration-numbering.test.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4663,
+   "path": "apps/gateway/src/domains/actions/handlers.rs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4667,
+   "path": "scripts/tests/space-revocation-timing.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4667,
+   "path": "scripts/tests/space-stream-storm.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4779,
+   "path": "scripts/tests/baseline-diff.mjs",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 4888,
+   "path": "scripts/space-e2e-seed.sh",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 5006,
+   "path": "apps/Control Plane/user-core/migrations/033_space_effect_policy_events.up.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 5007,
+   "path": "apps/Control Plane/user-core/migrations/033_space_effect_policy_events.down.sql",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 5008,
+   "path": "apps/Control Plane/user-core/internal/spaces/entitlement_catalog.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 5009,
+   "path": "apps/Control Plane/user-core/internal/spaces/policy_audit.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  },
+  {
+   "line": 5010,
+   "path": "apps/Control Plane/user-core/internal/spaces/effect_policy_audit_live_test.go",
+   "l1": null,
+   "l2": null,
+   "status": "proposed-new"
+  }
+ ]
+}

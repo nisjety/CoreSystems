@@ -1,0 +1,6 @@
+- P2 test-gap: new node --test files (scripts/tests/baseline-tooling, space-changed-areas, space-e2e-seed-session; tests/e2e/space-fixtures.test.ts) are not run by any package.json script or CI job yet; add them to the gate-self-test job.
+- P2 deferred: scripts/space-e2e-seed.sh --apply live proof (six users, orgs X/Y/Z, six storage states that sign in): needs the dev stack, run by someone other than the author.
+- P2 deferred: space-gate.yml on a real PR (red on a seeded failing area test, green on an untouched area): needs GitHub.
+- P2 deferred: convex-core.yml on a real PR (pnpm 11.3.0 install --frozen-lockfile, convex-test/typecheck/lint compare): needs GitHub.
+- P2 deferred: docs/plans/evidence/baseline-<date>/ capture against a clean worktree of the base SHA: runs every suite, not run here; until it exists space-baseline-compare.sh fails any id with failing tests and no stored baseline.
+- P3 test-gap: scripts/space-e2e-seed.sh shell plan-mode and the gateway half of the seed are not unit-tested (only the Node session script is).

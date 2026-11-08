@@ -1,0 +1,25 @@
+{
+ "slice": "M0-T0",
+ "status": "partial",
+ "commit": "fb992136a",
+ "files": [
+  "scripts/space-e2e-seed.sh",
+  "scripts/space-e2e-seed-session.mjs",
+  "scripts/tests/baseline-capture.mjs",
+  "scripts/tests/baseline-diff.mjs",
+  "docs/plans/evidence/README.md",
+  "apps/Frontend Plane/verevonv3/tests/e2e/space-fixtures.ts",
+  "apps/Frontend Plane/verevonv3/tests/e2e/space-shell.spec.ts",
+  "apps/Frontend Plane/verevonv3/playwright.config.ts"
+ ],
+ "compile": "ok",
+ "migrations": [],
+ "flags": [],
+ "tests_owed": [
+  "scripts/space-e2e-seed.sh --apply on the dev stack: six verified users, org X with A owner and B/C/E members, org Y with D, org Z ZDR-TEST with F, six storage states that sign in (live proof, someone other than the author)",
+  "apps/Frontend Plane/verevonv3/tests/e2e/space-fixtures.ts: skipUnlessSpace throws under E2E_REQUIRE_SPACE=1 and skips otherwise; spaceTestModel rejects verevon, verevon-budget, verevon-genius, auto, default",
+  "scripts/tests/baseline-capture.mjs and baseline-diff.mjs: parser unit cases (jest-json, eslint-json, tsc, tap, cargo, go-json) and a diff case (new id is a regression, vanished id is fixed, missing command is not-run)",
+  "docs/plans/evidence/baseline-<date>/: RUN baseline-capture against a clean worktree of the base SHA (not run now: it executes the full suites)"
+ ],
+ "notes": "Built to scope: seed script (+ gateway half), space-fixtures.ts, new 'space' Playwright project, baseline capture and diff tooling, evidence README. PARTIAL because the baseline itself (docs/plans/evidence/baseline-<date>/ JSON) was not captured: that runs every watch-list suite and is a test run, deferred to the wave-end test phase. Nothing in the seed selects or entitles any model, and the fixtures reject Verevon-routed models for Space specs (owner order 2026-10-27)."
+}

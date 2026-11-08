@@ -1,0 +1,5 @@
+- P2 deferred: spaces/membership_ops_live_test.go (7 tests): room writer matrix, byte-equal not-found, sole owner, two-owner race, expected_revision, idempotency, ledger seq, source-scoped sync; compile-checked only, need TEST_DATABASE_URL.
+- P2 deferred: spaces/archive_live_test.go (5 tests): archived room read-only vs write evidence, personal evidence active-only, Register replay precedence, refusals, set-to-state idempotency; need TEST_DATABASE_URL.
+- P2 deferred: http/space_room_state_live_test.go: typed 409 room_archived on thread-decision and thread-append-decision, non-member answer byte-equal to unknown room, ?readable=1 archived state; needs TEST_DATABASE_URL.
+- P2 deferred: users/gdpr_space_membership_ledger_postgres_test.go: erasure saga pseudonymises ledger actor_id and subject_id (fixture table added to the saga fixture schema); needs TEST_DATABASE_URL.
+- P3 test-gap: WS04-S7 "archived room fails schedule/import/sandbox" is proven at resolver level (personal resolvers forced archived by SQL), not through the HTTP decision routes; a personal Space cannot be archived by the writer.

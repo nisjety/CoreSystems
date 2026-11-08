@@ -1,0 +1,3 @@
+- P3 test-gap: ClientContractBanner Reload click: asserted through a stubbed window.location.reload only; a real browser reload is not exercised (Playwright tier).
+- P3 test-gap: room_artifacts retention.zdr: tested for org-core 200 true/false and 500 (null); a 200 with a malformed body is not separately pinned.
+- P3 test-gap: csp-report 413: the cap is asserted at the 8 KiB boundary through the router; the nginx-side body limit is not covered.

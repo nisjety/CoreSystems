@@ -1,0 +1,7 @@
+- P2 deferred: P-CX1 codegen spike: docker restart convex-gateway must show 'Convex functions ready!' on the split schema; needs the live stack (later tier).
+- P2 deferred: WS04-S1 F1 live flow: add/remove a user in org X, Control roster follows within ~10 s, flag 0 returns disabled; needs the live stack.
+- P2 deferred: WS04-S5 live flow: owner creates room, adds member, audience revision advances and Control controlState becomes acknowledged; needs the live stack.
+- P2 deferred: WS04-S2 gateway tests (PATCH viewer refused before Convex, typed errors, zdr_org_room_admin_never_calls_the_model_plane): owed to the gw lock group.
+- P2 deferred: WS04-S2 SPA tests (SpaceRoomSettings.test.tsx, action-surface-contract spaces.update_room_details): owed to the spa-room lock group.
+- P3 test-gap: syncOrganizationRoom / requestOrganizationRoomSync handlers (org-core fetch, PUT body roster_mode org_derived, debounce row writes) are not driven by a mocked ctx yet; only the pure planners and the cron are covered.
+- P3 test-gap: convex-core has no committed tsc coverage of test/*.cjs; tests rely on tsx at run time.

@@ -1,0 +1,26 @@
+{
+ "slice": "WS04-S3",
+ "status": "built",
+ "commit": "79640b054",
+ "files": [
+  "apps/Control Plane/user-core/internal/directory/people.go",
+  "apps/Control Plane/user-core/internal/http/directory.go",
+  "apps/Control Plane/user-core/internal/http/routes_directory.go",
+  "apps/Control Plane/user-core/internal/http/scopes_directory.go",
+  "apps/Control Plane/user-core/internal/http/server.go",
+  "apps/Control Plane/user-core/cmd/server/main.go",
+  "apps/Control Plane/docker-compose.yml"
+ ],
+ "compile": "ok (go build ./... and go vet ./internal/directory ./internal/http)",
+ "migrations": [],
+ "flags": [
+  "scope directory:read:self on the verevon-gateway user-core credential (gateway flag SPACE_PEOPLE_SEARCH_API not built here)"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/user-core/internal/directory/people_test.go: escapeLike escapes backslash, percent and underscore; q over 100 runes, limit 0 or over 50 and a malformed or oversized cursor give ErrInvalidRequest; cursor encode/decode round trip and rank outside 0..1 rejected",
+  "apps/Control Plane/user-core/internal/directory/people_live_test.go: only active org members with active users listed; q matches name or email case-insensitively with literal %/_; prefix matches sort before substring; keyset paging over 3 pages has no dup or gap; exclude_member_of removes room members only when the caller is a member of it and is ignored otherwise; caller not in org gives ErrCallerNotInOrg; is_self set",
+  "apps/Control Plane/user-core/internal/http/directory_test.go: route needs gateway principal + verified delegation + scope directory:read:self (403 directory_delegation_required otherwise), org and caller come only from the delegation, 400 invalid_request, 403 member_not_in_organization, 503 directory_unavailable when unwired or store errors, envelope {data:{people,next_cursor}}",
+  "apps/Control Plane/user-core/internal/http/service_auth_test.go: serviceScopeForRequest GET /api/v1/internal/directory/people == directory:read:self and it requires verified delegation"
+ ],
+ "notes": "Control leg only (lock group): single SQL join users x user_org_memberships, keyset cursor (rank,lower(name),id), limit 20/50, route GET /api/v1/internal/directory/people via the P-UC1 seams, scope added to the gateway credential in compose. NOT built (other lock groups): gateway directory.rs route + flag + limiter, spaces-client searchDirectoryPeople, SpaceMemberControls search box. | LEGS CLOSED by WS04-S3.gw, WS04-S3.spa (see their unit files)."
+}

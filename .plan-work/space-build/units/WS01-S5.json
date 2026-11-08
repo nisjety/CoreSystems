@@ -1,0 +1,44 @@
+{
+ "slice": "WS01-S5",
+ "status": "built",
+ "commit": "9aecdb37a",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/human_posts.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws01.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws01.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml"
+ ],
+ "compile": "ok: gateway cargo check clean; tsc -b no errors in src/shared/actions",
+ "migrations": [],
+ "flags": [
+  "SPACE_HUMAN_POSTS_API dev on / production false (SpaceFeatureFlags.human_posts_api)",
+  "SPACE_THREAD_PANE_UI dev on / production false (thread_pane_ui)",
+  "SPACE_SEND_IDEMPOTENCY_API dev on / production false (send_idempotency_api)",
+  "SPACE_CONNECTIVITY_BANNER_UI dev on / production false (connectivity_banner_ui)"
+ ],
+ "tests_owed": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/human_posts.rs (wiremock through the real router, pattern room_4b_fixture in spaces/mod.rs tests): create_post_mints_create_decision_without_retrieval_and_sends_keys (thread-decision body has space_ref, session_key and idempotency_key = space-post-<id>, no retrieval-decision call; model-gateway POST /v1/threads body carries space_context, session_key, first_message{post_kind post, client_message_id space-post-<id>}; 201 {data:{space_ref,thread_id,message_id,sequence,deduplicated}}, 200 when deduplicated)",
+  "same: reply_mints_v2_decision_bound_to_content_digest (thread-append-decision body has post_kind post and content_digest = sha256 of the TRIMMED content; model-gateway body content equals the digested bytes)",
+  "same: forged_authority_fields_are_rejected_not_forwarded (role, org_id, space_context, space_append_context, metadata, decision fields in the body give 400 invalid_post and zero Control/model-gateway calls)",
+  "same: zdr_org_gets_typed_412_before_any_control_call (org ZDR, x-zdr header and body zdr:true give 412 zdr_durable_mutation_forbidden in catalogue shape; zero user-core requests); zdr_refusal_body_matches_spa_golden (compare with src/shared/api/contracts/zdr-refusals.json message_en/retryable/action for both codes)",
+  "same: org_core_failure_is_typed_503_not_zdr (org-core down gives 503 zdr_decision_unavailable, not 412)",
+  "same: flag_off_is_404 (space_human_posts_disabled before org/ZDR/body); stale_authority_is_retried_once (model-gateway 409 space_authority_stale then 201 means two mints; two stale means 409 surfaced after exactly two); control_403_maps_to_space_post_not_authorized (flag on and off; typed details.reason only when denials_typed and Control sent one); Control 404/400/409/5xx map to space_not_found/invalid_post/space_authority_stale/space_decision_unavailable",
+  "same: validation: content blank, NUL, >8000 chars -> 400 invalid_post details.max_chars 8000; client_send_id outside ^[A-Za-z0-9_-]{16,64}$ -> 400 invalid_client_send_id; blank thread id -> 404 thread_not_found; space_lifecycle None -> 404 space_not_found, Err -> 503 space_lifecycle_unavailable; model-gateway errors (post_not_stored with details.thread_id, idempotency_key_conflict, thread_not_found, typed 412) pass through with status; non-JSON upstream error -> 503 session_unavailable; no token or decision field appears in any response body",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs tests: space_context_carries_features_and_limits (features.human_posts/thread_pane/send_idempotency/connectivity_banner mirror SpaceFeatureFlags, limits.post_max_chars 8000; existing space_context_composes_active_lifecycle test still green)",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs: SpaceFeatureFlags::default() has the four new flags off; from_env off under APP_ENV=production when unset, on in dev",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws01.rs: both dispatchers 400 without spaceRef (and threadId for reply), pass clientSendId as client_send_id, wrap the receipt in the owner envelope, flag off gives 404",
+  "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs: spaces.create_post and spaces.reply_in_thread are in the registry set (ws01.ts fragment) and have an execute_action arm reaching dispatch_",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts + model-eligibility.test.ts/catalog-manifest.test.ts: ids present, risk low, requiresApproval false, reversible false, ownerPlane model; neither id is model-executable (explicit negative assertion)",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/admission-contract.test.ts: agent-action-admission golden must be regenerated (VEREVON_UPDATE_GOLDEN=1) then .sha256 pin and vendored copies refreshed, as noted by WS03-S4 (two more none rows)",
+  "Test runs must not use verevon/budget/genius models (user order): the wiremock tests above call no model at all"
+ ],
+ "notes": "New spaces/human_posts.rs merged via module_routes(): POST /threads and /threads/{id}/messages share submit_post with the two actions. Order: flag, org, ZDR (typed 412/503), body, lifecycle, bearers, Control mint, model-gateway; a reply re-mints once on 409 space_authority_stale. One send id = session key = Control key = client_message_id = space-post-<id>. Also space_context_from_decision, space_scope_for_thread (owner-bound by-id read, shape UNVERIFIED), features/limits in GET context. No migration."
+}

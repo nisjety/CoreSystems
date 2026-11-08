@@ -1,0 +1,6 @@
+- P2 decision: Feature scope rules are checked only after the core table, so a feature can never re-scope an existing path; the plan did not specify the order.
+- P2 decision: Registrars are init()-appended slices (no edit of shared files); route order across features follows Go file-name init order, which gin does not depend on for distinct paths.
+- P2 test-gap: No route-table golden exists in the repo (plan says "route table golden unchanged"); a golden from gin Routes() should be added and captured at the end of W1 tests.
+- P2 gap: Non-spaces internal scopes (authz, memberships, mail-task, users) remain in service_auth.go; only spaces scopes moved, as the plan names scopes_spaces.go.
+- P3 follow-up: serviceScopeRequiresVerifiedDelegation still lives in service_auth.go and now delegates the spaces part to spaceScopeRequiresVerifiedDelegation; WS03-S3 registers the "spaces:policy:admin:" prefix there.
+- P3 follow-up: gofmt -l flags every file in the package because the worktree is CRLF; formatting was not checked beyond go vet.
