@@ -59,6 +59,13 @@ paths = [
   '''pnpm-lock\.yaml$''',
   '''package-lock\.json$''',
   '''yarn\.lock$''',
+  # Committed worktree scratch (2026-11-08 sweep): .plan-work verify/buf-lint/
+  # build outputs and patch batches carry synthetic IDs that trip generic-api-key.
+  '''(^|/)\.plan-work/''',
+  # Byte-copy of the Ingestion Plane tree nested under Frontend Plane (sweep).
+  '''Frontend Plane/Ingestion Plane/''',
+  # Compiled audit helper binary committed in the same sweep.
+  '''audit-verify\.exe$''',
 ]
 
 # Matched against the detected secret string (gitleaks 8.24.3's default

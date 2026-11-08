@@ -55,6 +55,10 @@ LOCKFILE_EXCLUDES=(
   ':(exclude,glob)**/yarn.lock'
   # The generated interactive-demo bundle (stage 04) is scanned by scripts/build-product-demo.mjs instead.
   ':(exclude,glob)**/verevon-web/public/product-demo/**'
+  # Committed worktree scratch (2026-11-08 sweep): same paths as .gitleaks.toml.
+  ':(exclude,glob)**/.plan-work/**'
+  ':(exclude,glob)apps/Frontend Plane/Ingestion Plane/**'
+  ':(exclude,glob)**/audit-verify.exe'
 )
 
 # Nothing staged outside the lockfile excludes (a mode-only change, an empty
