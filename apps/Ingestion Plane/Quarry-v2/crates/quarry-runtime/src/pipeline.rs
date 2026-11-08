@@ -23,7 +23,7 @@ use quarry_transform::{
 };
 use serde_json::json;
 
-use crate::artifact_store::ArtifactStore;
+use crate::artifact_store::{ArtifactStore, PiiEnforcingStore};
 use crate::autoscale::AutoscaledPool;
 use crate::driver::{Driver, FetchHints, RenderHints};
 use crate::events::EventSink;
@@ -522,6 +522,32 @@ fn is_pii_redaction_failure(e: &QuarryError) -> bool {
         == Some(PII_REDACTION_FAILED)
 }
 
+thread_local! {
+    /// Set while a PII scan runs on this thread, so the panic hook stays quiet.
+    static SCANNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs a PII scan or redaction and catches its panic. A scanner panic can quote
+/// the text it was scanning, so the panic hook prints nothing for a panic inside
+/// a scan. Every other panic, on any thread, goes to the hook it had before.
+pub(crate) fn catch_scanner_panic<T>(
+    scan: impl FnOnce() -> T + std::panic::UnwindSafe,
+) -> std::thread::Result<T> {
+    static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
+    QUIET_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !SCANNING.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+    let was_scanning = SCANNING.with(|flag| flag.replace(true));
+    let result = std::panic::catch_unwind(scan);
+    SCANNING.with(|flag| flag.set(was_scanning));
+    result
+}
+
 /// `text` with every finding replaced, or an error. Never a partial result:
 /// the text comes back only when a scan of it finds nothing.
 fn redact_text_fail_closed(text: &str) -> Result<String, PiiRedactionFailure> {
@@ -529,7 +555,7 @@ fn redact_text_fail_closed(text: &str) -> Result<String, PiiRedactionFailure> {
         return Err(PiiRedactionFailure::TooLarge);
     }
     let scan_is_clean = |candidate: &str| {
-        std::panic::catch_unwind(|| quarry_transform::pii::scan(candidate).is_empty())
+        catch_scanner_panic(|| quarry_transform::pii::scan(candidate).is_empty())
             .map_err(|_| PiiRedactionFailure::ScannerPanicked)
     };
     let mut current = text.to_owned();
@@ -537,7 +563,7 @@ fn redact_text_fail_closed(text: &str) -> Result<String, PiiRedactionFailure> {
         if scan_is_clean(&current)? {
             return Ok(current);
         }
-        let redacted = std::panic::catch_unwind(|| quarry_transform::pii::redact(&current))
+        let redacted = catch_scanner_panic(|| quarry_transform::pii::redact(&current))
             .map_err(|_| PiiRedactionFailure::ScannerPanicked)?;
         current = redacted;
     }
@@ -599,6 +625,27 @@ fn redact_page_text(page: PageText) -> QuarryResult<PageText> {
         links: redact_serde(&page.links).map_err(fail("links"))?,
         metadata: redact_serde(&page.metadata).map_err(fail("metadata"))?,
     })
+}
+
+/// E3.6-4b: the store a run writes its artifacts through. A redacting run gets
+/// [`PiiEnforcingStore`], so none of its writes can keep text the scanner has not
+/// cleared, whatever the org settings say. Any other run gets its store as it is.
+fn run_artifact_store(store: &Arc<dyn ArtifactStore>, redacting: bool) -> Arc<dyn ArtifactStore> {
+    if redacting {
+        Arc::new(PiiEnforcingStore::new(store.clone()))
+    } else {
+        store.clone()
+    }
+}
+
+/// E3.6-4b: the page-image producer a run renders with. A redacting run has none:
+/// a picture of the page cannot be text-redacted, so the page is not rendered.
+fn page_renderer_for_run<T>(renderer: Option<T>, redacting: bool) -> Option<T> {
+    if redacting {
+        None
+    } else {
+        renderer
+    }
 }
 
 pub struct PageRunner {
@@ -1064,6 +1111,7 @@ impl PageRunner {
         run_id: &RunKind,
         resp: &crate::fetch::FetchResponse,
         fingerprint: &str,
+        artifacts: &Arc<dyn ArtifactStore>,
     ) -> QuarryResult<CaptureOutput> {
         use base64::Engine as _;
         let mut out = CaptureOutput::default();
@@ -1107,8 +1155,7 @@ impl PageRunner {
                     resp.final_url.as_ref(),
                     &format!("{fingerprint}#cap:final.{kind}"),
                 );
-                let handle = self
-                    .artifacts
+                let handle = artifacts
                     .put(&org, run_id, &label, kind, image.bytes.clone())
                     .await?;
                 self.event_sink
@@ -1155,8 +1202,7 @@ impl PageRunner {
                     resp.final_url.as_ref(),
                     &format!("{fingerprint}#cap:final.pdf"),
                 );
-                let handle = self
-                    .artifacts
+                let handle = artifacts
                     .put(&org, run_id, &label, "pdf", pdf.bytes.clone())
                     .await?;
                 self.event_sink
@@ -1211,8 +1257,7 @@ impl PageRunner {
                         resp.final_url.as_ref(),
                         &format!("{fingerprint}#cap:action.{}.{}", outcome.index, output.kind),
                     );
-                    let handle = self
-                        .artifacts
+                    let handle = artifacts
                         .put(&org, run_id, &label, kind, held.bytes.clone())
                         .await?;
                     self.event_sink
@@ -1874,8 +1919,12 @@ impl PageRunner {
         // Canonical page hash combines normalized URL with content fingerprint,
         // giving a stable artifact key that is independent of run_id.
         let page_hash = quarry_core::artifact::page_hash(resp.final_url.as_ref(), &fp.0);
+        // E3.6-4b: every artifact this run writes goes through this store.
+        let artifacts = run_artifact_store(&self.artifacts, redacting);
         // WS13.4b: the captures this run took (no-op unless the request asked).
-        let mut captured = self.persist_captures(run_id, &resp, &fp.0).await?;
+        let mut captured = self
+            .persist_captures(run_id, &resp, &fp.0, &artifacts)
+            .await?;
 
         // Artifacts — skip durable writes when ZDR is active. Every artifact is
         // stamped with the run's org so `GET /v1/artifacts/{id}` can bind the
@@ -1896,14 +1945,13 @@ impl PageRunner {
             };
             let html_art = match source_bytes {
                 Some(bytes) => Some(
-                    self.artifacts
+                    artifacts
                         .put(artifact_org, run_id, &page_hash, source_label, bytes)
                         .await?,
                 ),
                 None => None,
             };
-            let md_art = self
-                .artifacts
+            let md_art = artifacts
                 .put(
                     artifact_org,
                     run_id,
@@ -1956,8 +2004,7 @@ impl PageRunner {
             };
             let meta_bytes = serde_json::to_vec(&plan)
                 .map_err(|e| QuarryError::new(ErrorCode::Internal, e.to_string()))?;
-            let meta_art = self
-                .artifacts
+            let meta_art = artifacts
                 .put(artifact_org, run_id, &page_hash, "meta.json", meta_bytes)
                 .await?;
             self.event_sink
@@ -2414,8 +2461,9 @@ impl PageRunner {
                 let ingest_url = resp.final_url.to_string();
                 let cancel_token = self.cancel_token.clone();
                 // Phase-2 visual RAG producer — captured into the ingest task so
-                // the page render fires once the DP2 document_id is known.
-                let page_renderer = self.page_renderer.clone();
+                // the page render fires once the DP2 document_id is known. A
+                // redacting run renders no page (E3.6-4b).
+                let page_renderer = page_renderer_for_run(self.page_renderer.clone(), redacting);
                 let render_org = org_id.clone();
                 let render_title = output.metadata.title.clone();
                 let render_zdr = self.zdr;
@@ -5725,5 +5773,45 @@ mod pii_redaction_tests {
                 assert_eq!(failed.payload["cause"], "capture_not_redactable");
             }
         }
+    }
+
+    #[test]
+    fn a_scanner_panic_is_caught_and_the_quiet_flag_is_cleared() {
+        let caught = catch_scanner_panic(|| -> bool { panic!("a scanner quoting {EMAIL}") });
+        assert!(caught.is_err());
+        assert!(!SCANNING.with(std::cell::Cell::get));
+        assert_eq!(catch_scanner_panic(|| 7).ok(), Some(7));
+    }
+
+    #[test]
+    fn a_redacting_run_renders_no_page() {
+        assert!(page_renderer_for_run(Some("renderer"), true).is_none());
+        assert_eq!(page_renderer_for_run(Some("renderer"), false), Some("renderer"));
+        assert_eq!(page_renderer_for_run::<&str>(None, false), None);
+    }
+
+    #[tokio::test]
+    async fn a_redacting_run_writes_through_a_store_that_refuses_unredacted_text() {
+        let _sink =
+            crate::artifact_store::SinkPiiTestOverride::install(PiiRedactionSettings::default());
+        let inner: Arc<dyn ArtifactStore> = Arc::new(InMemoryStore::new());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let dirty = format!("Skriv til {EMAIL} i dag").into_bytes();
+
+        run_artifact_store(&inner, false)
+            .put(ORG, &run_id, "page", "markdown", dirty.clone())
+            .await
+            .expect("a run that does not redact writes as before");
+        let before = inner.count(ORG).await.unwrap();
+
+        let error = run_artifact_store(&inner, true)
+            .put(ORG, &run_id, "page", "markdown", dirty)
+            .await
+            .expect_err("a redacting run refuses unredacted text");
+        let details = error.details.clone().unwrap();
+        assert_eq!(details["reason"], PII_REDACTION_FAILED);
+        assert_eq!(details["cause"], "residual_pii");
+        assert!(!error.to_string().contains(EMAIL));
+        assert_eq!(inner.count(ORG).await.unwrap(), before, "the refused write stored nothing");
     }
 }
