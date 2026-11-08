@@ -1,0 +1,65 @@
+/* The changed-files card under a run's answer (F-t3-076). It sits in the transcript, so it keeps to the surface and
+   border tokens of the chat, and a path reads in the monospace the computer panel uses for paths. */
+.verevon-changed-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  min-width: 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+}
+
+.verevon-changed-files__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--verevon-text);
+}
+
+.verevon-changed-files__head span {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-changed-files__list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-changed-files__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.verevon-changed-files__path {
+  min-width: 0;
+  color: var(--verevon-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-changed-files__kind,
+.verevon-changed-files__saves {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.verevon-changed-files__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
