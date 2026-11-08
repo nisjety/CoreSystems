@@ -1,0 +1,20 @@
+{
+  "agent": "T2-idn-1",
+  "slices": ["WS05-S4", "WS05-S6", "WS05-S7"],
+  "written": 255,
+  "run": 234,
+  "passed": 234,
+  "failed_fixed": 1,
+  "skipped_deferred": 21,
+  "depth_rows": 7,
+  "commit": "285691d8a (WS05-S4), 8f5a4eb75 (WS05-S6 + WS05-S7)",
+  "commands": [
+    "cd apps/Control Plane/audit-core && go test ./internal/api/ ./internal/store/ (and ./... green)",
+    "cd apps/Control Plane/org-core && go test ./internal/org/ ./internal/http/ (and ./... green)",
+    "cd apps/Frontend Plane/verevonv3/apps/gateway && CARGO_TARGET_DIR=C:/dev/space-target-gw CARGO_INCREMENTAL=0 cargo test --bin '*' -- domains::audit domains::auth::public domains::org_identity",
+    "cd apps/Frontend Plane/verevonv3 && node node_modules/vitest/vitest.mjs run (audit-client, AuditLogSection, SettingsPages.audit-log, CoreSidebarSettingsPanels.audit-log, identity-audit-actions, DomainsPanel, SsoPolicyPanel)",
+    "cd apps/Control Plane/auth-core && node node_modules/jest/bin/jest.js src/auth/sso-enforcement.spec.ts src/auth/sso-provider-admin.controller.spec.ts",
+    "playwright test tests/e2e/org-identity-admin.spec.ts --list (listing only)"
+  ],
+  "notes": "234 new tests green: Go 59, Rust 29, Vitest 60, Jest 86. 21 deferred: 17 Go DB-gated (TEST_DATABASE_URL / CONTROL_LIFECYCLE_TEST_DATABASE_URL skip) and 4 Playwright. One stale test fixed: org-core retention_posture_contract_test now expects auth-core's org:domain:read:any compose scope (S6). pnpm exec is blocked by a deps-install check in this worktree, so vitest/playwright ran via node_modules directly; auth-core node_modules is a junction to the planning worktree's install (gitignored). The gateway lib test build was briefly broken by another agent's in-flight edits to spaces/mod.rs and config.rs; the final run compiled. The config flag test lives in org_identity.rs because config.rs held another agent's uncommitted hunk."
+}

@@ -1,0 +1,34 @@
+{
+ "slice": "WS14-S3",
+ "status": "built",
+ "commit": "6ce345f95",
+ "files": [
+  "apps/Data Plane v2/docker-compose.yml",
+  "apps/Data Plane v2/infra/postgres/migrations/20261102062000_documents_space_file_dedupe.sql",
+  "apps/Data Plane v2/infra/postgres/migrations/20261102062000_documents_space_file_dedupe.down.sql",
+  "apps/Data Plane v2/services/documents-api-go/cmd/main.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/config/config.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/model/document.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/repo/document_repo.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/repo/space_files.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/documents.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/space_import.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/space_upload.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/spacegrant/client.go"
+ ],
+ "compile": "ok (go build ./... and go vet on handler, repo, spacegrant, config, cmd)",
+ "migrations": [
+  "migration data 20261102062000 apps/Data Plane v2/infra/postgres/migrations/20261102062000_documents_space_file_dedupe.sql"
+ ],
+ "flags": [
+  "DOCUMENTS_SPACE_FILES false (compose ${:-false}, strict literal true)"
+ ],
+ "tests_owed": [
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/space_upload_test.go: owner := signed subject only with a verified space_upload decision (body owner_id naming another user 403); type space_upload without a decision 403; flag off 404 room_files_disabled; visibility forced shared; metadata sha256 missing/invalid 400 room_file_metadata_invalid; server-stamped text_chars/created_by_kind/scan_state; duplicate 409 room_file_duplicate with document_id; quota 409 room_files_quota_exceeded (max_files, max_text_bytes); grant denied 403 space_files_not_authorized with reason_code and NO X-Space-Import-Authority-Accepted header; grant unavailable/not configured 503 and no accepted header; retry with same idempotency key reuses the row and re-attempts the grant; header set only after the grant; bulk refuses type space_upload; delete of a room file calls RevokeFile with the uploader bearer and a stub failure does not fail the delete",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/space_import_test.go: isSpaceUpload and signedSubject; personal-Space connector import owned by the subject when the flag is on, unchanged when off",
+  "apps/Data Plane v2/services/documents-api-go/internal/repo/space_files_live_test.go (TEST_DATABASE_URL): admission under advisory lock with concurrent uploads, count and byte quota, hash dedupe per (org, Space), deleted file releases its hash, unique index backstop maps to SpaceFileDuplicateError",
+  "apps/Data Plane v2/services/documents-api-go/internal/spacegrant/client_test.go (httptest): AttachFile posts decision_token and document_id with X-Service-Id documents-api, maps 200/403(code)/404/5xx; RevokeFile sends DELETE with subject_type=space, user bearer and a v2 delegation whose operation is authz:revoke and resource id is the document (HMAC verifies against Control's canonical form)",
+  "apps/Data Plane v2/tests: migration 20261102062000 up/down applies; index uq_documents_space_file_sha256 exists after up and is gone after down"
+ ],
+ "notes": "Flag-gated (DOCUMENTS_SPACE_FILES, default off). Grant is attached before the accepted header; grant revoke on delete is best effort via Control's owner-asserted DELETE (needs CONTROL_OWNER_ASSERTED_GRANTS and authz:write on the documents-api credential). Data migration timestamp 20261102062000 is a placeholder to retake at merge. Tests not run."
+}

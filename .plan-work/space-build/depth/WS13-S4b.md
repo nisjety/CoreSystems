@@ -1,0 +1,5 @@
+- P2 gap: The redirect's flag check calls getSpaceFeatures() on every open in production when the dev override is off; a cached features read would save one request.
+- P2 risk: A 401 from the resolver lands on the neutral view rather than the sign-in flow if the session-expiry event does not fire first (RequireAuth normally intercepts).
+- P3 gap: The unavailable view uses a plain anchor (full reload) to the room; a router link would avoid it.
+- P3 follow-up: space-entry-redirect.css re-scopes the .verevon-space-restricted look under .verevon-space-entry; fold into one shared notice when WS07 consolidates.
+- P2 test-gap: No e2e for the two-tab permalink flow yet (tests/e2e/space-search.spec.ts covers it in the plan).

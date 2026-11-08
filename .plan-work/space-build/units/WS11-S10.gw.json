@@ -1,0 +1,31 @@
+{
+ "slice": "WS11-S10.gw",
+ "status": "built",
+ "commit": "926a7cb73",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws11.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/status.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws11.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts"
+ ],
+ "compile": "ok (gateway cargo check clean; 2 pre-existing marketing warnings). SPA actions TS not compiled (schema-only edit)",
+ "migrations": [],
+ "flags": [
+  "SPACE_STATUS_API (space_status_api) dev true, production false (compose + production compose + SpaceFeatureFlags.status_api, features.status)"
+ ],
+ "tests_owed": [
+  "apps/gateway/src/domains/spaces/status.rs tests: follow_and_status_text_refused_under_zdr_with_typed_412 (PUT with non-blank text under ZDR org is 412 zdr_durable_mutation_forbidden with no Convex call; state-only write allowed; unknown posture is 503 zdr_decision_unavailable)",
+  "status.rs: put_status_validates_state_and_maps_invalid_status (400 invalid_status for unknown state and for Convex invalid_status; deny_unknown_fields 400 invalid_request; flag off 404 space_status_disabled)",
+  "status.rs: get_status_includes_text_only_when_org_not_zdr (includeText false for Enabled and Unknown; null row gives all-null data)",
+  "status.rs: roster_annotation_adds_status_to_user_members_only (service members untouched, missing row gives status null, failed lookup leaves the field absent, flag off unchanged)",
+  "status.rs: agents_annotation_adds_activity (missing id reads idle, failed lookup leaves absent)",
+  "apps/gateway/scripts/action-surface-contract.test.mjs and SPA catalog-manifest.test.ts: spaces.set_status present, ownerPlane application, not model-eligible",
+  "dispatcher test: dispatch_spaces_set_status maps state/text/expiresAt to state/text/expires_at"
+ ],
+ "notes": "BFF half only: GET/PUT /api/v1/spaces/status (domains/spaces/status.rs), status on roster user members, activity on agents, spaces.set_status contract + dispatcher + model-access exemption. SpaceStatusMenu.tsx, roster chips UI and AccountSettingsPage are SPA work, not built. No clear route (Convex clearStatusForGateway has no BFF caller)."
+}

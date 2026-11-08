@@ -579,7 +579,10 @@ const UNITS = [
    "WS04-S10",
    "P-UC1",
    "WS04-S5",
-   "WS04-S8"
+   "WS04-S8",
+   "WS04-S8.gw",
+   "WS04-S8.spa",
+   "WS04-S9.spa"
   ],
   "ws": "WS04",
   "ms": "M2.2",
@@ -1234,7 +1237,9 @@ const UNITS = [
   "deps": [
    "WS11-S3",
    "P-CX1",
-   "WS11-S5"
+   "WS11-S5",
+   "WS11-S3.gw",
+   "WS11-S3.spa"
   ],
   "ws": "WS11",
   "ms": "M2.2",
@@ -1303,7 +1308,9 @@ const UNITS = [
   "level": 3,
   "deps": [
    "P-SPA1",
-   "WS11-S3"
+   "WS11-S3",
+   "WS11-S3.gw",
+   "WS11-S3.spa"
   ],
   "ws": "WS11",
   "ms": "M2.2",
@@ -1438,7 +1445,9 @@ const UNITS = [
   "deps": [
    "WS11-S3",
    "WS11-S6",
-   "P-CX1"
+   "P-CX1",
+   "WS11-S3.gw",
+   "WS11-S3.spa"
   ],
   "ws": "WS11",
   "ms": "M2.2",
@@ -1508,7 +1517,9 @@ const UNITS = [
    "WS16-S9",
    "P-SPA1",
    "WS11-S3",
-   "WS11-S4"
+   "WS11-S4",
+   "WS11-S3.gw",
+   "WS11-S3.spa"
   ],
   "ws": "WS16",
   "ms": "M2.3",
@@ -1580,6 +1591,201 @@ const UNITS = [
   "ms": "M2.1",
   "planStart": 1691,
   "planEnd": 1799
+ },
+ {
+  "id": "WS04-S8.gw",
+  "what": "LEG gw of WS04-S8 (visibility, directory policy, self-join). The Control leg is committed (10e972aa6); read .plan-work/space-build/units/WS04-S8.json first. Build ONLY: gateway directory.rs rooms route, room_admin.rs join/settings proxy plus audience reconcile, flag SPACE_ROOM_DIRECTORY_API, and the gateway dispatcher side of actions spaces.join_room / spaces.update_room_settings",
+  "lane": "L4",
+  "group": "gw",
+  "size": "M/L",
+  "level": 1,
+  "deps": [
+   "WS04-S8"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
+ },
+ {
+  "id": "WS04-S8.spa",
+  "what": "LEG spa of WS04-S8. Control leg 10e972aa6 and the gw leg (units/WS04-S8.gw.json) are done; read both unit files. Build ONLY the SPA: action contracts spaces.join_room / spaces.update_room_settings in src/shared/actions, SpacesDirectoryPage.tsx, SpaceRoomSettings, errors.ts copy; the App.tsx route line and the CoreSidebarSpacesPanel entry are allowed as minimal edits outside your group",
+  "lane": "L4",
+  "group": "spa-room",
+  "size": "M/L",
+  "level": 1,
+  "deps": [
+   "WS04-S8.gw"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
+ },
+ {
+  "id": "WS04-S9.spa",
+  "what": "LEG spa of WS04-S9 (composed people and agent directory). The gateway leg is committed (243561a67); read units/WS04-S9.json first. Build ONLY the SPA: spaces-client resolveDirectory, DirectoryPicker.tsx, SpaceMemberControls.tsx",
+  "lane": "L7",
+  "group": "spa-room",
+  "size": "M",
+  "level": 1,
+  "deps": [
+   "WS04-S9"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
+ },
+ {
+  "id": "WS11-S3.gw",
+  "what": "LEG of WS11-S3 (Convex read-state extensions, BFF aggregate). The Application half is committed (920bb2ac1). Read .plan-work/space-build/units/WS11-S3.json (and any earlier leg unit files of WS11-S3) first. Build ONLY: the gateway BFF for attention: domains/spaces/attention.rs aggregate (attention list, item state, read-all, unread/mark-unread, level, follow, invite, reason on read), its routes, flags and compose entries, and the gateway dispatchers for the matching spaces.* actions. WS11-S4's SPA (907ee8498) already calls these routes: read units/WS11-S4.json and match its client paths and payloads exactly",
+  "lane": "L6",
+  "group": "gw",
+  "size": "L",
+  "level": 3,
+  "deps": [
+   "WS11-S3"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS11-S3.spa",
+  "what": "LEG of WS11-S3 (Convex read-state extensions, BFF aggregate). The Application half (920bb2ac1) and the gateway leg (units/WS11-S3.gw.json) are done. Read .plan-work/space-build/units/WS11-S3.json (and any earlier leg unit files of WS11-S3) first. Build ONLY: the SPA action contracts in src/shared/actions for the attention actions the gw leg dispatches, and any wiring the WS11-S4 SPA (907ee8498) still lacks to reach them",
+  "lane": "L6",
+  "group": "spa-room",
+  "size": "L",
+  "level": 3,
+  "deps": [
+   "WS11-S3.gw"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS11-S10.gw",
+  "what": "LEG of WS11-S10 (org status text and agent availability chips). The Application half is committed (c7584a983). Read .plan-work/space-build/units/WS11-S10.json (and any earlier leg unit files of WS11-S10) first. Build ONLY: BFF GET/PUT /api/v1/spaces/status, roster status and agents activity routes, flag and compose entries, and the gateway dispatcher for spaces.set_status",
+  "lane": "L6",
+  "group": "gw",
+  "size": "M",
+  "level": 5,
+  "deps": [
+   "WS11-S10"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS11-S10.spa",
+  "what": "LEG of WS11-S10 (org status text and agent availability chips). The Application half (c7584a983) and the gw leg (units/WS11-S10.gw.json) are done. Read .plan-work/space-build/units/WS11-S10.json (and any earlier leg unit files of WS11-S10) first. Build ONLY: action contract spaces.set_status, spaces-client calls, SpaceStatusMenu.tsx and roster chips; a minimal AccountSettingsPage entry is allowed outside your group",
+  "lane": "L6",
+  "group": "spa-room",
+  "size": "M",
+  "level": 5,
+  "deps": [
+   "WS11-S10.gw"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS11-S11.gw",
+  "what": "LEG of WS11-S11 (reminders). The Application half is committed (f0860876e). Read .plan-work/space-build/units/WS11-S11.json (and any earlier leg unit files of WS11-S11) first. Build ONLY: BFF reminder routes, flag space_reminders_api with compose entries, and the gateway dispatchers for spaces.create_reminder / spaces.cancel_reminder",
+  "lane": "L6",
+  "group": "gw",
+  "size": "M",
+  "level": 6,
+  "deps": [
+   "WS11-S11"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS11-S11.spa",
+  "what": "LEG of WS11-S11 (reminders). The Application half (f0860876e) and the gw leg (units/WS11-S11.gw.json) are done. Read .plan-work/space-build/units/WS11-S11.json (and any earlier leg unit files of WS11-S11) first. Build ONLY: action contracts spaces.create_reminder / spaces.cancel_reminder, spaces-client calls and SpaceRemindMenu.tsx",
+  "lane": "L6",
+  "group": "spa-room",
+  "size": "M",
+  "level": 6,
+  "deps": [
+   "WS11-S11.gw"
+  ],
+  "ws": "WS11",
+  "ms": "M2.2",
+  "planStart": 2024,
+  "planEnd": 2132
+ },
+ {
+  "id": "WS10-S7.ctl",
+  "what": "LEG of WS10-S7 (turn_origin rules). The Session Core half is committed (5d3b6ad83). Read .plan-work/space-build/units/WS10-S7.json (and any earlier leg unit files of WS10-S7) first. Build ONLY: the Control twin in user-core (approval_decide_decision.go and whatever the plan names for turn_origin on the Control side)",
+  "lane": "L2",
+  "group": "ctl",
+  "size": "S",
+  "level": 4,
+  "deps": [
+   "WS10-S7"
+  ],
+  "ws": "WS10",
+  "ms": "M2.3",
+  "planStart": 1914,
+  "planEnd": 2023
+ },
+ {
+  "id": "WS04-S11.sc",
+  "what": "LEG of WS04-S11 (opt-in history window (since_join)). The Control leg is committed (a85ad2d85). Read .plan-work/space-build/units/WS04-S11.json and any earlier WS04-S11 leg unit files first. Build ONLY: session-core history-floor claim and filter (grpc.rs, run_service_grpc.rs) behind SESSION_CORE_SPACE_HISTORY_FLOOR, plus compose entries",
+  "lane": "L4",
+  "group": "sc",
+  "size": "L",
+  "level": 2,
+  "deps": [
+   "WS04-S11"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
+ },
+ {
+  "id": "WS04-S11.gw",
+  "what": "LEG of WS04-S11 (opt-in history window (since_join)). The Control leg is committed (a85ad2d85). Read .plan-work/space-build/units/WS04-S11.json and any earlier WS04-S11 leg unit files first. Build ONLY: the gateway settings passthrough for the history floor and any flag/compose entries",
+  "lane": "L4",
+  "group": "gw",
+  "size": "L",
+  "level": 2,
+  "deps": [
+   "WS04-S11.sc"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
+ },
+ {
+  "id": "WS04-S11.spa",
+  "what": "LEG of WS04-S11 (opt-in history window (since_join)). The Control leg is committed (a85ad2d85). Read .plan-work/space-build/units/WS04-S11.json and any earlier WS04-S11 leg unit files first. Build ONLY: the SPA timeline notice and the spaces-client types for the history floor",
+  "lane": "L4",
+  "group": "spa-room",
+  "size": "L",
+  "level": 2,
+  "deps": [
+   "WS04-S11.gw"
+  ],
+  "ws": "WS04",
+  "ms": "M2.2",
+  "planStart": 1029,
+  "planEnd": 1142
  }
 ]
 const LIMIT = (args && args.limit) ? args.limit : 4
@@ -1621,7 +1827,7 @@ function prompt(u) {
     ? `Plan subsection: Grep '#### ${u.ws} ' in ${PLAN} (currently lines ${u.planStart}-${u.planEnd}); design file .plan-work/design/${u.ws}.md.`
     : `This is a seam/baseline row, defined in plan sections 4.1.1 (M0 exit criteria), 4.4.2 (prep refactors) and 4.5-4.6: Grep '${u.id}' in ${PLAN}; related workstream slices that consume it name it in their tables.`
   const deps = u.deps.length ? `Dependencies already built (read .plan-work/space-build/units/<id>.json for each): ${u.deps.join(', ')}.` : 'No slice dependencies.'
-  return `Read C:/dev/CoresSystem/.claude/worktrees/space-main-merge/.plan-work/00-build-rules-w2.md first and follow it exactly; your first shell command is cd "C:/dev/CoresSystem/.claude/worktrees/space-main-merge". You build slice ${u.id}: ${u.what} (lane ${u.lane}, size ${u.size}, milestone ${u.ms} of wave W2).
+  return `Read C:/dev/CoresSystem/.claude/worktrees/practical-mccarthy-1dc567/w2/.plan-work/00-build-rules-w2.md first and follow it exactly; your first shell command is cd "C:/dev/CoresSystem/.claude/worktrees/practical-mccarthy-1dc567/w2". You build slice ${u.id}: ${u.what} (lane ${u.lane}, size ${u.size}, milestone ${u.ms} of wave W2).
 ${where}
 ${deps}
 ${GROUP_HINT[u.group] || ''}

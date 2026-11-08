@@ -1,0 +1,48 @@
+{
+ "slice": "WS10-S3",
+ "status": "built",
+ "commit": "d2be41cbe",
+ "files": [
+  "apps/Model Plane/deploy/docker-compose.production.yml",
+  "apps/Model Plane/deploy/docker-compose.release.yml",
+  "apps/Model Plane/deploy/docker-compose.yml",
+  "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+  "apps/Model Plane/go/gen/model_plane/v1/orchestration_grpc.pb.go",
+  "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
+  "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs",
+  "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+  "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
+  "apps/Model Plane/rust/services/session-core/migrations/0074_approval_gate_context.sql",
+  "apps/Model Plane/rust/services/session-core/migrations/revert/0074_approval_gate_context.down.sql",
+  "apps/Model Plane/rust/services/session-core/src/approval_delivery.rs",
+  "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/approval_gate.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/mod.rs"
+ ],
+ "compile": "ok (cargo check session-core, execution-core, model-gateway --lib --bins; go build go/gen and orchestrator-core)",
+ "migrations": [
+  "migration session-core 0074 apps/Model Plane/rust/services/session-core/migrations/0074_approval_gate_context.sql"
+ ],
+ "flags": [
+  "EXECUTION_CORE_SPACE_APPROVAL_GATE off|shadow|enforce (unset=off; compose dev enforce, production and release off)",
+  "EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN (blank=no Control inputs)"
+ ],
+ "tests_owed": [
+  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs: fold lattice (allow<ask<block), GateMode parse default off, action_digest golden vector (key order and whitespace independent), action_key names operation only",
+  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs (resolve): never-auto tool pauses with a once-approval and a rule present; block beats once-token and rule; view unavailable makes a risky call ask with grants disabled; zdr and waived never claim or use a grant; non-mcp tool never reaches use",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: gate off and non-Space step keep the three early awaiting_approval returns; enforce defers them into one fold; shadow changes nothing",
+  "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs: Space descriptor + authority_changed answer ends Terminal authority_changed; Control unavailable leaves the lease; no space_id skips the check",
+  "apps/Model Plane/rust/services/session-core/src/space/approval_gate.rs (units written): claims bind org, user, run, Space, tool; non-mcp tool refused; lifetime over 120 s refused; ZDR drops digest",
+  "apps/Model Plane/rust/services/session-core (DB, --ignored approval_scope --test-threads=1): two concurrent claim_once calls, one wins; expired, other thread, other user, other digest, resume_class!=none and continuation_mode!='' rows are not claimed; grant-created row shape (status granted, decided_by grant:<rule>, grant_ref, no outbox row, metadata.decision.source standing_grant); forged, expired, wrong-run and wrong-tool grant_use_token refused",
+  "apps/Model Plane/rust/services/session-core: ZDR caller refused for grant_use_token and ClaimOnceApproval with the durable-mutation refusal, no digest row written",
+  "apps/Model Plane/rust/crates/mp-orchestration proto_wire_parity and apps/Model Plane/go/gen proto_wire_parity_orchestration_test.go: new CreateApprovalRequest fields 16-19 and ClaimOnceApproval messages",
+  "apps/Control Plane/user-core: cross-vector that a Control-signed approval-grant-use-v1 token verifies in Session Core (scripts/tests/space-contract-vectors-sync pattern)"
+ ],
+ "notes": "Gate is folded into execute_step_inner (enforce defers capability/hook/posture asks into one fold with Control's per-tool level; shadow observes; off and non-Space unchanged). Once-token via new ClaimOnceApproval RPC (proto + Go + Python regenerated); standing-rule pass via grant_use_token on CreateApproval (MCP tools only); worker checks Control before a Space continuation. Standing-rule pass is inert until Control's view returns agent_subject_id and the execution-core credential lands (see depth file).",
+ "slice_extra": ""
+}

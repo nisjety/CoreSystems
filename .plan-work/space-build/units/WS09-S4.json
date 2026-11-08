@@ -1,0 +1,39 @@
+{
+ "slice": "WS09-S4",
+ "status": "built",
+ "commit": "60db2b789",
+ "files": [
+  "apps/Model Plane/proto/model_plane/v1/runs.proto",
+  "apps/Model Plane/rust/services/session-core/src/room_run_attach.rs",
+  "apps/Model Plane/rust/services/session-core/src/main.rs",
+  "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/runs.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/mod.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/room_run.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+  "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+  "apps/Model Plane/deploy/docker-compose.yml",
+  "apps/Model Plane/deploy/docker-compose.override.yml",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/run_live.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs"
+ ],
+ "compile": "ok",
+ "migrations": [],
+ "flags": [
+  "SPACE_RUN_LIVE_VIEW default off (compose :-false, dev override true)",
+  "SPACE_RUN_LIVE_TEXT default off (requires live view)"
+ ],
+ "tests_owed": [
+  "apps/Model Plane/rust/services/session-core/src/room_run_attach.rs (DB tests room_attach_*, run with --ignored): wrong space, foreign org, thread beyond audience ceiling, child run all NotFound; expired, foreign-subject and write-permission decisions refused; revoked viewer refused on re-authorize; ZDR credential, decision zero_data_retention claim and zdr/zdr_waived run give zdr_feature_not_supported/agent_run; valid_until is min(decision expiry, now+600); run_phase running for an open obligation",
+  "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs: ListRuns Space branch sets owner_subject_id, owner path leaves it empty",
+  "apps/Model Plane/rust/services/model-gateway/tests/room_run_live_test.rs: replay then tail, snapshot first, re-authorize at 15 s, reauth_required at validity end, revoked closes with error, per-user cap 429, per-run cap, foreign-org pointer miss 410, pointer owner mismatch 410, flag off 404, finished run replays then closes, 410 after TTL, no decision token in any body, projector output carries no sentinel content",
+  "apps/Model Plane/rust/services/model-gateway/src/space_routes/runs.rs: pointer_request_id accepts only the right org and owner; attach caps hold and release on drop; status_response fixed words and ZDR catalogue body",
+  "apps/Model Plane/rust/services/model-gateway/src/room_run.rs: SpaceRunPolicy::from_values live_text requires live_view; defaults off",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/run_live.rs: wiremock tests: flag off 404 feature_unavailable; org ZDR makes zero Control calls and answers zdr_feature_not_supported; Control 403 becomes space_read_not_authorized; the decision is in the POST body and in no URL or response; forged x-space-* ignored; relayed codes map to fixed words; unknown upstream error becomes model_error",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: add authorize_room_run_attach stub to MockRunService so the test build compiles",
+  "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check, zdr_posture_matrix.rs and zdr_refusal_inventory.rs still pass"
+ ],
+ "notes": "AuthorizeRoomRunAttach in session-core (room_run_attach.rs) + RunService proto; model-gateway POST /v1/spaces/:space/runs/:run/live projects the owner buffer through RoomProjector (snapshot, 300 ms tail, 15 s re-authorize, caps 8/100); gateway GET route run_live.rs relays. agent_work already existed from S2. See depth file for deviations. Two commits: 72732716c (gateway mod.rs registration; also swept a pre-staged mode-only change to apps/Model Plane/scripts/verify-sandbox-production-profile.sh by another builder) and 60db2b789 (rest)."
+}

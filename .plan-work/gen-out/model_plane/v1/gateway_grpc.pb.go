@@ -68,6 +68,7 @@ const (
 	ModelGateway_CreateTask_FullMethodName           = "/model_plane.v1.ModelGateway/CreateTask"
 	ModelGateway_ListTasks_FullMethodName            = "/model_plane.v1.ModelGateway/ListTasks"
 	ModelGateway_Health_FullMethodName               = "/model_plane.v1.ModelGateway/Health"
+	ModelGateway_ScreenContent_FullMethodName        = "/model_plane.v1.ModelGateway/ScreenContent"
 )
 
 // ModelGatewayClient is the client API for ModelGateway service.
@@ -200,6 +201,8 @@ type ModelGatewayClient interface {
 	ListTasks(ctx context.Context, in *ListTasksRequest, opts ...grpc.CallOption) (*ListTasksResponse, error)
 	// Health check for load balancer probes.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
+	// WS26-S7: Do-mode content screening. A verdict only; the content is never returned.
+	ScreenContent(ctx context.Context, in *ScreenContentRequest, opts ...grpc.CallOption) (*ScreenContentResponse, error)
 }
 
 type modelGatewayClient struct {
@@ -709,6 +712,16 @@ func (c *modelGatewayClient) Health(ctx context.Context, in *HealthRequest, opts
 	return out, nil
 }
 
+func (c *modelGatewayClient) ScreenContent(ctx context.Context, in *ScreenContentRequest, opts ...grpc.CallOption) (*ScreenContentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScreenContentResponse)
+	err := c.cc.Invoke(ctx, ModelGateway_ScreenContent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ModelGatewayServer is the server API for ModelGateway service.
 // All implementations must embed UnimplementedModelGatewayServer
 // for forward compatibility.
@@ -839,6 +852,8 @@ type ModelGatewayServer interface {
 	ListTasks(context.Context, *ListTasksRequest) (*ListTasksResponse, error)
 	// Health check for load balancer probes.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
+	// WS26-S7: Do-mode content screening. A verdict only; the content is never returned.
+	ScreenContent(context.Context, *ScreenContentRequest) (*ScreenContentResponse, error)
 	mustEmbedUnimplementedModelGatewayServer()
 }
 
@@ -995,6 +1010,9 @@ func (UnimplementedModelGatewayServer) ListTasks(context.Context, *ListTasksRequ
 }
 func (UnimplementedModelGatewayServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedModelGatewayServer) ScreenContent(context.Context, *ScreenContentRequest) (*ScreenContentResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ScreenContent not implemented")
 }
 func (UnimplementedModelGatewayServer) mustEmbedUnimplementedModelGatewayServer() {}
 func (UnimplementedModelGatewayServer) testEmbeddedByValue()                      {}
@@ -1892,6 +1910,24 @@ func _ModelGateway_Health_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ModelGateway_ScreenContent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScreenContentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ModelGatewayServer).ScreenContent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ModelGateway_ScreenContent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ModelGatewayServer).ScreenContent(ctx, req.(*ScreenContentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ModelGateway_ServiceDesc is the grpc.ServiceDesc for ModelGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2090,6 +2126,10 @@ var ModelGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _ModelGateway_Health_Handler,
+		},
+		{
+			MethodName: "ScreenContent",
+			Handler:    _ModelGateway_ScreenContent_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

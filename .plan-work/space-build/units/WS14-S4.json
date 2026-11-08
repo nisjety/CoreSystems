@@ -1,0 +1,38 @@
+{
+ "slice": "WS14-S4",
+ "status": "built",
+ "commit": "2bb0a261a",
+ "files": [
+  "apps/Data Plane v2/docker-compose.yml",
+  "apps/Data Plane v2/services/documents-api-go/cmd/main.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/config/config.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/documents.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/shares.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/repo/shares.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/userauthz/client.go",
+  "apps/Data Plane v2/services/documents-api-go/internal/userauthz/grants.go",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.tsx",
+  "apps/Frontend Plane/verevonv3/src/shared/api/ownership-client.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts"
+ ],
+ "compile": "ok (documents-api-go go build ./... and go vet on handler, userauthz, repo, cmd; gateway cargo check; SPA tsc6 -p tsconfig.app.json: no errors in touched files)",
+ "migrations": [],
+ "flags": [
+  "DOCUMENTS_SHARE_WRITES false (compose ${:-false}, strict literal true)"
+ ],
+ "tests_owed": [
+  "apps/Data Plane v2/services/documents-api-go/internal/handler/shares_test.go: flag off -> 404 shares_disabled on list/add/remove; service principal and missing bearer 403; non-owner (and org-visible non-owned doc) 404 on all three; owner with org:data:write_all allowed; role edit/other 400 role_not_supported with no Control call; subject == owner/actor 409 self_share; 200 user-grant cap 409 share_limit_reached (re-share of existing subject allowed); ZDR token or missing posture refuses writes 403; Control 400 code passes through, Control 403/404/5xx -> 503 sharing_unavailable; DELETE asks Control only for subject_type=user; GET lists space rows read-only; shared-with-me excludes own docs and deleted docs and works with the flag off",
+  "apps/Data Plane v2/services/documents-api-go/internal/userauthz/grants_test.go (httptest): Grant/Revoke/ListGrants/ListVisibleSpace send X-Service-Id documents-api, the actor bearer and a v2 delegation whose operation (authz:grant, authz:revoke, authz:grants, authz:space-visible), resource id (document id; Space ref for space-visible) and body digest verify against Control's canonical form; non-200 becomes StatusError with Control's code; existing ListVisibleDocuments still signs authz:visible with an empty digest",
+  "apps/Data Plane v2/services/documents-api-go/internal/repo/shares_live_test.go (TEST_DATABASE_URL): ListSharedWith excludes owner's own, deleted and other-org documents and returns no content",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs (cargo test, wiremock): REST routes proxy to documents-api with the data-plane bearer and never call user-core; flat {error,code} is rewritten to {error:{code,message}} and an unsafe code falls back to the status default; list maps shares -> grants; role passes through so edit gets role_not_supported",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions (cargo test): ownership.share_document and ownership.revoke_document_share dispatch through documents-api and wrap the result in the action envelope",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts: ownership.share_document and ownership.revoke_document_share have ownerPlane data and isModelExecutableAction(...) is false (negative assertion); admission contract golden unchanged (schemaHash ignores ownerPlane)",
+  "apps/Frontend Plane/verevonv3/src/features/knowledge/components/ShareDialog.test.tsx: a space row shows no Remove button; user rows do; new refusal codes render the errors.ts copy in both locales",
+  "scenario M2-S7 step 5 (live): owner A shares with C (grant row, C sees it); C sharing A's document is 404; role edit is role_not_supported; the gateway principal calling /authz/grant directly gets 403"
+ ],
+ "notes": "documents-api now proves ownership then calls Control's owner-asserted grant surface with the actor bearer and a v2 delegation; granted_by comes from the delegation. Gateway shares.rs and both ownership.* dispatchers proxy documents-api (no Control grant call left); registry ownerPlane is data and the actions stay non-model-executable. Rollout: deploy gateway + documents-api first, DOCUMENTS_SHARE_WRITES on, then CONTROL_OWNER_ASSERTED_GRANTS. shared-with-me is not flag-gated. Tests not run."
+}

@@ -1,0 +1,29 @@
+{
+ "slice": "WS11-S11.gw",
+ "status": "built",
+ "commit": "a01197caf",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/reminders.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws11.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws11.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts"
+ ],
+ "compile": "ok (gateway cargo check clean; 2 pre-existing marketing warnings). SPA actions TS not compiled (schema-only edit)",
+ "migrations": [],
+ "flags": ["SPACE_REMINDERS_API (space_reminders_api) dev true, production false (compose + production compose + SpaceFeatureFlags.reminders_api, features.reminders)"],
+ "tests_owed": [
+  "apps/gateway/src/domains/spaces/reminders.rs tests: create_reminder_201_then_200_deduplicated (201 {reminder_id, remind_at}; identical retry 200 deduplicated true)",
+  "reminders.rs: create_requires_room_membership_and_refuses_zdr (no Control role gives 403 active_membership_required with no Convex call; ZDR org gives typed 412 zdr_durable_mutation_forbidden, unknown posture 503, before any Convex call)",
+  "reminders.rs: create_maps_convex_codes (invalid_reminder_time 400, too_many_reminders 429 with details.max_pending 50, space_not_found 404, invalid ids 400, unknown body field 400 invalid_request)",
+  "reminders.rs: list_pending_only_and_cancel (state other than pending 400 invalid_state; foreign or unknown id and fired id 404 reminder_not_found; cancel allowed under ZDR); flag off gives 404 space_reminders_disabled on all three routes",
+  "dispatcher tests: dispatch_spaces_create_reminder maps spaceRef/threadId/messageId/remindAt to route body; dispatch_spaces_cancel_reminder maps reminderId",
+  "apps/gateway/scripts/action-surface-contract.test.mjs and SPA catalog-manifest.test.ts: spaces.create_reminder and spaces.cancel_reminder present, ownerPlane application, not model-eligible",
+  "SpaceRemindMenu.test.tsx and the SPA client belong to the SPA unit"
+ ],
+ "notes": "BFF half: POST /spaces/{ref}/reminders, GET /spaces/reminders, DELETE /spaces/reminders/{id} in domains/spaces/reminders.rs; flag + compose; spaces.create_reminder / cancel_reminder contracts, dispatchers, model-access exemptions. SpaceRemindMenu.tsx and spaces-client methods NOT built (SPA). Foreign uncommitted edits (SpacePage.tsx, core.ts, errors.ts, convex-core files) left untouched."
+}

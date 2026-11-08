@@ -1,0 +1,57 @@
+{
+ "slice": "WS05-S8",
+ "status": "built",
+ "commit": "1229bf844",
+ "files": [
+  "apps/Control Plane/auth-core/migrations/030_scim_deprovision.sql",
+  "apps/Control Plane/auth-core/src/auth/scim-provisioning.controller.ts",
+  "apps/Control Plane/auth-core/src/app.module.ts",
+  "apps/Control Plane/org-core/migrations/029_org_scim.up.sql",
+  "apps/Control Plane/org-core/migrations/029_org_scim.down.sql",
+  "apps/Control Plane/org-core/internal/org/scim_service.go",
+  "apps/Control Plane/org-core/internal/org/auth_identity_client.go",
+  "apps/Control Plane/org-core/internal/org/identity_audit_outbox.go",
+  "apps/Control Plane/org-core/internal/org/service_enhanced.go",
+  "apps/Control Plane/org-core/internal/http/scim_handlers.go",
+  "apps/Control Plane/org-core/internal/http/server.go",
+  "apps/Control Plane/org-core/internal/http/service_auth.go",
+  "apps/Control Plane/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/scim.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/org_identity.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs (edit landed in sibling commit 733e88f29)",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/ScimPanel.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/org-identity-client.ts"
+ ],
+ "compile": "org-core go build+vet ok; gateway cargo check ok; SPA tsc6 clean for touched files; auth-core not-checked: no node_modules in worktree",
+ "migrations": [
+  "org-core 029 migrations/029_org_scim.up.sql",
+  "auth-core 030 migrations/030_scim_deprovision.sql"
+ ],
+ "flags": [
+  "ORG_SCIM_ENABLED off (org-core)",
+  "SCIM_EDGE_ENABLED off everywhere (gateway)",
+  "ORG_CORE_SCIM_EDGE_TOKEN (org-core + gateway) creates principal verevon-scim-edge"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/org-core/internal/org/scim_service_test.go: scimOperationID stable per (org,scim_id,target,revision) and a valid v5 UUID; NormalizeSCIMUserName table; token hash/prefix; reactivation role mapping owner->admin, unknown->member; fake provisioner: create on unverified domain ErrSCIMDomainNotVerified, role always member, state-compare no-op, last owner audited refused_last_owner, DELETE keeps tombstone and is idempotent, tombstone revive",
+  "apps/Control Plane/org-core/internal/org/scim_postgres_test.go: token insert max 3 active and needs a verified domain, resolve by hash (revoked/expired/deleted org -> unauthorized), RLS isolation on both tables, (org,user_name) uniqueness, revision CAS conflict, audit outbox row in the same tx, migration 029 up/down",
+  "apps/Control Plane/org-core/internal/http/scim_handlers_test.go: flag off 404 on admin and /internal/scim/v2; missing/invalid bearer 401 SCIM error with WWW-Authenticate; member/viewer 403 identity_admin_required on token routes; RFC 7644 error shapes (uniqueness 409, mutability 409, invalidValue 400, invalidFilter 400); filter parser; PATCH shapes (path active, no-path object, string False, add op, other attrs ignored); 429 Retry-After at 300/min per token; Groups 501; list count capped at 100",
+  "apps/Control Plane/org-core/internal/http/service_auth_test.go: org:scim:any valid only for verevon-scim-edge; /internal/scim/v2/* needs org:scim:any and the gateway principal cannot reach it; /orgs/:id/scim/* needs org:identity:admin:self; withSCIMEdgeCredential leaves the registry unchanged for a missing/short/duplicate token",
+  "apps/Control Plane/auth-core/src/auth/scim-provisioning.controller.spec.ts: missing/wrong token 401/503; provision finds-or-creates the user, never owner, idempotent for an existing member, binds the pending member_added audit actor; deprovision removes only that org's member, deletes only sessions active in that org, refuses the last owner (409 last_owner), replay returns the stored result, non-member answers removed:false",
+  "apps/Control Plane/auth-core/src/auth/scim-deprovision.postgres.spec.ts: migration 030 applies after 029; apply_membership_mutation scim_deprovision is atomic with the outbox row and audit actor binding; other kinds keep their actor checks; operation id reuse with different input is rejected",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/scim.rs (tests module): classify() path/method table; edge off or token empty answers 501 with no upstream call; missing bearer 401 with no upstream call; only filter/startIndex/count forwarded; client x-org-id and x-service-* headers never forwarded; Groups 501; body over 64 KiB refused",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/org_identity.rs (tests module): scim token routes member 403 with no upstream call, flag off 404, body allow-list name + expires_in_days 1..365, token id segment validation, create response no-store",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs: ScimEdgeConfig is off unless SCIM_EDGE_ENABLED and a secure token; Debug redacts the token",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/ScimPanel.test.tsx: member sends no request; admin sees tokens and status; created token shown once then cleared on dismiss; no_verified_domain and scim_token_limit copy; feature_disabled/not_found falls back to the note",
+  "apps/Frontend Plane/verevonv3/src/shared/actions catalog-manifest and model-eligibility tests: org.create_scim_token and org.revoke_scim_token registered, human-only, not model-executable",
+  "apps/Frontend Plane/verevonv3/tests/e2e/org-identity-admin.spec.ts: SCIM token create/revoke and a stubbed IdP POST / PATCH active=false / replay against the edge"
+ ],
+ "notes": "SCIM Users complete: org-core tokens+users+RFC 7644 surface (userName/externalId eq, PATCH active, DELETE tombstone, Groups 501, role always member, 300/min/token), auth-core provision/deprovision via apply_membership_mutation kind scim_deprovision (migration 030), stateless gateway edge, token panel, 2 human-only actions. DEVIATION: verevon-scim-edge principal is appended in code from ORG_CORE_SCIM_EDGE_TOKEN (not a ORG_CORE_SERVICE_CREDENTIALS JSON entry). auth-core uncompiled; sibling commit 733e88f29 contains my config.rs edit."
+}

@@ -1,0 +1,36 @@
+{
+ "slice": "WS11-S4",
+ "status": "partial",
+ "commit": "907ee8498",
+ "files": [
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-attention-client.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-attention.ts",
+  "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/SpaceAttentionBadge.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/space-attention-badge.css",
+  "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/space-room-layout.css",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-unread.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/core.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts"
+ ],
+ "compile": "ok (tsc6 -p tsconfig.app.json: no errors in touched files; only others' SpaceAgentPolicyEditor/schedule-contract errors)",
+ "migrations": [],
+ "flags": [
+  "space_attention_ui: no SPA flag read; the store parks itself on 404 space_attention_disabled (gateway flag default off)"
+ ],
+ "tests_owed": [
+  "src/features/spaces/lib/space-attention.test.ts: one poller per browser (leader lock held, follower only listens), backoff doubles to 300 s and honours retry-after, 404 space_attention_disabled parks the poller, stale after 90 s, polite announcement only on increase in a visible tab, badge passed through unchanged",
+  "src/shared/api/spaces-attention-client.test.ts: attentionFromWire drops rooms without space_ref, clamps counts, unknown badge kind becomes none, zdr_empty mode, request bodies of read-all/unread/notify",
+  "src/features/core/components/sidebar/CoreSidebarSpacesPanel.test.tsx: badge drawn from the store for an unobserved room and not for the open room, level items with checkmark, unknown room draws nothing",
+  "src/features/spaces/components/SpaceRoomTimeline.test.tsx: divider aria-label 'N new', Jump to unread scrolls and focuses the first unread post, Mark unread posts before_ms = activity-1 and is hidden when the store has no answer for the room",
+  "src/features/spaces/lib/space-unread.test.ts: firstUnreadIndex (none, first, mid) and markUnreadBeforeMs (no timestamp -> undefined, activity-1)",
+  "src/features/spaces/components/SpacePage.test.tsx: first markSpaceRead call of a visit sends reason enter, later polls while_open, switching room sends enter again",
+  "src/features/core/lib/navigation-wiring.test.ts + CoreSidebar tests: overview-spaces item carries badge attention and renders the total only when > 0",
+  "src/shared/i18n/errors.test.ts: the three WS11 codes have no and en copy"
+ ],
+ "notes": "SPA half built: client, store (Web Locks leader + BroadcastChannel, 30 s poll, backoff, stale 90 s, polite live region), sidebar room badges (unobserved rooms only), nav total badge, level menu, Mark all read, 'N new' divider, Jump to unread, Mark unread, reason enter/while_open. MISSING and out of my lock group: gateway BFF routes (domains/spaces/attention.rs, read-all, unread, notify, reason on read) and the spaces.* action contracts, which WS11-S3 left unbuilt; until they land every call 404s and the UI stays dark."
+}

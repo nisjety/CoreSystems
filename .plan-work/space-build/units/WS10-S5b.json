@@ -1,0 +1,38 @@
+{
+ "slice": "WS10-S5b",
+ "status": "built",
+ "commit": "1049df2d5",
+ "files": [
+  "apps/Application Plane/convex-core/convex/schema/spaces.ts",
+  "apps/Application Plane/convex-core/convex/spaceAgents.ts",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws10b.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/tool_policy.rs",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentPolicyEditor.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/space-tool-policy.css",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-tool-policy.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws10b.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/core.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/tool-policy.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts"
+ ],
+ "compile": "ok (gateway cargo check: no errors, only unrelated marketing test warnings; SPA pnpm exec tsc -b: 0 errors; convex-core tsc --noEmit: none in touched files)",
+ "migrations": [],
+ "flags": ["SPACE_TOOL_POLICY_EDITOR_ENABLED (gateway, features.tool_policy_editor) prod off, dev on"],
+ "tests_owed": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/tool_policy.rs (tests module): flag off gives 404 feature_disabled on all three routes; body with an unknown field, missing expected_revision, level other than allow/ask/block or over 200 entries gives 400 tool_policy_invalid/unsupported_policy_field and no Control call; agent PUT resolves binding_ref to subjectId from Convex, 404 agent_binding_not_found for a revoked or other-Space binding; Control typed error (403 tool_policy_role_required, 409 tool_policy_revision_conflict) relayed with status and code; non-typed Control failure gives 503 tool_policy_unavailable; Convex sync failure still answers 200 with projection pending",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentPolicyEditor.test.tsx: closed until toggled; loads merged view and the agent layer on open; rows edit without losing focus; duplicate/empty/invalid key blocks Save; save sends entries and expected_revision and shows Saved; 409 reloads the layer and shows the conflict copy; row held down by the ceiling shows the override note",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-tool-policy.test.ts: draftProblem cases, draftMatchesStored ignores order, mergedLevelFor falls back to * then allow, rowOverriddenByCeiling, mergedRows orders * first, toolPolicyEditorEnabled follows features and dev override",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/tool-policy.test.ts: request shapes for GET/PUT, normalisation reads an unknown level as block and null entries as empty",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: spaces.set_tool_policy registered and not model-executable (model-access exempt)",
+  "apps/Application Plane/convex-core/test/space-agent-registry.test.cjs: setSpaceAgentBindingPolicyForGateway stores revision and digest, refuses wrong Space/org/revoked binding (agent_binding_not_found), never lowers a stored revision, leaves updatedAt and approvalMode untouched; spaceAgentBindingsForGateway returns the two fields"
+ ],
+ "notes": "Gateway tool_policy.rs (GET/PUT tool-policy, PUT agents/{binding}/tool-policy relayed to Control S5a, then Convex projection), spaces.set_tool_policy action + dispatcher, Convex setSpaceAgentBindingPolicyForGateway + additive fields, SPA client, SpaceAgentPolicyEditor in the Agent tab (per agent and room ceiling). Legacy approvalMode/allowedTools deliberately not synced (see depth file). Tests not run (owed)."
+}

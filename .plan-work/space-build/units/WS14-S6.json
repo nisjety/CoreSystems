@@ -1,0 +1,29 @@
+{
+ "slice": "WS14-S6",
+ "status": "built",
+ "commit": "10ef79360",
+ "files": [
+  "apps/Ingestion Plane/imports-core/app/main.py",
+  "apps/Ingestion Plane/imports-core/app/service.py",
+  "apps/Ingestion Plane/imports-core/app/config.py",
+  "apps/Ingestion Plane/imports-core/app/space_upload.py",
+  "apps/Ingestion Plane/imports-core/app/scan.py",
+  "apps/Ingestion Plane/imports-core/migrations/005_space_upload_idempotency.sql",
+  "apps/Ingestion Plane/imports-core/.env.example",
+  "apps/Ingestion Plane/docker-compose.yml"
+ ],
+ "compile": "ok (py_compile on changed modules; fastapi not installed locally, app import not run)",
+ "migrations": [
+  "imports-core 005 apps/Ingestion Plane/imports-core/migrations/005_space_upload_idempotency.sql"
+ ],
+ "flags": [
+  "IMPORTS_SPACE_UPLOAD default false (compose ${:-false}, strict literal true)"
+ ],
+ "tests_owed": [
+  "apps/Ingestion Plane/imports-core/tests/test_space_upload.py: valid decision + docx/csv -> 202 data.upload_id, job source_type space_upload with intent, item document_id recorded; same decision idempotency_key replays 200 deduplicated:true with no second job and no re-parse; unique index race returns winner",
+  "apps/Ingestion Plane/imports-core/tests/test_space_upload_refusals.py: every code (room_files_disabled 404, room_file_empty, room_file_count_exceeded, room_file_too_large max_bytes, room_file_type_unsupported allowed[], room_file_no_extractable_text, room_file_text_too_long, room_files_quota_exceeded 409, zdr_durable_mutation_forbidden 412 form+X-ZDR); decision-less call 403 decision_required; subject mismatch/forged decision 403; source_type other than space_upload 403; Idempotency-Key mismatch 403; envelope shape and no file names in logs",
+  "apps/Ingestion Plane/imports-core/tests/test_job_authorization.py: GET job and events for a space_upload job return 404 for another user in the same org and 200 for the uploader; non-space jobs stay org-scoped",
+  "apps/Ingestion Plane/imports-core/tests/test_durable_jobs.py: item error_code/document_id mapping from documents-api responses (_space_upload_error_code, _store_document returns document_id)"
+ ],
+ "notes": "Route POST /api/v1/import/jobs/space-upload behind IMPORTS_SPACE_UPLOAD; order flag, ZDR, decision, replay, validate/extract, quota, job. Worker stores document_id/error_code in item metadata; upload_id added to document metadata. Depends on S3 (already present in tree) for owner/quota/dedupe. Tests not run."
+}

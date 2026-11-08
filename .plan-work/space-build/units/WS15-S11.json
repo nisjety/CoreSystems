@@ -1,0 +1,34 @@
+{
+ "slice": "WS15-S11",
+ "status": "built",
+ "commit": "cd78d5684",
+ "files": [
+  "apps/Control Plane/user-core/internal/spaces/membership_feed.go",
+  "apps/Control Plane/user-core/internal/http/space_membership_feed.go",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/timeline.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/timeline.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-timeline-store.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/SystemNoticeRow.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/SystemRowsGroup.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/space-entries.css"
+ ],
+ "compile": "ok (go build ./... + go vet ./internal/spaces ./internal/http; cargo check gateway bin clean apart from pre-existing marketing test-module warnings; tsc6 -p tsconfig.app.json no errors in touched files)",
+ "migrations": [],
+ "flags": [
+  "SPACE_SYSTEM_ENTRIES_API default off (gateway; compose false; needs SPACE_TIMELINE_API; features.system_entries = both on)"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/user-core/internal/spaces/membership_feed_test.go: TestMembershipFeedIntervalAndLimit (after inclusive, before exclusive, limit+1 gives truncated, order created_at desc then event_id desc, NormalizeMembershipFeedParams rejects bad RFC3339, after>=before, limit 0/101/abc), TestMembershipFeedRefusesNonMember (ErrNoCurrentMembership, other org sees nothing), TestMembershipFeedAppliesHistoryFloor (owed until WS04-S11 exists)",
+  "apps/Control Plane/user-core/internal/http/space_membership_feed_test.go: live TestMembershipEventsRouteMatrix (owner, editor, viewer, outsider, removed; archived room readable); gateway principal without delegation 403; serviceScopeForRequest maps GET /spaces/{ref}/membership-events to spaces:resolve",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/timeline.rs tests: system_entries_are_cut_to_the_page_interval (first page open at top, older page lo=own oldest post and hi=before-cursor time, has_more=false leaves lo open, after page lo=cursor time), cursor v1|seq|ms round trip and legacy v1|seq still decodes, system_entries_source_failure_is_a_named_gap (200 with unavailable system_entries_unavailable), flag off sends no Control call and system_entries empty, unknown action dropped",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs tests: space_context features.system_entries true only with SPACE_SYSTEM_ENTRIES_API and SPACE_TIMELINE_API",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/timeline.test.ts: system_entries parsed, sorted oldest first, rows without id/action/time or kind != membership dropped; system_truncated read",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-timeline-store.test.ts: rows de-duplicated by id across pages, held back below the oldest loaded post while hasEarlier, cap 500 drops oldest",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/SystemRowsGroup.test.tsx and SpaceRoomTimeline.test.tsx: rows placed before the first later post, trailing rows after the last, pinned posts never anchor a row, more than 3 rows collapse behind 'N earlier room changes' and expand on click, unknown roster id reads Former member"
+ ],
+ "notes": "Control feed route (spaces:resolve, signed delegation, live/archived membership), gateway interval merge in R1 (cursor now carries post time as v1|seq|ms; old cursors still decode), SPA store/placement/collapse built. Built over foreign uncommitted hunks in config.rs, mod.rs, docker-compose.yml and SpaceRoomTimeline.tsx using a temporary index (HEAD plus only this slice's edits). WS04-S11 history floor and WS15-S12 Application notices not built (other slices)."
+}
