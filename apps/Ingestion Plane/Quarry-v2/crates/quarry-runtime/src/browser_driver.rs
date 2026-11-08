@@ -626,6 +626,10 @@ impl BrowserDriverAdapter {
         if hints.render.actions.is_some() && !self.inner.capabilities().scrape_actions {
             return Err(actions_unavailable());
         }
+        // E4.4-a: a page emulation needs a browser that can set one. Refused the same way.
+        if hints.render.page_emulation.is_some() && !self.inner.capabilities().page_emulation {
+            return Err(page_emulation_unavailable());
+        }
         // WS13.5: a request with actions holds one heavy-lane permit for the whole page
         // run. A busy lane is a 429 at once, never a queue (a capture crops instead).
         let _heavy_permit = if hints.render.actions.is_some() {
@@ -641,7 +645,10 @@ impl BrowserDriverAdapter {
 
         // The pooled lease is shared by host across callers, so the tenant is
         // stamped on this call's copy rather than on the pooled one.
-        let mut call_lease = if self.session_isolation {
+        // E4.4-a: an emulated fetch never reuses a pooled session, whose page another request may
+        // hold, so its overrides are set on a page no other request can see.
+        let isolated = self.session_isolation || hints.render.page_emulation.is_some();
+        let mut call_lease = if isolated {
             // WS13.1: a fresh lease id per fetch, so every fetch gets its own
             // browser context and cookie jar, even for the same host and across
             // organizations. Nothing is seeded under the host key, and the guard
@@ -694,6 +701,15 @@ impl BrowserDriverAdapter {
             lease: Some(guard),
         };
         let session = held.session();
+
+        // E4.4-a: the page's locale, timezone and location, before its first navigation. A set that
+        // fails fails the fetch, and the session is released.
+        if let Some(emulation) = hints.render.page_emulation.as_ref() {
+            if let Err(e) = self.inner.set_page_emulation(session, emulation).await {
+                let _ = held.finish(true).await;
+                return Err(e);
+            }
+        }
 
         // The ordinary scrape pipeline is not an exemption from Quarry's
         // browser egress authority. A fresh Chromium context begins deny-all;
@@ -896,6 +912,15 @@ fn actions_unavailable() -> QuarryError {
     QuarryError::new(
         ErrorCode::Unsupported,
         "this browser cannot run scrape actions",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+}
+
+/// E4.4-a: the refusal for a page emulation when the browser cannot set one.
+fn page_emulation_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "this browser cannot emulate a page's locale, timezone or location",
     )
     .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
 }
@@ -1628,6 +1653,214 @@ mod tests {
         assert_eq!(heavy_permits_from(Some("3"), 4), 3);
         assert_eq!(heavy_permits_from(Some("9"), 4), 4);
         assert_eq!(heavy_permits_from(Some("0"), 4), 1);
+    }
+}
+
+#[cfg(test)]
+mod page_emulation_tests {
+    use super::*;
+    use crate::driver::RenderHints;
+    use bytes::Bytes;
+    use quarry_browser::{BrowserSession, SessionInner};
+    use quarry_core::page_emulation::PageEmulation;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// A browser that records the order of its calls. It can be told that it cannot emulate, or
+    /// that its emulation fails.
+    struct EmulationMock {
+        page_emulation: bool,
+        fail_emulation: bool,
+        acquire_count: AtomicUsize,
+        leases: TokioMutex<Vec<String>>,
+        emulated: TokioMutex<Vec<PageEmulation>>,
+        call_order: TokioMutex<Vec<&'static str>>,
+    }
+
+    impl EmulationMock {
+        fn new(page_emulation: bool, fail_emulation: bool) -> Self {
+            Self {
+                page_emulation,
+                fail_emulation,
+                acquire_count: AtomicUsize::new(0),
+                leases: TokioMutex::new(Vec::new()),
+                emulated: TokioMutex::new(Vec::new()),
+                call_order: TokioMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BrowserDriverTrait for EmulationMock {
+        fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
+            quarry_browser::BrowserDriverCapabilities {
+                page_emulation: self.page_emulation,
+                ..Default::default()
+            }
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            self.acquire_count.fetch_add(1, Ordering::SeqCst);
+            self.leases
+                .lock()
+                .await
+                .push(lease.session_affinity_key.clone());
+            self.call_order.lock().await.push("acquire");
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(TokioMutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            self.call_order.lock().await.push("release");
+            Ok(())
+        }
+        async fn set_page_emulation(
+            &self,
+            _session: &BrowserSession,
+            emulation: &PageEmulation,
+        ) -> QuarryResult<()> {
+            self.call_order.lock().await.push("set_page_emulation");
+            if self.fail_emulation {
+                return Err(QuarryError::new(
+                    ErrorCode::BadRequest,
+                    "the browser refused the locale",
+                ));
+            }
+            self.emulated.lock().await.push(emulation.clone());
+            Ok(())
+        }
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            self.call_order.lock().await.push("configure_egress_policy");
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            self.call_order.lock().await.push("goto");
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            self.call_order.lock().await.push("content");
+            Ok(Bytes::from_static(b"<html><body>ok</body></html>"))
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn wait_for(
+            &self,
+            _session: &BrowserSession,
+            _selector: &str,
+            _timeout_ms: u32,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+    }
+
+    fn locale_only() -> PageEmulation {
+        PageEmulation {
+            locale: Some("nb_NO".to_owned()),
+            ..PageEmulation::default()
+        }
+    }
+
+    fn emulated(emulation: PageEmulation) -> FetchHints {
+        FetchHints {
+            render: RenderHints {
+                page_emulation: Some(emulation),
+                ..RenderHints::default()
+            },
+            ..FetchHints::default()
+        }
+    }
+
+    fn page_url() -> Url {
+        Url::parse("https://example.com/").unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_emulation_is_set_after_acquire_and_before_the_first_navigation() {
+        let mock = Arc::new(EmulationMock::new(true, false));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        adapter
+            .fetch_conditional(&page_url(), &emulated(locale_only()))
+            .await
+            .expect("fetch ok");
+        let order = mock.call_order.lock().await.clone();
+        assert_eq!(
+            order.iter().take(4).copied().collect::<Vec<_>>(),
+            vec![
+                "acquire",
+                "set_page_emulation",
+                "configure_egress_policy",
+                "goto"
+            ]
+        );
+        assert_eq!(*mock.emulated.lock().await, vec![locale_only()]);
+    }
+
+    #[tokio::test]
+    async fn an_emulated_fetch_never_shares_a_pooled_session() {
+        let mock = Arc::new(EmulationMock::new(true, false));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)))
+            .with_session_isolation(false);
+        adapter
+            .fetch_conditional(&page_url(), &emulated(locale_only()))
+            .await
+            .expect("fetch ok");
+        let leases = mock.leases.lock().await.clone();
+        assert_eq!(leases.len(), 1);
+        assert!(leases[0].starts_with("example.com~"), "{}", leases[0]);
+    }
+
+    #[tokio::test]
+    async fn a_driver_that_cannot_emulate_refuses_before_the_pool_is_touched() {
+        let mock = Arc::new(EmulationMock::new(false, false));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        let Err(error) = adapter
+            .fetch_conditional(&page_url(), &emulated(locale_only()))
+            .await
+        else {
+            panic!("a driver without the capability must refuse the emulation");
+        };
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert_eq!(mock.acquire_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_emulation_fails_the_fetch_and_releases_the_session() {
+        let mock = Arc::new(EmulationMock::new(true, true));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        let Err(_) = adapter
+            .fetch_conditional(&page_url(), &emulated(locale_only()))
+            .await
+        else {
+            panic!("a failed emulation must fail the fetch");
+        };
+        let order = mock.call_order.lock().await.clone();
+        assert!(!order.contains(&"goto"), "{order:?}");
+        assert_eq!(order.last(), Some(&"release"), "{order:?}");
+    }
+
+    #[tokio::test]
+    async fn a_fetch_without_an_emulation_does_not_set_one() {
+        let mock = Arc::new(EmulationMock::new(true, false));
+        let adapter = BrowserDriverAdapter::new(mock.clone(), Arc::new(RuntimeLeasePool::new(4)));
+        adapter
+            .fetch_conditional(&page_url(), &FetchHints::default())
+            .await
+            .expect("fetch ok");
+        assert!(!mock.call_order.lock().await.contains(&"set_page_emulation"));
+        assert!(mock.emulated.lock().await.is_empty());
     }
 }
 

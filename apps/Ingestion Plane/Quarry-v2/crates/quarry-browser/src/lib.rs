@@ -836,6 +836,10 @@ pub struct BrowserDriverCapabilities {
     /// Additive on the wire.
     #[serde(default)]
     pub capture_options: bool,
+    /// E4.4-a: the driver emulates a page's locale, timezone and geolocation when the page opens
+    /// (`BrowserDriver::set_page_emulation`). Additive on the wire.
+    #[serde(default)]
+    pub page_emulation: bool,
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -1123,6 +1127,18 @@ pub trait BrowserDriver: Send + Sync {
         _policy: BrowserEgressPolicy,
     ) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("configure_egress_policy"))
+    }
+
+    /// E4.4-a: the locale, timezone and geolocation the next page this session opens emulates.
+    /// It is set after `acquire` and before the session's first navigation; a session whose page
+    /// is already open refuses it. A driver that cannot emulate refuses here too, so a page never
+    /// quietly has the host's locale when the caller asked for another. Default: refused.
+    async fn set_page_emulation(
+        &self,
+        _session: &BrowserSession,
+        _emulation: &quarry_core::page_emulation::PageEmulation,
+    ) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("page_emulation"))
     }
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()>;
 
@@ -1820,11 +1836,13 @@ mod capability_wire_tests {
             parsed_oldest.per_tab_egress,
             parsed_oldest.scrape_actions,
             parsed_oldest.capture_options,
+            parsed_oldest.page_emulation,
         ] {
             assert!(!additive);
         }
         // A peer that predates trusted_input but has the later additive keys (WS8.E tab keys,
-        // WS13.3 capture keys) sends them as false, and the new key is the only difference.
+        // WS13.3 capture keys, E4.4-a page emulation) sends them as false, and the new key is the
+        // only difference.
         let older = serde_json::json!({
             "persistent_profile": true,
             "devtools_trace": false,
@@ -1838,7 +1856,8 @@ mod capability_wire_tests {
             "tab_pinning": false,
             "per_tab_egress": false,
             "scrape_actions": false,
-            "capture_options": false
+            "capture_options": false,
+            "page_emulation": false
         });
         let parsed: BrowserDriverCapabilities =
             serde_json::from_value(older.clone()).expect("older shape parses");

@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::ai_spec::{bare_name_error, parse_ai_object, AiKind, AiReport, AiSpec, Highlight};
 use crate::capture::{CaptureLimits, CapturePlan, PdfOptions, ScreenshotOptions};
 use crate::output::NormalizedOutput;
+use crate::page_emulation::{
+    check_location, parse_locale, parse_timezone, Location, PageEmulation,
+};
 use crate::scrape_actions::{
     validate_actions, ActionError, ActionLimits, ActionOnError, ActionOutcome, ActionStatus,
     ActionsSummary, ValidatedActions,
@@ -519,6 +522,12 @@ pub struct ScrapeOptions {
     /// `on` is served under zero data retention only, and never with a capture or an action.
     /// Absent and `off` are the same request.
     pub redact_pii: Option<PiiRedaction>,
+    /// E4.4-a: the locale the page emulates, as sent (`nb-NO`). See [`PageEmulation`].
+    pub locale: Option<String>,
+    /// E4.4-a: the timezone the page emulates, as sent (`Europe/Oslo`).
+    pub timezone: Option<String>,
+    /// E4.4-a: the geolocation the page reports, as sent.
+    pub location: Option<Location>,
 }
 
 /// The longest `max_age` a request may ask for: 30 days, in milliseconds.
@@ -527,7 +536,7 @@ pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 12] = [
+const OPTION_KEYS: [(&str, &str); 15] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -540,6 +549,9 @@ const OPTION_KEYS: [(&str, &str); 12] = [
     ("actions_on_error", "actionsOnError"),
     ("max_age", "maxAge"),
     ("redact_pii", "redactPii"),
+    ("locale", "locale"),
+    ("timezone", "timezone"),
+    ("location", "location"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -659,6 +671,26 @@ impl ScrapeOptions {
                         "unsupported_on_error",
                         "actionsOnError must be abort or continue",
                     )),
+                },
+                "locale" => match value.as_str() {
+                    Some(text) => options.locale = Some(text.to_owned()),
+                    None => errors.push(FieldError::new(
+                        snake,
+                        "invalid_type",
+                        "locale must be a language tag string",
+                    )),
+                },
+                "timezone" => match value.as_str() {
+                    Some(text) => options.timezone = Some(text.to_owned()),
+                    None => errors.push(FieldError::new(
+                        snake,
+                        "invalid_type",
+                        "timezone must be an IANA name string",
+                    )),
+                },
+                "location" => match read_location(value) {
+                    Ok(location) => options.location = Some(location),
+                    Err(mut found) => errors.append(&mut found),
                 },
                 _ => {}
             }
@@ -857,6 +889,7 @@ impl ScrapeOptions {
                 ));
             }
         }
+        let page_emulation = self.page_emulation_checked(limits, &mut errors);
         // Captures: at most one screenshot and one PDF among the formats.
         let mut capture = CapturePlan::default();
         for format in &formats {
@@ -951,7 +984,64 @@ impl ScrapeOptions {
             actions,
             max_age_ms,
             redact_pii,
+            page_emulation,
         })
+    }
+
+    /// E4.4-a: the locale, timezone and location of the request, checked. Refused as
+    /// `feature_disabled` while the limit is off (the edge keeps the keys unknown then, so this
+    /// is reached only by a caller that builds the options itself). `None` when none is asked.
+    fn page_emulation_checked(
+        &self,
+        limits: &ScrapeLimits,
+        errors: &mut Vec<FieldError>,
+    ) -> Option<PageEmulation> {
+        let asked = [
+            ("locale", self.locale.is_some()),
+            ("timezone", self.timezone.is_some()),
+            ("location", self.location.is_some()),
+        ];
+        let first = asked.iter().find(|(_, set)| *set).map(|(name, _)| *name)?;
+        if !limits.per_page_emulation_enabled {
+            errors.push(FieldError::new(
+                first,
+                "feature_disabled",
+                "locale, timezone and location are not enabled on this endpoint",
+            ));
+            return None;
+        }
+        let mut emulation = PageEmulation::default();
+        if let Some(raw) = self.locale.as_deref() {
+            match parse_locale(raw) {
+                Some(locale) => emulation.locale = Some(locale),
+                None => errors.push(FieldError::new(
+                    "locale",
+                    "invalid_locale",
+                    "locale must be a language tag such as en-US or nb-NO",
+                )),
+            }
+        }
+        if let Some(raw) = self.timezone.as_deref() {
+            match parse_timezone(raw) {
+                Some(timezone) => emulation.timezone = Some(timezone),
+                None => errors.push(FieldError::new(
+                    "timezone",
+                    "invalid_timezone",
+                    "timezone must be an IANA name such as Europe/Oslo",
+                )),
+            }
+        }
+        if let Some(location) = self.location.as_ref() {
+            match check_location(location) {
+                Ok(checked) => emulation.location = Some(checked),
+                Err(field) => errors.push(FieldError::new(
+                    format!("location.{field}"),
+                    "out_of_range",
+                    format!("location.{field} is out of range"),
+                )),
+            }
+        }
+        Some(emulation)
     }
 }
 
@@ -1063,6 +1153,67 @@ fn option_decode_error(path: &str, error: &serde_json::Error) -> FieldError {
     }
 }
 
+/// E4.4-a: the `location` object. `latitude` and `longitude` are required, `accuracy` is
+/// optional, and any other key is an unknown field. Every problem is reported.
+fn read_location(value: &serde_json::Value) -> Result<Location, Vec<FieldError>> {
+    let Some(object) = value.as_object() else {
+        return Err(vec![FieldError::new(
+            "location",
+            "invalid_type",
+            "location must be an object with latitude and longitude",
+        )]);
+    };
+    let mut errors = Vec::new();
+    for key in object.keys() {
+        if !matches!(key.as_str(), "latitude" | "longitude" | "accuracy") {
+            errors.push(FieldError::new(
+                format!("location.{key}"),
+                "unknown_field",
+                "location takes latitude, longitude and accuracy",
+            ));
+        }
+    }
+    for name in ["latitude", "longitude"] {
+        if object.get(name).is_none_or(serde_json::Value::is_null) {
+            errors.push(FieldError::new(
+                format!("location.{name}"),
+                "missing_field",
+                "location needs both latitude and longitude",
+            ));
+        }
+    }
+    let latitude = location_number(object, "latitude", &mut errors);
+    let longitude = location_number(object, "longitude", &mut errors);
+    let accuracy = location_number(object, "accuracy", &mut errors);
+    let (Some(latitude), Some(longitude), true) = (latitude, longitude, errors.is_empty()) else {
+        return Err(errors);
+    };
+    Ok(Location {
+        latitude,
+        longitude,
+        accuracy,
+    })
+}
+
+fn location_number(
+    object: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    errors: &mut Vec<FieldError>,
+) -> Option<f64> {
+    let item = object.get(name).filter(|item| !item.is_null())?;
+    match item.as_f64() {
+        Some(number) => Some(number),
+        None => {
+            errors.push(FieldError::new(
+                format!("location.{name}"),
+                "invalid_type",
+                "expected a number",
+            ));
+            None
+        }
+    }
+}
+
 fn read_bool(
     name: &str,
     value: &serde_json::Value,
@@ -1149,6 +1300,9 @@ pub struct ScrapeLimits {
     /// `max_age` is accepted only when this is set. Off by default: a request for
     /// it is `feature_disabled` at `max_age`. INNH-7 sets it from `QUARRY_EDGE__SCRAPE_MAX_AGE`.
     pub max_age_enabled: bool,
+    /// `locale`, `timezone` and `location` are accepted only when this is set. Off by default:
+    /// a request for one is `feature_disabled`. E4.4-a sets it from `QUARRY_EDGE__PER_PAGE_LOCALE`.
+    pub per_page_emulation_enabled: bool,
 }
 
 impl Default for ScrapeLimits {
@@ -1167,6 +1321,7 @@ impl Default for ScrapeLimits {
             actions_enabled: false,
             ai_formats_enabled: false,
             max_age_enabled: false,
+            per_page_emulation_enabled: false,
         }
     }
 }
@@ -1199,6 +1354,10 @@ pub struct ResolvedScrapeOptions {
     /// E3.6-5: `On` when the returned text goes through the PII scanner. A redacted result
     /// is not the page's text, so it neither reads nor writes a cache (see [`Self::is_default`]).
     pub redact_pii: PiiRedaction,
+    /// E4.4-a: what the page emulates (locale, timezone, location), checked. `None` when the
+    /// request asked for none. A page that emulates is another page, so it is part of
+    /// [`Self::canonical_options_key`] and of [`Self::is_default`].
+    pub page_emulation: Option<PageEmulation>,
 }
 
 impl ResolvedScrapeOptions {
@@ -1228,6 +1387,7 @@ impl ResolvedScrapeOptions {
             && self.capture.is_empty()
             && self.actions.is_none()
             && self.redact_pii == PiiRedaction::Off
+            && self.page_emulation.is_none()
     }
 
     /// Whether the page cache may serve or store this request. Only a default
@@ -1299,6 +1459,12 @@ impl ResolvedScrapeOptions {
         if self.redact_pii == PiiRedaction::On {
             canonical["redact_pii"] = serde_json::json!("on");
         }
+        // E4.4-a: a page that emulates another locale, zone or position is another result.
+        // Absent for the default request, so the key of every existing request is unchanged.
+        if let Some(emulation) = &self.page_emulation {
+            canonical["page_emulation"] =
+                serde_json::to_value(emulation).unwrap_or(serde_json::Value::Null);
+        }
         blake3::hash(canonical.to_string().as_bytes())
             .to_hex()
             .to_string()
@@ -1353,6 +1519,10 @@ pub struct EffectiveScrapeOptions {
     /// when it did not. Always reported, so a caller can see what was applied.
     #[serde(default)]
     pub redact_pii: PiiRedaction,
+    /// E4.4-a: the locale, timezone and location the page emulated. Absent when the request
+    /// asked for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_emulation: Option<PageEmulation>,
 }
 
 impl EffectiveScrapeOptions {
@@ -1393,6 +1563,7 @@ impl EffectiveScrapeOptions {
             cached_at: None,
             cache_age_ms: None,
             redact_pii: resolved.redact_pii,
+            page_emulation: resolved.page_emulation.clone(),
         }
     }
 }
@@ -1601,6 +1772,13 @@ mod tests {
             actions_on_error: Some(ActionOnError::Continue),
             max_age: Some(1),
             redact_pii: Some(PiiRedaction::On),
+            locale: Some("en-US".to_owned()),
+            timezone: Some("UTC".to_owned()),
+            location: Some(Location {
+                latitude: 1.0,
+                longitude: 2.0,
+                accuracy: Some(3.0),
+            }),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1614,14 +1792,149 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            keys.len() * 2 - 3,
-            "snake and camel spellings; formats, extractor and actions are spelled the same"
+            keys.len() * 2 - 6,
+            "snake and camel spellings; formats, extractor, actions, locale, timezone and location are spelled the same"
         );
         assert!(names.contains(&"onlyMainContent") && names.contains(&"maxInlineBytes"));
         assert!(names.contains(&"actionsOnError") && names.contains(&"actions"));
         assert!(names.contains(&"maxAge") && names.contains(&"max_age"));
         assert!(names.contains(&"redactPii") && names.contains(&"redact_pii"));
-        assert_eq!(OPTION_KEYS.len(), 12);
+        assert!(names.contains(&"locale") && names.contains(&"timezone") && names.contains(&"location"));
+        assert_eq!(OPTION_KEYS.len(), 15);
+    }
+
+    // ---- E4.4-a: locale, timezone and location
+
+    fn emulation_limits() -> ScrapeLimits {
+        ScrapeLimits {
+            per_page_emulation_enabled: true,
+            ..ScrapeLimits::default()
+        }
+    }
+
+    fn emulate(body: serde_json::Value) -> Result<ResolvedScrapeOptions, Vec<FieldError>> {
+        ScrapeOptions::from_value(&body)?.resolve(false, &emulation_limits())
+    }
+
+    #[test]
+    fn page_emulation_is_refused_while_its_limit_is_off() {
+        for (body, path) in [
+            (json!({ "locale": "nb-NO" }), "locale"),
+            (json!({ "timezone": "Europe/Oslo" }), "timezone"),
+            (json!({ "location": { "latitude": 59.9, "longitude": 10.7 } }), "location"),
+        ] {
+            let errors = ScrapeOptions::from_value(&body)
+                .unwrap()
+                .resolve(false, &ScrapeLimits::default())
+                .unwrap_err();
+            assert_eq!(errors[0].code, "feature_disabled", "{body}");
+            assert_eq!(errors[0].path, path);
+        }
+    }
+
+    #[test]
+    fn page_emulation_is_checked_and_stored_the_way_the_browser_takes_it() {
+        let emulation = emulate(json!({
+            "locale": "nb-NO",
+            "timezone": "Europe/Oslo",
+            "location": { "latitude": 59.9139, "longitude": 10.7522 },
+        }))
+        .unwrap()
+        .page_emulation
+        .expect("asked for");
+        assert_eq!(emulation.locale.as_deref(), Some("nb_NO"));
+        assert_eq!(emulation.timezone.as_deref(), Some("Europe/Oslo"));
+        let location = emulation.location.expect("asked for");
+        assert_eq!((location.latitude, location.longitude), (59.9139, 10.7522));
+        assert_eq!(
+            location.accuracy,
+            Some(crate::page_emulation::DEFAULT_ACCURACY_M)
+        );
+        // A request that asks for none of them emulates nothing.
+        assert!(emulate(json!({ "formats": ["markdown"] }))
+            .unwrap()
+            .page_emulation
+            .is_none());
+    }
+
+    #[test]
+    fn bad_page_emulation_values_are_field_errors_at_their_paths() {
+        let errors = emulate(json!({ "locale": "en US; drop", "timezone": "../etc" })).unwrap_err();
+        assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), ("locale", "invalid_locale"));
+        assert_eq!(
+            (errors[1].path.as_str(), errors[1].code.as_str()),
+            ("timezone", "invalid_timezone")
+        );
+        let errors = emulate(json!({ "location": { "latitude": 91, "longitude": 0 } })).unwrap_err();
+        assert_eq!(
+            (errors[0].path.as_str(), errors[0].code.as_str()),
+            ("location.latitude", "out_of_range")
+        );
+        // The read refuses the shape: types, missing and unknown keys, each at its path.
+        let errors = ScrapeOptions::from_value(&json!({ "locale": 5 })).unwrap_err();
+        assert_eq!(errors[0].code, "invalid_type");
+        let errors = ScrapeOptions::from_value(&json!({ "location": "Oslo" })).unwrap_err();
+        assert_eq!((errors[0].path.as_str(), errors[0].code.as_str()), ("location", "invalid_type"));
+        let errors = ScrapeOptions::from_value(&json!({ "location": { "latitude": "north", "longitude": 1 } }))
+            .unwrap_err();
+        assert_eq!(errors[0].path, "location.latitude");
+        let errors = ScrapeOptions::from_value(&json!({ "location": { "latitude": 1, "altitude": 3 } }))
+            .unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.path == "location.longitude" && e.code == "missing_field"));
+        assert!(errors
+            .iter()
+            .any(|e| e.path == "location.altitude" && e.code == "unknown_field"));
+    }
+
+    #[test]
+    fn page_emulation_makes_a_different_page_and_is_not_the_default() {
+        let plain = emulate(json!({ "formats": ["markdown"] })).unwrap();
+        let with_locale = emulate(json!({ "locale": "nb-NO" })).unwrap();
+        assert!(!with_locale.is_default());
+        assert_ne!(
+            with_locale.canonical_options_key(),
+            plain.canonical_options_key()
+        );
+        let with_zone = emulate(json!({ "locale": "nb-NO", "timezone": "Europe/Oslo" })).unwrap();
+        assert_ne!(
+            with_zone.canonical_options_key(),
+            with_locale.canonical_options_key()
+        );
+        // The same locale in the other spelling is the same page.
+        let spelled_out = emulate(json!({ "locale": "nb_NO" })).unwrap();
+        assert_eq!(
+            spelled_out.canonical_options_key(),
+            with_locale.canonical_options_key()
+        );
+    }
+
+    #[test]
+    fn the_effective_options_echo_page_emulation_only_when_it_was_asked_for() {
+        let asked = emulate(json!({ "timezone": "UTC" })).unwrap();
+        let value = serde_json::to_value(EffectiveScrapeOptions::new(
+            &asked,
+            false,
+            CacheState::Bypass,
+            "static",
+            false,
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(value["page_emulation"]["timezone"], "UTC");
+        assert!(value["page_emulation"].get("locale").is_none());
+        let plain = resolve(json!({}), false).unwrap();
+        let value = serde_json::to_value(EffectiveScrapeOptions::new(
+            &plain,
+            false,
+            CacheState::Bypass,
+            "static",
+            false,
+            &[],
+        ))
+        .unwrap();
+        assert!(value.get("page_emulation").is_none());
     }
 
     // ---- E3.6-5: redact_pii

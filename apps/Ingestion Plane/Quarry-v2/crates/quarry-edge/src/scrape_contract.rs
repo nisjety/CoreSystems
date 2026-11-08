@@ -28,6 +28,7 @@ use std::sync::OnceLock;
 
 use axum::http::{HeaderName, HeaderValue};
 use chrono::{DateTime, NaiveDate, Utc};
+use quarry_core::page_emulation::PAGE_EMULATION_KEYS;
 use quarry_core::scrape::{
     FieldError, ScrapeLimits, ScrapeOptions, ScrapeWarning, RESERVED_REJECTED,
 };
@@ -67,10 +68,16 @@ pub struct ScrapeSettings {
     /// and runs the URL result cache. Off by default: a request carrying `max_age`
     /// is a 400 `feature_disabled` at `max_age`, and nothing is written to the cache.
     pub max_age_enabled: bool,
+    /// E4.4-a: `QUARRY_EDGE__PER_PAGE_LOCALE=on` (or `1`, `true`) accepts `locale`, `timezone` and
+    /// `location`. Off by default: while it is off those keys are unknown keys, as they were before.
+    pub per_page_emulation_enabled: bool,
 }
 
 /// The environment name of the `max_age` switch.
 pub const ENV_SCRAPE_MAX_AGE: &str = "QUARRY_EDGE__SCRAPE_MAX_AGE";
+
+/// The environment name of the per-page locale, timezone and location switch (E4.4-a).
+pub const ENV_PER_PAGE_LOCALE: &str = "QUARRY_EDGE__PER_PAGE_LOCALE";
 
 impl Default for ScrapeSettings {
     fn default() -> Self {
@@ -142,6 +149,13 @@ impl ScrapeSettings {
                 .as_deref(),
             Some("on" | "1" | "true")
         );
+        let per_page_emulation_enabled = matches!(
+            lookup(ENV_PER_PAGE_LOCALE)
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("on" | "1" | "true")
+        );
         Self {
             strict_validation,
             strict_after,
@@ -149,6 +163,7 @@ impl ScrapeSettings {
             options_enabled,
             records_enabled,
             max_age_enabled,
+            per_page_emulation_enabled,
         }
     }
 
@@ -169,6 +184,7 @@ impl ScrapeSettings {
             actions_enabled: crate::scrape_actions::actions_mode().enabled(),
             ai_formats_enabled: ai_formats::enabled(),
             max_age_enabled: self.max_age_enabled,
+            per_page_emulation_enabled: self.per_page_emulation_enabled,
             ..ScrapeLimits::default()
         }
     }
@@ -220,7 +236,11 @@ pub fn parse_body(
         return Err(reserved);
     }
 
-    let option_names = ScrapeOptions::field_names();
+    // E4.4-a: while its switch is off, the emulation keys are not options: unknown, as before.
+    let option_names: Vec<&str> = ScrapeOptions::field_names()
+        .into_iter()
+        .filter(|name| settings.per_page_emulation_enabled || !PAGE_EMULATION_KEYS.contains(name))
+        .collect();
     let mut unknown_keys: Vec<String> = object
         .keys()
         .filter(|key| {
@@ -246,7 +266,11 @@ pub fn parse_body(
     }
 
     let options = if settings.options_enabled {
-        let options = ScrapeOptions::from_value(&value)?;
+        let options = if settings.per_page_emulation_enabled {
+            ScrapeOptions::from_value(&value)?
+        } else {
+            ScrapeOptions::from_value(&without_keys(&value, &PAGE_EMULATION_KEYS))?
+        };
         let mut bad = Vec::new();
         for (name, selectors) in [
             ("include_tags", options.include_tags.as_deref()),
@@ -275,6 +299,17 @@ pub fn parse_body(
         unknown_keys,
         strict,
     })
+}
+
+/// The body without `keys`, for a switch that is off: a key that is not an option is not read.
+fn without_keys(value: &Value, keys: &[&str]) -> Value {
+    let mut copy = value.clone();
+    if let Some(object) = copy.as_object_mut() {
+        for key in keys {
+            object.remove(*key);
+        }
+    }
+    copy
 }
 
 /// One `unknown_field` warning per ignored key.
@@ -528,6 +563,73 @@ mod tests {
         let strict_off = ScrapeSettings { options_enabled: false, strict_validation: true, ..ScrapeSettings::default() };
         let errors = parse(json!({ "url": "https://example.com", "maxAge": 5 }), &strict_off).unwrap_err();
         assert_eq!(errors[0].code, "unknown_field");
+    }
+
+    #[test]
+    fn the_per_page_locale_switch_reads_on_only() {
+        assert!(!ScrapeSettings::default().per_page_emulation_enabled);
+        for on in ["on", "1", "true", " ON "] {
+            let settings = ScrapeSettings::from_lookup(|name| {
+                (name == ENV_PER_PAGE_LOCALE).then(|| on.to_owned())
+            });
+            assert!(settings.per_page_emulation_enabled, "{on}");
+            assert!(settings.limits().per_page_emulation_enabled);
+        }
+        for off in ["off", "0", "", "enabled"] {
+            let settings = ScrapeSettings::from_lookup(|name| {
+                (name == ENV_PER_PAGE_LOCALE).then(|| off.to_owned())
+            });
+            assert!(!settings.per_page_emulation_enabled, "{off}");
+            assert!(!settings.limits().per_page_emulation_enabled);
+        }
+    }
+
+    #[test]
+    fn emulation_keys_are_unknown_keys_while_the_switch_is_off() {
+        let body = json!({
+            "url": "https://example.com",
+            "locale": "nb-NO",
+            "timezone": "Europe/Oslo",
+            "location": { "latitude": 59.9, "longitude": 10.7 },
+        });
+        let parsed = parse(body.clone(), &lenient()).unwrap();
+        assert_eq!(parsed.unknown_keys, vec!["locale", "location", "timezone"]);
+        assert_eq!(parsed.options.locale, None);
+        assert_eq!(parsed.options.timezone, None);
+        assert_eq!(parsed.options.location, None);
+        // Strict refuses them as unknown fields, as it refused them before this slice.
+        let errors = parse(body, &strict()).unwrap_err();
+        assert!(errors.iter().all(|error| error.code == "unknown_field"));
+        assert!(errors.iter().any(|error| error.path == "locale"));
+    }
+
+    #[test]
+    fn emulation_keys_are_options_and_checked_while_the_switch_is_on() {
+        let on = ScrapeSettings {
+            per_page_emulation_enabled: true,
+            ..ScrapeSettings::default()
+        };
+        let parsed = parse(
+            json!({
+                "url": "https://example.com",
+                "locale": "nb-NO",
+                "timezone": "Europe/Oslo",
+                "location": { "latitude": 59.9, "longitude": 10.7 },
+            }),
+            &on,
+        )
+        .unwrap();
+        assert!(parsed.unknown_keys.is_empty());
+        assert_eq!(parsed.options.locale.as_deref(), Some("nb-NO"));
+        assert_eq!(parsed.options.timezone.as_deref(), Some("Europe/Oslo"));
+        assert_eq!(parsed.options.location.map(|location| location.latitude), Some(59.9));
+        let errors = parse(
+            json!({ "url": "https://example.com", "location": { "latitude": 1 } }),
+            &on,
+        )
+        .unwrap_err();
+        assert_eq!(errors[0].path, "location.longitude");
+        assert_eq!(errors[0].code, "missing_field");
     }
 
     #[test]

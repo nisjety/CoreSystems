@@ -12,7 +12,8 @@
 //! The contract checks (`ResolvedScrapeOptions::resolve`) and the browser
 //! capability check (501 `browser_capability_unavailable`, refused before the
 //! pool is touched) live in the contract and the runtime. This module only
-//! chooses the plan and reads the environment.
+//! chooses the plan and reads the environment. E4.4-a's page emulation (locale,
+//! timezone, location) takes the same browser plan (`apply_page_emulation`).
 
 use std::sync::OnceLock;
 
@@ -89,12 +90,33 @@ pub fn inline_max_bytes() -> usize {
 /// browser fetch with no fallback chain. Otherwise the request's signals decide,
 /// as they always have.
 pub fn plan_for(resolved: &ResolvedScrapeOptions, signals: DriverSignals) -> DriverPlan {
-    // WS13.5: actions run in the browser too, so they take the same plan.
-    if resolved.capture.is_empty() && resolved.actions.is_none() {
+    // WS13.5: actions run in the browser too, so they take the same plan. E4.4-a: so does a page
+    // emulation, which only a browser can set.
+    if resolved.capture.is_empty()
+        && resolved.actions.is_none()
+        && resolved.page_emulation.is_none()
+    {
         plan_from_signals(signals)
     } else {
-        DriverPlan::browser_fetch("screenshot, pdf or actions require the browser")
+        DriverPlan::browser_fetch(
+            "screenshot, pdf, actions or page emulation require the browser",
+        )
     }
+}
+
+/// E4.4-a: put the request's locale, timezone and location on the render hints the runner takes.
+/// Nothing is set when the request asks for none, so the default path is unchanged.
+pub fn apply_page_emulation(render: &mut RenderHints, resolved: &ResolvedScrapeOptions) {
+    render.page_emulation = resolved.page_emulation.clone();
+}
+
+/// E4.4-a: the refusal for a page emulation when no browser driver is wired.
+pub fn page_emulation_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "locale, timezone and location need a browser, and none is available on this endpoint",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
 }
 
 /// Put the request's captures on the render hints the runner takes. Nothing is
@@ -437,6 +459,44 @@ mod tests {
         apply_capture(&mut render, &resolved, CaptureLimits::default());
         assert!(render.capture.is_none());
         assert!(render.capture_inline_max_bytes.is_none());
+    }
+
+    #[test]
+    fn a_page_emulation_plans_the_browser_and_reaches_the_render_hints() {
+        let limits = quarry_core::scrape::ScrapeLimits {
+            per_page_emulation_enabled: true,
+            ..quarry_core::scrape::ScrapeLimits::default()
+        };
+        let resolved = quarry_core::scrape::ScrapeOptions::from_value(
+            &serde_json::json!({ "locale": "nb-NO" }),
+        )
+        .expect("the options parse")
+        .resolve(false, &limits)
+        .expect("the emulation resolves");
+        let plan = plan_for(&resolved, DriverSignals::default());
+        assert_eq!(plan.driver, quarry_core::output::DriverKind::Browser);
+        assert!(plan.fallback_chain.is_empty());
+
+        let mut render = RenderHints::default();
+        apply_page_emulation(&mut render, &resolved);
+        assert!(render.needs_browser());
+        assert_eq!(
+            render.page_emulation.and_then(|emulation| emulation.locale).as_deref(),
+            Some("nb_NO")
+        );
+    }
+
+    #[test]
+    fn a_request_without_an_emulation_leaves_the_plan_and_the_hints_alone() {
+        let resolved = empty_resolved();
+        let mut render = RenderHints::default();
+        apply_page_emulation(&mut render, &resolved);
+        assert!(render.page_emulation.is_none());
+        assert!(!render.needs_browser());
+        assert_eq!(
+            plan_for(&resolved, DriverSignals::default()).driver,
+            plan_from_signals(DriverSignals::default()).driver
+        );
     }
 
     fn empty_resolved() -> ResolvedScrapeOptions {
