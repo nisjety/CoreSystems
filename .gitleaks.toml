@@ -78,6 +78,9 @@ regexes = [
   # push-subscription test hands to subscribe(). Neither is a credential; a different value still flags.
   '''^BTBZMqHH6r4Tts7J_aSIgg$''',
   '''^BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8$''',
+  # Fake service-token placeholders in gateway test fixtures
+  # ("billing-test-secret-at-least-32-bytes" and siblings), not real credentials.
+  '''.*-test-secret-at-least-32-bytes$''',
   '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
   # Test-only fixtures & env-var NAME references (not secret values), all in
   # *_test.go: NATS auth table tests reference the env-var identifier they read
