@@ -24,7 +24,8 @@ use axum::response::{IntoResponse, Response};
 
 use quarry_core::capture::CaptureLimits;
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::scrape::ResolvedScrapeOptions;
+use quarry_core::page_emulation::PageEmulation;
+use quarry_core::scrape::{FieldError, ResolvedScrapeOptions};
 use quarry_runtime::driver::RenderHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
 use quarry_runtime::{DriverPlan, PageRunner};
@@ -110,13 +111,25 @@ pub fn apply_page_emulation(render: &mut RenderHints, resolved: &ResolvedScrapeO
     render.page_emulation = resolved.page_emulation.clone();
 }
 
-/// E4.4-a: the refusal for a page emulation when no browser driver is wired.
-pub fn page_emulation_unavailable() -> QuarryError {
-    QuarryError::new(
-        ErrorCode::Unsupported,
-        "locale, timezone and location need a browser, and none is available on this endpoint",
-    )
-    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+/// E4.4-a: the refusal for a page emulation when no browser driver is wired: one field error per
+/// emulated field, each `unsupported_option`, on a 400 (an option this edge does not offer).
+pub fn page_emulation_unsupported(emulation: &PageEmulation) -> Vec<FieldError> {
+    let asked = [
+        ("locale", emulation.locale.is_some()),
+        ("timezone", emulation.timezone.is_some()),
+        ("location", emulation.location.is_some()),
+    ];
+    asked
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(path, _)| {
+            FieldError::new(
+                path,
+                "unsupported_option",
+                format!("{path} needs a browser, and this edge has none to emulate it on"),
+            )
+        })
+        .collect()
 }
 
 /// Put the request's captures on the render hints the runner takes. Nothing is
@@ -496,6 +509,26 @@ mod tests {
         assert_eq!(
             plan_for(&resolved, DriverSignals::default()).driver,
             plan_from_signals(DriverSignals::default()).driver
+        );
+    }
+
+    #[test]
+    fn a_page_emulation_without_a_browser_names_each_field_it_asked_for() {
+        let emulation = PageEmulation {
+            locale: Some("nb_NO".to_owned()),
+            timezone: Some("Europe/Oslo".to_owned()),
+            location: None,
+        };
+        let named: Vec<(String, String)> = page_emulation_unsupported(&emulation)
+            .into_iter()
+            .map(|field| (field.path, field.code))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("locale".to_owned(), "unsupported_option".to_owned()),
+                ("timezone".to_owned(), "unsupported_option".to_owned()),
+            ]
         );
     }
 

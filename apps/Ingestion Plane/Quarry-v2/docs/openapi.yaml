@@ -8701,7 +8701,9 @@ components:
             that is not a language tag such as en-US or nb-NO. A request with a locale is
             browser work: the page is emulated before its first navigation, and it never
             reads or writes the page or result cache. Refused on /v1/scrape/stream
-            (unsupported_in_stream) while the switch is on.
+            (unsupported_in_stream) while the switch is on. On an edge with no browser,
+            400 unsupported_option, one field error per emulated field (locale,
+            timezone or location).
         timezone:
           type: string
           maxLength: 64

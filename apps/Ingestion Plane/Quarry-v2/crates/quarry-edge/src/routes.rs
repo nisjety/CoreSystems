@@ -1023,13 +1023,14 @@ async fn scrape_with(
         ));
     }
     // E4.4-a: a locale, timezone or location is set by the browser, so it needs one too.
-    if resolved.page_emulation.is_some()
-        && !state.drivers.has(quarry_core::output::DriverKind::Browser)
+    if let Some(emulation) = resolved
+        .page_emulation
+        .as_ref()
+        .filter(|_| !state.drivers.has(quarry_core::output::DriverKind::Browser))
     {
-        let error = crate::scrape_actions::page_emulation_unavailable();
-        return Err((
-            StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::NOT_IMPLEMENTED),
-            Json(Envelope::<()>::err(&request_id, error)).into_response(),
+        return Err(contract_error(
+            &request_id,
+            crate::scrape_actions::page_emulation_unsupported(emulation),
         ));
     }
 
@@ -3422,6 +3423,41 @@ mod tests {
         let data = &body["data"];
         assert!(data["markdown"].as_str().unwrap().contains("ola.nordmann@example.no"));
         assert_eq!(data["effective_options"]["redact_pii"], "off");
+    }
+
+    #[tokio::test]
+    async fn a_page_emulation_on_an_edge_with_no_browser_is_a_400_naming_each_field() {
+        let settings = crate::scrape_contract::ScrapeSettings {
+            per_page_emulation_enabled: true,
+            ..Default::default()
+        };
+        let response = call_scrape_settings(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "locale": "nb-NO", "timezone": "Europe/Oslo" }),
+            &settings,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "locale");
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "unsupported_option");
+        assert_eq!(body["error"]["details"]["fields"][1]["path"], "timezone");
+        assert_eq!(body["error"]["details"]["fields"][1]["code"], "unsupported_option");
+    }
+
+    #[test]
+    fn the_stream_refuses_page_emulation_only_while_its_switch_is_on() {
+        let asked: ScrapeRequest = serde_json::from_value(
+            serde_json::json!({ "url": "https://example.com/", "timezone": "UTC" }),
+        )
+        .expect("a request");
+        let unset: ScrapeRequest = serde_json::from_value(
+            serde_json::json!({ "url": "https://example.com/", "locale": null }),
+        )
+        .expect("a request");
+        assert!(stream_requests_page_emulation(&asked, true));
+        assert!(!stream_requests_page_emulation(&asked, false));
+        assert!(!stream_requests_page_emulation(&unset, true));
     }
 
     #[tokio::test]
