@@ -448,6 +448,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/runs/:run_id/timing", get(get_run_timing))
         // EP-14 S7: one model call's request snapshot, owner only, D3-filtered by Session Core.
         .route("/v1/runs/:run_id/requests/:call_seq", get(get_run_request))
+        // P2 (the computer panel's owner read): one page of a process's output for the run that
+        // started it. Owner only, under the caller's own Space read decision.
+        .route(
+            "/v1/runs/:run_id/processes/:pid/output",
+            get(get_run_process_output),
+        )
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -8136,6 +8142,8 @@ async fn read_process_output(
                 space_id: space_ref,
                 space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+                // The Space-level read names no run; the owner route below does.
+                run_id: String::new(),
             },
             &bearer,
         )?)
@@ -8156,6 +8164,298 @@ async fn read_process_output(
         "gap_before": response.gap_before,
         "retained_from_seq": response.retained_from_seq,
     })))
+}
+
+/// Query of the owner read of one process's output. The Space and its decision travel with the
+/// request for the reason `ProcessesQuery` gives: sandbox-manager verifies the decision against the
+/// Space the caller names, never against whatever the row says.
+#[derive(Debug, Deserialize)]
+struct RunProcessOutputQuery {
+    space_ref: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+    after_seq: Option<i64>,
+    max_bytes: Option<i64>,
+}
+
+/// Session Core's ownership answer for a run-scoped read. A typed refusal keeps its catalogue code.
+/// A caller who does not own the run and a run that does not exist read the same, as 404.
+fn run_owner_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return grpc_status_to_http(status);
+    }
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// Sandbox-manager's answer to a run-scoped output read. A process of another run, a process of
+/// another Space and no process at all read the same, so the answer says nothing about which it was.
+fn process_output_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound => run_trace_error(
+            StatusCode::NOT_FOUND,
+            "process_not_found",
+            "no such process in this run",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/processes/:pid/output?space_ref=&space_read_decision_ref=&space_read_decision_token=&after_seq=&max_bytes=`
+/// — one page of the output of a process its own run started (P2, the owner read path).
+///
+/// Both checks must pass. Session Core's durable ownership record proves the caller owns the run, as
+/// a run-scoped mutation does. Sandbox-manager then admits only a process of that run, in the Space the
+/// caller names, under the caller's own Space read decision. A zero-retention caller is refused before
+/// anything is read, with feature `run_inspection`, as the timing route refuses it, because process
+/// output is retained content.
+async fn get_run_process_output(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    sandbox: VerifiedSandboxBearer,
+    Path((run_id, process_id)): Path<(String, String)>,
+    Query(query): Query<RunProcessOutputQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection")
+                    .json_body(),
+            ),
+        ));
+    }
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let process_id = process_id.trim();
+    if !valid_trace_run_id(process_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_process_id",
+            "process id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let space_ref = require_url_safe_space_ref(query.space_ref.as_deref())?;
+    let decision_ref = query
+        .space_read_decision_ref
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let decision_token = query
+        .space_read_decision_token
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if decision_ref.is_empty() || decision_token.is_empty() {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "space_read_decision_required",
+            "space_read_decision_ref and space_read_decision_token are required",
+        ));
+    }
+    let after_seq = query.after_seq.unwrap_or(0);
+    let max_bytes = query.max_bytes.unwrap_or(0);
+    if after_seq < 0 || max_bytes < 0 {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "after_seq and max_bytes must not be negative",
+        ));
+    }
+
+    session_flow::require_durable_run_owner_with_token(
+        &state,
+        run_id,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|status| run_owner_status_to_http(&status))?;
+
+    let response = state
+        .sandbox_client
+        .clone()
+        .read_process_output(authenticated_sandbox_request(
+            ReadProcessOutputRequest {
+                process_id: process_id.to_owned(),
+                after_seq,
+                max_bytes,
+                space_id: space_ref,
+                space_read_decision_ref: decision_ref,
+                space_read_decision_token: decision_token,
+                run_id: run_id.to_owned(),
+            },
+            &sandbox,
+        )?)
+        .await
+        .map_err(|status| process_output_status_to_http(&status))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "data": {
+            "process_id": process_id,
+            "state": process_state_name(response.state),
+            "exit_code": response.exit_code,
+            "end_reason": (!response.end_reason.is_empty()).then(|| response.end_reason.clone()),
+            "gap_before": response.gap_before,
+            "retained_from_seq": response.retained_from_seq,
+            "chunks": response.chunks.iter().map(|chunk| json!({
+                "seq": chunk.seq,
+                "stream": process_stream_name(chunk.stream),
+                "text": String::from_utf8_lossy(&chunk.content),
+                "ends_with_newline": chunk.ends_with_newline,
+            })).collect::<Vec<_>>(),
+        },
+        "meta": {
+            "next_cursor": response.next_cursor,
+            "has_more": response.has_more,
+        },
+    })))
+}
+
+#[cfg(test)]
+mod run_process_output_route_tests {
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    const VALID_QUERY: &str =
+        "space_ref=space-1&space_read_decision_ref=read-1&space_read_decision_token=token";
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    fn app(zdr: bool, with_sandbox_bearer: bool) -> Router {
+        let mut router = Router::new()
+            .route(
+                "/v1/runs/:run_id/processes/:pid/output",
+                get(get_run_process_output),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        if with_sandbox_bearer {
+            router = router.layer(Extension(VerifiedSandboxBearer::for_test(
+                "sandbox-manager-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_before_anything_is_read() {
+        let uri = format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}");
+        let (status, body) = get_json(app(true, true), &uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_sandbox_bearer_is_required() {
+        let uri = format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}");
+        let (status, _) = get_json(app(false, false), &uri).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn malformed_ids_and_cursors_are_refused_before_any_rpc() {
+        let cases = [
+            (
+                format!("/v1/runs/run.1/processes/proc_1/output?{VALID_QUERY}"),
+                "invalid_run_id",
+            ),
+            (
+                format!("/v1/runs/run_1/processes/proc.1/output?{VALID_QUERY}"),
+                "invalid_process_id",
+            ),
+            (
+                "/v1/runs/run_1/processes/proc_1/output?space_ref=space%26x&space_read_decision_ref=read-1&space_read_decision_token=token".to_owned(),
+                "",
+            ),
+            (
+                format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}&after_seq=-1"),
+                "invalid_cursor",
+            ),
+        ];
+        for (uri, code) in cases {
+            let (status, body) = get_json(app(false, true), &uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+            if !code.is_empty() {
+                assert_eq!(body["error"]["code"], code, "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_without_a_space_decision_is_refused_before_any_rpc() {
+        let (status, body) = get_json(
+            app(false, true),
+            "/v1/runs/run_1/processes/proc_1/output?space_ref=space-1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "space_read_decision_required");
+    }
+
+    #[test]
+    fn an_unowned_or_missing_run_reads_as_no_run_and_an_outage_stays_an_outage() {
+        for refused in [
+            tonic::Status::permission_denied("run access denied"),
+            tonic::Status::not_found("run not found"),
+        ] {
+            let (status, body) = run_owner_status_to_http(&refused);
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body.0["error"]["code"], "run_not_found");
+        }
+        let (status, _) =
+            run_owner_status_to_http(&tonic::Status::unavailable("run ownership unavailable"));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn another_runs_process_reads_as_no_process_in_this_run() {
+        let (status, body) =
+            process_output_status_to_http(&tonic::Status::not_found("process not found"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["error"]["code"], "process_not_found");
+        let (status, _) =
+            process_output_status_to_http(&tonic::Status::permission_denied("decision refused"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
 }
 
 /// Lifetime of the thread lease a workspace read acquires. Execution-core's own

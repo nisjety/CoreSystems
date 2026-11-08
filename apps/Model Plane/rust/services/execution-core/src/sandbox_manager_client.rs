@@ -763,6 +763,9 @@ impl SandboxManagerClient {
             // does not hold.
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            // The model's reads are scoped by execution-core's own Space check,
+            // not by a run, so this caller names none.
+            run_id: String::new(),
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().read_process_output(wire))
