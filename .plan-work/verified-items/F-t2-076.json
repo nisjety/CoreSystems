@@ -1,0 +1,102 @@
+{
+ "finalId": "F-t2-076",
+ "tier": "nice-to-have",
+ "rank": 11,
+ "title": "Agent scaling bets: child browser subagents and WebMCP page tools (site playbooks and MCP exposure are covered by F-t2-043 and F-t2-064)",
+ "summary": "Four independent, later-stage bets: URL-pattern-bound site playbooks (guidance only, never permissions) injected into browser observations and learned from successful run receipts; child browser runs with narrower child grants (read-only class, capped concurrency) spawned by a parent run; browser.observe/act exposed as an MCP tool behind the same broker grants and approvals; and WebMCP page-tool discovery executed as sensitive-class actions with one-shot approval.",
+ "whyItMatters": "Playbooks raise success on common SaaS UIs, subagents give parallel research, MCP exposure lets external agents use Verevon's governed browser, and WebMCP positions Quarry for sites that publish typed tools.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (sixteen SKILL.md playbooks with autoInject {keywords, url}; subagent profiles with isolated browser state) and Codex (CDP WebMCP.enable per frame with toolsAdded/Removed events)",
+  "others": [
+   "Aside outbound-only relay with allowlisted remote operations",
+   "Codex CI109 signed browser-access attestation for cloud agents"
+  ],
+  "prevalence": "Playbooks 2 of 3 (common); remote drivers 2 of 3 (common); subagents 1 of 3 (unique); WebMCP 1 of 3 (unique)",
+  "mechanism": "Playbooks: registry keyed by URL pattern or keywords, injected into the next observation header and marked as guidance. Subagents: spawn(profile, task) gives a new session with its own browser binding and a tool set filtered by profile, results returned as text. WebMCP: enable the domain per frame, keep a per-tab tool registry, expose tools as webmcp:<host>:<tool> with per-site permission and review."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3203-3452",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339"
+  ],
+  "gap": "Quarry supports parallel runs and any authorised device can drive sessions (cloud-native, no relay needed). No URL-bound skills (grep of Model Plane found none), no WebMCP handling in Quarry crates, and neither child-grant fan-out from execution-core nor MCP exposure of browser tools is evidenced; these were not verified in code."
+ },
+ "approach": "Model Plane: URL-bound skills injected into observations (seed a few top sites, learn more via procedure compile in browser_procedure.rs); child browser runs with child grants and a per-org concurrency cap; MCP tool wrapper over the same grants. Ingestion Plane: discover WebMCP tools in observations and execute them as sensitive-class actions with fenced descriptions. Schedule each separately.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001 grant wiring",
+  "F-t2-010 planner loop live",
+  "F-t2-032 action classes"
+ ],
+ "planeOwner": "Model Plane",
+ "risks": "Stale playbook selectors; cost explosion from subagents (cap concurrency per org); external clients must never obtain grants outside the user's ACL; page-defined tools are untrusted input.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 10,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-09-14"
+ ],
+ "sourceClusters": [
+  "C-t2-09-037",
+  "C-t2-09-039",
+  "C-t2-09-040",
+  "C-t2-09-043"
+ ],
+ "sourceCategories": [
+  "AI-browser control"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-076",
+   "status": "partial",
+   "exactGap": "Delegated subagents are shipped in Model Plane (nested agent loop, depth 1, per-run ceiling default 8 and hard cap 100, research fan-out) and the in-loop browser.observe and browser.act aliases exist behind a broker-validated grant, but delegated children are leaf-role and refused browser_agent and browser.act as risky, so there are no child browser runs. Missing: a read-only browser action class in broker grants (grant.go carries allowed actions only for sensitive scopes), any per-org live browser run cap (Quarry has only global lease pools), and any WebMCP handling (no code anywhere; the only mention is an outbound 'expose Verevon actions to in-browser agents' bridge in the root plan Verevon-ai-first-plan.md, the opposite direction to Quarry discovering page tools). External MCP exposure of browser tools is not in the gateway, whose mcp.rs only proxies the MCP-server registry.",
+   "evidence": [
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs:1-30 (real nested loop, MAX_DEPTH = 1), :63 and :71 (DEFAULT_MAX_CHILDREN 8, MAX_CHILDREN_CEILING 100)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1628-1665 (leaf role: depth > 0 refuses risky tools), :2989-3025 (run_subagent), :3045 (run_delegated_child)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:259-272 and :280-285 (browser_agent and browser.act in the risky list; browser.observe is not)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:39-45 (browser_agent tool plus browser.observe and browser.act aliases)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs:230-300 (execute_quarry_browser_mcp: observes or acts on an existing Quarry run, requires a broker-validated grant, max_steps 1, no new run)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:791-794 (browser tools map to cap.browser.open)",
+    "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:39-59 (Grant: domains, sensitive AllowedActions, ParentGrantID for approvals; no read-only class or concurrency field)",
+    "C:/dev/CoresSystem/apps/Model Plane/go/services/browser-broker/internal/server/ratelimit.go:1-30 (fixed-window request rate limit, not a live-run cap)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:30-50 and quarry-edge/src/main.rs:323,337 (global semaphore pools, not per org)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-215 and :1914-1925 (single shared Chromium with a process-wide viewport; differing viewport relaunches and clears all pages)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs (grep: Model Plane runs send no viewport) and C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:345-348, :489 (UI sessions send 1280x800)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-20 (MCP-servers registry proxy only)",
+    "C:/dev/CoresSystem/Verevon-ai-first-plan.md:44 and :120 and :148 (the only WebMCP mentions in the repo outside lockfiles: an outbound flag-gated bridge that registers Verevon actions as page tools via document.modelContext.registerTool, the opposite direction to Quarry discovering page-published tools; case-insensitive grep finds no WebMCP code in Quarry, Model Plane or the Frontend)"
+   ],
+   "reuse": [
+    "run_delegated_child and the research fan-out dispatch (shipped) for spawning children and merging results",
+    "BrowserBroker Grant.ParentGrantID pattern for child grants that are strict subsets of the parent grant",
+    "execute_quarry_browser_mcp and the browser.observe alias for read-only observation by a child on a leased run",
+    "resolve_child_ceiling and the org ceiling hook for a per-org child cap",
+    "browser_procedure compile_procedure in Quarry for any later playbook learning (owned by F-t2-043)"
+   ],
+   "constraints": "Model proposes, Quarry executes: WebMCP descriptors discovered in a page are untrusted input and must be fenced, and their execution must go through a Quarry action with a fresh one-shot broker approval grant, never directly from the Model Plane. Child grants must be strict subsets of the parent (ParentGrantID shape) and may never widen the owner's ACL or a Space's authority; the leaf-role rule (agent.rs:1628-1665) must be relaxed only for a defined read-only browser class, not generally. The shared Chromium process means parallel child runs share one browser, and today a UI session (1280x800) and a Model Plane run (no viewport) already force relaunches that drop each other's pages, so that must be fixed before fan-out. ZDR inheritance by child runs was not verified (INF) and must be confirmed before browser children ship.",
+   "approachAdjustment": "Follow the title: remove site playbooks (F-t2-043) and the MCP exposure wrapper (F-t2-064; the in-loop browser.observe and browser.act aliases already exist) from the summary and approach. For child browser runs: reuse run_delegated_child, add a read-only browser action class to BrowserBroker grants (F-t2-032) with a leaf-role exception limited to that class, add a per-org live-run cap in Quarry, and first make viewport page-scoped so concurrent runs stop relaunching Chromium. Keep WebMCP as a research spike only (the CDP WebMCP domain is experimental, INF) and do not schedule it until real sites publish tools.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged for child browser runs, which are L because they depend on action classes (F-t2-032), a per-org cap and the viewport fix; WebMCP is a separate M spike.",
+   "verdict": "reword",
+   "verdictReason": "Partial is accurate: subagents and in-loop browser MCP aliases already exist, so the item should not read as greenfield, and child browser runs are specifically blocked by the leaf-role risky-tool rule and missing action classes. The summary and approach still describe playbooks and MCP exposure that the title assigns elsewhere, and WebMCP should be demoted to a spike.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

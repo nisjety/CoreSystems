@@ -1,0 +1,106 @@
+{
+ "finalId": "F-t2-051",
+ "tier": "recommended",
+ "rank": 27,
+ "title": "Procedure store and run-as-procedure, with postconditions so real runs can compile",
+ "summary": "Persist compiled browser procedures (versioned, tagged, org and owner scoped), add an execute endpoint that replays a procedure through the normal step path with grant, approval and budget checks, and offer 'save as procedure' after a successful agent run. First add optional postcondition assertions to agent steps so typical click, type and select runs can reach Verified status, because the compiler today rejects anything unverified.",
+ "whyItMatters": "Turning a one-off agent browsing session into a repeatable, schedulable procedure is the step from 'the agent browses' to 'the product automates', and a replay is cheaper than re-planning every run. Quarry already has the hard part (compile, replay-compare, quality and impact checks) which Firecrawl's open source does not expose.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (agent run exported as skill, workflow and schema)",
+  "others": [
+   "Apify (immutable versioned builds with tags)"
+  ],
+  "prevalence": "1 of 4 sources; unique",
+  "mechanism": "GET /v2/agent/:id/skill returns {name, spec, skillMd, workflow, schema, blueprint} derived from a finished run (the generator itself is closed upstream, so only the route shape is known). Re-implement as: distill the verified action trajectory into a parameterized procedure (steps, element refs, input schema) plus a natural-language skill; store with a version; replay executes deterministic steps and hands drift back to the agent. Apify adds immutable builds numbered MAJOR.MINOR.BUILD, tag-to-build mapping and pinning, and records the resolved build on each run."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:61-200",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2462-2538",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:216-262",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2362",
+   "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:93-96",
+   "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:1-10"
+  ],
+  "gap": "SRC: compile_procedure, compare_replay, assess_quality and analyze_impact exist behind four stateless endpoints; the compiled procedure is returned to the caller and never stored, version is fixed at 1, and there is no execute-procedure endpoint. compile_procedure rejects any receipt whose outcome is not Verified (browser_procedure.rs:85), but outcome_for_action marks click, type, press, scroll, select and evaluate as Unknown ('postcondition_required'), so a typical form-driving run cannot compile; only navigate, wait, capture, dialog and download steps verify. Receipts are not appended under ZDR, so ZDR runs cannot be compiled at all. The Verevon UI does not call these endpoints and capability-core's skill sink does not take browser trajectories (not verified)."
+ },
+ "approach": "Ingestion Plane: (1) extend the agent step request with an optional expect assertion (URL pattern, ref present, text present) that Quarry evaluates after the action and uses to upgrade the outcome to Verified. (2) Add a procedures table (quarry-control Postgres or edge Postgres): org_id, owner_id, procedure_id, version, tags, steps, source_receipt_ids, status (draft, promoted, quarantined) and the quality report; versions are immutable, tags move, and each run records the resolved version. (3) POST /v1/agent/procedures/{id}/runs starts a run and feeds the steps through the existing step handler, so grants, sensitive approvals and budgets (R-t2-06-01) apply again; on drift return RepairRequired to the planner. Model Plane: 'save as procedure' after a successful run and register promoted procedures as capabilities in capability-core (R-t2-06-07). Frontend: saved procedures list with replay-check and impact status.",
+ "effort": "L",
+ "dependencies": [
+  "BrowserBroker grant issuance in production (cross-category)",
+  "F-t2-008 budgets",
+  "Durable receipt store (non-ZDR)",
+  "Coordinate with any automation or scheduling category"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Replaying with logged-in profiles must re-check grants and approvals every run, never replay a stored sensitive approval. ZDR runs cannot be saved. Postconditions that are too weak would let a broken replay look verified; keep the unverified-step refusal in assess_quality. Overlaps an automation category.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 2,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-06-04] docs/WEB_AGENT_ROADMAP_EXECUTION.md:93-96 (persistent rollout state and fixture-backed quality gates for procedures)"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-04"
+ ],
+ "sourceClusters": [
+  "C-t2-06-020",
+  "C-t2-06-005"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-051",
+   "status": "partial",
+   "exactGap": "Quarry has stateless compile_procedure, compare_replay, assess_quality and analyze_impact (browser_procedure.rs:61-200) behind four routes (agent_routes.rs:3685-3695); the compiled procedure is returned to the caller, version is hard-coded to 1 (browser_procedure.rs:108), nothing stores it, no execute route exists, and nothing outside Quarry calls these routes. compile_procedure rejects any receipt whose outcome is not Verified (browser_procedure.rs:85-96) while outcome_for_action marks click, type, press, scroll, select and evaluate as Unknown (observation.rs:217-262) and StepBody has no expect or postcondition field (agent_routes.rs:818-824), so a form-driving run cannot compile; ref-based actions also embed snapshot_id, generation and ref_id (contracts.rs:650-654) and compare_replay demands exact action equality, so a stored procedure could not replay in a new session without re-binding refs.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:61-112",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:114-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:217-262",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:818-824",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2391",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2462-2540",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3683-3696",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:183-188",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-700",
+    "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:36-40",
+    "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:93-96",
+    "apps/Model Plane/rust/services/execution-core/src/postcondition.rs:996-1075",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:262-285",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:238-310",
+    "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:1-60"
+   ],
+   "reuse": [
+    "Quarry browser_procedure.rs compile, compare_replay, assess_quality and analyze_impact and the four existing routes: keep stateless and extend.",
+    "Durable non-ZDR step receipts (receipts.append at agent_routes.rs:2346-2391, list_for_actor) as the compile source.",
+    "Model Plane run-level postcondition: PlanConfig.postcondition and judge_browser_procedure (browser_agent.rs:262-285, postcondition.rs:996-1075) as the run-level verifier to pair with a new step-level expect evaluated by Quarry.",
+    "The normal step path /v1/agent/runs/:id/step with BrowserBroker grants, execution-core approval gate (browser_events.rs:238) and max_cost_usd budgets for any replay.",
+    "Existing SemanticLocator and ElementFingerprint (contracts.rs) as the stable locators to store instead of run-specific refs.",
+    "capability-core and session-core agent_skills registration path (skillsink/sink.go) and capability-core cron for scheduling replays."
+   ],
+   "constraints": "Quarry's own code and docs put procedure rollout state and business approval outside Quarry: assess_quality 'supplies evidence for the owning release/Model workflow' (agent_routes.rs:2512-2527, browser_procedure.rs:150-152), Quarry 'does not silently replay or self-heal effectful procedures' (agent_routes.rs:2523-2527) and 'Model Plane remains the planner and policy owner' (agent_routes.rs:2462-2466); persistent rollout state is listed as future work (WEB_AGENT_ROADMAP_EXECUTION.md:93-96). A Quarry-owned store with an execute endpoint that replays steps would make Quarry the proposer, which breaks 'Model proposes, Quarry executes'. Every replay must re-run grants, sensitive-action approvals and budgets and must never reuse a stored approval; ZDR runs write no receipts (agent_routes.rs:2360-2391) so they can never be compiled or saved.",
+   "approachAdjustment": "Keep Quarry's role as deterministic evidence: add an optional step-level expect assertion (URL pattern, ref present, text present) that Quarry evaluates after the action to upgrade the outcome to Verified, and canonicalise stored actions to stable locators (semantic locator or element fingerprint, stripping snapshot_id, generation and ref_id) so replay can re-bind against a fresh snapshot and fail closed on ambiguity. Put the procedure store (versioned, tagged, org and owner scoped, draft/promoted/quarantined) and the runner in Model Plane (capability-core registry or session-core), where the runner proposes each stored step to Quarry's normal step endpoint, uses Quarry's replay-check for comparison, and applies grants, approvals and budgets; 'save as procedure' and the list UI are Frontend work on top.",
+   "effortRevised": "XL",
+   "effortNote": "Raised from L: step-level postconditions in Quarry, locator canonicalisation and replay re-binding, a Model Plane store plus runner with approvals and budgets, and UI. It also depends on the live planner loop, grants and budgets (F-t2-001, F-t2-008, F-t2-010). Could be staged: postconditions (M), canonicalisation (M), store plus runner (L).",
+   "verdict": "reword",
+   "verdictReason": "The compile, replay-check, quality and impact functions exist and are wired to routes, so the item must say the stateless half is shipped; the missing half is a store, an execute path and postconditions. The proposed placement (Quarry store plus execute endpoint) conflicts with Quarry's documented design and the Model-proposes rule, and the item misses that ref-based actions are run-specific and cannot replay verbatim.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

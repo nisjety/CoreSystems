@@ -1,0 +1,103 @@
+{
+ "finalId": "F-t2-035",
+ "tier": "recommended",
+ "rank": 11,
+ "title": "Durable hosted browser sessions: idle and absolute TTLs, suspend/resume, view vs control tokens, optional recording, scrape-to-session replay",
+ "summary": "Move agent browser run state from the in-process run map to a durable session store with a state machine (starting, running, suspended, stopped, failed), idempotent create, separate idle and absolute TTLs instead of the fixed 120 s / 12 step UI defaults, and suspend/resume implemented as a profile snapshot plus browser release and restore. Issue separate read-only and interactive live-view tokens and add optional recording gated by org policy (off under ZDR). As a later phase, persist a ReplayContext (url, actions, profile, location) on scrape results and add POST /v1/scrape/:id/session so a user or a Model run can continue from a scrape result.",
+ "whyItMatters": "Two minutes is short for real browsing, an in-process map loses runs on restart, and enterprises want audit recordings. The plan documents say crash-safe resume is not yet proven for every provider, and 'continue interactively from this scrape' is a natural AI-first flow.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl Hangar hosted sessions (firecrawl-engine-and-infra-019, SRC)",
+  "others": [
+   "Apify container URL and live view exposing DevTools (apify-platform-061, DOC)",
+   "Firecrawl scrape-to-interact replay (firecrawl-engine-and-infra-021, SRC)"
+  ],
+  "prevalence": "Session lifecycle and live view: 2 of 4 sources (firecrawl, apify), differentiator. Replay: 1 of 4, unique.",
+  "mechanism": "Session row {state, created_at, last_activity_at, idle_ttl, abs_ttl, idempotency_key}; create is idempotent via Idempotency-Key with retries, long-poll until running; a reaper transitions rows on TTL; suspend = snapshot profile and release the browser, resume = new browser plus restore; live view = signed short-lived URLs with view and control scopes; recording = screencast frames to segmented video, disabled under ZDR. Replay: store {url, waitFor, actions, profile, location} with each scrape; promote(scrape_id) verifies the caller owns it, creates a session, replays, and hands the session id to the agent or UI."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490 (UI sessions default to max_steps 12 and max_runtime_s 120)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1285-1290 (agent driver plus in-process agent_routes::new_runs() map)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3668-3713 (browser-session, control, timeline, tabs, devtools, frames/ws, frames/stream, live-view routes)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:421-440 (live_view and refresh_live_view default to None for the local driver)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/persistent_session.rs (TTL/idle registry; no users outside the module per grep)",
+   "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:78-84 (durable resume_run_id still needs a verified rehydration test)"
+  ],
+  "gap": "Run state is not durable; no suspend/resume, no idle-vs-absolute TTL pair, no recording; idempotent create is not evidenced (check agent_routes session create); live-view tokens are not split by view and control scope; scrape results store no replay context, and a Model run started from a preview acquires its own hidden lease with only start_url plus profile_id as continuity."
+ },
+ "approach": "Ingestion Plane: durable session table in Postgres (same pattern as postgres_profile_store and postgres_step_receipts) with the state machine, TTL reaper, idempotency key and suspend/resume via the R-t2-03-02 profile snapshot; wire or retire persistent_session.rs. Add view-scoped and control-scoped live-view tokens at the edge; optional recording to artifacts behind an org policy flag and never under ZDR. Frontend Plane: gateway browser.rs passes TTL options and uses the two token types. Phase 2 (after R-t2-03-03): ReplayContext stored on non-ZDR scrape results and POST /v1/scrape/:id/session, with the Model Plane starting a browser run on the adopted session.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-020 (profile persistence fixes)",
+  "F-t2-023 (scrape actions) for the replay phase"
+ ],
+ "planeOwner": "Ingestion Plane; token handling in Frontend Plane gateway",
+ "risks": "Recordings and replay contexts are sensitive data; long sessions raise cost; replays are not deterministic on dynamic pages; the in-process run map is a restart-safety risk until replaced.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 2,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-08] apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md deliberate gates item 1 (durable receipt/checkpoint store and resume_run_id rehydration tests) and SOVEREIGN_SCRAPING_RELIABILITY.md Phase 3 (session health states); suspend/resume, TTL pair, recording and replay are not listed"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-08"
+ ],
+ "sourceClusters": [
+  "C-t2-03-021",
+  "C-t2-03-023"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-035",
+   "status": "partial",
+   "exactGap": "Quarry already has the durable pieces: a Postgres-backed AgentRunCheckpoint (profile, URL, grant, control mode, status Active/Closed; in-memory fallback when no database is configured), receipts, timeline and event history, an owner projection that falls back to the checkpoint when the live run is gone, resume via resume_run_id (new lease plus persisted profile plus fresh broker grant, ZDR refused), a profile store for cookie/storage snapshots, and Model Plane durable runs with pause/resume/stop; the live Chromium handle necessarily stays in the process-local agent_runs map. Missing are idle and absolute TTLs (RunEntry has no timestamps, max_runtime_s only becomes lease.ttl_s, and persistent_session.rs has no consumers), a reaper, a fuller state machine, recording for the local driver (only Browserbase/Kernel provider flags exist), view-versus-control scope (live view and frames are owner-only, input is gated by control mode), idempotent create, any ReplayContext on scrape results, and a caller of the resume path (execution-core's StartRunRequest and the gateway never send resume_run_id). The gateway BrowserRunStore is #[cfg(test)] only, so the 12-step / 120 s values are UI start defaults, not a gateway-side session store.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:79-102 (RunEntry: no created_at or last_activity), 107, 484-486 (caller_owns_live_run), 488-509 (timeline/checkpoint writes skipped under ZDR)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1308-1335,1415-1450 (resume_run_id path, ZDR checkpoints refused, ttl_s = max_runtime_s default 120)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1669-1727 (browser_session projection falls back to the durable checkpoint), 2608-2650 (live_view owner-checked)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:25-90 (AgentRunCheckpoint, AgentRunStatus Active/Closed, BrowserControlMode)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:603-634 (Postgres vs in-memory receipt store), 1284-1290 (agent_driver, agent_runs), 320 (Browserbase recording: false)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/persistent_session.rs:1-40 (idle/TTL registry)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:168 (re-export only; no consumer found by grep)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:8-14,63-64 (provider-side ttl_s / replay flags)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:55 (provider-side recording flag)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:188-200 (BrowserRunStore under cfg(test)), 476-490 (UI defaults max_steps 12, max_runtime_s 120), 566-600 (session reads come from the Quarry owner projection)",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:182-192 (StartRunRequest has no resume_run_id)",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:1-60 (durable browser-agent run via session-core with pause/resume/stop)",
+    "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:78-84 (crash/restart rehydration tests for resume_run_id still required)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs:1-30 (receipt-to-procedure compile and replay checks)"
+   ],
+   "reuse": [
+    "AgentRunCheckpoint + postgres_step_receipts + resume_run_id as the session durability base",
+    "postgres_profile_store / s3_profile_store for the profile snapshot behind suspend/resume",
+    "persistent_session.rs registry (wire it as the idle/absolute TTL reaper or retire it)",
+    "BrowserControlMode and the owner-checked live-view and frame routes for scope handling",
+    "browser_procedure.rs for the later replay phase; Model Plane session-core for run pause/resume/stop"
+   ],
+   "constraints": "Do not create a second run state machine: the Model Plane (session-core, model-gateway browser_run.rs) owns run pause/resume/stop while Quarry owns the browser session, lease and profile, and the F-t2-054 tab work must share the same checkpoint. ZDR: no checkpoint, timeline, recording or replay context may be stored (current code already skips these under ZDR and refuses ZDR resume), and recording needs an org policy flag from Control Plane plus consent. Space access never widens an owner-plane ACL, so view-only sharing of someone else's run is an ACL decision, not a token type; today only the owning org and actor can read live view and frames. Resume needs a still-valid broker grant and the broker grant store is in-memory.",
+   "approachAdjustment": "Extend rather than rebuild: add created_at/last_activity to RunEntry with idle and absolute TTL enforced by a reaper shared with F-t2-006; widen AgentRunCheckpoint.status beyond Active/Closed (suspended, failed) and implement suspend as release with a persisted profile (already what close_run + persist_profile does for non-ZDR runs); wire resume_run_id into execution-core's StartRunRequest and add the rehydration test the roadmap gate asks for; add idempotent create keyed by a start key like model-gateway's managed_start_key. Implement view-only as a scope on the existing owner-checked routes and WS rather than bearer URLs, and treat cross-user sharing as a separate ADR. Recording only for non-ZDR with an org flag; ReplayContext after F-t2-023 on top of browser_procedure.rs.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged. TTL + reaper + state widening is M and shared with F-t2-006; resume wiring S; scopes M; recording and ReplayContext are separate later phases.",
+   "verdict": "reword",
+   "verdictReason": "Durable checkpoints, resume, profile snapshots and Model Plane durable runs already exist, so the item must describe the delta (TTL/idle enforcement, reaper, state widening, resume caller, scopes, recording, replay) instead of a new session store.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

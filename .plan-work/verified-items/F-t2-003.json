@@ -1,0 +1,136 @@
+{
+ "finalId": "F-t2-003",
+ "tier": "priority",
+ "rank": 3,
+ "title": "Close the gateway search-cache ZDR and tenant hole, then publish a per-feature ZDR capability matrix",
+ "summary": "Phase 1 (S): the gateway /search cache key (search.rs:218-226) holds query, limit, include_answer and filters but no org or user scope, and store() runs without any ZDR check (SRC, re-read in this T2 pass); results are kept 4 h and served stale when Quarry fails. Add the authorized org id to the key, skip lookup and store for ZDR requests and ZDR orgs, and route every cache through one shared should_cache() admission rule (never cache ZDR, credentialed, action or profile requests). Phase 2 (M): declare a per-feature ZDR capability matrix with explicit refusal codes, and keep a content-free ZDR run tombstone with a default retention janitor.",
+ "whyItMatters": "Two architecture rules are broken at once: ZDR must propagate, and no tenant may see another tenant's data. If smart-router results include org-scoped corpus or Data Plane vector hits (INF from the router design, not traced end to end), this is a cross-tenant disclosure, not only a ZDR gap. Phase 1 is a one-file fix.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (SRC)",
+  "others": [
+   "Firecrawl (requests row that redacts URL and options under ZDR while keeping outcome, timing and cost plus a scheduled deletion and a TTL access row; explicit per-feature ZDR honour/refuse/degrade list with team modes disabled|allowed|forced)"
+  ],
+  "prevalence": "1 of 4 sources (Firecrawl) has an explicit admission function; unique as a function, but ZDR propagation is a Verevon architecture rule, so it is required regardless || Run history with retention 3 of 4 (table-stakes); ZDR capability matrix 1 of 4 (Firecrawl, unique)",
+  "mechanism": "One pure function shouldCache(request, result) is evaluated before every cache write. It returns false for opt-out, ZDR, any credential-bearing input (custom headers, actions, profile or session), custom screenshot sizes and partial or low-fidelity engine output (for example truncated or unparsed PDFs). || Merged items add: Static table feature to {honours, degrades with warning, refuses with status} checked during validation; a team-level mode overrides request flags and responses warn about skipped features. Run rows requests(id, org, kind, origin, outcome, started_at, ended_at, cost, zdr, target or redaction marker) with result blobs keyed by id and a job_access(id, org, expires_at) row checked on retrieval; a janitor deletes rows and blobs past plan retention."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:218",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:286",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:194",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:44-90",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:213-250",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:430-436",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3846-3870",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:205-232",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:575-588",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/janitor.go:40-62",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_event_history.rs:31"
+  ],
+  "gap": "Gateway search cache: no org in the key, no ZDR gate, 4 h TTL with stale fallback (SRC, verified in T2). Quarry itself is ZDR-correct for events and artifacts. No declared ZDR matrix; ZDR runs leave no tombstone row."
+ },
+ "approach": "Frontend Plane gateway first (search.rs, cache.rs): scope the key by the authorized org id and bypass the cache for ZDR (crate::zdr::request_zdr / org_zdr_enabled already exist). Then a shared should_cache() used by gateway and Quarry caches, a ZDR matrix published from quarry-core, and a tombstone row in quarry-control. || Source detail: [R-t2-04-02] Frontend Plane gateway first (S): move CacheAdmission into a shared module (for example next to zdr.rs), call it from search_web before lookup and store, and include the authorized org id in the key. Extend the scrape-preview key with the request variant (formats, headers, actions) or refuse to cache when any are present. Ingestion Plane second: add one should_cache() in quarry-core, used by quarry-edge, the search router and the future URL cache, excluding ZDR, credentialed inputs, actions/profiles and PII-redacted raw bodies. Add a test that a ZDR org's search leaves no gateway cache entry. || [R-t2-07-05] Ingestion Plane owns the matrix (JSON in quarry-runtime/contracts, generated from or tested against route attributes) and the tombstone row in quarry-control; the janitor default and retention days come from Control Plane plan settings. Frontend Plane gateway: skip the search-web cache for ZDR and key it by org when not ZDR (ship this first, it is a small fix), and read the matrix for UI gating. Fix the ZDR scrape to return inline content.",
+ "effort": "M",
+ "dependencies": [
+  "crate::zdr::{request_zdr, org_zdr_enabled} (exist)",
+  "Authorized org id from AuthenticatedUser / upstream::authorized_org_id",
+  "Control Plane plan and retention settings"
+ ],
+ "planeOwner": "Frontend Plane gateway (phase 1); Ingestion Plane (matrix, tombstone)",
+ "risks": "Lower hit rate for repeated queries across orgs, which is acceptable. The search path should fail closed on a ZDR lookup failure, as zdr.rs already does. || The matrix can drift from code, so generate or test it. The tombstone must be reviewed against the ZDR contract (metadata only). Do not weaken Verevon's existing stricter ZDR refusals when aligning with the reference.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 11,
+  "DOC": 1,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-04-02",
+  "R-t2-07-05"
+ ],
+ "sourceClusters": [
+  "C-t2-04-021",
+  "C-t2-07-009",
+  "C-t2-07-010"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability",
+  "Observability & operations"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-003",
+   "status": "partial",
+   "exactGap": "Phase 1 is fully open: gateway search_web builds its cache key from query, limit, include_answer and filters only (search.rs:209-226), stores with no ZDR check (search.rs:285), keeps entries fresh 4 h and for 24 h with a stale fallback (cache.rs:20-25), and search.rs contains no zdr reference. This is a confirmed cross-tenant path, not only a ZDR gap: the Quarry /v1/search it fronts uses org-scoped private-corpus providers (TantivyLocalIndex, org_id taken from the JWT, search_routes.rs:503-517, local_index.rs module docs) and include_answer feeds an org-scoped answer pipeline, while the gateway key carries no org. Quarry itself is correct (org-keyed SearchCache with no cache read or write under ZDR, search_routes.rs:762-780), a ZDR-aware CacheAdmission already exists privately for the scrape preview (knowledge/quarry.rs:213-280, though its key at line 104 is still target-only), and per-endpoint ZDR refusals exist (routes.rs:563-588); there is no declared per-feature ZDR matrix and no ZDR run tombstone.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:195-231",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:285",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:1-30",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:194-200",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:44-135",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:213-280",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:495-530",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:762-790",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/local_index.rs:14-32",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/local_index.rs:286-300",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:405-440",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:563-588",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/janitor.go:20-62"
+   ],
+   "reuse": [
+    "CacheAdmission in knowledge/quarry.rs (promote to a shared gateway module instead of writing a second one)",
+    "crate::zdr::{request_zdr, org_zdr_enabled}; org_zdr_enabled already fails closed (assumes ZDR on lookup failure)",
+    "authorized_org_id for the cache-key org segment",
+    "Quarry's SearchCache::key(org_id, ...) and the ZDR-skips-cache branch in search_routes.rs as the reference admission shape",
+    "refuse_durable_job_under_zdr and zdr_persistent_profile_forbidden as the existing refusal-code style for the matrix",
+    "quarry-control janitor loop (artifacts only, default off) as the base for a ZDR tombstone sweeper"
+   ],
+   "constraints": "Two architecture rules are broken today (ZDR must propagate; no tenant may read another tenant's data), and the gateway is the one boundary the ownership matrix says must hold neither. Frontend Plane gateway owns the fix for phase 1; Quarry (Ingestion) owns the ZDR matrix and any tombstone, and a tombstone must be metadata-only and reviewed against the ZDR contract. Fail closed on ZDR lookup failure as zdr.rs already does. Do not weaken Verevon's stricter existing ZDR refusals when aligning with Firecrawl.",
+   "approachAdjustment": "Keep phase 1 as written but make it one change: move the private CacheAdmission to a shared module, call it in search_web before lookup and before store, add the authorized org id to the key, and also key the scrape-preview cache by org and request variant (formats, headers, actions). Phase 2: generate or test the ZDR matrix from route attributes in quarry-core rather than hand-maintaining JSON, and do the tombstone only after the contract review.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged: phase 1 is S (one gateway file plus a test), phase 2 is M.",
+   "verdict": "keep",
+   "verdictReason": "Gap confirmed in code and upgraded from inference to source-verified cross-tenant exposure; the approach is already right and phase 1 is the highest-value quick fix in this batch.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-003",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index/index.ts:49-95 (shouldCache inline in sendDocumentToIndex)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/lib/request-context.ts (hasCustomRequestContext = headers|actions|profile)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/agent.ts:45-58 (400 when team scrapeZDR is forced)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/diff.ts:80-90 (change tracking skipped with a warning under ZDR)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-status.ts:25-40",
+    "C:/dev/firecrawl/apps/api/src/services/logging/log_job.ts:493-560,704-715 (redaction markers, enqueueZdrCleanupJob)",
+    "C:/dev/firecrawl/apps/api/src/lib/job-access-store.ts:1-40 (JOB_ACCESS_TTL_MS 24 h, crawlTtlHours)",
+    "C:/dev/firecrawl/apps/api/src/lib/zdr-helpers.ts (disabled|allowed|forced)",
+    "record aside-agent-control-architecture-065 (local SQLite state, no retention evidence)",
+    "record apify-platform-099 (DOC only, https://docs.apify.com/platform/storage)"
+   ],
+   "corrections": "shouldCache is an inline boolean inside sendDocumentToIndex, not a separate pure function. It excludes any custom headers, actions or profile (hasCustomRequestContext), not only credential-bearing input, and there is no 'session' term. It also excludes results from low-fidelity engines (TLS client, fetch, except the sitemap team), Exchange, the index itself, and page-aware or marker PDF parsers. Firecrawl's deletion is a per-request ZDR cleanup queue plus access-row expiry (24 h default, crawlTtlHours for crawls), not a janitor that runs on plan retention. Plan-based retention comes from Apify and is DOC-only. 'Run history with retention 3 of 4' is overcounted: the Aside record cited (065) shows local session storage and no retention policy. Aside's only evidenced retention is a 15-minute purge of ephemeral sessions in a terminal state. Several ZDR refusals (agent/extract, scrape-status) trigger when the team flag forces ZDR, not on the per-request flag.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Apify retention is DOC-only",
+    "Firecrawl ZDR forced/allowed modes are enterprise team flags",
+    "The retention behaviour of every ZDR sink was not traced, as the source record itself notes"
+   ],
+   "confidence": "high"
+  }
+ }
+}

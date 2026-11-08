@@ -1,0 +1,113 @@
+{
+ "finalId": "F-t2-028",
+ "tier": "recommended",
+ "rank": 4,
+ "title": "Page context to chat: Quarry hit-test, @tab mentions, selection and region attachments, frame context menu",
+ "summary": "Add a Quarry hit-test endpoint that turns a frame point or region into an element descriptor (AX ref, role, name, nearby text, bbox, crop, tab id, URL, snapshot generation). Build the SPA side: a select mode in BrowserChrome, region and image attachments, and an @tab mention token {sessionId, tabId, title, url, snapshotGeneration} that the gateway re-validates against Quarry fail-closed before use. Attachments are labelled 'from page' for the user before sending and enter the Model as BrowserScraped provenance (screened). A right-click menu over the frame (Ask, Explain, Summarize page, Send to Knowledge, Open in new tab) reuses the same hit-test. || Add a mention token for a live browser session or tab (for example verevon://browser-session/<id>/tab/<id>?title&url) to the chat composer. Model Plane resolves it server-side through a Quarry session ownership check on org and actor, validates the title and URL against the live tab, and never treats the mention as a grant.",
+ "whyItMatters": "Point at the thing and ask about it is the highest-leverage way for the user and the agent to share a browser, and the element descriptors map straight onto the AX refs that browser.act already uses. It also unblocks on-page annotation (R-t2-08-11). || Lets users point the agent at the exact page they are looking at in the in-app browser. Small UX win.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (@tab mention with fail-closed staleness check, iab-059)",
+  "others": [
+   "Aside (richest selection and region attachment payload, aside-browser-product-017; selection quick actions and context menu)",
+   "Codex context menu gating annotate items by page eligibility (iab-049)",
+   "Codex browser plugin (plugin://browser mention=tab-v1 with browserId, tabId, title, url, validated against the live tab)"
+  ],
+  "prevalence": "2 of 3 sources (Codex, Aside); common. || 1 of 4 sources (Codex only, from bundled docs); unique",
+  "mechanism": "Mention token tab-v1 {browserId, tabId, title, url}; on use list the tabs and require an exact match or report 'unavailable'. Selection payload {text | region{elementSummary, previewImage, elements[{selector, tagName, role, text, alt, src, href}]}}, kept per tab and cleared on navigation. Codex also shows page-provided metadata or suggested prompts to the user, labelled, and the model only gets what the user submits. For Verevon: BrowserChrome select mode, the gateway asks Quarry to hit-test the frame point, Quarry returns an AX-ref descriptor plus crop, attached to chat with {sessionId, tabId, url, snapshot generation} and re-validated before any action. || Merged items add: The mention carries browserId, tabId, title and url; the resolver selects the matching browser or profile and checks that the snapshot title and URL still match the live tab before use."
+ },
+ "verevonToday": {
+  "status": "unknown",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3876 (global composer intentionally does not handle @ mentions)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:128 ('dom_select' and 'knowledge_ingest' advertised as default capabilities)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578,2700 (capability list advertised by the gateway)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:384-428 (session tabs list/select/close routes exist, so session and tab ids are addressable)",
+   "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:25-45 (existing @-mention covers roster people and agents; documented rule that a mention never grants)"
+  ],
+  "gap": "No page-to-chat attachment, hit-test endpoint, @tab mention or frame context menu was found; absence is inferred from a light read, not proven. || No baseline record. The Space composer mention list covers people and agents, not browser sessions; whether the main chat composer can reference a live browser session or tab was not found."
+ },
+ "approach": "Ingestion Plane: a hit-test endpoint returning an AX-ref element descriptor and crop. Frontend: @tab and browser-session references in the chat composer validated fail-closed against tab id and URL (absorbs R-t2-10-09), selection and region attachments, frame context menu. Page-originated text is shown to the user and labelled; the model only receives what the user submits. || Source detail: [R-t2-08-05] Ingestion Plane: hit-test and element-descriptor endpoint on the Quarry session API returning AX ref, role, name, nearby text, bbox and crop, tied to the snapshot generation. Frontend Plane: select mode, region/image attach, @tab mention in the chat composer, frame context menu, and a visible 'from page' label. Model Plane: treat attachments as BrowserScraped provenance and re-validate staleness (tab id, URL, generation) before acting; attachments are ephemeral under ZDR. || [R-t2-10-09] Frontend Plane composer adds the token; the gateway resolves it server-side (org plus actor ownership of the Quarry session) before anything reaches Model Plane, reusing the pattern in SpaceRoomComposer where mentions are re-resolved server-side and never grant access.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-012",
+  "F-t2-001",
+  "Live session ownership API exposed through the gateway"
+ ],
+ "planeOwner": "Frontend Plane with an Ingestion Plane endpoint",
+ "risks": "Prompt injection via page text (keep provenance screening and the user-visible label); ZDR means attachments must stay ephemeral; stale refs after navigation must fail closed. || Referencing another actor's session would widen the ACL; ownership must be checked server-side and stale tab ids rejected.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 14,
+  "DOC": 1,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-05",
+  "R-t2-10-09"
+ ],
+ "sourceClusters": [
+  "C-t2-08-024",
+  "C-t2-08-025",
+  "C-t2-08-027",
+  "C-t2-10-018"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)",
+  "Integration-plane overlap"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-028",
+   "status": "absent",
+   "exactGap": "None of the pieces exist: there is no Quarry point-to-element hit-test endpoint (elementFromPoint appears only inside the injected click JS of the kernel driver, kernel.rs:651-660, and chromiumoxide click_point dispatches raw mouse events), no geometry in Quarry's snapshot/AX contracts, no select mode, region attach or context menu in BrowserChrome, and no @tab or browser-session mention (the global composer deliberately has no '@' trigger, DashboardComposer.tsx:3873-3880, and the Space composer mentions cover roster people and agents only). The substrate is real: AX nodes carry backendDOMNodeId, tabs list returns {tab_id, title, url, active}, snapshots have a generation that Quarry already uses to reject stale refs, and Quarry runs enforce org+actor ownership.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx:3873-3880",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx:20-50",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4399",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:127-137",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:811",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:190-270",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts:1-40",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:365-395",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:651-660",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:729",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1165-1180",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841-2870",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:216-221",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:360-460",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:484-486",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3661-3730",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs:30-70",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:195-240"
+   ],
+   "reuse": [
+    "Gateway server-side mention resolver pattern (spaces.rs:4399 inject_mentioned_space_agent_persona; SpaceRoomComposer doc: a mention never grants) for resolving an @tab token before anything reaches Model Plane.",
+    "Quarry session tabs list (GET /v1/agent/runs/:id/tabs; gateway /api/v1/browser/sessions/:id/tabs) and BrowserTab {tab_id, title, url, active} for fail-closed title and URL validation; caller_owns_live_run for org+actor ownership.",
+    "chromiumoxide AX mapping with backendDOMNodeId (chromiumoxide.rs:1165-1180): a CDP DOM.getNodeForLocation result maps onto the same AX refs that browser.act uses.",
+    "BrowserChrome frame click translation (BrowserChrome.tsx:811) for frame-scale coordinate mapping, and the region selection model in KnowledgeScrapePreview (selected set, onToggle).",
+    "ChatLiveRunPanel, which already mounts BrowserChrome in compact mode inside chat, as the chat-side attachment surface.",
+    "TrustClass::BrowserScraped screening in execution-core provenance.rs and model-gateway moderation.rs."
+   ],
+   "constraints": "TrustClass is a pure function of the tool name (moderation.rs:204-240, provenance.rs:30-70, two copies kept in sync by hand), so user-turn attachments are not classified at all; labelling page attachments BrowserScraped needs a new path (for example the gateway resolves the mention or attachment into a synthetic context block under a new tool name such as browser.page_context added to both classify() copies). Mention resolution must be server-side, org plus actor checked by Quarry, and never a grant; a Space room must not be able to resolve another actor's session (Space access never widens an owner-plane ACL). ZDR: attachments and crops stay ephemeral (ZDR agent runs append no durable receipts, agent_routes.rs:2346-2391). Stale tab id, URL or snapshot generation must fail closed. Page text is attacker-controlled, so keep the user-visible 'from page' label and screening.",
+   "approachAdjustment": "Split and reorder. Slice 1 (S-M, no Quarry change): @tab/session mention token {sessionId, tabId, title, url}, resolved in the gateway through the Quarry tabs list with the user's token, fail-closed on mismatch, injected as a labelled untrusted page-context block. Slice 2: region attach by client-side cropping of the already streamed frame, again with no Quarry change. Slice 3 (M): a new read-only hit-test endpoint on the Quarry session API using CDP DOM.getNodeForLocation, mapped through backendDOMNodeId to the existing AX node, returning role, name, ref, rect and snapshot generation; geometry work is shared with F-t2-038. Slice 4: frame context menu built on slices 1-3. Do not claim BrowserScraped provenance without the new classification path.",
+   "effortRevised": "L",
+   "effortNote": "Raised from M: hit-test plus geometry in Quarry, a select-mode overlay, a new Model Plane provenance path for attachments, and the gateway resolver add up to L. The mention-only first slice is S-M.",
+   "verdict": "reword",
+   "verdictReason": "Nothing here exists today, so the item stays, but its description should (a) lead with the mention token slice that needs no Quarry change, (b) state that the BrowserScraped provenance claim needs a new classification path because TrustClass is derived from tool names only, (c) note that no element geometry exists yet, and (d) drop the contradictory sizing (highest-leverage versus small UX win) in the merged text.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

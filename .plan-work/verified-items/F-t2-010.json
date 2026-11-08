@@ -1,0 +1,126 @@
+{
+ "finalId": "F-t2-010",
+ "tier": "priority",
+ "rank": 10,
+ "title": "Turn on the LLM browser planner by default, with budgets, a browsing procedure prompt and connector-first routing",
+ "summary": "Replace the QUARRY_BROWSER_AGENT_LLM env gate with an org-policy flag so the planner in execution-core is the default AI browser loop, with per-run step, time and token budgets. Add a versioned browsing procedure to the planner prompt (observe, act, re-observe; escalation ladder AX ref -> semantic locator -> set-of-marks -> coordinates; stop rules) and a routing step that prefers Integration Plane provider actions or Quarry search/scrape before opening a browser, unless the user asked for the browser.",
+ "whyItMatters": "This is the AI-browser feature users actually see; without an enabled planner the in-app browser has no real agent. A procedure prompt raises task success at near-zero cost, and connector-first routing is cheaper, more reliable and honours provider OAuth scopes.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (FE098 hosted interact loop: capped interactive snapshot, one tool, step caps and guardrails) for the loop; Aside for the procedure prompt; Codex for connector-first routing",
+  "others": [
+   "Aside AA035 harness versioning",
+   "Codex CA070 efficiency caps (DOC)"
+  ],
+  "prevalence": "Loop 2 of 3 (common); procedure prompt 2 of 3 (table-stakes); connector-first 1 of 3 (unique to Codex)",
+  "mechanism": "Loop: interactive snapshot (capped around 40k chars) plus URL goes to the LLM with one tool; execute; return a snapshot diff; stop on done, step cap or budget; guardrails reject commands outside the allowed set. Prompt: observe -> act -> re-observe to confirm, escalation ladder, no URL-guessing loops, trust one authoritative on-page signal, periodic progress updates. Routing: if a linked resource has a connector, call it; use search for public lookups; open the browser only on explicit intent or connector failure."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:130-139",
+   "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53-65",
+   "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:237-241",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:621",
+   "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:296",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1056",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts:137",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:113"
+  ],
+  "gap": "A durable loop with pause/resume/stop exists, but LlmPlanner::from_env returns None unless QUARRY_BROWSER_AGENT_LLM is 1/true/yes (SRC, read in this audit; compose does not set it per baseline), so the default is a deterministic planner. The planner schema offers only navigate/click/type/scroll/wait/extract/done and the system prompt is one short paragraph about ref targeting with no verify, escalation or stop rules (SRC). Connector-first routing between provider actions, Quarry search and the browser is unverified."
+ },
+ "approach": "Model Plane execution-core: flip the default behind an org-policy flag, enforce per-run step/time/token budgets, add the versioned procedure prompt and widen the planner schema to Quarry verbs it cannot reach today (press, select, back, get_content), keeping the existing risk gates and ZDR checks. Add a routing policy (connector -> Quarry search/scrape -> browser) recorded in run receipts that honours explicit user intent. Frontend: one 'Do this in the browser' entry point. Evaluate prompt changes against Quarry step receipts.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-001 grant wiring",
+  "F-t2-015 trusted input",
+  "Integration Plane capability discovery"
+ ],
+ "planeOwner": "Model Plane",
+ "risks": "Runaway cost: budgets are mandatory before default-on. Over-long prompts: keep rules short and test-driven. Eager routing can ignore an explicit request to use the browser.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 2,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-09-02"
+ ],
+ "sourceClusters": [
+  "C-t2-09-051",
+  "C-t2-09-007",
+  "C-t2-09-008"
+ ],
+ "sourceCategories": [
+  "AI-browser control"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-010",
+   "status": "partial",
+   "exactGap": "A durable LLM-planned loop exists (execution-core llm_planner.rs and browser_agent.rs with pause/resume/stop, max_steps, max_runtime_s, forwarded max_cost_usd and HITL risk gates), but LlmPlanner::from_env returns None unless QUARRY_BROWSER_AGENT_LLM is 1/true/yes (llm_planner.rs:130-148) and nothing under apps/Model Plane sets it, so the deterministic planner runs by default; users already have a flag-free LLM-proposed loop through the SPA's suggest-action path (model-gateway http_routes.rs:2023-2100, browser-loop.ts:1-30). The durable planner's ActionType is goto/click/type/extract/observe/scroll/wait only (browser_agent.rs:91-99) with a one-paragraph prompt (llm_planner.rs:236-241) and a fixed 512-token cap per call, so press, select and back (present in Quarry's wire actions, quarry_agent.rs:125-175) are unreachable, there is no per-run token budget, and no connector-first routing exists.",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:1-30, 128-148 (env gate; inference bearer required)",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53-65 (ACTION_SCHEMA enum)",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:170-263 (observation text and system prompt; max_tokens 512)",
+    "apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs:170-232 (LlmPlanner::from_env at the call site; deterministic fallback)",
+    "apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs:416-460 (browser.observe and browser.act MCP tools)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:91-99 (ActionType)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:225-345 (PlanConfig budgets, check_limits, stop_criteria, postcondition)",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:125-175, 340-400 (wire actions Press/Select/Back/GetContent; planner Extract/Observe map to GetContent)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:2015-2100 (suggest-action: system prompt, VLM summary, zdr true inference)",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:297-310, 631-633 (durable run needs four bearers; refused under ZDR)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-loop.ts:1-30 (client-side capped loop plus durable run mode)",
+    "grep of apps/Model Plane for QUARRY_BROWSER_AGENT_LLM: only llm_planner.rs and tests/browser_agent_e2e.rs:17"
+   ],
+   "reuse": [
+    "llm_planner.rs planner_infer_request, ACTION_SCHEMA and ACTION_SCHEMA_STRICT",
+    "browser_agent.rs check_limits, stop_criteria, postcondition and browser_risk.rs HITL gates",
+    "inference-core Verevon intent modes (verevon-balance) and the cost-core budget guard for spend",
+    "model-gateway suggest-action prompt with its visual summary as the richer prompt base",
+    "browser.observe / browser.act MCP tools for model-driven step loops inside chat",
+    "execution-core runtime_loop tool catalog as the place for routing guidance"
+   ],
+   "constraints": "Model proposes, Quarry executes or rejects: any widened planner action must map onto Quarry's governed AgentAction set and keep per-step grant, domain and risk gates. Default-on depends on F-t2-001 because the durable run needs a broker grant and a browser bearer that the gateway cannot supply in production today, and on a verified inference bearer (the planner is disabled without one). ZDR: model-gateway refuses durable browser runs under ZDR (browser_run.rs:307), so a default-on flag cannot apply there. Per-org spend lives in cost-core; max_cost_usd feeds Quarry's flat action-cost table, not LLM spend, so a per-run token budget would be new Model Plane work. Raw observation text enters the prompt unscrubbed, so F-t2-021 should land before default-on.",
+   "approachAdjustment": "Reword the premise: the in-app browser is not agent-less today because the SPA suggest-action loop works without the flag; the env gate affects the durable run and chat browser_agent autopilot. Put connector-first routing in the parent chat runtime loop (tool descriptions or system prompt in execution-core runtime_loop), since the browser sub-planner never sees provider actions. get_content is already reachable through extract/observe, so widen only press, select, back and wait_for. Move from env flag to org policy only after budgets and grants exist.",
+   "effortRevised": "M",
+   "effortNote": "",
+   "verdict": "reword",
+   "verdictReason": "The env-gated default-off planner and thin prompt are verified, but the claim that the in-app browser has no real agent is wrong (a flag-free LLM loop exists), get_content is already reachable, and routing belongs in the parent loop; reword and sequence after F-t2-001 and F-t2-021.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-010",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:20-22 (MAX_STEPS 25, SNAPSHOT_MAX_CHARS 40000)",
+    "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:128-129 (prompt rule: never open new tabs)",
+    "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:271-330 (single 'browser' tool takes a free-form agent-browser command or && chain run in the sandbox; only guard is regex denylist for 'tab new'/'open')",
+    "C:/dev/firecrawl/apps/api/src/lib/scrape-interact/browser-agent.ts:380, 407 (stopWhen stepCountIs(25); ACTION LOG reminder injected in prepareStep)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@6350853 (Aside SYSTEM_PROMPT: Reading Escalation, 'Treat an action as unconfirmed until a fresh snapshot', switch strategy after 2-3 failures, updates about every 30 s, Completion and Verification)",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/api-use-behavior.md:10-26",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/skills/control-in-app-browser/SKILL.md:6-17"
+   ],
+   "corrections": "1) The Firecrawl loop description is overstated. The single tool accepts free-form agent-browser CLI strings, && chains included, executed through the sandbox's bash. The only command guardrail is a regex denylist for 'tab new'/'open', so 'guardrails reject commands outside the allowed set' is wrong (there is no allowlist). There is no snapshot diff: the model re-runs snapshot and gets the full output. The only stops are the 25-step cap and a per-command timeout, with no token or cost budget. Per-run step/time/token budgets and an allowlisted verb set are Verevon additions, not Firecrawl practice. Because its guardrails are weaker than Verevon's 'one governed action per call', Firecrawl should be cited for loop shape only (capped interactive snapshot, refs, step cap, action-log reminder), not for guardrails. 2) The ladder 'AX ref -> semantic locator -> set-of-marks -> coordinates' is a Verevon synthesis. Aside's actual ladder is interactive snapshot -> full snapshot -> wait and re-snapshot -> annotated screenshot (ref boxes) or raw screenshot, plus 'unconfirmed until re-snapshot' and 'switch strategy after 2-3 failures'. Attribute it accordingly. 3) Codex connector-first routing is skill/prompt text (DOC) that the model is told to follow, not a code-level router. Say so and do not describe it as a 'routing step'. 4) Loop prevalence: Codex also runs a multi-step model loop over browser tools (Node REPL), so 'loop 2 of 3' undercounts; it is 3 of 3 (table-stakes).",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Codex procedure, efficiency caps and connector-first rules are DOC (shipped skill/doc text), enforced only by model compliance",
+    "Aside prompt is SRC from the daemon SEA blob; provider-specific overrides exist and which harness (v1/v2) a surface uses is INF",
+    "Firecrawl interact runs inside the Hangar sandbox (hosted); ZDR switches to a different model with store:false (per record, not re-read)"
+   ],
+   "confidence": "high"
+  }
+ }
+}

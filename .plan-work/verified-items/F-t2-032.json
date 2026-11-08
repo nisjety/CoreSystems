@@ -1,0 +1,130 @@
+{
+ "finalId": "F-t2-032",
+ "tier": "recommended",
+ "rank": 8,
+ "title": "Per-origin agent consent and action-class grants: child grants, run modes, typed denials, org origin policy and a browser settings hub",
+ "summary": "Build on F-t2-022: BrowserBroker grants carry action classes and run modes; per-origin consent is issued as child grants with turn, conversation and always scopes where any deny beats any approval; Quarry returns typed, non-retryable denials with decisionSource; org origin policy uses a wildcard pattern language with deny-wins merge; tool docs are generated from the driver capability matrix and grant; and a Browser settings hub shows per-site agent rules and org policy.",
+ "whyItMatters": "Codex shows the mature shape (one policy choke point, 16 typed denial reasons, per-origin consent; SRC). Verevon already has the hard part (fail-closed risk gates and one-shot sensitive grants) but no per-origin persistence or typed denials, so agents retry around refusals and users re-approve the same site repeatedly.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (CA004/CA005 per-origin consent with turn/conversation/global scopes and deny-first resolution; org origin policy with field-level deny-wins merge)",
+  "others": [
+   "Firecrawl (org-level origin policy, differentiator)",
+   "Aside (zod-typed modes and ordered rules; every Page method declares its action class and calls ensureAccess) for classes; Codex for the choke point (ensureCommandAllowed, 16-reason denial catalogue with decisionSource and retryable) and docs delivered as data",
+   "Codex in-app browser (settings hub with agent-permission matrix, iab-071; synced and admin-managed policy, iab-056/057)"
+  ],
+  "prevalence": "Consent 1 of 3 (unique); org policy 2 of 3 (differentiator) || Classes 2 of 3 (table-stakes); typed denials 1 of 3 (unique); docs as data 2 of 3 (table-stakes) || Settings hub: 2 of 3 sources, table-stakes. Admin-managed synced policy: 1 of 3 (Codex), unique.",
+  "mechanism": "On navigation to origin O for class K: check denies (conversation, global, enterprise), then approvals (turn, conversation, global), else prompt with scope choices and store the decision in a scoped table. Policy = {defaultOriginPolicy, origins[pattern] -> {access, uploads, downloads, rawCdp, persist}}; hosts are normalised (lowercase, trailing dot, IPv6 brackets); admin and user config merge per field with deny precedence. || Merged items add: Rule order deny > ask > allow > default evaluated for (mode, class, URL glob, args); read-only denies modify/download outright. Wrap dispatch in one function that classifies the command, evaluates policy and returns {code, decisionSource, retryable, message}. The tool description is generated from {backend, capabilities, environment}; enforcement stays in the executor. || Settings routes under /settings/browser-use/*; an agent-permission matrix lists per-origin rules (approval modes, downloads, uploads, CDP, site tools). Local config tables are projected to a server settings endpoint with revisions and conflicts surfaced; enterprise requirement keys (for example external profile import disabled, global persistent approvals disallowed) are enforced by asserting functions before any write, and managed items are labelled."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1397",
+   "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:190",
+   "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1414",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2294-2400",
+   "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:237-241",
+   "apps/Frontend Plane/verevonv3/src/features/settings/components (no browser section; the only matches are unrelated MCP, account and workspace pages)",
+   "apps/Control Plane (light grep: no browser_policy, allowed_sites or blocked_sites symbols)",
+   "Broker grants are per grant with host allowlists, not user-editable rules (v-browser-app baseline)"
+  ],
+  "gap": "A fixed run-level domain allowlist (exact host or subdomain) is enforced before and after actions and fails closed. There is no mid-run 'allow this origin?' prompt, no scoped persistence, no per-class origin rules and no org-admin browser policy object identified (baseline; Control Plane not checked). || Grants carry domain allowlist, TTL and org/owner scope, and quarry-edge is already a per-action choke point, but there is no run mode or action-class rule, and denials are generic QuarryError codes without decision_source or retryable. The planner prompt in llm_planner.rs is a static string (SRC); whether other execution-core browser tool schemas derive from driver capabilities was not checked. || No Browser settings section, no per-site agent-permission matrix, no org-level browser policy. Both are inferred from light greps of the settings feature and the Control Plane, so treat the status as likely, not proven."
+ },
+ "approach": "Model Plane BrowserBroker (child grants, action classes), Ingestion Plane (typed denials), Control Plane (org origin policy), Frontend (settings hub). || Source detail: [R-t2-09-08] Model Plane: map the Quarry domain-not-in-grant denial to an approval; BrowserBroker issues a child grant with the new origin (stored per user/org). Control Plane owns the org policy object with versioning; the broker intersects it with consent (deny wins) and embeds the policy version in the grant; Quarry enforces only what the grant contains (no cross-plane DB access). || [R-t2-09-07] Model Plane BrowserBroker: add mode and action classes to the grant (mode changes are user/Control Plane actions, never agent-callable). Ingestion Plane quarry-edge: classify AgentAction and add {decision_source, retryable} to QuarryError for policy denials. Model Plane execution-core: render the anti-circumvention line in tool results and generate browser tool docs from the Quarry capability response and the grant. || [R-t2-08-07] Control Plane: org browser policy resource with versioned writes and audit; Model Plane BrowserBroker: rule store plus policy evaluation at grant issue time (fail-closed); Frontend Plane: Settings > Browser backed by gateway endpoints that proxy the broker; managed rows labelled and locked. Rules never widen an owner-plane ACL through Spaces.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001 grant wiring",
+  "Quarry driver capability exposure (shipped, quarry-browser/src/lib.rs:269-290)",
+  "F-t2-001"
+ ],
+ "planeOwner": "Model Plane + Ingestion Plane + Control Plane + Frontend Plane",
+ "risks": "Consent fatigue; policy drift between Control and Model Plane caches (version it in the grant); persistence must be per user/org and must never widen a Space or owner-plane ACL. || Doc drift between policy text and enforcement (enforcement must stay in Quarry/broker); the agent must never change its own mode. || Policy evaluation must be fail-closed and audited; rules must not widen owner ACLs via Spaces; ZDR default has to propagate to grants.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 24,
+  "DOC": 1,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-09-08",
+  "R-t2-09-07",
+  "R-t2-08-07"
+ ],
+ "sourceClusters": [
+  "C-t2-09-028",
+  "C-t2-09-029",
+  "C-t2-09-026",
+  "C-t2-09-027",
+  "C-t2-09-006",
+  "C-t2-08-041",
+  "C-t2-08-042"
+ ],
+ "sourceCategories": [
+  "AI-browser control",
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-032",
+   "status": "partial",
+   "exactGap": "Shipped: a fail-closed, broker-owned host allowlist (exact host or subdomain, no wildcards) enforced at run start, before and after every step and in the CDP Fetch guard, plus one-shot sensitive child grants bound by parent_grant_id for respond_dialog/upload_ref/download_ref and per-action HITL risk gates in execution-core. Missing: any per-origin or per-class consent persistence (the broker store is in-memory and a run's domain list is immutable and must equal its grant at every step), run modes or action classes on the grant, typed denials with decision_source (status_err in agent_routes.rs codes a 403 as BAD_REQUEST with a message string), an org origin-policy object in Control Plane, and a Settings > Browser hub (settings/components has no browser section). No symbol named decision_source, denial_reason or origin policy exists in Quarry, Model Plane, gateway or SPA code.",
+   "evidence": [
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-34 (sensitive action allow-list is only respond_dialog, upload_ref, download_ref)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:56 and :104-119 (ParentGrantID; a child approval needs an ordinary parent with no actions)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:307-345 (NormalizeAllowedDomains/isCanonicalDomain reject wildcards, IPs and single-label hosts)",
+    "apps/Model Plane/go/services/browser-broker/cmd/main.go:63 (grant.NewStore(): in-memory grant store, no durable backend)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:78-95,170-179 (sensitive approval needs parent_grant_id; mode is local or cloud only)",
+    "apps/Model Plane/proto/model_plane/v1/browser.proto:25-49 (AcquireGrantRequest: mode, allowed_domains, sensitive scopes; no run mode or action class)",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:170-195 (run policy must exactly equal broker policy; start_url checked)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:25-110 (RiskCategory and ApprovalOutcome Granted/Denied/TimedOut; no remembered approval)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:148 (decided_by left empty)",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:6-12,223-232 (tool-level Auto/Ask/Deny; no origin scope)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:284-340 (validate_sensitive_approval; validate_run_grant requires run domains == broker domains at each step)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:391-400,1153-1178 (BrowserExecutionTier and its per-tier action allow-list)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1106-1122 (status_err wraps every status in ErrorCode::BadRequest; driver_err)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1139,1396-1411 (fail-closed isolated-egress gate; resumed run domain policy must match its grant)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2276-2306 (one-shot approval reuse is CONFLICT; domain denial is a generic FORBIDDEN string)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-72 (typed ErrorCode and retryable flag exist; no decision_source)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs:12-80 (typed CrawlDenialReason exists for the crawl frontier only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:25-125 (BrowserEgressPolicy) and :445-451 (driver configure_egress_policy)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706-775 (per-request Fetch guard with a domain_grant_blocked decision)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1775-1830 (Godkjenn and Avsla per action only)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:263-285,695-715 (BrowserControlMode agent_control/human_takeover; typed CONFLICT during takeover)",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components (directory listing: no browser section)",
+    "apps/Control Plane/user-core/internal/users/types.go:136-143 (generic per-category UserSettings row, no revision field)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:479 (OD13: open decision on domain scope and policy owner)"
+   ],
+   "reuse": [
+    "Quarry BrowserEgressPolicy plus the driver configure_egress_policy hook (quarry-browser/src/lib.rs:445) as the single enforcement point for any widened origin set",
+    "BrowserBroker CreateScopedSensitiveApproval parent-bound child-grant pattern (grant.go:104)",
+    "CrawlDenialReason (quarry-core/src/crawl_denial.rs) as the template for a browser-action DenialReason, and QuarryError.retryable",
+    "BrowserExecutionTier plus require_ephemeral_evidence_action (agent_routes.rs:391,1153) as the existing per-run action allow-list to extend into run modes and action classes",
+    "execution-core RiskCategory gate and session-core durable approvals (DECIDE_APPROVAL_SQL, decided_by) for the prompt and audit trail",
+    "user-core UserSettings category rows for user-level site rules; settings-ui.tsx and the McpServersSection.tsx pattern for a Settings > Browser section",
+    "Gateway BrowserControlMode (human_takeover) as the existing user-owned mode switch that the agent cannot flip"
+   ],
+   "constraints": "Model proposes, Quarry executes or rejects: Quarry may enforce only what the broker-signed grant contains and must never read Control Plane rules (no cross-plane DB), so rules are compiled into the grant at issue time with an embedded policy version. Plane ownership: durable rules belong in Control Plane (user-core user settings and an org policy object); the broker is a decision point and today is in-memory. Space access never widens an owner-plane ACL, so rules are per user or org, never per Space. ZDR must propagate: persistent always-allow scopes store host names, so limit ZDR orgs to turn scope (INF). Policy evaluation stays fail-closed and every deny and approve is audited. Open owner decision OD13 (fence of start host plus at most 8 user-listed domains, broker as authority) should be settled before the pattern language is designed.",
+   "approachAdjustment": "Split into three deliverables and fix two placement errors. (1) Typed denials first (S-M, Ingestion plus execution-core): add a browser DenialReason enum with decision_source and make the Quarry error code match the HTTP status (status_err currently emits BAD_REQUEST for 403s), modelled on CrawlDenialReason. (2) Per-origin consent (L): the item's 'broker issues a child grant with the new origin' does not work with current semantics, because child grants allow exactly one of three sensitive actions and validate_run_grant demands run domains equal the parent grant at every step; add a new parent-bound origin-extension grant kind that Quarry validates, then widen the live policy through configure_egress_policy, or end and resume with a new grant (resume is blocked by the same equality check). Persist conversation and always decisions in Control Plane user settings, not the broker. (3) Org origin policy and Settings > Browser hub (L): Control Plane owns the versioned policy and the broker intersects it at grant issue. Keep the wildcard pattern language out until grant.go isCanonicalDomain and BrowserEgressPolicy::canonical_broker_domains change together. Fold the saved-approval part of F-t2-073 into this item.",
+   "effortRevised": "XL",
+   "effortNote": "As a single item it spans Model, Ingestion, Control and Frontend planes and needs a new Quarry grant kind plus a durable rule store; split it as S-M (typed denials) + L (per-origin consent) + L (org policy and hub).",
+   "verdict": "reword",
+   "verdictReason": "The gap is real (no per-origin consent, typed denials, run modes or policy hub), but the child-grant mechanism and the broker as persistence layer conflict with the code (single-action child grants, run domains fixed to the grant, in-memory store), so the bundle should be split and sequenced with typed denials first.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

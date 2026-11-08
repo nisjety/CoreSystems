@@ -1,0 +1,99 @@
+{
+ "finalId": "F-t2-063",
+ "tier": "recommended",
+ "rank": 39,
+ "title": "Code-mode browser control: sandboxed script runtime over typed Quarry bindings, with approval-input hardening",
+ "summary": "Offer the model one persistent REPL tool per session that runs model-written JS in a QuickJS/V8 isolate inside execution-core with only typed Quarry bindings (observe, act, locator, extract), no network, fs or raw CDP, memory/stack limits and a per-call deadline. Every binding call goes to quarry-edge with the run's grant so each action is still grant-checked, approved and receipted per Quarry step. Ship with opaque handles, no imports and freeze-and-copy of every argument that reaches an approval or Quarry call.",
+ "whyItMatters": "Fewer model round-trips and tokens for multi-step tasks (fill a form, paginate, extract a table), and programmatic post-processing of page data before it reaches the model. It preserves 'Model proposes, Quarry executes' because each host call is a Quarry step.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (one persistent QuickJS scope per session with a small surface: page, tabs, snapshot, annotatedScreenshot, fetch, plus runtime lints; AA083 non-marshalable host handles)",
+  "others": [
+   "Codex (CA077/CA054 model-visible vs programmatic observation split; approval inputs copied into a frozen object to close a TOCTOU gap)",
+   "Firecrawl (interact tool)"
+  ],
+  "prevalence": "3 of 3 sources; table-stakes (hardening: 2 of 3)",
+  "mechanism": "Embed a WASM JS engine with memory/stack limits and an interrupt deadline; keep one top-level scope per session; inject host functions that marshal to typed commands; return only values the script emits to the model. Before any approval, verify arguments are plain own data properties, deep-copy, freeze and execute exactly the frozen copy; reject module import/require."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4202",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479"
+  ],
+  "gap": "Verevon exposes browser.observe / browser.act as one typed action per model call; there is no batching and no programmatic post-processing. Hardening is only relevant once code-mode exists; typed JSON actions are already plain data."
+ },
+ "approach": "Model Plane sandboxes/execution-core: isolate runtime with typed bindings that are thin clients for quarry-edge /step using the run's grant; approvals stay per Quarry step, not per script. Build only after the single-step loop (R-t2-09-02) is live and measured, so token and latency data justifies it.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001 grant wiring",
+  "F-t2-010 planner loop live",
+  "F-t2-015 trusted input",
+  "F-t2-002 evaluate gating"
+ ],
+ "planeOwner": "Model Plane",
+ "risks": "Larger attack surface from model-written code; shipping without the hardening would create approval bypasses; one script can contain many actions, so per-script approval is unsafe.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 11,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-09-12"
+ ],
+ "sourceClusters": [
+  "C-t2-09-003",
+  "C-t2-09-004"
+ ],
+ "sourceCategories": [
+  "AI-browser control"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-063",
+   "status": "planned",
+   "exactGap": "No script runtime exists: execution-core offers browser.observe and browser.act as single typed JSON actions (closed oneOf schema, additionalProperties false, snapshot refs only, no JavaScript, CSS selector or URL) and a bwrap-sandboxed code_interpreter that runs only python or sh with no network and no tool bridge. Code-mode is planned generically in Model Plane docs only (MODEL_PLANE_IMPROVEMENTS_2026.md sections 23.4-23.5 and verevon_CHAT_PARITY_BACKLOG.md #11, an in-sandbox RPC client), with no browser-specific design and no code, so the item's alreadyPlanned=false is inaccurate. The approval-input hardening half has no present gap: typed browser.act input is plain data and the approval stores the exact tool_input in a frozen, encrypted continuation descriptor.",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479-3508 (browser_act_parameters_json: closed schema, refs only, approval grant ids)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4204-4212 (browser.observe and browser.act: one action per call; description excludes URLs, selectors, JavaScript, raw CDP)",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs:1-30 (hermetic per-call workspace, no network, timeout, scrubbed output; python or sh)",
+    "apps/Model Plane/rust/services/execution-core/src/policy.rs:1-50 and executor.rs:132-140,349-352,389 (MpSandboxPolicy/MpNetworkPolicy; bwrap --unshare-net)",
+    "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:1888-1935 (DOC: code mode for MCP greenfield, verified 2026-08-03; section 23.5 safety list)",
+    "apps/Model Plane/docs/verevon_CHAT_PARITY_BACKLOG.md:99-106 (DOC: backlog #11, in-sandbox RPC client)",
+    "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs:1-35 (browser_agent cannot be cold-resumed from a descriptor)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:328-432 (in-process approval polling with a wait budget, fail-closed timeout)",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:770-830 (continuation descriptor: exact approval-scoped action, encrypted, finite expiry)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4476-4515 (pause_for_approval freezes tool_input into the descriptor)",
+    "apps/Model Plane/go/services/sandbox-manager/internal (directory listing: lease, process, workspace, snapshot; no script runtime)",
+    "negative searches: no quickjs/rquickjs/wasmtime/deno_core/rusty_v8/boa and no code_mode in Model Plane or Quarry code"
+   ],
+   "reuse": [
+    "code_interpreter plus the execution-core executor/bwrap policy (MpSandboxPolicy, MpNetworkPolicy::Disabled, timeout, output scrubbing) as the isolation substrate: run the engine as a sandboxed child, not an in-process isolate",
+    "browser.observe / browser.act and execute_quarry_browser_mcp as the only host-call targets, so every call stays one Quarry step",
+    "the approval record, continuation descriptor and decision pipeline (one approval per Quarry step)",
+    "the in-process approval wait-budget pattern from the browser loop (browser_events.rs) for a script blocked on approval",
+    "model-gateway tool-result handles / result_query to keep large page data out of model context"
+   ],
+   "constraints": "Model proposes, Quarry executes: every binding call stays a separate Quarry step with the run's grant and its own approval; one approval must never cover a whole script. Approvals are durable pauses with an exact frozen descriptor and browser_agent cannot be cold-resumed, so a script waiting on approval must keep its sandbox alive and end as unknown-outcome when the wait budget is exceeded. ZDR: script inputs and outputs must not be persisted and must be scrubbed like code_interpreter output. Code-mode in general is already planned in Model Plane docs, so this must be a slice of that effort, not a parallel runtime. Preconditions are unbuilt: browser grants have no issuance path and the single-step planner loop has not been measured.",
+   "approachAdjustment": "Fold into the planned generic code-mode (docs 23.4/23.5, backlog #11) as one browser binding set. Run the engine as a bwrap'd child of execution-core with network disabled, speaking a line-delimited RPC to the parent, which proxies each binding to browser.observe/browser.act with approvals, instead of embedding QuickJS or V8 in the execution-core process. Python over RPC (backlog #11) is the lower-risk first engine because code_interpreter already ships it; choose JavaScript only for a measured reason. Drop freeze-and-copy hardening from scope until a script can reach an approval, since the typed schema and descriptor already provide it.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged. The sandbox substrate exists, but the item depends on grant issuance and a measured single-step loop; it becomes XL if a new JavaScript engine is embedded in-process.",
+   "verdict": "demote",
+   "verdictReason": "Code-mode is already planned generically, the browser variant has unbuilt preconditions (grants, planner loop, measurements) and unproven savings, and the proposed in-process isolate conflicts with the existing sandboxed-child pattern. Keep as a later slice of the generic code-mode work.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

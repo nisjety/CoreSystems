@@ -1,0 +1,102 @@
+{
+ "finalId": "F-t2-059",
+ "tier": "recommended",
+ "rank": 35,
+ "title": "Register governed remote browser backends (Kernel, Browserless, Browserbase) behind an egress-containment proof",
+ "summary": "Expose the backend list and each backend's capability set through the session API, register the already-implemented Kernel and Browserless drivers behind config, and implement the containment proof that lets a remote driver run governed agent sessions (route provider traffic through Quarry's pinned egress proxy or require a provider-side egress allowlist attestation). Today Browserbase is scrape-only and Quarry rightly refuses backends that cannot prove isolated_egress.",
+ "whyItMatters": "The local lease pool is a hard-coded 2 and one Chromium process, so burst capacity and reliability for the in-app browser and AI runs need a scale-out path that does not change Model Plane tools. Capability flags keep the governance story intact.",
+ "referenceBestPractice": {
+  "bestSource": "Codex multi-backend Browsers.list with per-backend capability sets (codexbrowser-in-app-browser-009 and codexbrowser-automation-and-safety-139, SRC)",
+  "others": [],
+  "prevalence": "1 of 4 sources (codex), unique; remote browser providers are common across scrapers",
+  "mechanism": "trait BrowserBackend { kind(); capabilities() -> Caps; open_session(); ... } registered at startup from config; the session API lists available backends ({type, family, profile, metadata}) and the planner or Model chooses by required capabilities (for example needs_user_login selects an extension backend, needs_isolated_egress selects a hosted one)."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:265-269 (BrowserDriverCapabilities, including isolated_egress and security_evidence)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1873-1891 (local driver capabilities)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:243 and kernel.rs:497",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:316-327 (Browserbase registered for the scrape path with pool 4; no Kernel or Browserless registration found)",
+   "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:85-89 (SSRF and DNS-pinning gates required for every remote provider before enabling for agents)"
+  ],
+  "gap": "BrowserDriver trait and capability flags exist and the local driver ships; Browserbase cannot run agent sessions (no isolated_egress); Kernel and Browserless are implemented but unregistered; there is no backend list on the session API and no user-browser or DOM-only backend."
+ },
+ "approach": "Ingestion Plane: register Kernel/Browserless behind config in main.rs, implement the egress-containment proof (provider traffic via Quarry's pinned proxy or an attested provider allowlist) and per-provider SSRF/redirect/subresource tests listed in the roadmap gates, then expose GET /v1/agent/backends with capabilities. Model Plane selects by required capabilities but never names a provider. Restrict managed providers to approved processor policies (ZDR, DPA).",
+ "effort": "L",
+ "dependencies": [
+  "Remote-provider containment proof (planned in WEB_AGENT_ROADMAP_EXECUTION.md)",
+  "F-t2-007 (local pool) so remote and local capacity share one admission model"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-browser, quarry-edge)",
+ "risks": "Remote providers are data processors under ZDR and DPAs; the containment proof is hard to make real; provider outages need fallback to the local pool.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 1,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-09] apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md deliberate gate 2 (SSRF tests for every remote browser provider before enabling for agents) and SOVEREIGN_SCRAPING_RELIABILITY.md Phase 5 (managed providers only under approved processor policy)"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-09"
+ ],
+ "sourceClusters": [
+  "C-t2-03-017"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-059",
+   "status": "partial",
+   "exactGap": "Capability flags and gates exist (BrowserDriverCapabilities, lib.rs:265-286; require_isolated_agent_egress and require_driver_capabilities, agent_routes.rs:1125-1217, with driver_requirements already accepted at 1305), but the agent path is hard-wired to one driver, state.agent_driver = ChromiumoxideDriver (main.rs:1283-1288), so there is nothing to register Kernel or Browserless into for agent runs; the scrape path has a single DriverKind::Browser slot that Browserbase takes before the local driver (main.rs:322-339). Kernel and Browserless are REST-only one-shot shims (kernel.rs:1-20, browserless.rs:1-12) constructed only in tests, and Browserbase never opens its connectUrl (browserbase.rs:5-12), so none of the three can serve ref-based actions, AX snapshots or live frames. The session API has a hard-coded capability list but no backend listing (browser.rs:2578, 2700), and per-run driver_capabilities are only echoed after a run exists (agent_routes.rs:543, 1658).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:265-286",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:331-360",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:480-488",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1872-1895",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:1-30",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:1-40",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs:1-30",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:316-340",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1283-1288",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:60-135",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/privacy.rs:120-170",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1125-1217",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1305",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:86-92",
+    "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:77-90",
+    "apps/Ingestion Plane/Quarry-v2/docs/GAP.md:450-462",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2700"
+   ],
+   "reuse": [
+    "BrowserDriver trait, BrowserDriverCapabilities and the require_* gates in agent_routes",
+    "BrowserDriverAdapter::managed_provider with processor_id plus PrivacyPolicy.guard_third_party_processing (ZDR denies third-party processing even when the processor matches)",
+    "ChromiumoxideDriver code as the base for a CDP-attached remote driver (Browser::connect)",
+    "driver_requirements field already on the agent start body, per-run driver_capabilities in the response",
+    "ProfileStore for provider-agnostic persistent profiles; GAP.md 12.1 per-provider SSRF audit"
+   ],
+   "constraints": "Remote browsers are third-party processors: they need an approved processor policy and are refused under ZDR (privacy.rs tests), plus DPA review. Containment proof conflict: the pinned egress proxy endpoint type is loopback-only (lib.rs:331-360), which a remote browser cannot reach, so 'route provider traffic through Quarry's pinned proxy' contradicts that invariant, and GAP.md:450-462 records that Kernel and Browserbase only offer main-frame allowlists and that a real CDP connection is a prerequisite; the roadmap gate also requires redirect, iframe, XHR and subresource SSRF tests per provider before agent use (WEB_AGENT_ROADMAP_EXECUTION.md:85-89). Model proposes capability requirements and Quarry selects or rejects; the Model must never name a provider, and no driver_requirements usage was found in Model Plane Rust or Go sources.",
+   "approachAdjustment": "Re-scope into three parts. (1) S to M, scrape path only: allow more than one managed browser driver by keying the registry beyond DriverKind::Browser (main.rs:322-339) and register Kernel or Browserless behind config with the existing managed_provider processor guard; this adds page-render burst capacity without touching agent governance. (2) XL for agent sessions: build a CDP-attached remote driver that reuses ChromiumoxideDriver over Browser::connect (the REST shims cannot do ref actions), replace the single state.agent_driver with a registry keyed by backend id, then implement and test the containment proof; keep Browserbase scrape-only until then. (3) S: expose GET /v1/agent/backends with capability sets and select by driver_requirements in start_run. Restrict managed providers to approved processor policies and non-ZDR runs.",
+   "effortRevised": "XL",
+   "effortNote": "The item assumed the Kernel and Browserless drivers were ready to register. They are REST shims, so agent-capable remote backends need a new CDP-attached driver, a driver registry in AppState and a real containment proof.",
+   "verdict": "reword",
+   "verdictReason": "Partial and already planned as a gate, but the central premise (register the implemented Kernel and Browserless drivers) is wrong for agent sessions and the proxy-based proof conflicts with the loopback-only invariant. Reword with the corrected split and a larger agent-session effort.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

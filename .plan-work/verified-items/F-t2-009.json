@@ -1,0 +1,108 @@
+{
+ "finalId": "F-t2-009",
+ "tier": "priority",
+ "rank": 9,
+ "title": "Route PDFs, Office files and images to the right parser in /v1/scrape (Content-Type plus magic bytes)",
+ "summary": "After any driver returns bytes, sniff Content-Type and then the first bytes (%PDF-, a zip containing [Content_Types].xml, OLE compound file, PNG/JPEG/WebP). If the body is not HTML, hand the already-fetched bytes to the matching parser in quarry-transform (pdf.rs, docx.rs, images.rs) instead of running charset decoding and readability over binary data, and record the detected kind in output metadata. Express it as a typed Replan::IsFile when the planner work in R-t2-03-06 lands.",
+ "whyItMatters": "PDFs and Office files linked from sites are a common knowledge-base input. Today a PDF URL goes through readability and produces garbage markdown that users notice immediately, even though a PDF text extractor already exists.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl specialtyScrapeCheck (firecrawl-engine-and-infra-017, SRC)",
+  "others": [],
+  "prevalence": "1 of 4 sources (firecrawl), unique; table-stakes for a Firecrawl-class scraper",
+  "mechanism": "kind = sniff(content_type) or sniff_magic(first 512 bytes): %PDF-, PK zip with [Content_Types].xml, OLE compound file, PNG/JPEG/WebP. If kind is not html, raise AddFeature(pdf|document|image) carrying the already-downloaded bytes as prefetch so the parser needs no refetch. Record kind in output metadata."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:440-480 (content-type is read only for the PageFetched event and charset; the body is decoded as text and fed to readability)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:839 (the only caller of quarry_transform::pdf::extract_text)",
+   "grep: quarry_transform docx:: and images:: have no callers outside quarry-transform (docx.rs and images.rs are unwired)",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:29 (PDF text parity marked partial, DOCX listed as a P2 add)"
+  ],
+  "gap": "Scrape has no file-type routing. PDF extraction is used only by the answer pipeline; DOCX and image parsers exist but nothing calls them."
+ },
+ "approach": "Ingestion Plane: add a sniff_kind(content_type, bytes) helper after the driver fetch in quarry-runtime/src/pipeline.rs and dispatch to quarry-transform pdf/docx/images, with size caps and artifact offload for large files. For browser fetches that land on a download, reuse the bytes the browser downloaded. Set the output metadata content kind and a typed skip reason for unsupported types. Later fold into the Replan vocabulary (R-t2-03-06) and the planned /v1/parse route.",
+ "effort": "S",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane (quarry-runtime pipeline, quarry-transform)",
+ "risks": "Large or malicious files: enforce byte caps, parser timeouts and sandboxing; decompression bombs in zip-based Office files.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 3,
+  "DOC": 1,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-04] apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:29 (add DOCX, P2) and SOVEREIGN_SCRAPING_RELIABILITY.md Phase 6 (/v1/parse for private file bytes); scrape-pipeline routing itself is not listed"
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-04"
+ ],
+ "sourceClusters": [
+  "C-t2-03-024"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-009",
+   "status": "partial",
+   "exactGap": "PageRunner reads Content-Type only for the PageFetched event and charset decode, then runs readability on every body (pipeline.rs:440-506), so a PDF or Office URL produces garbage markdown. The needed pieces already exist elsewhere: answer.rs has is_pdf (Content-Type or %PDF- within the first 1 KiB, answer.rs:683-753) and calls pdf::extract_text (answer.rs:839, 25 MB cap in pdf.rs:40/203), docx::extract_text exists with a 25 MB cap but has no non-test callers, and images.rs is not an image parser (HTML lazy-image/srcset helpers only), so the item's PNG/JPEG/WebP leg has no parser to route to.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:421-440 (16 MB body cap)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:441-506 (content-type read for event and charset; text decode; readability)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:679-753 (is_pdf: header or magic bytes, Norwegian public-sector rationale)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:800-850 (PDF branch vs readability branch in the /v1/answer fetcher)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs:40, 69-85, 202-213 (extract_text, 25 MB cap)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:1-40 (extract_text, zip + word/document.xml, 25 MB cap)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/images.rs:1-40 (lazy-load, base64 strip, srcset only)",
+    "grep over quarry crates: no docx:: or images:: callers outside quarry-transform; only answer.rs:839 calls pdf::extract_text",
+    "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:18-34, 100-106 (PDF partial, DOCX a P2 add)"
+   ],
+   "reuse": [
+    "answer.rs is_pdf and PDF_MAGIC_SCAN_BYTES (move into quarry-transform or a shared quarry-runtime module and call from both paths)",
+    "quarry-transform pdf::extract_text / extract_headings and docx::extract_text with their existing size caps",
+    "charset::decode and the existing PageFetched content_type metadata",
+    "zdr::guard for artifact offload of large extracted text",
+    "services/quarry-vision-sidecar is the likely home for an image/OCR leg (directory listing only, not read)"
+   ],
+   "constraints": "Ingestion Plane only; no cross-plane dependency. Keep byte caps (pipeline 16 MB, PDF and DOCX 25 MB), parser timeouts and zip decompression-bomb limits since DOCX is a zip. Under ZDR extracted text stays inline with no artifact write. Changing output for non-HTML bodies changes fingerprints used by change monitors, so record the detected content kind in metadata.",
+   "approachAdjustment": "Reuse the existing is_pdf sniffer instead of writing a new one and add the zip-with-[Content_Types].xml check for Office files; route PDF and DOCX only. Remove images.rs as the image target: it cannot parse image binaries. Image bodies need OCR or a vision call, which is a separate and larger item, or a typed unsupported_media skip reason for now. Legacy OLE .doc should be a typed skip.",
+   "effortRevised": "S",
+   "effortNote": "S holds for PDF plus DOCX routing because sniff and both parsers exist; image/OCR routing is out of scope and would be M.",
+   "verdict": "reword",
+   "verdictReason": "The scrape pipeline really lacks file-type routing, but PDF sniffing and extraction already ship in the answer path, DOCX is written but unwired, and the image parser the item names does not exist; reword to PDF and DOCX reuse.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-009",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/utils/specialtyHandler.ts:138-365 (magic table: %PDF-, PK 03 04, OLE2 D0CF11E0A1B11AE1; HANDOFF_SNIFF_BYTES; AddFeatureError handoff; GCS reference handled first; ZIP_ARCHIVE_MEDIA_TYPES exclusion; image path behind imageOcrEnabled)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/fetch/index.ts:214 and engines/fire-engine/index.ts:220 (callers)",
+    "C:/dev/firecrawl/apps/api/src/lib/image-ocr-gate.ts (isImageOcrEnabled requires FIRE_PDF_BASE_URL and config.IMAGE_OCR_ENABLED)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/index.ts:530-545 (image OCR follows the parsers option and sits behind the deployment switch)",
+    "C:/dev/firecrawl/apps/api/src/lib/image-formats.ts (sniffable images include png, jpeg, tiff, gif, bmp, jp2, webp)",
+    "https://apify.com/apify/website-content-crawler (saveFiles/saveContentTypes download PDF/DOC/DOCX/XLS/CSV to the key-value store; no text extraction)"
+   ],
+   "corrections": "The OOXML/ODF check sniffs only the PK 03 04 local-file header and excludes genuine ZIP media types. It does not look for [Content_Types].xml. The first-512-bytes window is a recommendation: the reference computes HANDOFF_SNIFF_BYTES from its signature table. The order is: a GCS PDF reference first, then the Content-Type header, then magic bytes. Image routing is not always on: it needs a deployment switch (IMAGE_OCR_ENABLED plus a FirePDF base URL) and the per-request parsers option. Otherwise images are rejected as unsupported files. Archives, audio, video and executables are rejected explicitly. The rest of the mechanism, including the prefetch handoff so parsers do not re-download, is accurate.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "SRC (Firecrawl repo)",
+    "Image OCR handoff is deployment-gated and option-gated; PDF parsing quality depends on the FirePDF service, which is external in the hosted product",
+    "Apify Website Content Crawler selects files by content type but only downloads them and does not parse them (DOC), so '1 of 4' holds for parser routing"
+   ],
+   "confidence": "high"
+  }
+ }
+}

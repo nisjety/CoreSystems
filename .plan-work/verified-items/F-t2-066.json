@@ -1,0 +1,102 @@
+{
+ "finalId": "F-t2-066",
+ "tier": "nice-to-have",
+ "rank": 1,
+ "title": "Policy-gated browsing preset limited to consent-banner handling and ad/tracker filtering (fingerprint masking deferred to an ADR)",
+ "summary": "Re-scoped by T2. Keep the benign parts of R-t2-03-11: wire the existing consent-banner script and optional ad/tracker filtering behind an org policy flag, and make locale/timezone/TLS identity consistent with the request context of F-t2-058. Do not wire stealth.rs or fingerprint masking until an ADR on anti-bot posture decides it; F-t2-027 currently recommends deleting the dead stealth code.",
+ "whyItMatters": "The consolidators disagree: R-t2-04-03 removes stealth code and reports blocks honestly, R-t2-03-11 wires it under policy. Verevon's contract already forbids challenge bypass (ChallengeSignal.requires_escalation defaults to true, SRC), and the honest posture (Codex, SRC) fits Verevon best. Consent handling and ad filtering still save time and cost.",
+ "referenceBestPractice": {
+  "bestSource": "Apify fingerprint-suite and Camoufox (apify-platform-056 and -057, DOC); Firecrawl behaviorOverrides (firecrawl-engine-and-infra-013, SRC)",
+  "others": [
+   "Firecrawl tlsclient tier with an explicit demotion rule (firecrawl-engine-and-infra-007, SRC) and Apify got-scraping header generation (apify-platform-062, DOC)",
+   "Firecrawl blockAds via uBlock Origin Lite on hosted sessions (firecrawl-api-surface-059, SRC)",
+   "Codex deliberately ships no stealth because it drives real user browsers (codexbrowser-in-app-browser-011, SRC)"
+  ],
+  "prevalence": "Stealth and TLS identity: 2 of 4 sources (apify, firecrawl), common. Ad blocking: 1 of 4, unique.",
+  "mechanism": "Per session sample a fingerprint {UA, sec-ch-ua, platform, screen, deviceMemory, WebGL vendor/renderer, fonts, locale, timezone} consistent with the egress country; apply it with Emulation.setUserAgentOverride (with userAgentMetadata), setLocaleOverride, setTimezoneOverride, setDeviceMetricsOverride and Page.addScriptToEvaluateOnNewDocument; persist it with the profile so identity never changes mid-profile; derive HTTP headers from the same profile; planner rule: after a browser attempt fails never demote to a plain client unless explicitly allowed. Ad blocking via an MV3 blocker extension or CDP Fetch.enable with a filter-list matcher."
+ },
+ "verevonToday": {
+  "status": "stub",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52,292,420-430 (STEALTH_SCRIPT, CONSENT_DISMISS_SCRIPT, default_preamble; grep finds no caller outside stealth.rs)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-244 (launch flags are crash/dev-shm/quic only; no UA, locale or timezone override)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs:34-39 (TlsProfile Chrome/Firefox/Safari defined), :248-260 and :317 (redirects deliberately disabled until per-hop validation exists)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:51 (TLS plan always uses TlsProfile::default())",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fingerprint_rotation.rs (FingerprintRotator exists; only is_block_status is used, by fallback_driver.rs:96, fetch.rs:252, pipeline.rs:405, egress_broker.rs:159)",
+   "grep: no adblock or filter-list code in quarry crates; apps/Ingestion Plane/Quarry-v2/docs/SCRAPING_ENGINE_GAPS.md section 2.5 (dated 2026-05-28) describes an adblock interception task that is not present in the code (stale doc)"
+  ],
+  "gap": "Stealth and consent scripts are never injected; no fingerprint generator or persisted fingerprint; the planner only picks the Chrome TLS profile; the TLS tier does not follow redirects; the rotator policy is unwired; no ad or tracker blocking."
+ },
+ "approach": "Ingestion Plane. Phase A (S, hygiene): per-hop-validated redirect following in the TLS driver, planner use of Firefox/Safari profiles, wire FingerprintRotator on block, adopt the no-browser-to-plain-demotion rule. Phase B (M): FingerprintProfile persisted with the browser profile (SessionSnapshot already has UA/locale/timezone fields), applied on context creation; inject default_preamble only under the 'stealth' RunPolicy preset and log it in receipts; derive HTTP headers from the same profile and session locale (depends on R-t2-03-05 emulation). Phase C (S, optional): adblock-rust matcher in the existing CDP Fetch guard plus a default-on consent-dismiss option and a 'block ads' toggle in BrowserChrome. Never apply stealth to customer-owned authenticated SaaS sessions, and do not add CAPTCHA solving as a default (non-goal in the Sovereign Scraping proposal).",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-058 (locale/timezone/geo overrides for consistent identity)",
+  "F-t2-020 (profile persistence to hold the fingerprint)"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Terms-of-service and legal exposure on protected sites; arms-race maintenance and fingerprint drift as browsers update; an inconsistent fingerprint is worse than none; filter-list licensing (EasyList is copyleft) and breakage on sites that need ad scripts.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 3,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-11] apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:63,99 (P1 auto session/fingerprint rotation on block) and SOVEREIGN_SCRAPING_RELIABILITY.md Phase 3 (bind session state to egress identity and fingerprint profile); stealth injection and ad blocking are not listed"
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-11"
+ ],
+ "sourceClusters": [
+  "C-t2-03-006",
+  "C-t2-03-005",
+  "C-t2-03-012"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-066",
+   "status": "stub",
+   "exactGap": "stealth.rs defines STEALTH_SCRIPT, CONSENT_DISMISS_SCRIPT and default_preamble but only its own unit test calls default_preamble (lib.rs:164 merely exports the module), the chromiumoxide launcher sets only crash, shm and QUIC flags with no UA, locale, timezone or addScriptToEvaluateOnNewDocument call, DriverPlan.stealth_level has no reader, the planner always picks TlsProfile::default(), the TLS adapter deliberately does not follow redirects, and FingerprintRotator::on_block is never called (only is_block_status is used). No ad or tracker filtering exists (blockAds appears only in a Browserless doc comment), although the existing CDP Fetch guard already intercepts every request and could host a filter.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52,290-292,424-437 (scripts, default_preamble, and its only caller: the unit test)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:164 (pub mod stealth; no consumer)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-246 (launch flags)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706-775 (install_network_guard: per-request allow or block with receipts)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs:34,248-262 (TlsProfile enum; redirects disabled until per-hop validation exists)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:46,57 (TlsProfile::default() always; stealth_level field with no reader)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fingerprint_rotation.rs:30-80 (FingerprintRotator; callers use only is_block_status: fallback_driver.rs, fetch.rs, pipeline.rs, egress_broker.rs)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:190-198,213 (consent walls are classified as ChallengeKind::Consent; challenge signals set requires_escalation: true)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs:14 (blockAds only in a doc comment)",
+    "apps/Ingestion Plane/Quarry-v2/docs/SCRAPING_ENGINE_GAPS.md:136-160,197 (claims an adblock CDP task is fixed; no such code exists: stale)",
+    "grep (negative): no adblock, filter-list or block_ads code in quarry crates; no consent handling outside stealth.rs and observation.rs"
+   ],
+   "reuse": [
+    "chromiumoxide install_network_guard (CDP Fetch interception with per-request decisions and receipts) as the ad and tracker filter hook",
+    "stealth.rs CONSENT_DISMISS_SCRIPT, injected alone via Page.addScriptToEvaluateOnNewDocument",
+    "ChallengeKind::Consent detection in observation.rs to trigger or verify banner handling",
+    "SessionSnapshot UA, locale and timezone fields and ProfileMetadata for context-consistent identity",
+    "quarry-tls TlsProfile set and the per-hop SSRF preflight needed to enable redirect following"
+   ],
+   "constraints": "Quarry executes deterministically and records what it did: any Quarry-initiated click such as banner dismissal is not a Model-proposed action and must be logged in receipts and kept off authenticated customer SaaS sessions. Quarry's challenge classifier marks every detected challenge requires_escalation: true (observation.rs:213) rather than bypassing it, which fits F-t2-027's removal of the dead stealth code. ZDR is unaffected. Ad and tracker filtering must live in the existing fail-closed Fetch guard so it cannot weaken the egress policy.",
+   "approachAdjustment": "The item contradicts itself: the title defers fingerprint masking to an ADR, but Phase B injects default_preamble (which bundles STEALTH_SCRIPT with the consent script) and builds a persisted FingerprintProfile. Narrow it to: inject CONSENT_DISMISS_SCRIPT alone behind an org policy flag; add an ad and tracker matcher in install_network_guard with a distinct receipt decision; per-hop validated redirect following in the TLS driver; locale and timezone from the session context (F-t2-058). Also change the consent script's behaviour: it deliberately clicks the affirmative accept button (stealth.rs:290-291) and so grants tracking consent on the user's behalf, which is the wrong default for a Norwegian and EU product; prefer reject-all or necessary-only controls, or hide the overlay, and record the choice. Move FingerprintProfile persistence and FingerprintRotator wiring under the anti-bot ADR.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged in size after narrowing: consent injection and TLS redirect hygiene are S each, the ad and tracker matcher with filter-list licensing is M; the dropped fingerprint profile work would have been the larger part.",
+   "verdict": "reword",
+   "verdictReason": "Confirmed stub with no production path, but the proposed wiring (default_preamble, FingerprintProfile) exceeds the item's own stated scope and the existing consent script accepts cookies instead of rejecting them; reword to the consent, filter and redirect-hygiene scope.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

@@ -1,0 +1,155 @@
+
+---
+
+## 4. Slices (PR-sized, in build order)
+
+Conventions for every slice. Rust Quarry tests run in the `rust:1` container recipe (the crates do not build on the Windows host; `bash -c` not `-lc`; cache volumes `quarry-cargo`, `quarry-target`; the full edge set takes more than 10 minutes). Go commands run per module (no `go.work` for Quarry; control and orchestrator are `go 1.25.0`). CI today: `quarry-v2-ci.yml` [C] runs `cargo test --workspace` and report-only Go coverage (control 41.6%, orchestrator 37.2% against an 80% floor, S9); `internal/jobs`, `internal/activities`, `internal/controlauth` have no test file, so each slice that touches them adds one. A deployment claim needs rebuilt local images, a running stack and the stated end-to-end flow (repo rule; Ingestion Plane recipe: `make up` with the env-file chain from the deploy memory, then `make test-endpoints`). Migration numbers: next free in `Q:services/quarry-control/internal/store/pg/migrations/` is `015` and D4 reserves `015_zdr_run_tombstones.sql`; this design uses `016`, `017`, `018`. Numbers are provisional: the runner applies by file name and records it in `schema_migrations` (`pg.go` 162-204); every DDL statement is `IF NOT EXISTS`, so a rename before the first apply is harmless, but a file must never be renamed after it has been applied anywhere (the `UPDATE` in `017` would run again; it is guarded, see S1).
+
+Stream A (lifecycle, F-t2-017): L1, L2, L3, L5, then L4 after the decision. Stream B (schedules, F-t2-018): S0, S1, S2, S3, S4, S5. S2 needs L1's migration (job columns) and S5 needs F-t2-016 scope. S0 and L1 start on day one in parallel.
+
+---
+
+### L1. Job record v2, origin, status/errors/ongoing read surface (effort M, 4.5 engineer-days)
+
+**Goal.** Every crawl and batch job has a typed, org-scoped read surface: `GET /v1/jobs/:id`, `GET|... /v1/crawl/:id`, `/v1/batch/:id`, `/errors`, `/ongoing`; the job record carries origin and counters; the handoff to control is signed; `GET /v1/crawl/jobs` keeps working.
+
+| Path | Symbol | Change | Tag |
+|---|---|---|---|
+| `QCT:internal/store/pg/migrations/016_jobs_lifecycle.sql` | table `jobs` | add `origin_type TEXT NOT NULL DEFAULT 'unknown'`, `origin_actor TEXT NOT NULL DEFAULT ''`, `origin_ref TEXT NOT NULL DEFAULT ''`, `created_by TEXT NOT NULL DEFAULT ''`, `desired_state TEXT NOT NULL DEFAULT ''`, `desired_seq BIGINT NOT NULL DEFAULT 0`, `applied_seq BIGINT NOT NULL DEFAULT 0`, `workflow_id TEXT NOT NULL DEFAULT ''`, `deadline_at BIGINT`, `terminal_reason TEXT NOT NULL DEFAULT ''`, `finished_at BIGINT`; indexes `idx_jobs_pending_control ON jobs(id) WHERE desired_seq > applied_seq`, `idx_jobs_active ON jobs(created_at) WHERE status IN ('accepted','running','paused')`, `idx_jobs_org_kind_status ON jobs(org_id, kind, status, created_at DESC)` | [NEW] |
+| `QCT:internal/store/store.go` | `Job` (174-212), `MarshalJSON` (230-262), `UnmarshalJSON` (265-300), `JobsStore` (119-148), `EventLog` (153-170), `memJobs` (569-740), `memEventLog` | add the eleven fields to the struct and to BOTH hand-written wire structs (a missed field would silently drop on the wire); `JobsStore` gains `ListByKindStatus(orgID, kind string, statuses []string, limit int, cur string)`, `ListActive(limit int)`; `EventLog` gains `SummaryForJob(jobID) JobEventSummary`, `CountsForJobs(ids []ID) map[ID]map[string]int`, `ForJobTypes(jobID, types []string, afterSeq uint64, limit int)`; memory implementations for all | [C] |
+| `QCT:internal/store/pg/resources.go` | `jobsStore` (54-460), `eventLog` (990-1090) | replace the eight duplicated 10-column SELECT lists and scan blocks (Get 115, GetByOrg 150, GetByRunID 186, List 241, ListByOrg 299, ListByKind 357, ListBySchedule 412, FindByIdempotencyKey 80) by one `const jobCols` and `scanJob(row)`; `Create` writes the new columns; SQL for `SummaryForJob`: `SELECT type, COUNT(*), MAX(seq), MIN(ts), MAX(ts) FROM events WHERE job_id=$1 GROUP BY type`; `ForJobTypes` adds `AND type = ANY($n)` | [C] |
+| `QCT:internal/resources/resources.go` | `createJobInput` (460-465), `createJob` (396-458), `updateJob` (513-549), `markJobTerminalIfNeeded` (302-316), `jobStatusForEvent` (318-329), `MountJobs` (24-33) | `createJobInput.Origin{Type, Actor, Ref, CreatedBy}` validated against the closed set; `updateJob` patch gains `if_status` (409 on mismatch), `workflow_id`, `deadline_at`, and refuses leaving a terminal status; `jobStatusForEvent` maps `run_paused` to `paused`, `run_resumed` to `running`, `run_timed_out` to `timed_out`, `schedule_skipped` to `skipped`; `markJobTerminalIfNeeded` never regresses a terminal status; new routes `GET /v1/jobs/{id}/summary`, `GET /v1/jobs/{id}/errors` | [C] |
+| `QCT:internal/resources/jobs_lifecycle.go` | `getJobSummary`, `jobErrors`, `buildStatus` | `summary`: org-scoped, returns `{job, phase, counts{completed,failed,blocked,retried,extracted}, total, total_kind, last_seq, first_ts, last_ts, deadline_at, expires_at, warnings[]}` from `SummaryForJob`; `errors`: org-scoped, `ForJobTypes(['page_failed','page_blocked','page_retried'], after_seq, limit)` then keep `page_retried` rows with `payload.final == true`; response shape of D7 | [NEW] |
+| `QCT:internal/resources/job_wire.go` | `jobWire`, `toJobWire` | add `origin{type,actor,ref}`, `phase`, `deadline_at`, `stats{completed,failed,total}`, `desired_state` (Rust `JobSummary` is not `deny_unknown_fields`); `stats` for lists from `CountsForJobs` (one grouped query per page, not per job) | [C] |
+| `QCT:internal/resources/cycle23.go` | `MountJobsByKind` (about 367-400) | honour `?status=a,b` through `ListByKindStatus`; keeps `limit` default 25 | [C] |
+| `QO:internal/workflows/workflows.go` | `runPage` error branch (191-201) | payload adds `final: true` and `code` (the `Category.String()`); no command-sequence change, so no `GetVersion` | [C] |
+| `QE:handoff.rs` | `forward_to_orchestrator` (26-100) | new `forward_job_signed(state, org_id, kind, params, origin)` that signs with `state.internal_signer` exactly as `forward_mutation` does (`resource_routes.rs` 443-540), sends body `{kind, params, origin}` and `Idempotency-Key` when given; old function kept for tests | [C] |
+| `QE:routes.rs` | `crawl_handoff` (590-667), `batch_handoff` (681-725), route table (125-293) | build `RunOrigin` from claims (D4) and call `forward_job_signed`; register static `/v1/crawl/jobs`, `/v1/batch/jobs`, `/v1/crawl/ongoing`, `/v1/batch/ongoing` and the id routes next to lines 133-134 and 192 (small hunks, no reflow) | [M] |
+| `QE:job_lifecycle_routes.rs` | `get_job`, `get_crawl`, `get_batch`, `job_errors`, `ongoing` | handlers over `control_client`; kind check against the path (404 on mismatch); typed envelope `{data, meta}`; ZDR-floor callers get status counts and 403 on `errors` URLs (D10) | [NEW] |
+| `QE:control_client.rs` | `ControlClient::get_json/send_json`, `map_status` | signed GET and mutation with the `forward_mutation` error mapping (404 NotFound, 400 BadRequest, 401/403 Forbidden, 409 Conflict, other DriverFailed); unwraps `{data}` | [NEW] |
+| `Q:crates/quarry-core/src/resources.rs` | `JobSummary` (156-180), new `RunOrigin`, `JobStatusView`, `JobErrorsView` | typed structs so OpenAPI/SDK generation and the edge share one definition; `JobSummary` gains optional `origin`, `phase` (`#[serde(default)]`) | [C] |
+| `QE:lib.rs` | module list | `pub mod control_client; pub mod job_lifecycle_routes;` in the existing alphabetical block | [M] |
+| `Q:docs/openapi.yaml` | paths | `/v1/jobs/{job_id}` GET, `/v1/crawl/{id}` GET, `/v1/crawl/{id}/errors`, `/v1/crawl/ongoing`, batch aliases; `RunOrigin`, `JobStatus` schemas | [M] |
+| `Q:docs/CONTRACTS.md`, `Q:docs/REST_RESOURCES.md` | job section | document status vocabulary (D2), origin set (D4), `/errors` shape (D7) | [C] |
+
+**API and data model.** `GET /v1/crawl/:id` returns `{data:{job_id, kind, status, phase, terminal, origin:{type,actor,ref}, created_at, started_at?, finished_at?, deadline_at?, expires_at?, counts:{completed,failed,blocked,retried}, total, total_kind:"budget|exact", warnings:[{code,message}], control:{desired, pending}, schedule_id?, run_id?}}`; `/errors` as D7; `/ongoing` is `GET /v1/crawl/jobs` restricted to `status in (accepted,running,paused)` with the same page envelope (`ListQuery` already carries `status`, `resource_routes.rs` 44-61). No proto. SQL as above.
+
+**Flag and rollout.** No flag: additive read routes and nullable or defaulted columns. Deploy order: control first (migration, new routes, old `PUT` unchanged), then edge. Rollback: redeploy the previous edge; columns stay.
+
+**Tests.**
+- Go control: `TestJobsMigration016IsIdempotent` (pg_test.go pattern, `QCT:internal/store/pg/pg_test.go` [C]), `TestJobWire_RoundTripsOriginAndStats`, `TestSummary_CountsFromEvents`, `TestSummary_OrgScopedCrossTenantIs404`, `TestErrors_IncludesFinalRetriedAndBlocked`, `TestUpdateJob_IfStatusConflictIs409`, `TestUpdateJob_CannotLeaveTerminal`, `TestJobStatusForEvent_PausedResumedTimedOutSkipped`, `TestMarkJobTerminal_DoesNotRegress`. Command: `cd "apps/Ingestion Plane/Quarry-v2/services/quarry-control" && go test ./internal/resources/ ./internal/store/... -count=1`.
+- Go orchestrator: `TestRunPage_FailurePayloadIsFinalWithCode` in `workflows_test.go`. Command: `cd ".../services/quarry-orchestrator" && go test ./internal/workflows/ -count=1`.
+- Rust edge (new `Q:crates/quarry-edge/tests/job_lifecycle.rs` [NEW], harness of `zdr_claim_floor.rs` with a wiremock control double): `crawl_status_is_org_scoped_and_404s_foreign_id`, `crawl_jobs_list_route_still_matches_after_id_route` (the collision test: `GET /v1/crawl/jobs` must reach the list handler), `errors_include_blocked_and_final_retried`, `kind_mismatch_is_404` (`/v1/batch/<crawl job>`), `handoff_is_signed_and_carries_origin` (control double asserts the HMAC triple and `origin`), `zdr_floor_caller_gets_counts_but_not_error_urls`, `service_token_gets_403_on_lifecycle_routes`. Command: `cargo test -p quarry-edge --test job_lifecycle` in the container.
+- Gateway unaffected in L1.
+
+**Definition of done.** Status, errors and ongoing answer for a live crawl and a finished one; a second org gets 404 for the first org's id; the existing `GET /v1/crawl/jobs` still returns the list; handoff works with `QUARRY_INTERNAL_HMAC_REQUIRED=1`; Ingestions run rows show real progress (`stats`).
+
+**Deployment evidence.** Rebuild `quarry-control`, `quarry-edge`, `quarry-orchestrator` images (`deploy/compose`), bring the stack up with HMAC required. Flow: (0, before changes) record the status of `POST /v1/crawl` with a valid org-A token against the stack to settle the unsigned-handoff question; (1) `POST /v1/crawl {url: <local test site with 40 pages, one 404 link>, max_pages: 20}`, capture `job_id`; (2) poll `GET /v1/crawl/{job_id}` every second: `counts.completed` rises monotonically to 20, `status` ends `completed`, `origin.type == "user"`, `origin.actor` equals the token's user id; (3) `GET /v1/crawl/{job_id}/errors` lists the 404 URL with `code: client_4xx` and a blocked-host URL under `blocked`; (4) with an org-B token the same id returns 404; (5) `GET /v1/crawl/jobs` returns 200 with the list; (6) Ingestions page shows the progress bar for the run (`/api/ingestions/runs` carries `stats`).
+
+**Effort.** M, 4.5 days (control 2, edge 1.5, tests and docs 1). **Risks.** Hand-written `MarshalJSON` drift (mitigated by the round-trip test); the SELECT-list refactor touches D6-flagged code (a mechanical diff, reviewed alone); `?status` on `/v1/{kind}/jobs` changes a route the gateway already calls (additive).
+
+---
+
+### L2. Cancel, pause, resume: desired state, orchestrator control loop, batch handlers, typed timeout (effort L, 7 engineer-days)
+
+**Goal.** `DELETE /v1/crawl/:id` and `POST /v1/crawl/:id/pause|resume` (and batch aliases) work end to end; every way a run ends has a typed terminal state; batch is controllable.
+
+| Path | Symbol | Change | Tag |
+|---|---|---|---|
+| `QCT:internal/store/store.go`, `pg/resources.go` | `JobsStore` | `SetControl(orgID, id, action, actor string) (Job, error)` (one transaction: validate transition, set status `cancelled` immediately for `accepted`, else set `desired_state`, `desired_seq = desired_seq+1`), `AckControl(id, appliedSeq)` (raises only), `PendingControl(limit)`, `ListRunning(limit)`, `Finalize(id, status, reason string, finishedAt int64)` (terminal only, idempotent), `UpdateIf(j, ifStatus)` | [C] |
+| `QCT:internal/resources/jobs_lifecycle.go` | `controlJob`, `pendingControl`, `controlAck`, `runningJobs`, `finalizeJob`, `appendJobEvent` | org-scoped `POST /v1/jobs/{id}/control {action, actor, actor_type}`: transitions per D1 (409 on terminal, on pause of non-running, resume of non-paused, any verb on `scrape` except cancel-while-accepted); appends `control_requested` event when the job has a run id; internal routes `GET /v1/internal/jobs/pending-control`, `POST /v1/internal/jobs/{id}/control-ack`, `GET /v1/internal/jobs/running`, `POST /v1/internal/jobs/{id}/finalize` (deterministic event id for `run_timed_out`/forced `run_cancelled`) | [NEW] |
+| `Q:pkg/quarrycontracts/event.go` | `EventType` consts | add `EvtControlRequested = "control_requested"`, `EvtRunTimedOut = "run_timed_out"`, `EvtScheduleSkipped = "schedule_skipped"`; `QCT:internal/resources/event_wire.go` [C] 51-96 maps them (`running/ok`, `failed/error`, `cancelled/warn`) | [C] |
+| `Q:crates/quarry-core/src/event.rs` | `EventType`, `event_type_token` | mirror the three types so NATS and the Rust sink stay exhaustive (the control log does not need it to function; parity avoids a later exhaustive-match break) | [C] |
+| `QO:internal/jobs/dispatcher.go` | `dispatch` (244-309), `markRunning` (313-342), `tick` (148-203), `job` struct (401-407) | `markRunning` becomes compare-and-set (`if_status:"accepted"`) and also sends `workflow_id` and `deadline_at`; on 409 the dispatcher terminates the workflow it just started (`TerminateWorkflow(workflowID, "", "cancelled before start")`); `WorkflowExecutionTimeout` from `ExecutionTimeoutFor` instead of the constant at 254; the `tick` rule that marks any non-accepted job `done` (165-169) stays (cancel is a separate loop) | [C] |
+| `QO:internal/jobs/control.go` | `RunControl`, `applyPending`, `escalate`, `sweep` | loop every 2 s: fetch pending, `SignalWorkflow(workflow_id, "", signalName, nil)`, ack; unapplied cancel older than `QUARRY_CANCEL_GRACE_S` gets `TerminateWorkflow` and `finalize{cancelled, forced}`; every 30 s the sweep lists running jobs (limit 200), calls `DescribeWorkflowExecution` and finalizes closed ones (D5 mapping); a signal error of kind `serviceerror.NotFound` counts as applied | [NEW] |
+| `QO:internal/timeouts/timeouts.go` | `ExecutionTimeoutFor(kind, params)` | env table of D5, hard ceiling 6 h; leaf package imported by `jobs` and `schedules` | [NEW] |
+| `QO:cmd/orchestrator/main.go` | block 145-152 | `go jobsMgr.RunControl(rootCtx)` beside `go jobsMgr.Run(rootCtx)`; config from env (`QUARRY_CANCEL_GRACE_S`, `QUARRY_JOB_TIMEOUT_*`) | [C] |
+| `QO:internal/workflows/signals.go` | `waitWhilePaused` (140-146), `crawlControl` | `workflow.Await(ctx, func() bool { return c.state != statePaused })` behind `GetVersion("lifecycle-v1")`; `pauseSeq` counter | [C] |
+| `QO:internal/workflows/workflows.go` | `BatchJobWF` (359-383), pause emits (437-449, 540-552) | `installControlHandlers`, `controlGate`, per-URL gate behind `GetVersion("batch-control-v1")`; terminal `run_cancelled` for batch; `pauseSeq` in the idempotency parts | [C] |
+| `QE:job_lifecycle_routes.rs` | `cancel_job`, `pause_job`, `resume_job` | `DELETE /v1/crawl/:id`, `POST /v1/crawl/:id/pause|resume`, batch aliases; `authorize_control(claims, job)` (org-wide for now, Q4); body to control carries `actor` and `actor_type` from claims; maps 409 to `Conflict` with the terminal status in `details` | [NEW] |
+| `QE:routes.rs` | route table | four more routes next to the L1 hunk | [M] |
+| `Q:docs/openapi.yaml`, `Q:docs/RUNBOOKS.md` [M] | | control verbs, 409 semantics, runbook "a run will not cancel" (grace, force, `GET /v1/jobs/{id}` desired vs applied) | [M], [M] |
+
+**API and data model.** `DELETE /v1/crawl/:id` returns `{data:{job_id, status, phase:"cancelling", control:{desired:"cancel", pending:true}}}`; `POST .../pause` and `.../resume` return the same shape. Error codes: 404 foreign or missing, 409 `Conflict` with `details:{status, reason}` for terminal or wrong-state, 409 with `not_controllable` for scrape. Events: `control_requested` `{action, actor, actor_type}`, `run_paused`/`run_resumed` (unique per pause), `run_cancelled` `{pages_visited, pages_failed, forced?}`, `run_timed_out` `{timeout_type, limit_s}`.
+
+**Flag and rollout.** `QUARRY_EDGE__JOB_CONTROL=1` (edge, default on after a staging pass) gates the three verbs; `QUARRY_JOB_CONTROL_LOOP=1` (orchestrator, default on) gates the loop. Order: control and orchestrator first (loop idle without pending rows), then edge. Rollback: edge flag off (verbs answer 501), loop flag off; pending rows are harmless. In-flight workflows replay because of the two `GetVersion` ids.
+
+**Tests.**
+- Go workflows (`QO:internal/workflows/workflows_test.go`, `testsuite`): `TestBatchJobWF_CancelSignalEndsBatchEarly`, `TestBatchJobWF_PauseThenResumeCompletesAll`, `TestBatchJobWF_PauseTwiceEmitsTwoDistinctEvents` (asserts two distinct `run_paused` event ids via the `EmitEvent` stub), `TestCrawlJobWF_PauseUsesAwaitNotTimers` (asserts no timer scheduled while paused with the new version), `TestCrawlJobWF_OldHistoryKeepsSleepPolling` (`env.OnGetVersion("lifecycle-v1", ...)` returns `workflow.DefaultVersion`; `OnGetVersion` exists in SDK v1.29.1, `internal/workflow_testsuite.go:514`), `TestRunPage_RetryableFailureIsFinalErrorEvent`.
+- Go jobs (`QO:internal/jobs/control_test.go` [NEW], `httptest` control plus `go.temporal.io/sdk/mocks.Client`): `TestApplyPending_SignalsAndAcks`, `TestApplyPending_NotFoundCountsAsApplied`, `TestEscalate_TerminatesAfterGrace`, `TestSweep_TimedOutBecomesTypedTerminal`, `TestSweep_RepeatedPassIsNoop`, `TestMarkRunning_ConflictTerminatesStartedWorkflow`, `QO:internal/timeouts/timeouts_test.go` [NEW] `TestExecutionTimeoutPerKind`.
+- Go control: `TestControl_CancelAcceptedJobIsImmediateAndDispatchCannotOverwrite`, `TestControl_TerminalIs409`, `TestControl_PauseWrongStateIs409`, `TestControl_CrossOrgIs404`, `TestPendingControl_ReturnsOnlyUnapplied`, `TestFinalize_IsIdempotent`, `TestControl_ScrapeNotControllable`.
+- Rust edge: `cancel_is_org_checked_and_409_on_terminal`, `verbs_forward_actor_from_claims`, `service_token_cannot_control`, `zdr_caller_can_cancel_but_not_read_errors`.
+- Commands: orchestrator `go test ./internal/workflows/ ./internal/jobs/ -count=1`; control `go test ./internal/resources/ ./internal/store/... -count=1`; edge `cargo test -p quarry-edge --test job_lifecycle`.
+
+**Definition of done.** A running 5000-page crawl can be paused, resumed and cancelled from the API; a cancelled crawl stops within one page plus the 2 s loop; a workflow killed by the timeout ends as `timed_out` with an event; a cancel that beats the dispatcher never runs; old in-flight workflows replay.
+
+**Deployment evidence.** Rebuild all three images. Flow with a slow local test site (1 s per page, 200 pages): (1) start a crawl, wait for `counts.completed >= 5`; (2) `POST /v1/crawl/{id}/pause`: within about 10 s `phase` is `paused`, `counts.completed` stops moving for 30 s; `GET /v1/jobs/{id}/events` shows exactly one new `run_paused`; (3) resume, then pause again: a second distinct `run_paused` appears; (4) resume, then `DELETE`: within a page and 2 s the status is `cancelled` and `run_cancelled` carries `pages_visited`; (5) `DELETE` again answers 409; (6) start a batch of 20 URLs and cancel it after 3: status `cancelled`, `pages_visited` small; (7) set `QUARRY_JOB_TIMEOUT_CRAWL_S=20` in the last env file, start a crawl of the slow site: after about 50 s the job is `timed_out` and the event `run_timed_out` exists (this proves the sweep, since the workflow emitted nothing); (8) `temporal workflow describe -w quarry-job-<id>` shows the matching closed state.
+
+**Effort.** L, 7 days (control 2, orchestrator 3, edge 1, docs and evidence 1). **Risks.** Temporal non-determinism (mitigated by two `GetVersion` ids and the version tests); signal sent to a closed workflow (treated as applied, finalize sweep corrects the record); leftover durable-frontier queue rows after cancel or timeout (no purge route: a follow-up for a queue janitor, tracked in Q-follow-ups; harmless to correctness because queue names are per run); the control HMAC is one shared secret for edge and orchestrator, so a compromised edge could call the internal routes (pre-existing trust model, not widened beyond the control surface it already reaches).
+
+---
+
+### L3. Live job-event tail with snapshot, `Last-Event-ID` and per-org caps (effort M, 4 engineer-days)
+
+**Goal.** `GET /v1/jobs/:id/events?follow=true` is a resumable live stream; the legacy drain behaviour is preserved without `follow`.
+
+| Path | Symbol | Change | Tag |
+|---|---|---|---|
+| `QE:resource_routes.rs` | `list_job_events` (1057-1130) | take `HeaderMap`; read `Last-Event-ID`; page-until-caught-up in the legacy path (fixes the 500-event truncation at 1073); branch to the follow stream when `follow=true` and the flag allows | [C] |
+| `QE:job_stream.rs` | `JobStream`, `StreamPermit`, `acquire(org)`, `follow(...)` | polling loop with the cadence and terminal logic of D8, `id: <seq>` on every frame, snapshot frame, `Event::retry`, 15 s keep-alive, 30 min `reconnect`; process-global limiter (`LazyLock<Mutex<HashMap<String,usize>>>`), no `AppState` field | [NEW] |
+| `QE:routes.rs` | table | `GET /v1/crawl/:id/events`, `/v1/batch/:id/events` aliases next to L1/L2 hunks | [M] |
+| `GW:domains/knowledge/quarry.rs` | `crawl_job_events` (1132-1158), `crawl_run_events` (1098-1120) | append `follow=true` when the SPA asks (query passthrough already forwards `qs(&uri)`); keep forwarding `last-event-id`; no body change | [C] |
+| `Q:docs/openapi.yaml` | `/v1/jobs/{job_id}/events` (1232-1262) | document `follow`, `replay`, `id:`, `snapshot`, `reconnect`, 429 | [M] |
+
+**API.** Frames: `event: snapshot` (`id` = last seq, data = status view), `event: <type>` with `id: <seq>` and the control event as data (unchanged shape), `event: reconnect`, final `data: done`. Env: `QUARRY_EDGE__JOB_STREAM_FOLLOW=1` (default off in the first release, on after the SPA is switched), `QUARRY_EDGE__JOB_STREAM_MAX_PER_ORG=20`, `QUARRY_EDGE__JOB_STREAM_MAX=500`, `QUARRY_EDGE__JOB_STREAM_MAX_AGE_S=1800`.
+
+**Rollout and rollback.** Flag off keeps byte-compatible legacy output. Roll back by turning the flag off.
+
+**Tests.** Rust edge, new `tests/job_stream.rs` [NEW] (wiremock control double that serves growing event lists): `snapshot_is_first_frame_and_carries_last_seq`, `resume_with_last_event_id_replays_only_newer`, `header_wins_over_after_seq`, `stream_ends_with_done_on_terminal_event`, `stream_ends_on_terminal_status_without_event` (timeout case), `org_cap_returns_429_and_releases_permit_on_drop`, `legacy_drain_unchanged_without_follow`, `legacy_pages_past_500_events`, `idle_backoff_reaches_five_seconds` (tokio `start_paused`), `foreign_job_is_404_before_any_frame`. Command: `cargo test -p quarry-edge --test job_stream`. Gateway: `cargo test --manifest-path "apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml" crawl_job_events` (add a test next to the quarry.rs test module 773-1000 that the `Last-Event-ID` header and `follow` reach the upstream request).
+
+**Definition of done.** A client that disconnects mid-crawl and reconnects with `Last-Event-ID` receives exactly the missing events once; the 21st stream of an org is refused; a timed-out job ends its stream.
+
+**Deployment evidence.** Rebuild edge and gateway. Flow: (1) `curl -N -H "Accept: text/event-stream" "http://127.0.0.1:8082/v1/jobs/<id>/events?follow=true"` against a running slow crawl with a valid token: first frame `snapshot`, then `page_fetched` frames with ascending `id`; (2) kill curl after 10 frames, note the last `id`, rerun with `-H "Last-Event-ID: <id>"`: first event frame has `id = last+1`; (3) open 21 curls for one org: the 21st returns 429; (4) cancel the crawl: the stream emits `run_cancelled` then `done` and closes; (5) through the gateway path `/api/v1/knowledge/jobs/<id>/events?follow=true` the same behaviour is visible in the browser network panel.
+
+**Effort.** M, 4 days. **Risks.** Poll load on control (bounded by caps and back-off, measured in evidence by watching control request rate); edge restart drops streams (clients resume with `Last-Event-ID`); per-instance cap multiplies with replicas (documented); `seq` allocation in control is `MAX(seq)+1` then insert (`pg/resources.go` 1018-1030): two concurrent batches for one run can lose an event as an `ErrConflict` replay (pre-existing; the tail would never show it; flagged for F-t2-014, whose trace envelope owns event ordering).
+
+---
+
+### L4. Paged job results, phase 1 page index (effort M, 3.5 engineer-days; ADR-GATED D9; optional)
+
+**Goal.** `GET /v1/crawl/:id/results?cursor=` returns up to 100 page records or 10 MiB, `next` = last seq returned (advances by what was actually returned).
+
+| Path | Symbol | Change | Tag |
+|---|---|---|---|
+| `QCT:internal/resources/jobs_lifecycle.go` | `jobResults` | `ForJobTypes(['page_extracted'], after_seq, 100)`; byte-bounded accumulation; response `{kind:"page_index", items:[{url,title,status,excerpt,word_count,fingerprint,artifact_id?}], next}` | [C] after L1 |
+| `QE:job_lifecycle_routes.rs` | `job_results` | ZDR floor refused; flag `QUARRY_EDGE__JOB_RESULTS=1` (default off) | [C] after L1 |
+| `Q:docs/openapi.yaml` | | document `kind: page_index` and its limits | [M] |
+
+**Tests.** control `TestResults_CapsAtHundredAndAdvancesBySeq`, `TestResults_ByteCapStopsEarly`; edge `results_flag_off_is_404`, `results_refuse_zdr_floor`. Commands as L1. **DoD.** The page index of a 250-page crawl pages in three calls with no duplicates or gaps. **Evidence.** Run the 40-page crawl, page with `limit` 15 and compare the URL set to the crawl's `page_fetched` events. **Effort.** M, 3.5 days. **Risk.** Product misread of an index as content: the `kind` field and docs say so; replaced by F-t2-052.
+
+---
+
+### L5. Gateway proxy, SPA controls and Model Plane registry actions (effort M, 4 engineer-days)
+
+**Goal.** The crawl UI shows live state and offers Pause, Resume, Cancel and an errors drawer; the same verbs exist as registry actions the Model can propose.
+
+| Path | Symbol | Change | Tag |
+|---|---|---|---|
+| `GW:domains/knowledge.rs` | router (170-196) | `GET /api/v1/knowledge/crawl/{id}`, `GET .../{id}/errors`, `DELETE .../{id}`, `POST .../{id}/pause|resume`, `GET /api/v1/knowledge/crawl/ongoing` (static before `{id}`) | [C] |
+| `GW:domains/knowledge/quarry.rs` | new `crawl_status`, `crawl_errors`, `crawl_cancel`, `crawl_pause`, `crawl_resume` | `proxy_bearer_json` with the user's Quarry token (same shape as `list_crawl_jobs` 1074-1096); org and user come from the session, never the path | [C] |
+| `GW:domains/ingestions/runs.rs` | `RUN_KINDS` (24), `to_run_item` | add `scrape`; carry `origin`, `phase`, `desiredState`; `stats` now populated | [C] |
+| `GW:domains/actions/handlers.rs`, `dispatchers.rs` | `execute_action` (about 110, 255-267), new `dispatch_ingestions_get_run_status`, `..._pause_run`, `..._resume_run`, `..._cancel_run` | arms plus dispatchers delegating to the proxies above (pattern of `dispatch_ingestions_run_schedule_action`, `dispatchers.rs` 3996-4026) | [C] |
+| `FE:shared/actions/action-registry.ts` | `ingestions.*` block (2563-2594), new input schemas | four actions of D20; `ingestions.create_schedule` input extended (S-slices) | [C] |
+| `FE:shared/api/knowledge-client.ts` | `isTerminalCrawlStatus` (802-804), `streamCrawlRunEvents` (619-643), new `getCrawlStatus`, `cancelCrawl`, `pauseCrawl`, `resumeCrawl`, `getCrawlErrors` | `timed_out`, `skipped` terminal; stream with `follow=true`, `lastEventId` kept across reconnects (`readSseStream` already supports `lastEventId`, `sse.ts` [M] 10-16, 38-40), bounded retry | [C] |
+| `FE:shared/api/ingestions-client.ts` | `RunItem`, new `cancelIngestionRun` etc. | typed helpers | [C] |
+| `FE:features/dashboard/home/KnowledgeComposer.tsx` | crawl progress rows (about 288-420, 482-531) | Pause/Resume/Cancel buttons with confirm on Cancel, phase labels (`pausing`, `cancelling`), errors link; strings are inline `i18n.tr('nb', 'en')` pairs as in the file today (no locale file edit) | [M] (re-read the 10-line diff first) |
+| `FE:features/ingestions/components/VerevonIngestionsPage.tsx` | `RunsPanel` (721-780) | same controls for running rows; errors drawer; origin badge | [C] |
+| `apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs` | contract | no edit; it must pass because registry and handler ids are added together | [C] |
+
+**Tests.** Gateway: `cargo test --manifest-path "apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml" --all-targets` (new tests: proxy path building, no org in path, 409 passthrough). SPA: `cd "apps/Frontend Plane/verevonv3" && pnpm vitest run src/shared/api/knowledge-client.test.ts src/features/dashboard/home/KnowledgeComposer.test.tsx` plus new `CrawlControls.test.tsx` [NEW] (buttons by phase, confirm on cancel, terminal states hide controls), `pnpm typecheck`, `pnpm lint`, `pnpm test` (runs the action-surface contract). Known baseline: the verevonv3 worktree has pre-existing typecheck, lint and vitest failures (memory note), so compare failing sets against HEAD rather than trusting exit codes; run a second dev server because `:5173` is the main checkout and restart Vite after host edits (memory note).
+
+**Definition of done.** From the Knowledge composer a user pauses, resumes and cancels a live crawl and sees the phase change; a Model-proposed `ingestions.cancel_run` waits for approval and executes through the gateway; the registry and handler id sets still match.
+
+**Deployment evidence.** Rebuild gateway image and restart the SPA dev server. Flow in the browser (Playwright script `tests/e2e/crawl-lifecycle.spec.ts` [NEW], local project): start a crawl of the slow local site from the composer, click Pause (button becomes Resume within 10 s, counter freezes), Resume, Cancel (confirm), final status `Cancelled`; reload the page mid-crawl and see the controls and live count restored from `GET /api/v1/knowledge/crawl/{id}` plus the resumed stream; execute `ingestions.get_run_status` through `/api/v1/actions/execute` and compare to the Quarry response.
+
+**Effort.** M, 4 days. **Risks.** `KnowledgeComposer.tsx` in-flight diff; the SPA stores crawl jobs in `localStorage` (`verevon.dashboard.crawl.jobs.<org>`): new statuses must be tolerated when an old client reads them (additive string values).

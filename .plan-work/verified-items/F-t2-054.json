@@ -1,0 +1,107 @@
+{
+ "finalId": "F-t2-054",
+ "tier": "recommended",
+ "rank": 30,
+ "title": "Run- and turn-scoped tabs: deterministic cleanup, persisted tab sets and cold restore under a live-page budget",
+ "summary": "Have the Model Plane send turn_id and parent_run_id on every proposed browser action. Quarry records them, supports tab marks (deliverable, handoff), exposes a turn_ended endpoint that the Model Plane calls on turn end, interrupt and sub-agent stop (closing unmarked agent-opened tabs, downloads and blobs), and lets child runs reuse the parent's browser context under the parent's grant with narrower budgets. || Extend Quarry's existing AgentRunCheckpoint, which today stores one current_url, page hash, constraints, viewport, zdr, grant id and control mode, with the full tab list (URL, title, a bounded history window, active tab, agent or user flag). Resume then means a new lease plus lazy tab restore, and reopening a chat thread shows its tabs. Add a live-page budget in the lease scheduler that protects the active, agent-controlled, loading and downloading tabs and evicts by inactivity, restoring from the checkpoint on demand. Nothing is persisted under ZDR.",
+ "whyItMatters": "Deterministic cleanup at turn end is ZDR-friendly (no leftover pages or downloads) and keeps agent context small. Sub-agent sharing lets Model Plane multi-agent runs cooperate in one browser without duplicating grants. || A paused agent run or a HITL handoff can resume on the same pages, and idle Chromium pages stop costing money. It is also what makes co-browsing durable across a closed laptop.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (tab marks plus a once-only turn-ended tracker)",
+  "others": [
+   "Codex in-app browser (iab-034 thread-keyed tabs, iab-035 history snapshots, iab-031 live-page budget)"
+  ],
+  "prevalence": "1 of 4 sources; unique || 1 of 3 sources (Codex); unique as a complete lifecycle.",
+  "mechanism": "A registry maps sessionId to {conversationId, windowId, owner, disposeAfterSessionActivity}; child sessions inherit the parent route with dispose=true. Every tool call carries (session_id, turn_id); tabs opened in a turn get no mark. turnEnded(session, turn) clears session downloads and blobs, restores clipboards, detaches the debugger, then closes tabs with no mark, keeps deliverable tabs as output and keeps handoff tabs for the next turn (latest mark wins). A tracker keyed (session, turn) ensures cleanup runs exactly once, and Interrupt, Stop and SubagentStop hooks all call it. || Merged items add: Key pages by (conversationId, tabId). Persist {navigation:{currentIndex, entries[{url, title, pageState}]}, favicon, title}. Budget: at most N (32) live pages; protect active, agent-controlled, audible, capturing, loading and downloading tabs; evict by inactivity rank; restore lazily by recreating the page and replaying history."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:337-344",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:26",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:39-71 (AgentRunCheckpoint: single current_url, no tab list or history)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1436-1446 (resume_checkpoint; ZDR checkpoints refused; lease ttl defaults to 120 s)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:453,636 (checkpoint and browser-session projection)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385-396,483-487 (tabs exist within one session)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083-1134 (tab strip)"
+  ],
+  "gap": "Each agent run already gets its own CDP BrowserContext scoped to (org, actor, run) with tabs per run, behind broker grants. There is no turn concept, no tab marks, no cleanup on Model Plane interrupt or stop, and no parent/child run sharing for sub-agents (fleets are budgets only). window.open is rewritten to the same tab. || A durable single-URL run checkpoint and a resume path exist, but tabs, per-tab history, titles and an agent/user flag are not persisted, there is no binding of a tab set to a chat thread, and there is no live-page budget. The comparator's status of absent was corrected after reading the checkpoint struct."
+ },
+ "approach": "Ingestion Plane: tab records keyed by Model Plane run and turn ids with deliverable/handoff/temporary marks and one turnEnded cleanup per (session, turn), also on interrupt and sub-agent stop (Codex); persisted tab set per run with a live-page budget and cold restore (non-ZDR only). Depends on the reaper (F-t2-006) and durable sessions (F-t2-035). || Source detail: [R-t2-05-11] Model Plane passes turn_id and parent_run_id on every proposed browser action (additive to the existing action contract). Quarry, as executor, records them, adds mark-tab actions and a turn_ended endpoint, runs cleanup at most once per (run, turn) and on the reaper path from R-t2-05-04, and lets child runs attach to the parent context while keeping their own step budgets. Never auto-close user-opened or takeover tabs. || [R-t2-08-10] Ingestion Plane: extend AgentRunCheckpoint (and its Postgres writer in postgres_step_receipts.rs) with a bounded tab list and history window; implement restore as lease plus navigate; add a scheduler budget with protection rules. Coordinate with R-t2-03-08 (durable session store, suspend/resume) and R-t2-05-11 (turn-scoped tab cleanup) so there is one session state machine. Frontend Plane: reopening a thread rehydrates its tabs.",
+ "effort": "L",
+ "dependencies": [
+  "Model Plane run/turn ids on browser actions",
+  "F-t2-006 reaper",
+  "F-t2-001",
+  "F-t2-011",
+  "F-t2-035"
+ ],
+ "planeOwner": "Ingestion Plane + Model Plane (run/turn ids)",
+ "risks": "Closing a tab the user is co-browsing; protect user-opened and takeover tabs. Additive contract change must stay backwards compatible with existing callers. || Restored pages may differ (login expiry); stored URLs are sensitive, so scope them per tenant and never persist under ZDR; overlap with R-t2-03-08 can lead to two competing session models.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 14,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-05-11",
+  "R-t2-08-10"
+ ],
+ "sourceClusters": [
+  "C-t2-05-016",
+  "C-t2-08-014"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale",
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-054",
+   "status": "partial",
+   "exactGap": "Each agent run gets one per-session browser context with in-memory tabs, but tabs are REST/UI operations (agent_routes new_tab/select_tab/close_tab, gateway tab routes, BrowserChrome tab strip) because AgentAction has no tab verbs and window.open and target=_blank are rewritten into the same tab, so there are no agent-opened tabs to clean up today. Cleanup already happens at run level (execution-core always calls close_run when its loop ends, including on approval pause), and there is no turn concept, no turn_id or parent_run_id on StepRequest, no tab marks or turn_ended endpoint, no reaper or idle expiry for abandoned runs, no per-tab checkpoint (AgentRunCheckpoint stores one current_url and page hash), no live-page budget, and nothing in the Model Plane or gateway ever sends resume_run_id although Quarry supports it.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:25-71 (AgentRunCheckpoint: single current_url, no tabs)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:79-102 (RunEntry), 453-470 (checkpoint_for_entry), 1321-1335,1380-1450 (resume_checkpoint, ttl_s default 120)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3240-3300,3697-3713 (new_tab/list/select/close tab REST handlers, grant revalidation per tab)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-700 (AgentAction variants: no new_tab/select_tab/close_tab)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:969-995 (window.open and target=_blank rewritten to location.assign in the same tab), 2447-2520 (list_tabs/new_tab over in-memory pages)",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:182-212 (StartRunRequest/StepRequest: no turn_id, parent_run_id or resume_run_id)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:755-775 (loop always calls close_run, also on WaitingApproval)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2615-2650 (sub-agent child runs register parent_run_id in session-core, not in Quarry; none for ZDR)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:39-69 (Grant has ParentGrantID only for sensitive approvals; in-memory store)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:386-394 (tab routes proxy to Quarry)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1078-1090 (tab strip)",
+    "apps/Ingestion Plane/Quarry-v2/docs/WEB_AGENT_ROADMAP_EXECUTION.md:78-84 (resume_run_id still needs crash/restart rehydration tests)"
+   ],
+   "reuse": [
+    "AgentRunCheckpoint + postgres_step_receipts writer (add a bounded tab list and history window)",
+    "resume_run_id path in start_run (new lease plus persisted profile plus fresh grant)",
+    "chromiumoxide list_tabs/new_tab and the gateway tab proxy routes plus BrowserChrome tab strip",
+    "session-core managed child runs with parent_run_id as the Model Plane source of lineage",
+    "quarry-runtime RuntimeLeasePool/HostScheduler patterns for a live-page budget"
+   ],
+   "constraints": "Model proposes / Quarry executes: turn_id and parent_run_id can only be additive fields on the Model Plane StepRequest, and Quarry must not read Model Plane run state; authority stays with broker grants (the grant store is in-memory, so a resumed run needs a fresh grant and a child run needs an explicit child grant rather than reusing ParentGrantID, which today binds sensitive approvals). ZDR: nothing is persisted and ZDR checkpoints are refused, so cold restore is non-ZDR only; stored tab URLs are sensitive and tenant-scoped. This overlaps the durable-session item (F-t2-035): there must be one session state machine, not two.",
+   "approachAdjustment": "Demote and re-scope. First decide whether a chat thread keeps one long-lived Quarry run across turns (today one Model Plane run equals one Quarry run, closed at loop end); turn-scoped cleanup only matters then. Add agent tab verbs to AgentAction before building cleanup for agent-opened tabs. Fold persisted tab sets and cold restore into the F-t2-035 checkpoint work (extend AgentRunCheckpoint, wire resume_run_id into execution-core's StartRunRequest, add the rehydration test). Build the live-page budget only after a per-org/per-run session cap and an idle reaper exist (F-t2-025, F-t2-006). Child-run context sharing needs a broker child-grant design first.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged for the full item; several prerequisites (tab verbs, reaper, resume wiring, child grants) are outside it.",
+   "verdict": "demote",
+   "verdictReason": "The premise (agent-opened tabs left behind, Quarry recording turn ids) does not match the code: agents cannot open tabs, the Model Plane already closes the run at loop end, and the useful remainder (tab persistence, cold restore) depends on unbuilt prerequisites, so it belongs after durable sessions and caps.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

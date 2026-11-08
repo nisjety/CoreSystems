@@ -1,0 +1,127 @@
+{
+ "finalId": "F-t2-046",
+ "tier": "recommended",
+ "rank": 22,
+ "title": "Complete web-usage metering: browser metrics, outcome and surface attributes, price table and plan keys",
+ "summary": "Phase A: add distinct usage metrics for browser steps and minutes, agent runs and extract/map (today extract and map are billed as search queries) with attributes {outcome, driver, llm_format, paid_provider, zdr, surface}, and a closed x-verevon-surface enum set by the gateway and Model Plane. Phase B: surface per-run usage in the ingestion run view. Phase C: add plan keys (browser agent loop, persistent profiles, concurrent sessions, schedules) in org-core entitlements delivered as claims, per-class rate limits layered on the gateway's global bucket, and a per-org fair-share concurrency cap in Quarry.",
+ "whyItMatters": "Browser agent steps and minutes are not metered at all, so the most expensive Quarry feature is invisible to billing, and one org can consume every browser lease. Cost transparency for web acquisition (separate from model cost) and abuse protection are table-stakes that two or three of the four references have.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (single pricing function, failures free, two clear limit units)",
+  "others": [
+   "Apify",
+   "Aside"
+  ],
+  "prevalence": "3 of 4 sources; table-stakes",
+  "mechanism": "Firecrawl: one pure function price(options, outcome, cost tracking, flags) per job: base unit per page, failures cost 0, surcharges for LLM or security features, PDF per page, a ZDR surcharge, with a separate tracker of real provider costs for margin. Two limit units (pages or credits, and concurrent browsers) with separate submission and status rate limits. Aside gates features per plan (for example remote control on pro and max only). Apify meters compute units (GB-RAM-hours) plus storage operations. Every Firecrawl request also carries an origin and an integration tag from a closed list for analytics and cost attribution."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:1-140",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:348-351",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:297-300",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs",
+   "apps/Ingestion Plane/Quarry-v2/docs/BILLING.md",
+   "apps/Control Plane/org-core/internal/org/types.go:28-35",
+   "apps/Control Plane/org-core/internal/org/types.go:318-345",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:51-58",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:143-148",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:323",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:337",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:30-45"
+  ],
+  "gap": "SRC: Quarry publishes idempotent usage events to billing-core over NATS (usage.> to Lago) for five metrics (scrape page, crawl seed, search query, answer synth, batch URL), with scrape skipped on error; source is fixed to quarry-edge and there is no surface tag. /v1/extract (the web_fetch tool path) and /v1/map are metered as quarry.search.query. agent_routes.rs emits no usage events, so browser steps, minutes and agent runs are unmetered. Pricing lives in Lago billable-metric configuration outside this repo (INF, from the usage.rs comment), not in a pure function the Model Plane can call for estimates. org-core default entitlements are chat, api_keys, audit_logs and sso, quotas are api_calls, users and storage_mb per plan, and ZDR is the only computed plan-gated entitlement; no browser or Quarry keys exist. The gateway has a global distributed per-org/user token bucket (600 RPM default) over every route, but no per-class limits, and Quarry's browser pool is two or four process-wide leases with no per-org fairness. The SPA usage client is unused code."
+ },
+ "approach": "Ingestion Plane: add metrics for browser steps and minutes, agent runs, extract and map with attributes; copy x-verevon-surface (closed enum) into usage events and receipts; emit usage from the agent step path (under ZDR carry ids and counts only, never content). Control Plane: billing-core owns the price table for the new metrics (failures free) and exposes a price-estimate endpoint that Model Plane approval cards (R-t2-06-07) and the budget work (R-t2-06-01) can call; org-core adds entitlement and quota keys that reach Quarry and the gateway as signed claims, never cross-plane DB reads. Frontend gateway: add cheap/expensive rate-limit classes on top of rate_limit.rs; Frontend: per-run usage in the ingestion run view. Quarry: a per-org semaphore in front of the lease pool, sized from the claim.",
+ "effort": "L",
+ "dependencies": [
+  "billing-core price table and Lago metric codes",
+  "F-t2-022 claim channel",
+  "org-core entitlement keys"
+ ],
+ "planeOwner": "Control Plane (pricing, entitlements) with Ingestion Plane (metrics, concurrency) and Frontend Plane (rate-limit classes, usage UI)",
+ "risks": "Pricing inside Quarry would violate plane ownership, so keep prices in billing-core and only attributes in Quarry. Usage under ZDR must carry no content. A new metric needs a matching Lago billable-metric code before it ships. Claims must flow through tokens, not DB reads.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 9,
+  "DOC": 3,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-06-09] docs/BILLING.md (metering contract shipped for five metrics); browser metrics and plan keys are not planned there"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-09"
+ ],
+ "sourceClusters": [
+  "C-t2-06-010",
+  "C-t2-06-034",
+  "C-t2-06-023"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-046",
+   "status": "partial",
+   "exactGap": "Quarry publishes five idempotent usage metrics to billing-core over NATS (usage.rs:88-94), but /v1/extract and /v1/map are billed as quarry.search.query (extract_routes.rs:345-361 meters one unit per target even when items failed; map_routes.rs:294-310) and agent_routes.rs emits no UsageEvent, so browser steps, minutes and agent runs are unmetered (only a per-step receipt cost_usd from the flat action_cost table exists, used for max_cost_usd budgets). Events carry no surface or outcome attribute (the zdr flag already rides in scrape and search metadata), no Quarry price table or estimate endpoint was found in billing-core (pricing is Lago metric config), the plan-key lists in org-core and billing-core contain no browser or Quarry keys, and the gateway has one global token bucket. Browser leases are two fixed process-wide pools (4 Browserbase, 2 local chromiumoxide) with no per-org share.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:50-94",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:143-179",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:345-361",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:294-310",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:490-505",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:700-761",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2362",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_cost.rs:14-38",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:323",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:337",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:30-45",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:62-91",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_claim_floor.rs:379-388",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs:58-62",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:202-221",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle24.go:189-258",
+    "apps/Ingestion Plane/Quarry-v2/docs/BILLING.md:46-64",
+    "apps/Ingestion Plane/Quarry-v2/docs/BILLING.md:116-125",
+    "apps/Control Plane/billing-core/internal/billing/repository.go:371-380",
+    "apps/Control Plane/billing-core/internal/billing/repository.go:463-512",
+    "apps/Control Plane/billing-core/internal/billing/allowance_repository.go:189-210",
+    "apps/Control Plane/billing-core/internal/billing/defaults.go:5-80",
+    "apps/Control Plane/org-core/internal/org/types.go:266-271",
+    "apps/Control Plane/org-core/internal/org/types.go:318-345",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:49-58",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:269-289",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/leads.rs:66-110",
+    "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:140-174"
+   ],
+   "reuse": [
+    "quarry-runtime usage.rs UsageEvent, NatsUsageMeter and the usage_metrics constants: add the new metric constants there (billing-core metric names are free-form but each needs a Lago billable-metric code before shipping).",
+    "Per-step receipt cost_usd and the flat action_cost table (action_cost.rs, agent_routes.rs:2346-2362) as the quantity source for browser step metrics; keep it a budget estimator, not a price.",
+    "billing-core allowance policies keyed by metric (allowance_repository.go:189-210) for included units and rollover on the new browser metrics.",
+    "Gateway entitlement-gate pattern already used for the leads add-on (leads.rs:80-110, GET billing-core /entitlements/{key}, fail-closed 402) for browser plan keys.",
+    "Verified Quarry Claims (principal_type, service_id, zdr; auth.rs:62-91) to derive the surface tag from the caller identity.",
+    "Existing per-org budget pattern in quarry-edge config (vector_retrieval_per_org_hourly_budget, config.rs:58-62) for a per-org browser cap.",
+    "Quarry /v1/team/credit-usage|token-usage|concurrency routes (routes.rs:202-221) and the unused SPA getTeam* helpers (quarry-client.ts:140-174) as the base of a per-run or per-org usage view."
+   ],
+   "constraints": "Prices stay in billing-core/Lago, never in Quarry; Quarry only emits metric names, quantities and attributes, and a new metric needs its Lago code first (BILLING.md:56-64). ZDR must propagate: new browser and agent metrics must carry ids and counts only. Note the existing SCRAPE_PAGE event already puts the final URL and fingerprint into metadata even when zdr is active (routes.rs:490-505) and billing-core persists that metadata JSON in billing_usage_events (repository.go:463-512), so fix that in the same change. Plan entitlements and quotas are defined in two places (billing-core defaults.go and the shorter org-core list in types.go:266-271) and the gateway already reads billing-core for feature gating, so browser plan keys belong in billing-core (plus allowance policies) delivered through that endpoint or token claims, never by cross-plane DB reads. The gateway limiter derives its key as org:, user: or ip: (rate_limit.rs:269-289) but its own comment says it runs before require_session, so confirm which key is used in practice before adding per-class buckets.",
+   "approachAdjustment": "Derive the surface tag from the verified token principal (service_id/principal_type) plus a gateway-set closed enum accepted only from service tokens, instead of trusting a header from user tokens. Split extract and map into their own metrics and meter only successful items (today extract bills every attempted target). Emit browser step and minute events from the agent step and close path using receipt cost and duration, ids and counts only under ZDR, and do not price inside Quarry. Put browser plan keys in billing-core defaults and allowance policies and reuse the leads-style entitlement gate. Implement the per-org fair-share as a per-org semaphore in front of RuntimeLeasePool (lease_pool.rs), first with a config default, later sized from a claim.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged. Phase A (metrics, extract/map split, ZDR metadata cleanup) is about M on its own; plan keys across billing-core and the gateway plus the per-org lease cap push the whole item to L.",
+   "verdict": "keep",
+   "verdictReason": "The core claim holds: browser steps, minutes and agent runs are not metered at all, extract and map are mislabelled as search, and no plan keys or fair-share exist. Keep, but reword to say plan keys live in billing-core (with org-core as a second list), the surface tag should come from the verified principal, a flat action-cost estimator already exists in Quarry for budgets, and the existing scrape metadata leaks the URL under ZDR.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

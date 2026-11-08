@@ -1,0 +1,146 @@
+{
+ "finalId": "F-t2-022",
+ "tier": "priority",
+ "rank": 22,
+ "title": "Org-pinned, tighten-only web policy: tri-state capability gates delivered as signed claims and enforced by Quarry",
+ "summary": "Make the Control Plane the policy of record for web and browser capabilities (robots mode and override, maximum proxy tier, credential/cookie/header stripping, login or form-write actions for autonomous runs, raw evaluate, uploads and downloads, recording, persistent profiles, paid providers, domain allow/deny, ZDR) as disabled/allowed/forced, delivered on the signed-claim channel that already carries the ZDR floor and inside BrowserBroker grants as action classes. Quarry rejects at the edge and re-resolves per URL in PageRunner and the step path as a backstop. Requests, Spaces and the Model can only tighten.",
+ "whyItMatters": "This is the direct implementation of three Verevon rules: Quarry executes or rejects, ZDR must propagate, and Space access never widens an owner-plane ACL. Today two RunPolicy types exist and the edge hard-wires RunPolicy::default(), so no org or request policy is applied (SRC); control-plane presets are not consumed. Firecrawl Safe Mode (SRC) is the reference shape.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl Safe Mode (SRC)",
+  "others": [
+   "Firecrawl (per-team tri-state flags and per-key restrictions), with Codex's default-off browser gates"
+  ],
+  "prevalence": "1 of 4 sources (Firecrawl); unique, but it maps onto Verevon's own governance rules || 2 of 4 sources; differentiator",
+  "mechanism": "ResolvedPolicy = merge(orgPolicy, defaults) is computed in the API layer, which rejects requests that ask for forbidden options (403 SAFE_MODE_BLOCKED), and is recomputed in the worker for every URL including crawl children as a backstop that downgrades instead of trusting the request. It strips Authorization/Cookie/Proxy-Authorization, write/press/executeJavascript actions, profiles and URL userinfo, blocks browser endpoints, and bypasses allow-listed domains. All violations produce audit events. || Merged items add: Firecrawl TeamFlags hold disabled|allowed|forced per capability (ZDR for scrape and search can be forced, plus ignoreRobots, threatProtection, ipWhitelist); effective option = forced ? on : (allowed ? request : reject with typed error). Keys additionally carry allowedEndpoints and allowedFormats, checked per request and cached about 60 s. Codex keeps fine-grained gates (browserUse, full CDP access, webMcp, record-and-replay, auto-auth-for-sites, multi-window) that default to off with a dev-only env override."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:60-78",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs:6-17",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:414-417",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:461",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1435-1441",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2296-2304",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:55-75",
+   "apps/Control Plane/org-core/internal/org/types.go:266-315",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:82-140",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:144-300",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1440-1445",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:542-543"
+  ],
+  "gap": "RunPolicy not org-pinned and not enforced; gates live in env or manifests; ZDR already works as a forced posture via the zdr JWT claim floor, which is the pattern to generalise (SRC)."
+ },
+ "approach": "ADR first: policy of record in org-core (Control) vs capability-core (Model). Then Control Plane org-core policy storage and admin UI, auth-core claim minting, BrowserBroker action-class grants, and Quarry edge/PageRunner enforcement with typed denials (F-t2-032 builds per-origin consent on top). || Source detail: [R-t2-04-05] Control Plane: org policy record, entitlements (robots.ignore, proxy.enhanced, and so on) and audit events. Gateway shared::quarry_token adds a compact policy_floor claim beside the ZDR floor. Ingestion Plane: one resolved-policy type in quarry-core that merges the org floor over the request (replace the hard-wired defaults at routes.rs:461 and similar, and reconcile the two RunPolicy types). Enforce at the edge by rejecting with a typed sub-code, and again in PageRunner and agent step execution per URL (including crawl children and redirects), downgrading rather than trusting the request. Remove or entitlement-gate presets that contradict governance (fast = RobotsIgnore, stealth). Model Plane: pass the resolved policy in the run grant so the planner does not propose forbidden actions. Scope it to autonomous and agent actions and credential use; the human user's own manual browsing in the pane is not blocked, unlike Firecrawl's blanket 'no interactive sessions'. || [R-t2-06-02] Control Plane: org-core owns an admin-editable capability policy ({capability_key: disabled|allowed|forced}, keys such as browser.evaluate, browser.upload, browser.download, browser.persistent_profile, search.paid_provider, crawl.ignore_robots), exposed read-only to auth-core the way retention-posture is today. auth-core adds a capability-policy claim next to zdr and Quarry's Claims struct resolves request options against it (forced overrides, disabled rejects with a typed error). Model Plane: browser-broker adds allowed_action_classes and allowed_formats to ordinary grants (persisted in Postgres or Redis), computed from the org policy intersected with capability-core's Allow/Deny/Ask decision, with escalation through the existing approval flow. Quarry: the grant validator checks action class per step; ship default-deny plus sensitive approval for Evaluate immediately, independent of the rest.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-016 robots enforcement",
+  "F-t2-058 proxy-tier cap",
+  "Control Plane policy record, entitlements and audit",
+  "Quarry service-token claims extension",
+  "BrowserBroker grant issuance in production (cross-category; not re-verified)",
+  "auth-core claim minting change",
+  "org-core policy storage and admin UI",
+  "Decide the policy of record: org-core (Control) versus capability-core (Model)"
+ ],
+ "planeOwner": "Control Plane (policy of record) + Model Plane (grants) + Ingestion Plane (enforcement)",
+ "risks": "Policy resolved in two places can drift, so share one crate and test both paths. Overly strict defaults can break legitimate login-based research. A Space must never be able to widen the org policy (ownership-matrix rule). Ship a thin first slice (claims floor, robots, proxy-tier cap, credential stripping) together with R-t2-04-01. || Claim staleness when policy changes mid-run (mitigate with the short 15 min grant TTL and revalidation per action). Overly narrow grants can cause mid-run failures, so keep escalation through approvals. Two policy engines (org-core entitlements versus capability-core) must not diverge: pick one of record. Space access must never widen these gates.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 0,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-04-05",
+  "R-t2-06-02"
+ ],
+ "sourceClusters": [
+  "C-t2-04-018",
+  "C-t2-06-024",
+  "C-t2-06-033"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability",
+  "Platform & ecosystem"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-022",
+   "status": "partial",
+   "exactGap": "Only ZDR is org-pinned today: org-core's RetentionPosture feeds an auth-core claim that Quarry's Claims::zdr_floor raises over request flags, and that floor applies to user tokens only (service tokens are ignored by design). No org or request web policy exists: the edge hard-wires RunPolicy::default() (routes.rs:461, main.rs:1493), two unrelated RunPolicy types exist, control's presets (fast = RobotsIgnore) are never consumed by the edge, and quarry-control's /v1/blocklists entries have no org column and are not read by the edge. The Model Plane gate is one coarse capability (browser.observe/act and browser_agent all map to cap.browser.open) plus capability-core org-scope grants, with no action-class, robots, proxy-tier or header-stripping gates.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:56-140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs:1-17",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:55-80",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:413-417",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:461",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1485-1493",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-343",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1425-1441",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:45-80",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/blocklists.go:1-10",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:397-402",
+    "apps/Control Plane/org-core/internal/org/types.go:255-315",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:793-794",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:27-60",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:158-215",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:30-36"
+   ],
+   "reuse": [
+    "org-core RetentionPosture read endpoint plus auth-core claim stamping as the delivery pattern for a read-only policy posture (org-core types.go:255-315, quarry-edge auth.rs:56-140)",
+    "Claims::effective_zdr / zdr_floor as the 'can only raise, never lower' merge semantics to copy for every other gate",
+    "BrowserBroker grants: broker-owned allowed_domains (agent_routes.rs validate_run_grant) and the sensitive-action allowlist (grant.go:30-36) as the carrier for action classes",
+    "capability-core tenant-bound org-scope grants (engine.go denyOnGrant) and execution-core capability_policy Allow/Deny/Ask",
+    "quarry-runtime RunPolicy / DiscoveryPolicy (robots, proxy, block) as the base for one ResolvedPolicy type",
+    "BrowserEgressPolicy deny-all default and the existing ZDR refusals (zdr_persistent_profile_forbidden, refuse_durable_job_under_zdr)"
+   ],
+   "constraints": "Control Plane owns the org policy of record, Model Plane issues grants, Quarry (Ingestion) enforces or rejects with typed errors; there is no cross-plane DB access, so policy must travel as a signed claim or a grant field. CONFLICT: the claim channel that carries the ZDR floor only reaches user-token callers (gateway UI paths). execution-core and model-gateway call Quarry with service tokens whose zdr claim is true for every org and is deliberately ignored, so for Model-Plane-driven runs the resolved policy has to ride in the BrowserBroker grant or the start-run body set by the Model Plane. Space access must never widen the org policy, the Model can only propose and Quarry executes or rejects, and existing stricter ZDR refusals must not be loosened.",
+   "approachAdjustment": "Run the ADR first: org-core claims versus capability-core grants (capability-core already has tenant-bound org-scope grants and a single coarse browser capability). Do not describe the ZDR claim as covering the agent path; deliver policy by claim to user-token callers and by grant fields to Model-Plane-driven runs. Ship a Quarry-only thin slice before any org-core storage or admin UI: one ResolvedPolicy replacing the RunPolicy::default() sites, tighten-only merge with the existing zdr floor, typed denials for Evaluate/upload/download (ties to F-t2-002). Reconcile or delete the second RunPolicy type and the unused fast/stealth presets, and wire or retire /v1/blocklists, instead of adding a third policy shape.",
+   "effortRevised": "L",
+   "effortNote": "Kept at L because it spans four planes plus an ADR; treat the Quarry-only slice as M and the org-core/auth-core/broker plumbing as the remaining L.",
+   "verdict": "reword",
+   "verdictReason": "Direction is right and nothing substantial exists, but the delivery channel is wrong for the agent path, capability-core grants already exist as a competing policy of record, and a Quarry-only first slice is missing from the plan.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-022",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:1-240 (SAFE_MODE_DEFAULTS, resolveSafeMode, allowBypassSafeMode, allowlist relaxation, SAFE_MODE_LOGIN_ACTIONS, stripCredentialHeaders, stripUrlUserinfo)",
+    "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:120-170 (SAFE_MODE_BLOCKED checks)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/index.ts:1250-1310 (worker backstop re-resolve; strips headers, login actions, profile, URL userinfo)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:100-215 (emitSafeModeRejection, key restriction check)",
+    "C:/dev/firecrawl/apps/api/src/lib/siem-logging/index.ts:30,54-85 (events only if team.flags.siemLogging and org SIEM enabled)",
+    "grep emitRejectedScrapeActivityEvent in controllers (scrape, crawl, batch-scrape, extract, agent only)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2107-2142 (TeamFlags tri-state; maxBrowserSessions declared)",
+    "C:/dev/firecrawl/apps/api/src/lib/zdr-helpers.ts:1-60",
+    "C:/dev/firecrawl/apps/api/src/lib/key-restriction.ts:8-9,80-84 (60 s cache)",
+    "scratchpad/tmp/cxib/main.pretty.js:2327 (Codex gate schema yi and defaults bi, all false)",
+    "scratchpad/tmp/cxib/main.pretty.js:2358-2372 (CODEX_ELECTRON_DESKTOP_FEATURE_OVERRIDES honoured only when buildFlavor is Dev)",
+    "scratchpad/tmp/cxib/browser-service.pretty.js:1226,24144 (full_cdp_access_enabled plus readRequirements)"
+   ],
+   "corrections": "Firecrawl Safe Mode is not strictly tighten-only: an org admin can set allowBypassSafeMode so a request may send safeMode:false, and allowlisted domains switch off robots, stealth, authentication and site-handling controls. 'All violations produce audit events' is overstated: rejected-scrape SIEM events are emitted only from the scrape, crawl, batch-scrape, extract and agent controllers, and only when the team has the siemLogging flag and SIEM is enabled for the org. Worker-side downgrades are silent, and the map and search rejections emit nothing. 'Signed claims' is Verevon's own design; Firecrawl reads flags from the cached account chunk (ACUC). Codex browser gates are vendor rollout feature flags (client defaults are false until server values load; the env override works only in Dev builds), not org-admin policy. The exception is the enterprise requirement browser_use_full_cdp_access. maxBrowserSessions is declared in TeamFlags, but no enforcement was found in the repo.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Safe Mode and tri-state flags are enterprise or support-enabled team flags ('contact support'), SRC",
+    "Safe Mode has a per-request bypass (if the admin allows it) and a domain allowlist, so admin config can widen it",
+    "SIEM audit events are emitted only when the siemLogging flag is on",
+    "Codex gates: only client-side defaults observed; actual server-delivered values not observed"
+   ],
+   "confidence": "high"
+  }
+ }
+}

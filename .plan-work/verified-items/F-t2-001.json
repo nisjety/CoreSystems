@@ -1,0 +1,152 @@
+{
+ "finalId": "F-t2-001",
+ "tier": "priority",
+ "rank": 1,
+ "title": "Production BrowserBroker grants and delegated bearer forwarding (unblocks every browser path)",
+ "summary": "Give the Model Plane BrowserBroker a durable (Postgres) grant store and a production issue/acquire/revoke path. The gateway obtains a user-session grant when it creates a browser session, sends grant_id on POST /v1/agent/runs, forwards x-browser-authorization and x-inference-authorization, and derives child grants for AI runs instead of the interim session:{id} string. Add one end-to-end contract test (gateway -> model-gateway -> execution-core -> quarry-edge) in prod mode that fails on 401/403.",
+ "whyItMatters": "Prod-mode Quarry requires a broker grant on every agent run and refuses to boot without a validator (SRC), yet nothing outside tests issues grants and the broker store is in memory (SRC). Until this lands, the in-app browser, the AI step/loop, co-browsing, the credential bridge, budgets carried in the grant and per-origin consent cannot work in production (INF, high confidence, not runtime-tested). This is the single highest-leverage item in the audit.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (hardened page hosting, iab-028/029)",
+  "others": [
+   "Aside (Chromium fork, so the same pattern is inferred, INF)",
+   "Aside (AA005/AB050 signed-challenge short-lived CDP tokens; AA007 routed, cancellable command bridge)",
+   "Firecrawl (api-surface fc-006 sessions with ttl and activityTtl; fc-005 scrape-to-session interact bridge)"
+  ],
+  "prevalence": "1 of 3 sources record it (Codex); treated as common because Aside is a Chromium fork (INF). For Verevon the matching mechanism is a trusted issuer deciding host authority, which is a prerequisite rather than a reference feature. || 2 of 3 sources (Aside, Codex); table-stakes || hosted browser sessions as an API: 1 of 4 sources (Firecrawl), differentiator",
+  "mechanism": "Codex's main process intercepts every guest attach (will-attach-webview): it forces partition, session and preload, deletes allowpopups, disablewebsecurity and nodeintegration, and pre-registers a route token so only known tabs can attach; the renderer cannot widen any of it. The Verevon analogue already exists on the Quarry side: host authority is broker-owned (Quarry overwrites a client's allowed_domains with the grant's canonical list at acquisition and revalidates every step). What is missing is the issuer. || Merged items add: The browser control endpoint refuses unauthenticated clients. A client fetches a challenge, signs it with an installation key and receives a short-lived bearer token. Browser-level commands go over a bridge routed per (account, profile, mode) with register/runCommand/cancelCommand and stale-connection rejection. Verevon analogue: a broker-issued grant checked by quarry-edge on every /step. || Session {ttl 30-3600 s, activityTtl 10-3600 s, profile, location, zdr}; a reaper closes a session on either timer and settles billing; live-view and replay URLs; /scrape/:id/interact lazily creates a session by replaying the scrape's URL, waits and actions. Verevon should copy the two timers and the bridge but not the free-form code execution."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-503 (session start posts max_steps/allowed_domains/max_runtime_s to /v1/agent/runs and carries no grant_id)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235,1258-1262 (interim 'session:{id}' grant_id; comment says durable BrowserGrant issuance is still unbuilt)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:182-200 (prod forces require_browser_grants; boot fails without a validator endpoint)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1377-1384 (403 'browser grant_id is required')",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1397-1412 (broker domains override client domains at acquisition)",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:669-690 (AI run starts its own lease with plan.config.grant_id)",
+   "v-browser-app baseline, known gap 1 (broker store in memory; not re-verified here)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1255-1263",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339",
+   "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62"
+  ],
+  "gap": "No durable BrowserGrant issuance (gateway comment browser.rs:1258-1262 says it is unbuilt); broker grants are held in memory; the gateway sends grant_id session:{id} and no browser or inference bearer, so AI paths likely fail with 401/403 (INF). docs/BROWSER_WORKSPACE_PLAN.md still says COMPLETE (stale DOC)."
+ },
+ "approach": "Model Plane BrowserBroker (Go grant.go): durable store plus issue/acquire/revoke with two grant kinds, user-session and run (org and owner scoped, canonical host list up to 32, TTL, ZDR flag; ZDR grants stay ephemeral). Gateway browser.rs: obtain the grant at session create, forward both bearers and derive child grants for AI runs. Quarry stays validator and executor and changes only in tests. The lease TTL reaper moves to F-t2-006 and the scrape-to-session bridge to F-t2-035. || Source detail: [R-t2-08-01] Model Plane BrowserBroker (Go, grant.go): add a durable store (Postgres) and an issue endpoint for a user-session grant kind (org and owner scoped, ZDR flag, TTL, bounded canonical domain list). Gateway browser.rs create_session calls the issuer with the delegated browser-audience bearer, passes grant_id on /v1/agent/runs and forwards x-browser-authorization to Quarry and model-gateway. start_ai_run (browser.rs:1235) mints a child grant from the session grant instead of the 'session:{id}' string; sensitive actions keep single-use child grants. Add an integration test that runs the gateway against Quarry in prod mode. Quarry is unchanged except for tests; the Model proposes, Quarry validates and executes. || [R-t2-09-01] Model Plane: BrowserBroker gets a durable store (Postgres) and AcquireGrant/Revoke called by model-gateway at run start, grant scoped per run and per domain set with TTL; ZDR runs keep grants ephemeral. Frontend gateway (verevonv3/apps/gateway/src/domains/browser.rs): replace the interim string with the broker grant and forward x-browser-authorization plus x-inference-authorization. Add a contract test across gateway, model-gateway, execution-core and quarry-edge that fails on 401/403. || [R-t2-01-05] Model Plane: durable BrowserGrant record plus an issuance API (canonical host allowlist up to 32, org/owner scoped, short TTL, persisted instead of in-memory) that the gateway calls on session create; model-gateway already validates a VerifiedBrowserBearer. Frontend gateway browser.rs: obtain the grant, send x-browser-authorization and pass the real grant id in start_ai_run. Ingestion Plane quarry-edge: enforce ttl_s with a reaper and add an activity TTL, excluding sessions awaiting approval; add POST /v1/scrape/:id/session (needs the scrape_id from R-t2-01-01) that creates an agent run seeded with the scrape URL and render hints. Do not add arbitrary code execution: keep one governed action per call with receipts so 'Model proposes, Quarry executes' holds.",
+ "effort": "M",
+ "dependencies": [
+  "Model Plane BrowserBroker persistence",
+  "Gateway delegated bearer forwarding (browser audience)",
+  "BrowserBroker persistence",
+  "Gateway auth header plumbing",
+  "Control Plane identity for org/owner scope",
+  "Control Plane org policy for host allowlists"
+ ],
+ "planeOwner": "Model Plane (BrowserBroker) + Frontend Plane gateway; Quarry (Ingestion) validates only",
+ "risks": "Grant scope creep: keep the canonical bounded host list (max 32) and single-use sensitive child grants. Restart semantics for in-flight sessions. Issuing grants for user sessions must not become a way around the model-initiated cross-domain HITL gate. || A grant scope that is too broad would widen ACLs: keep grants per run and per domain set, never per user globally. ZDR runs must not persist grants past the run. The 401/403 failure is inferred, so reproduce it before fixing. || Leaked sessions consume shared Chromium (mixed-viewport relaunch issue noted in baseline); TTL changes must not kill sessions awaiting human approval; grant scope must not widen via Spaces (an owner-plane ACL must never be widened).",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 24,
+  "DOC": 0,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-09-01] Code comment in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262 says real grant issuance is still unbuilt; the referenced docs/BROWSER_WORKSPACE_PLAN.md was not located under verevonv3/docs || [R-t2-01-05] Acknowledged as unbuilt in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262 (a plan file was not re-read)."
+ },
+ "quickWin": false,
+ "wave": "W1",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-08-01",
+  "R-t2-09-01",
+  "R-t2-01-05"
+ ],
+ "sourceClusters": [
+  "C-t2-08-001",
+  "C-t2-09-001",
+  "C-t2-01-029"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)",
+  "AI-browser control",
+  "Acquisition API surface"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-001",
+   "status": "partial",
+   "exactGap": "BrowserBroker already implements AcquireGrant, ValidateGrant and RevokeGrant over gRPC with org and owner scoping, a canonical host list of at most 32, a 15-minute TTL and sensitive child grants, but its store is the in-memory grant.Store (grant.go:62-71, main.go:63) and no production code calls AcquireGrant (Quarry's legacy acquire() is deny-by-default; model-gateway and execution-core only validate). The gateway never obtains a grant: create_session posts to Quarry /v1/agent/runs with no grant_id (browser.rs:483-506), which prod Quarry rejects with 403 (agent_routes.rs:1377-1381, main.rs:182-200), and start_ai_run sends the string session:{id} (browser.rs:1235) with data-plane, inference, execution and session bearers but no x-browser-authorization, which model-gateway's VerifiedBrowserBearer extractor requires (browser_run.rs:304, auth.rs:427-437). Missing: a durable store, an issuance path reachable by the gateway, browser-bearer plumbing, run-grant derivation and a prod-mode cross-service test.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-506 (session start body to Quarry, no grant_id)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235 (grant_id is session:{id})",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262 (comment: durable BrowserGrant issuance still unbuilt)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1318-1360 (start_ai_run forwards data-plane, inference, execution, session bearers only)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs:629-690 (proxy_model_json_with_delegations has no browser bearer parameter)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/audience_tokens.rs:27-42 (BrowserBroker audience declared, not yet invoked)",
+    "apps/Control Plane/auth-core/src/auth/convex-token.service.ts:446-455 (browser-broker audience can be minted)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:61-71 (in-memory Store)",
+    "apps/Model Plane/go/services/browser-broker/cmd/main.go:62-64 (grant.NewStore on gRPC :9095)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:22, 41-103, 106-150 (15 min TTL; AcquireGrant, Revoke, Validate)",
+    "apps/Model Plane/proto/model_plane/v1/browser.proto:12-60 (grant contract)",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:138-190, 297-310 (resolve_browser_grant; VerifiedBrowserBearer required; ZDR refused)",
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs:427-437, 943-955 (extractor returns 401 when no delegated browser bearer)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs:189-215 (execution-core validates the grant with the delegated bearer)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:182-200 (prod forces grants; boot fails without validator)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339, 1377-1412, 2258-2266 (grant required at run create and revalidated each step; broker domains override client)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs:97-130 (Quarry acquire() legacy and deny-by-default)",
+    "docs/BROWSER_WORKSPACE_PLAN.md:7 (says COMPLETE; stale against the unbuilt issuance)"
+   ],
+   "reuse": [
+    "browser-broker grant package: Create, CreateScopedSensitiveApproval, GetScoped, RevokeScoped, NormalizeAllowedDomains",
+    "BrowserBroker gRPC contract browser.proto and its authz principal binding",
+    "model-gateway browser_client, VerifiedBrowserBearer and resolve_browser_grant",
+    "gateway ModelServiceAudience::BrowserBroker and get_audience_token; auth-core browser-broker audience",
+    "Quarry GrpcGrantValidator and validate_run_grant; execution-core validate_browser_grant"
+   ],
+   "constraints": "Model Plane owns grant issuance; Quarry only validates (per step) and executes, and domains must come from the broker, never from the client (exact-equality check at agent_routes.rs:314-339). The gateway must not mint authority itself: issuance must go through the broker with the user's delegated browser-audience bearer so org and owner derive from verified claims (server.go AcquireGrant uses the verified principal). The broker is gRPC-only on :9095, so the gateway needs a gRPC client or an HTTP issue endpoint on model-gateway. ZDR: model-gateway already refuses durable browser runs under ZDR, ZDR user sessions that go straight to Quarry still need a grant, and ZDR grants must not be persisted. Grants stay org and owner scoped and a Space must never widen them. A 15-minute broker TTL caps session length until a renewal path exists (see F-t2-011).",
+   "approachAdjustment": "Placement is right (Model Plane broker plus gateway plumbing, Quarry unchanged). Corrections: (1) the gateway already forwards x-inference-authorization and the data-plane, execution and session bearers on start_ai_run; only x-browser-authorization is missing, so add a browser-bearer parameter to proxy_model_json_with_delegations and mint it through the already-declared BrowserBroker audience. (2) Prefer a model-gateway HTTP endpoint that wraps AcquireGrant, since it already holds the broker client and verified bearer, over teaching the gateway gRPC. (3) create_session, which goes directly to Quarry, needs the grant as well as start_ai_run. (4) Sensitive child grants exist, but deriving a narrower run grant from a session grant is a new broker API. (5) Slice it: issuance, gateway wiring and a prod-mode contract test on the existing in-memory store first, then the Postgres store.",
+   "effortRevised": "L",
+   "effortNote": "Touches the Go broker (store, migration, issue path), model-gateway, gateway proxy plumbing and a prod-mode contract test across four services in three planes; M only holds for the first slice on the in-memory store.",
+   "verdict": "keep",
+   "verdictReason": "Verified in code: prod Quarry requires a grant on every run and step, nothing in production issues one, the broker store is in memory and the gateway lacks the browser bearer, so every browser path is blocked in prod mode; the plane placement is correct and only details need adjusting.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-001",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/extract/codex/.vite/build/main-BklS_2Y2.js (grep: 'delete e.allowpopups,delete e.disablewebsecurity,delete e.webpreferences,t.sandbox=!0,...nodeIntegration=!1')",
+    "scratchpad/tmp/cxib/main.pretty.js:36712-36800 (ICe will-attach-webview handler: route/instance-id/hostGeneration checks, preventDefault on unmatched attach, src blanked, pendingWebviewRoutesByInstanceId)",
+    "scratchpad/tmp/cxib/main.pretty.js:36853-36864 (LCe/RCe/cU hardening; RCe re-allows popups for the browser-settings webview only)",
+    "REA inspect_pe_resources C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/Codex.exe (20272 bytes, single RT_MANIFEST type 24; ev_be48cc5443c2...)",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/ (chrome.dll, 155.0.8059.40.manifest present)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:1236 and :26688 (codex.browserAccess.v1 signed per-turn check, 'Local browser use is disabled in Work settings')",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@2735497 (AsideSecureCdpAuthorizer: /json/challenge -> signInstallationChallenge -> POST /json/auth/session, AsideSessionToken, EXPIRY_MARGIN_SEC=10, no retry on 401/403)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@2750919 (ExtensionBridgeServer, connection key account:profile:mode, ping 5 s, stale 15 s)",
+    "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (strings json/auth/session and AsideSessionToken present)",
+    "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:9834, :9986 (bridge URL; 'routed to the wrong browser profile or mode')",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:42-43 (ttl 30-3600 default 600, activityTtl 10-3600 default 300)",
+    "C:/dev/firecrawl/apps/api/src/lib/hangar.ts:111-120 (ttl/activityTtl passed to Hangar as max_lifetime_seconds/idle_timeout_seconds)",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:489-530 (reconcileBrowserSessions: 15 s redlock sweep that settles billing for unsettled Hangar sessions)",
+    "C:/dev/firecrawl/apps/api/src/routes/v2.ts:275-282, 651-673 (/scrape/:jobId/interact; /browser and /interact aliases)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-browser.ts:61-75 (prompt <=10000, code <=100000 bytes, node|python|bash)"
+   ],
+   "corrections": "1) Prevalence/class: the cluster C-t2-08-001 mechanism (will-attach-webview rewrite) is Electron-specific; Aside being a Chromium fork does not imply it has the same attach hardening, so the 'treated as common because Aside is a Chromium fork (INF)' line must go. State '1 of 3 (Codex), unique' for the attach hardening; 'real Chromium engine' alone is 2 of 3. 2) Best-in-class fit: Codex webview hardening is not an analogue of grant issuance. The closest reference mechanisms are Aside's signed-challenge short-lived CDP token plus routed bridge (SRC) and Codex's signed, nonce-bound per-turn browser/access check (SRC, CA028). Both are single-user local-device trust checks, not multi-tenant durable grant stores. Say plainly that no reference implements a durable org-scoped grant issuer; the issuer is a Verevon design requirement and not a parity item. 3) Firecrawl: the session timers are enforced by the external Hangar browser service (Firecrawl sends max_lifetime_seconds and idle_timeout_seconds; Hangar is not in the repo). Firecrawl's own code runs a 15 s reconciler that settles billing. It is not a reaper that closes sessions on either timer. Reword 'a reaper closes a session on either timer and settles billing' to say this.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Firecrawl browser sessions depend on Hangar (HANGAR_URL, hosted and closed source); TTL enforcement is INF from the parameter names and not observed",
+    "Firecrawl /interact needs USE_DB_AUTHENTICATION and is rejected for Safe Mode orgs (per record notes; not re-read)",
+    "Codex per-turn browser access is tied to a 'Work settings' toggle; enterprise or workspace gating is possible (INF from the error string)",
+    "Aside evidence comes from a scratch copy of the aside-daemon.exe NODE_SEA_BLOB (SRC by byte offset), not from a source repo"
+   ],
+   "confidence": "high"
+  }
+ }
+}

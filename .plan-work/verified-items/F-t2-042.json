@@ -1,0 +1,122 @@
+{
+ "finalId": "F-t2-042",
+ "tier": "recommended",
+ "rank": 18,
+ "title": "Agent web toolset: content-hydrated search, next-step hints, citations, and Quarry jobs as approval-gated tools with cost estimates",
+ "summary": "Let /v1/search accept scrapeOptions (bounded top-N, total time budget, shared fan-out) and give the Model Plane web_search tool a with_content flag so one call returns search hits plus page content. Add opt-in hints[] to success responses of scrape/search/map, computed only from local signals (truncated, empty, blocked, SERP URL), extending the existing next_actions field. Add a Model Plane tool-doc registry with a server-side 'docs read' check before high-risk browser tools, and attach stable source ids to tool output so answers cite them, with an org domain allow/deny policy honoured on service-token fetches. || Register Quarry crawl, map, batch-extract, pack runs and promoted procedures as capabilities in capability-core and as Model Plane tools, with parameter schemas taken from the pack schemas. The approval card shows an estimated cost and page cap before anything runs, and new service-principal scopes gate each route. A later phase exposes the same registry through mcp-bridge as an off-by-default, org-gated MCP facade with output-token caps.",
+ "whyItMatters": "Agents get N pages in one call instead of search plus N fetches, waste fewer turns on blind retries, and use risky browser tools more safely. Org admins can restrict which domains agents fetch and answers stay traceable to sources. || 'AI proposes, Quarry executes' is only real if the Model can propose more than two web tools. Today the chat agent can search and fetch one URL, but crawl, extract-with-schema, packs and procedures are not agent-reachable, so the Model falls back to repeated single fetches.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-017 search with scrapeOptions; fc-029 agent_hints) and Codex in-app browser (IAB-001 documentation-read gate)",
+  "others": [
+   "Apify RAG Web Browser (DOC; raw-http vs browser choice, time budget)",
+   "Aside (aside-agent-control 040: network permission hook and citation tags)",
+   "Apify (natural-language runner with confirmation before paid runs)"
+  ],
+  "prevalence": "search with content: 2 of 4 sources (Firecrawl, Apify), common; hints and doc gating: 2 of 4 (Firecrawl, Codex), differentiator; citations with per-URL permission: 1 of 4 (Aside), unique || 2 of 4 sources; differentiator (the two sources use different mechanisms)",
+  "mechanism": "Hydration: run search, over-fetch to survive filtering, scrape the top N concurrently with shared options inside a total time budget, attach formats per result. Hints: opt-in header, rules over locally computed signals with templates under 500 characters, max 32 rules, never raw page text, failure returns the original body. Doc gate: a registry with modes model|included|lookup and a guard that refuses a gated command until the session fetched the required doc id. Aside: tool results carry source ids and a policy hook evaluates {type:'network', url} before each fetch. || Merged items add: Apify: intent, then search the tool catalog (quality ranked), fill the input schema, show a confirmation with estimated cost, run, summarize the dataset; full-permission and rental tools are excluded. Codex: a minimal MCP server (js, js_reset, turn_ended) with surfaces selected by env (browser, computer or both; startup fails otherwise), tools.js.output_token_limit 25000, a startup timeout and enabled = false until the host turns it on."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:50-160",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:44 and :145 (search-then-fetch answer pipeline, synthesis needs the Model Plane grant)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:24-25 and :46-58 (next_actions exists, only on error paths)",
+   "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133 and :152 (read-only web_search/web_fetch tools, zdr in request bodies)",
+   "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:254-264",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184",
+   "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:39-40",
+   "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:133-155",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184-4192",
+   "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:787-795",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1",
+   "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts:143-150"
+  ],
+  "gap": "/v1/search returns snippets and chunks but cannot attach full scraped content per hit; success responses carry no hints; no doc-read gate for high-risk browser tools; web_search/web_fetch have no org-level per-URL policy at tool level and the citation convention for web_fetch was not verified; /v1/answer synthesis is blocked by the manifest grant (R-t2-01-04). || SRC: the chat agent's web tools are web_search (POST /v1/search) and web_fetch (POST /v1/extract) plus two aliases, with the scopes search:read and extract:read granted to execution-core on the Quarry audience; browser.observe only observes an existing run. Crawl, map, batch, extract-with-schema, presets, packs and procedures are not tools and carry no cost estimate. Risk-classified human approvals exist for browser actions and provider writes (stronger than Apify's single confirmation). Verevon consumes MCP servers (registry, OAuth, mcp-bridge) but exposes none; Quarry's backlog defers an MCP server because Verevon is the client."
+ },
+ "approach": "Model Plane execution-core web_tools: search with scrapeOptions hydration, bounded next-step hints on success paths (extend next_actions), grouped citations; Quarry crawl/batch/monitor jobs exposed as approval-gated tools with a cost estimate before launch. The off-by-default MCP facade from R-t2-06-07 moves to F-t2-064. || Source detail: [R-t2-01-10] Ingestion Plane: SearchRequest.scrapeOptions reusing the batch fan-out from R-t2-01-06 and ScrapeOptions from R-t2-01-01, with ZDR and budgets applied to every hydrated fetch; hints[] emitted from local signals in scrape/search/map handlers. Model Plane execution-core web_tools.rs: with_content flag, source ids on tool output, tool-doc registry plus a server-side docs-read check ahead of upload/download/dialog tools (these already need one-shot broker approval grants, so this is additive); org domain policy read from Control Plane and enforced both in the tool and on service-token scrapes, with denials logged. || [R-t2-06-07] Model Plane: add capability ids (for example cap.web.crawl, cap.pack.run) to capability-core with Allow/Deny/Ask and risk levels; add execution-core tool definitions that map to Quarry routes using the pack and procedure schemas; the approval card shows estimated cost (R-t2-06-01 caps plus R-t2-06-09 pricing) and page limits. Control Plane: add service-principal scopes (for example crawl:write, pack:run) to the auth-core policy contract. Quarry validates and executes. Phase 2: mcp-bridge adds a Quarry MCP facade (search, fetch, extract, browser.observe/act) that always obtains a BrowserBroker grant per session, caps output tokens, and is disabled unless the org policy (R-t2-06-02) allows it.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-005",
+  "F-t2-040 fan-out",
+  "F-t2-019 grant for /v1/answer",
+  "Control Plane org domain policy",
+  "F-t2-008 budgets",
+  "F-t2-053 packs and schemas",
+  "F-t2-051 procedures (optional)",
+  "F-t2-022 policy and grants (required for the MCP facade)"
+ ],
+ "planeOwner": "Model Plane + Ingestion Plane",
+ "risks": "Cost amplification (N scrapes per search); prompt injection if hints ever echo page text (never include raw text); over-restrictive domain policies degrade answers; hint drift versus real behaviour. || Unbounded crawls proposed by the model, so require a budget and an approval for every non-trivial job. An MCP facade that talks to Quarry directly with broad tokens would bypass the gateway authority path; it must go through BrowserBroker grants and ZDR rules.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 15,
+  "DOC": 3,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-01-10",
+  "R-t2-06-07"
+ ],
+ "sourceClusters": [
+  "C-t2-01-012",
+  "C-t2-01-022",
+  "C-t2-01-013",
+  "C-t2-06-016",
+  "C-t2-06-026"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface",
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-042",
+   "status": "partial",
+   "exactGap": "Confirmed missing: /v1/search has no scrapeOptions and execution-core web_search sends only {query, limit, zdr}; success responses carry no hints (next_actions exists only on the error envelope); agent-path tool output has no source ids; there is no org web-domain policy on web_search or web_fetch; no crawl, map, batch, extract-with-schema, pack or procedure tool or capability id exists (cap.tool.http covers only web_search and web_fetch); and nothing produces a cost-estimate approval (the COST approval kind is mapped but never created). Understated by the item: the chat path in model-gateway already has freshness and narrowest-tool guidance in its web_search description, numbered citations with a Sources tab, untrusted-data labelling of tool results and Data Plane suggested_next_tools hints; Quarry /v1/answer already runs search then full-page fetch with ZDR handling; and the Auth Core grant of search:read and extract:read to execution-core is in the policy contract. The 'Quarry MCP' names in execution-core (web.search, web.read, browser.observe, browser.act) are in-process aliases, not an MCP server, so the off-by-default facade is still unbuilt (tracked as F-t2-064).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:50-120 (SearchRequest: zdr, allow_paid_providers, include_answer, include/exclude domains; no scrape options)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1006-1030 (per-query UsageEvent)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:1-30,131-145 (hybrid search to full-page fetch to grounded answer, ZDR cache rules)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:15-60 (next_actions only on ApiError, populated for RATE_LIMITED)",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:1-60,120-175,240-300 (web_search to /v1/search, web_fetch to /v1/extract, free-chain only, text-only formatting with no source ids)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184-4212 and 4089-4290 (one-sentence web tool descriptions; full offered tool list has no crawl, map, batch or pack tool)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:42-56,642-646 (in-process Quarry MCP aliases)",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:775-835 (web_search and web_fetch map to cap.tool.http; no cap.web.* or cap.pack.*)",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts:143-150 (execution-core search:read and extract:read on the Quarry audience; no wildcard)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4304-4310,4359-4361,4469 (chat-path web_search guidance, fetch_url one-liner, tool results labelled data not instructions)",
+    "apps/Model Plane/rust/services/model-gateway/src/retrieval_metadata.rs:1-40 (Data Plane suggested_next_tools advisory hints with an advertised-tool guard)",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:699-708 (COST approval kind only mapped; no producer found)",
+    "apps/Model Plane/bridges/mcp-bridge/server.js:1-20 (reference bridge for registered MCP servers; no Quarry facade)",
+    "negative searches: no scrapeOptions/with_content, no cap.web.crawl, no org domain policy outside browser start_url, no cost-estimate producer"
+   ],
+   "reuse": [
+    "Data Plane retrieval_metadata.suggested_next_tools and its HINT_TO_TOOL advertised-tool guard (model-gateway retrieval_metadata.rs) as the pattern for Quarry success-path hints",
+    "quarry-edge /v1/answer search-then-fetch pipeline and its ZDR handling for bounded hydration",
+    "model-gateway tool_loop web_search citation machinery and relevance gate to give the agent path numbered source ids",
+    "capability_policy.rs capability-id mapping and the capability-core registry for new cap.web.* ids",
+    "the COST approval kind (already in the proto and session-core mapping) and pause_for_approval for the approval card",
+    "auth-core plane-service-principals-policy contract (one principal, one audience, named scopes) for new scopes"
+   ],
+   "constraints": "Model proposes, Quarry executes: crawl, batch and pack tools must be approval-gated with budgets and page caps enforced in Quarry as well as shown in the card; a displayed cost estimate is advisory. Service-principal scopes are Control Plane (auth-core), widened deliberately with no wildcard, and the contract test fails if a grant widens. Org domain policy would be Control-owned (none exists; Space allow_domains appears only in tests) and must be enforced in Quarry for service-token fetches too, or a tool-side check is bypassable. ZDR: hydrated fetches inherit zdr; hints are computed from local signals and never echo page text (prompt injection). Hydration multiplies spend, and agent paths are deliberately free-chain only (web_tools.rs).",
+   "approachAdjustment": "Split. (A) Search, hints and citations (M): implement hydration by reusing the answer pipeline's fetch fan-out behind a bounded scrape option; emit success-path hints with the retrieval_metadata.suggested_next_tools pattern (including the advertised-tool guard) instead of extending next_actions; give agent-path web tools numbered source ids by reusing the chat citation machinery. Rewriting the one-line execution-core descriptions and adding a conditional prompt snippet is S and needs no docs-read registry. (B) Quarry job tools (L): crawl, map and batch as approval-gated tools with caps and, only once a cost source exists, an estimated-cost approval; org domain policy as a separate Control item. Drop the docs-read gate (browser.act is closed-schema, approval-gated and grant-checked already) and keep the MCP facade in F-t2-064.",
+   "effortRevised": "L",
+   "effortNote": "The item says M but bundles hydration, hints, citations, a docs gate, org domain policy, new capability ids and scopes, a cost-estimate approval and Quarry job tools. (A) alone is M; (B) is L.",
+   "verdict": "reword",
+   "verdictReason": "The main gaps are real, but the chat path already has parts of the proposal (guidance, citations, untrusted labelling, a hint mechanism), the doc-read gate is low value given closed-schema typed actions, and the bundle is undersized. Reword and split into search-side and job-side items.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

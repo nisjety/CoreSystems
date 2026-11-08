@@ -1,0 +1,125 @@
+{
+ "finalId": "F-t2-038",
+ "tier": "recommended",
+ "rank": 14,
+ "title": "Agent presence and run control UX: animated cursor and target highlight, real annotation markers, steer/queue follow-ups, needs-attention notifications",
+ "summary": "Build one overlay layer in BrowserChrome that maps Quarry AX-ref rects (scaled to the frame) onto the frame stream. Use it for (a) an agent cursor and element highlight driven by the target rect that Quarry includes in the pre-action event, without blocking execution on a UI acknowledgement, and (b) an annotation mode where the user marks an element, text or region and the markers stay anchored to AX refs; a batch is sent to chat as one message carrying role, name, ref or selector, rect, nearby text, frame path and an optional screenshot. As an immediate small step, stop advertising the 'annotate' capability and remove the hard-coded placeholder anchor until this is real. || Include the target box/point in Quarry step 'started' events and render an animated cursor plus target highlight over the live frame in BrowserChrome (presentation-only, reduced-motion aware). Add steer and queue commands for browser runs with idempotency keys and expectedTurnId, consumed by execution-core at step boundaries, reusing Quarry's seq replay. Have Application Plane notification-core emit needs_approval, completed and failed notifications from run events.",
+ "whyItMatters": "It makes agent actions legible and trustworthy during co-browsing, gives users a precise way to tell the agent what to change or extract, and removes a visibly fake feature: the gateway advertises annotate while the UI shows one fixed marker. || Users can follow and trust what the AI does in the shared browser, redirect it mid-run ('no, the second result') without restarting, and leave a run in the background until approval is needed. These are the daily-use expectations once the loop is live.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (annotation iab-060/061; agent cursor automation-and-safety-063)",
+  "others": [
+   "Codex in-app browser (CI085: every pointer command first moves a host-drawn cursor and waits for an arrival ack) for presentation; Aside (AA036: WS envelopes with idempotent commands, steer{interrupt, expectedTurnId}, queue, afterSeq resume) for run control"
+  ],
+  "prevalence": "1 of 3 sources (Codex) for both; unique. || Each 1 of 3 sources (unique): cursor Codex only, steering Aside only, notifications Aside only",
+  "mechanism": "Cursor: moveMouse assigns a sequence number, pushes {moveSequence, x, y} to the host overlay, and waits for a cursor-arrived ack (timeout 1500 ms) before dispatching the click. Annotation: comment payload {pageUrl, framePath, selectedText or targetDescription, targetRole, targetName, targetSelector, targetPath, targetRect, nearbyText, additionalSelections, marker point, screenshot}; overlay modes browse and comment; batch mode collects several comments before sending. Verevon: Quarry emits the target point from the AX-ref bbox before executing and may wait a short fixed delay instead of an ack. || Merged items add: Cursor: before each pointer action the executor emits {moveSequence, x, y}; the UI animates an overlay and acks. Steering: command {id (idempotency), type, expectedTurnId}; the server acks and emits events with monotonically increasing per-run seq; steer injects a user message at the next step boundary (optionally interrupting the in-flight step); queue appends to the run inbox. State changes publish notifications that the task list and approvals subscribe to."
+ },
+ "verevonToday": {
+  "status": "stub",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:128-135 (one hard-coded anchor at 7%/18% labelled '1')",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1844-1850 (renders commentAnchors)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1822 (AI rationale bubble and step badges only)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578,2700 (gateway advertises 'annotate')",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1824",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2658",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2791",
+   "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:296",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1263",
+   "apps/Application Plane/notification-core/internal/channels/channels.go"
+  ],
+  "gap": "Annotation is a placeholder while the capability is advertised, and there is no agent cursor or element highlight; only a rationale bubble per step exists. || Quarry has typed agent-event SSE with ?from_seq replay and the gateway exposes pause/resume/stop, but the UI shows only an AI rationale bubble and step badges (no cursor or highlight), no mid-run steering or queued follow-up for browser runs was found, and a grep of notification-core finds no browser-run event handling (SRC grep; absent as far as found)."
+ },
+ "approach": "Frontend frame overlay (cursor animated to the target before the click lands, target highlight, annotation markers anchored to AX refs from F-t2-028); Model Plane run-control protocol (idempotent steer with expectedTurnId, queued follow-ups, replayable seq); Application Plane notification-core for attention notices that skip sessions the user is already watching. || Source detail: [R-t2-08-11] Ingestion Plane: include the target AX ref and rect in pre-action events (and the hit-test of R-t2-08-05 for user marks). Frontend Plane: overlay component with frame-scale mapping, annotation mode, batch send to chat; remove 'annotate' from the advertised capabilities until shipped. || [R-t2-09-09] Ingestion Plane: add target box/point to step 'started' events (no server-side ack; presentation only). Frontend Plane: Solid overlay for cursor and highlight over the scaled live frame. Model Plane: browser_run steer/queue commands picked up by execution-core at step boundaries, never bypassing a pending approval. Application Plane: notification-core consumes run events (needs_approval, completed, failed) and links back to the approval.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-028",
+  "F-t2-013",
+  "F-t2-001 grant wiring",
+  "F-t2-010 planner loop live",
+  "F-t2-013 co-browsing (cursor presents best on a shared tab)"
+ ],
+ "planeOwner": "Frontend Plane + Model Plane + Application Plane",
+ "risks": "Coordinate mismatch with scaled frames; anchors drift on dynamic pages (re-resolve by AX ref and fail visibly). || Overlay misalignment with scaled live frames; steering mid-action must not bypass pending approvals; notification noise (batch and rate-limit); ZDR: coordinates are not sensitive but notification text must not leak page content.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-08-11",
+  "R-t2-09-09"
+ ],
+ "sourceClusters": [
+  "C-t2-08-018",
+  "C-t2-08-026",
+  "C-t2-09-020",
+  "C-t2-09-021",
+  "C-t2-09-046"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)",
+  "AI-browser control"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-038",
+   "status": "partial",
+   "exactGap": "Annotation is a stub: browser-session.ts:128-135 advertises 'annotate' and returns one hard-coded anchor at 7%/18%, BrowserChrome.tsx:1844-1857 renders it, the gateway also advertises 'annotate' (browser.rs:2578, 2700) and no UI code consumes the capability. There is no agent cursor or target highlight: BrowserChrome shows only the rationale bubble (1822-1842), execution-core's BrowserActionDispatched carries action_type, url and reason, Quarry's action.started payload is only {step, action}, and no geometry (bbox or rect) exists in Quarry's snapshot or accessibility contracts. Browser runs have pause/resume/stop only (execution-core wait_out_pause_or_cancel); chat-turn mid-run queueing exists (model-gateway queued_input.rs) but not inside the browser loop, and run_completed/run_failed notifications already exist through capability-core runwatch to notification-core (toggle in AgentRunConsole, not in the browser panel) while a needs_approval notification does not.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts:127-137",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1822-1857",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:413",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts:424",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2578",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2700",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1384-1400",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:365-395",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs:180-195",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx:2478-2490",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.mid-run.test.tsx:1-20",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:930-940",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2655-2706",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:386-396",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:360-460",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:163-200",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:238-310",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:972-1011",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs:1-80",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:7400-7440",
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go:1-110",
+    "apps/Application Plane/notification-core/migrations/013_register_run_watch_notifications.up.sql:1-17",
+    "apps/Application Plane/notification-core/internal/http/handlers.go:197-216"
+   ],
+   "reuse": [
+    "Model Plane run-event path: execution-core OrchestrationEventSink publishes BrowserActionDispatched, BrowserObservationReceived, ApprovalRequired, ActionDecided, Paused and Resumed into session-core, which the gateway streams on /api/v1/runs/:id/events with Last-Event-ID forwarding (chat/streams.rs:180-195). This is the replayable seq, not Quarry.",
+    "BrowserChrome overlay container and the ChatLiveRunPanel that already mounts BrowserChrome in compact mode for watched chat runs (chat-run-watch.ts, ChatLiveRunPanel.tsx).",
+    "execution-core wait_out_pause_or_cancel (browser_agent.rs:972-1011) as the between-actions boundary where a steer or queued follow-up can be consumed.",
+    "model-gateway queued_input.rs design (classify-and-continue pause text, 3 messages and 2000 chars caps, tenant+user bound registry) and the /v1/invoke/:id/queue contract as the template for browser-run steering.",
+    "capability-core runwatch consumer plus notification-core types modelplane.run_completed and modelplane.run_failed (migration 013, handlers.go allowlist) and the AgentRunConsole RunWatchToggle; extend the same path with an approval-required type.",
+    "Existing approval cards in BrowserChrome (decide flow) and execution-core require_approval for the needs-attention state.",
+    "chromiumoxide AX nodes already carry backendDOMNodeId (chromiumoxide.rs:1165-1180) so rects can be fetched with a CDP box-model call when geometry is added."
+   ],
+   "constraints": "Model proposes, Quarry executes: the cursor and highlight must be presentation-only and must not gate execution on a UI ack; a steer or queued message may only change what the Model proposes next and must never bypass a pending approval (browser_events.rs:238 polls the approval). Queued input is refused for ZDR and waived tokens (http_routes.rs:823, require_non_zdr_durable_mutation), so steer/queue must keep that rule. Run events, seq and replay are Model Plane (session-core) concerns; notification-core only accepts a fixed allowlist per service principal (handlers.go:204-216), so a new notification type needs an allowlist entry and a channel-config migration. Notification text must not carry page content. Quarry's agent SSE ?from_seq is accepted but a no-op (agent_routes.rs:2700-2705) and the gateway does not proxy that stream, so the item's claim of reusing Quarry seq replay is wrong.",
+   "approachAdjustment": "Ship the honesty fix first: remove 'annotate' from both capability lists (browser.rs:2578, 2700 and the browser-session.ts default) and drop the placeholder anchor (S, quick win). For the cursor, geometry does not exist yet: add an optional rect to Quarry's snapshot target or accessibility projection (CDP box model via backendDOMNodeId), have execution-core copy it into the BrowserActionDispatched event, and animate in BrowserChrome; do not describe this as AX-ref bbox already available. Build steer/queue in Model Plane (execution-core consuming at the existing pause boundary, idempotent ids, replay via session-core Last-Event-ID), not as a Quarry feature. For notifications, run_completed/failed already exist, so only surface the watch toggle in the browser or chat panel and add a needs_approval type to capability-core/notification-core (first confirm that durable browser AI runs emit RUN_COMPLETED on mp.v1.run.*.event like other runs; not verified).",
+   "effortRevised": "L",
+   "effortNote": "Unchanged overall but it should be four separately shippable slices: annotate honesty fix (S), cursor/highlight incl. Quarry geometry (M-L), steer/queue in execution-core (M), needs_approval notification plus watch toggle (S-M). Completion notifications are already done.",
+   "verdict": "reword",
+   "verdictReason": "Part of the item already exists (completion/failure notifications, pause/resume/stop control, chat-turn queued input) and the replay and bbox premises are wrong (Quarry agent SSE replay is a no-op, no geometry in Quarry contracts). The stub annotate marker and the missing cursor, browser-loop steering and approval notification are real. Reword to the corrected four slices.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

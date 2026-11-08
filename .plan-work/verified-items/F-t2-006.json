@@ -1,0 +1,124 @@
+{
+ "finalId": "F-t2-006",
+ "tier": "priority",
+ "rank": 6,
+ "title": "Reap abandoned agent runs (idle and absolute TTL), cap concurrent runs, and make the fleet console real",
+ "summary": "Add a background sweeper in quarry-edge that closes agent runs past their lease ttl_s (derived from max_runtime_s) or an idle timeout, releases the browser lease, emits a run.expired event and denies further use of the run's grant. Add per-org and global caps on concurrent runs and a tab-count warning, move the in-process run registry to durable state for multi-instance operation (non-ZDR only), and proxy /v1/fleets through the gateway so the fleet console shows real runs.",
+ "whyItMatters": "Abandoned user or AI sessions currently hold a Chromium context and a live browser grant indefinitely. That is a resource leak on a shared browser host and a security exposure (a usable grant with no user present), and it grows with every agent run.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (global run semaphore, sub-agent cap, tab warning, idle sweeper)",
+  "others": [],
+  "prevalence": "1 of 4 sources; differentiator (only Aside has code evidence, and for a local single-user product)",
+  "mechanism": "A global semaphore (200 concurrent runs) gates run start; a per-run counter limits active sub-agents (8); the agent is warned at 5 open tabs; each tab carries a last-activity timestamp and a sweeper closes agent tabs and sessions past an idle TTL (15 minutes) and emits an event; ephemeral sessions are retained for a fixed 15-minute window."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1502",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:26",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:131",
+   "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:127"
+  ],
+  "gap": "ttl_s is computed from max_runtime_s (default 120) and stored on the lease at agent_routes.rs:1446-1502 but nothing sweeps it; a grep of agent_routes.rs finds no idle or reaper logic. Only max_steps is enforced on the step path. Runs live in an in-process HashMap (new_runs) so they cannot be shared across edge instances. The lease pool holds 2 sessions on one shared Chromium. The fleet console is a stub with placeholder live views fetching /v1/fleets that the gateway does not proxy. Step budgets and fleet budget aggregation do exist."
+ },
+ "approach": "Ingestion Plane (quarry-edge) with a small Frontend change. Add a tokio interval task that scans the run registry and closes runs past ttl_s or an idle threshold, where last_activity is refreshed on every step, on an attached frame/WS viewer, and on user takeover; on expiry release the lease, close the CDP BrowserContext, emit run.expired and mark the grant used-up (ask Model Plane BrowserBroker to revoke). Add org-scoped and global run caps at run start returning a typed 429/RESOURCE_BUSY with retry-after. Persist run records through the existing AgentRunCheckpoint path to Postgres for non-ZDR runs so the registry works across edge instances; ZDR runs stay in memory and simply expire. Frontend: proxy /v1/fleets in the gateway and replace placeholder tiles. Implementing the ttl check also enforces max_runtime_s for agent runs.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-029 edge metrics for visibility",
+  "F-t2-025 per-org caps share the admission code",
+  "Model Plane BrowserBroker grant revocation"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Reaping a run a user is still watching or co-browsing; refresh activity on viewer and takeover activity and never auto-close takeover tabs. Run-registry persistence must respect ZDR.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-05-04"
+ ],
+ "sourceClusters": [
+  "C-t2-05-015"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-006",
+   "status": "partial",
+   "exactGap": "No reaper exists: start_run computes ttl_s from max_runtime_s (agent_routes.rs:1446,1502) but nothing reads it, enforce_step_budget checks max_steps only (agent_routes.rs:446-451), and runs leave the in-process registry only through close_run (agent_routes.rs:3623-3626); the 15-minute BrowserBroker grant TTL (server.go:22) bounds use of an abandoned run but not the leaked Chromium pages. There is also no cap on agent runs at all: the agent ChromiumoxideDriver is one shared browser whose acquire never blocks (chromiumoxide.rs:1914-1942, main.rs:1284-1288), and the RuntimeLeasePool(2)/(4) at main.rs:323,337 only gates scrape-render fetches through BrowserDriverAdapter (browser_driver.rs:133-142). The fleet console is routed at /agents/fleets/:fleetId (App.tsx:216) but fetches /v1/fleets directly, the gateway has no /v1/fleets route, its Pause button PATCHes a route the edge does not register (fleet_routes.rs:216-222), and member tiles are placeholder text (FleetRunConsole.tsx:120-130,155-163).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-471",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1425-1445",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1495-1505",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1630-1641",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3600-3640",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:320-345",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1280-1290",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:1-140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:128-142",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1914-1942",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs:200-222",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:22",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:655",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:1-60",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:100-160",
+    "apps/Frontend Plane/verevonv3/src/app/App.tsx:216"
+   ],
+   "reuse": [
+    "the run registry and close_run release/receipt/checkpoint path (agent_routes.rs:3600-3650) as the single close routine the sweeper must call",
+    "AgentRunCheckpoint, checkpoint_for_entry and the resume_checkpoint flow for non-ZDR resume (agent_routes.rs:453-471, 1425-1445)",
+    "Quarry-v2 janitor and the sandbox-manager process Sweeper as sweeper patterns (sandbox-manager is Go in the Model Plane, so copy the pattern, do not import)",
+    "existing control_mode (agent_control / human_takeover) as the takeover signal for last_activity",
+    "FleetRegistry and fleet_router already in the edge (fleet_routes.rs:216-222) for the console backend"
+   ],
+   "constraints": "Ingestion Plane owns the browser lifecycle; Model Plane owns grants, so revocation is a BrowserBroker call and not Quarry's to make (the 15-minute grant TTL already bounds exposure, making explicit revocation optional). A RunEntry owns a process-local Chromium session, so the live registry cannot be shared across edge instances: durable state only enables resume through the existing checkpoint path, and cross-instance steps need sticky routing by run id. ZDR runs are never checkpointed and must stay in memory and simply expire. Reaping must not close a run a user is watching or has taken over.",
+   "approachAdjustment": "Keep the sweeper and add org-scoped and global run caps at start_run with a typed 429 plus retry-after; cap accounting must also cover UI-created browser sessions, since the SPA has no beforeunload or sendBeacon close so a closed tab or crash leaves the session open. Replace 'move the in-process run registry to durable state for multi-instance operation' with 'checkpoint for resume and use run-id affinity routing'. Treat grant revocation as optional. Fix the fleet console as its own S: gateway proxy for /v1/fleets plus a PATCH/cancel route in the edge, or hide the route until then.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged for sweeper plus caps; the fleet console proxy plus cancel route is a separate S.",
+   "verdict": "reword",
+   "verdictReason": "The leak and missing caps are real and confirmed; the multi-instance registry idea does not fit a process-local browser, the 2-slot pool evidence applies to scrape rendering, and the grant TTL already narrows the security half.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-006",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/aside/daemon_sea_blob.bin (MAX_CONCURRENT_RUNS=200, globalRunSemaphore, DEFAULT_IDLE_TTL_MS=6e5, getSemaphoreStats)",
+    "daemon_sea_blob.bin (assertSubagentCapacity, MAX_ACTIVE_SUBAGENTS=8)",
+    "daemon_sea_blob.bin (OPEN_TAB_WARNING_THRESHOLD=5; a '[warning] N tabs are open' text line is appended)",
+    "daemon_sea_blob.bin (agentTabsSettingsSchema closeAfterIdleMinutes 5..1440, default 15; flushIdleTabs; purgeEphemeralSessions; EPHEMERAL_SESSION_RETENTION_MS=9e5)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:41-43 (ttl default 600, max 3600; activityTtl default 300)",
+    "C:/dev/firecrawl/apps/api/src/lib/hangar.ts:112-120 and lib/browser-lifecycle.ts:247 (idle_timeout_seconds / ttl_without_activity passed to Hangar)",
+    "grep maxBrowserSessions (declared in TeamFlags only)"
+   ],
+   "corrections": "Aside's sweeper (flushIdleTabs) closes agent-owned tabs only for sessions whose status is idle, interrupted or aborted and whose session updatedAt is older than closeAfterIdleMinutes. It skips sessions with live activity and uses the session timestamp, not a per-tab last-activity timestamp. It does not reap running runs or delete sessions, and no event emission was seen. Ephemeral sessions in a terminal state are purged after 15 minutes. Aside has no absolute run TTL. A separate in-memory idle TTL of 10 minutes (DEFAULT_IDLE_TTL_MS) unloads agent session objects. The 5-tab warning is a text line added to the tool output. Prevalence is understated: Firecrawl hosted browser sessions have both an absolute ttl (default 600 s, max 3600) and an activityTtl (default 300 s), enforced by the closed Hangar service. Firecrawl is the better reference for 'idle and absolute TTL' in a multi-tenant server. No reference evidence supports a 'fleet console'.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Aside limits are constants in a local single-user daemon (SRC from the SEA blob)",
+    "Firecrawl TTL enforcement happens in the closed Hangar service; only the request params and their pass-through were seen",
+    "maxBrowserSessions enforcement not found"
+   ],
+   "confidence": "high"
+  }
+ }
+}

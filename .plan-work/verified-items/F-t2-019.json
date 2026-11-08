@@ -1,0 +1,142 @@
+{
+ "finalId": "F-t2-019",
+ "tier": "priority",
+ "rank": 19,
+ "title": "Structured extraction that works in production: json, summary, question and highlights formats over a real Model Plane structured-output grant",
+ "summary": "Add json (schema plus prompt, strict-schema normalisation, JSON repair), summary, question and highlights as ScrapeOptions formats on scrape and crawl, executed by calling a Model Plane structured-output endpoint over an org-bound, metered model-invoke grant. Today the prompt field is dead code, JSON exists only on /v1/extract, and the cross-plane token manifest denies model-invoke, so extraction only works under dev bypass (SRC). The grant is a tracked deferral (DEF-QB-T17-PART2, owner and date unassigned).",
+ "whyItMatters": "Schema-to-JSON extraction is the most-used LLM feature of scrape APIs and the basis for monitors, research jobs and extraction profiles. The Model Plane already centralises ZDR-aware model routing, so Quarry should call it rather than hold its own model keys.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (engine-and-infra-090 and api-surface-042 for json; api-surface-046 for summary/question/highlights)",
+  "others": [
+   "Firecrawl (api-surface fc-023: /extract deprecated in favour of a json format on /scrape plus the agent)"
+  ],
+  "prevalence": "1 of 4 sources in this record set (Firecrawl); common among scrape platforms (INF: LLM extraction is widely offered; Apify has no record for it in this set) for json, unique for question/highlights || structured LLM extraction as a built-in API: 1 of 4 sources (Firecrawl), differentiator for scraping APIs",
+  "mechanism": "normalizeSchema (additionalProperties:false, every field required, $ref resolved) then validate for strict mode with clear errors; pick the model by schema complexity ($ref/$defs go to a larger model); trim markdown by character bound then tokenizer to 80 percent of the context; call with response_format json_schema strict; on parse failure run a repair pass; on provider error fall back to the next provider; return data + warnings + token usage. summary, question and highlights are each one LLM call over trimmed markdown (10,000-char inputs) with a fixed instruction, returned as document.summary|answer|highlights; billed per page. || Merged items add: formats:[{type:'json', schema, prompt}] on scrape: convert the page to markdown, call the LLM with schema-constrained output, validate against the schema, return data.json; multi-page work goes through batch or the agent; the old /extract stays with Deprecation headers pointing to the new shape."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:1-40",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:129-283",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:207-232",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:286",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs:256",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/structured_extract.rs:1-30",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:941-957",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:36-65",
+   "apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md:112-122",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:136-137",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:37-58 (ExtractRequest.prompt is marked dead_code scaffolding; MAX_MAX_URLS 25, markdown cap 20k, sequential)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:184"
+  ],
+  "gap": "AiFormatRunner implements summary, json and query as a library: json is reachable only through POST /v1/extract (schema), query only through /v1/answer, and summary() has no caller outside its own module; there is no highlights format. The schema is pasted into the prompt and checked after the fact (schema_issues), with no strict-mode request, repair pass or provider fallback. StructuredExtractClient (quarry-runtime) targets a Model Plane POST /v1/structured/extract that no Model Plane code serves (grep of apps/Model Plane finds no such route; the gateway exposes /v1/invoke and /v1/ai/*). The model-invoke and model-stream rows of the cross-plane token manifest are granted:false, so QUARRY_EDGE__AI_FORMATS stays off by default and the calls would be refused with 403. || /v1/extract is sequential with no async job, the prompt is unused, schema extraction is refused because the manifest grants quarry-edge no model-gateway request, and the gateway forwards a prompt but never a schema. What works without a model: always-returned JSON-LD and hydration data."
+ },
+ "approach": "Control Plane: grant the model-gateway audience to quarry-edge (QB-T17). Model Plane: structured-output endpoint with schema-complexity model choice and provider fallback. Ingestion Plane: json/summary/question/highlights formats in the format registry from F-t2-005; batch fan-out for many URLs is F-t2-040. || Source detail: [R-t2-02-02] Model Plane (model-gateway + inference-core): add the structured-output endpoint Quarry already calls (shape in quarry-core contracts.rs:941-957), or extend /v1/invoke with a json_schema response format (verify what InferRequest carries first); own normalisation, complexity-based model choice, 80 percent context trim, one repair pass, provider fallback, cost and ZDR-aware provider choice (routing_policy.rs, fallback.rs, zdr.rs). Control Plane: grant quarry-edge a model-gateway audience with org binding and the ZDR flag (QB-T17 part 2), then flip granted in cross-plane-token-requests.json. Ingestion Plane: add json{schema,prompt}, summary, question, highlights to FormatSpec; run structured harvest first and call the model only for unfilled fields; wire the existing summary_for_org/query_for_org methods; require highlights to be verbatim substrings of the source markdown; reuse the model-gateway injection_defense marker framing for untrusted page text. || [R-t2-01-04] Ingestion Plane quarry-runtime ai_formats.rs and quarry-edge: add the json format to the ScrapeOptions union (R-t2-01-01), implement it through mp_client.rs against the Model Plane (Model Plane owns inference), fold prompt into the schema-guided prompt, treat page content as untrusted in that prompt, and propagate zdr. Control Plane: add the quarry-edge to model-gateway audience to apps/Control Plane/config/plane-service-principals.json and flip model-invoke/model-stream together with it, following the org-bound, metered path (DEF-QB-T17-PART2) so cost lands on the org. Gateway ingestions/runs.rs forwards schema as well as prompt. Keep /v1/extract as a deprecated facade over batch plus the json format.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-005 (formats contract)",
+  "Control Plane registry grant of model-gateway audience to quarry-edge (QB-T17 / DEF-QB-T17-PART2)",
+  "Model Plane structured-output endpoint",
+  "F-t2-005 ScrapeOptions",
+  "Control Plane plane-service-principals grant (D16 / QB-T17)",
+  "Model Plane org-bound metered invoke path (DEF-QB-T17-PART2)",
+  "F-t2-040 batch for multi-URL"
+ ],
+ "planeOwner": "Ingestion Plane (formats) + Model Plane (structured output) + Control Plane (grant)",
+ "risks": "Per-page model cost multiplies in crawls (needs a crawl-level cost cap tied to org budget); prompt injection from page text into extraction; hallucinated highlights (verbatim check); ZDR must hold across the Quarry to Model Plane hop. || Inference cost per page (budget it); ZDR must propagate into the Model Plane call; prompt injection from page content into the extraction prompt; schema-valid but wrong output.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 2,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-02-02] QB-T17 (Quarry-v2 docs/CROSS_PLANE_AUTH.md, docs/SELF_HOST.md:112): the Model Plane grant is deferred as DEF-QB-T17-PART2 with owner and date unassigned; the format-level work itself is not planned. || [R-t2-01-04] The grant is a tracked deferral: cross-plane-token-requests.json notes (D16, QB-T17) and model_plane_gate.rs (DEF-QB-T17-PART2). The json format and prompt wiring are not planned in anything read."
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-02-02",
+  "R-t2-01-04"
+ ],
+ "sourceClusters": [
+  "C-t2-02-009",
+  "C-t2-02-010",
+  "C-t2-01-017"
+ ],
+ "sourceCategories": [
+  "Output formats & content processing",
+  "Acquisition API surface"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-019",
+   "status": "partial",
+   "exactGap": "AiFormatRunner (ai_formats.rs:60-300) implements summary, json and query as a library: json is reachable only through POST /v1/extract with a schema (extract_routes.rs:195-300; sequential, markdown cap 20k, prompt field marked dead_code at 48), query only through /v1/answer, summary has no caller and there is no highlights format; the schema is pasted into the prompt and checked after the call with no strict mode or repair pass, and ModelPlaneInvokeRequest (mp_client.rs:31-40) carries neither structured_output_schema nor zdr (ai_formats.rs:302-310 discards the zdr argument). Every Quarry to Model Plane call is refused today because model-invoke and model-stream are granted:false (cross-plane-token-requests.json:41-65, model_plane_gate.rs), so QUARRY_EDGE__AI_FORMATS stays off, and StructuredExtractClient (structured_extract.rs) posts to a Model Plane /v1/structured/extract route that exists nowhere in apps/Model Plane. What already works: /v1/extract without a schema returns cleaned markdown plus a model-free structured harvest, and the Model Plane itself ships ExtractStructured (model-gateway grpc.rs:2516-2655: Quarry scrape then InferRequest.structured_output_schema, 80k char cap, ZDR-aware) while /v1/invoke already accepts structured_output_schema and zdr (http_routes.rs:6693, 8987).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:1-60",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs:60-322",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:30-60",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:195-345",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs:30-47",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs:150-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/structured_extract.rs:1-60",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:1-70",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-100",
+    "apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md:100-125",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:190-300",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:2464-2660",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6670-6700",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:8960-9000",
+    "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs:455-490",
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs:725-740",
+    "apps/Model Plane/go/pkg/quarry/client.go:1-20"
+   ],
+   "reuse": [
+    "model-gateway POST /v1/invoke structured_output_schema and zdr fields with the inference-core OpenAI response_format mapping (openai.rs:463-490); no new Model Plane endpoint is needed",
+    "model-gateway ExtractStructured RPC (grpc.rs:2516-2655) as an agent-driven path that needs no Quarry to Model Plane grant",
+    "AiFormatRunner and quarry_core::json_schema::validate (ai_formats.rs) plus mp_client.rs",
+    "Quarry structured harvest (JSON-LD and hydration data, ExtractedPage.structured) as the model-free first pass",
+    "model_plane_gate.rs and the token-request manifest as the single enabling switch once the registry grant lands",
+    "gateway ingestions/runs.rs create_extract, which forwards prompt only and must also forward schema"
+   ],
+   "constraints": "Inference is Model Plane-owned. Quarry may call model-gateway only with an org-bound service token, and the Control Plane registry grant is a tracked deferral (D16, QB-T17, DEF-QB-T17-PART2, owner and date unassigned), so the grant is a decision, not an engineering option. ZDR must be forwarded explicitly on the invoke body (currently dropped), and provider strictness differs: OpenAI gets response_format json_schema non-strict while Anthropic gets the schema only through the prompt (anthropic.rs:725-737). Page text is untrusted input, and per-page model cost multiplies in crawls, so it depends on the F-t2-008 budgets.",
+   "approachAdjustment": "Do not design a new Model Plane structured-output endpoint: extend ModelPlaneInvokeRequest to send structured_output_schema and zdr to the existing /v1/invoke, add the normalisation and one repair pass in Quarry or as an inference-core option, and treat the Control Plane grant as the gating decision. As an interim or alternative that avoids the grant, extend the existing ExtractStructured RPC (multi-URL, repair, highlights, summary) as the Model-proposed path and keep Quarry scrape formats for the user-facing API once D16 lands. The gateway runs.rs must forward schema as well as prompt.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged: the Model Plane share is smaller than stated (S, invoke already carries schema and zdr) but the Control Plane grant decision and the F-t2-005 formats contract dominate.",
+   "verdict": "reword",
+   "verdictReason": "Status is partial rather than missing and the Model Plane already has two structured-output paths (invoke with schema and ExtractStructured); the item should recommend wiring Quarry to them and resolving the QB-T17 grant instead of building a new endpoint.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-019",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/llmExtract.ts:36-62 (selectModelForSchema: gpt-4o-mini default, gpt-4.1 when $ref/$defs)",
+    "llmExtract.ts:108-150 (normalizeSchema: recurses into $defs/anyOf, required = all keys, additionalProperties:false; $ref not resolved)",
+    "llmExtract.ts:480 (maxContentTokens = 0.8 * maxInputTokens)",
+    "llmExtract.ts:560-575, 870-910 (fallback to gpt-4.1-mini only on quota/rate-limit errors)",
+    "llmExtract.ts:678-770 (experimental_repairText + LLM JSON repair pass)",
+    "llmExtract.ts:1343-1380 (performSummary: trimToTokenLimit + summarization system prompt)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/query.ts:25-62, 88-130, 190-240 (question/highlights: fine-tuned gpt-oss-20b on Fireworks, contextTokens 131072 with 16384 reserved, or Gemini flash-lite freeform; token-based trimming with 'page too long' warning)",
+    "C:/dev/firecrawl/apps/api/src/lib/scrape-billing.ts:20,170-215 (json +4, question/query +4, highlights +4 credits per page)",
+    "C:/dev/firecrawl/apps/api/src/lib/deprecations.ts:18-35 and routes/v2.ts:396,406 (v1/v2 extract deprecated, replacement /v2/scrape json format)"
+   ],
+   "corrections": "1) normalizeSchema does not resolve $ref; it normalises $defs in place and routes schemas with $ref/$defs to a larger model. 2) Fallback is to a second model (gpt-4.1-mini, same OpenAI provider) only on quota/rate-limit errors, not 'next provider on provider error'. 3) The 10,000-char figure is the max length of the question/query/prompt text, not the markdown input; question/highlights trim the page by tokens to the model context and summary uses trimToTokenLimit. 4) question/highlights run on a Firecrawl-hosted fine-tuned model (Fireworks) or Gemini through query.ts, not the json-extraction routine. 5) Prevalence: Apify Website Content Crawler offers an optional per-page AI summary (apify-platform-049, DOC), so 'summary' is at least 2 of 4; json/question/highlights as built-in scrape formats remain Firecrawl-only in this record set.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Firecrawl models are hard-coded to OpenAI families plus a private Fireworks fine-tune and Gemini; Verevon must route through Model Plane",
+    "question/highlights depend on a hosted fine-tuned model id; self-hosters may not have it (INF from model id string)",
+    "/extract is deprecated in Firecrawl (Deprecation headers), consistent with the item"
+   ],
+   "confidence": "high"
+  }
+ }
+}

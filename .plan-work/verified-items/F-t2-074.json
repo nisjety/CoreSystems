@@ -1,0 +1,96 @@
+{
+ "finalId": "F-t2-074",
+ "tier": "nice-to-have",
+ "rank": 9,
+ "title": "Quarry failure-mode and provider hardening: fail-open policy review, opaque provider errors, Postgres maintenance (verify first)",
+ "summary": "Write down and implement a per-dependency failure policy in Quarry RUNBOOKS: fail open with a short TTL for rate and plan limits during a Control Plane outage, always fail closed for ZDR posture, grants and billing. Add a typed ProviderError that never echoes upstream bodies for the Browserbase, Browserless and Kernel drivers, and proxy live-view capability URLs through the gateway with short-lived tokens. Add autovacuum settings for the hot queue and event-history tables and move to scheduled index maintenance only once volume justifies it.",
+ "whyItMatters": "Keeps Quarry available during Control Plane incidents without weakening ZDR or authority, prevents leaking provider capability URLs (which allow session takeover) to users or logs, and keeps the Postgres SKIP LOCKED queue healthy as volume grows. Each is small; none is urgent.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (cached entitlements with FAIL_OPEN_LIMITS and a 60 second TTL; hosted-browser errors mapped to fixed messages with the body cancelled; pg_cron REINDEX CONCURRENTLY in staggered slots with a watchdog)",
+  "others": [],
+  "prevalence": "1 of 4 sources (Firecrawl) for each; unique",
+  "mechanism": "Per-org entitlement cache (10 minutes) with fail-open defaults for limits only; provider client maps non-2xx responses to typed errors without bodies and never forwards raw live-view URLs; scheduled maintenance jobs plus tuned autovacuum on queue and event tables."
+ },
+ "verevonToday": {
+  "status": "unknown",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:336-343",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2608",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs",
+   "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md"
+  ],
+  "gap": "Quarry edge sets no CORS layer (good) and /version exposes the git SHA. Not verified: behaviour when the Control Plane or billing-core is unreachable, whether provider error bodies or live-view capability URLs reach clients unredacted, and whether the Postgres deploy config tunes autovacuum for the queue and event-history tables. Providers are mostly unwired today, so the provider hardening is low urgency."
+ },
+ "approach": "Ingestion Plane only: document the failure matrix in docs/RUNBOOKS.md and add tests for each dependency; add ProviderError in quarry-browser and route live-view through the existing live_view route with short-lived tokens; add autovacuum and maintenance settings to the quarry-control migrations or deploy config.",
+ "effort": "S",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Failing open on the wrong check widens access; less detailed provider errors (keep detail in sensitive logs only); reindex load in production.",
+ "significance": 2,
+ "confidence": "low",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-12"
+ ],
+ "sourceClusters": [
+  "C-t2-07-024",
+  "C-t2-07-030",
+  "C-t2-07-029"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-074",
+   "status": "absent",
+   "exactGap": "Confirmed missing: the Browserbase, Kernel and Browserless drivers put the raw upstream response body into QuarryError details or message (browserbase.rs:119-124, kernel.rs:325-334, browserless.rs:172-184), the agent driver_err and the gateway's forward_quarry_failure pass error bodies through, the ingestion-postgres compose command tunes memory only with no autovacuum or reindex settings, and RUNBOOKS.md has no dependency-failure matrix. Not true as framed: quarry-edge has no synchronous plan, rate-limit or entitlement lookup against Control Plane or billing-core (usage leaves asynchronously over NATS via NatsUsageMeter, noop without NATS), so there is no limit check to fail open; the real Control Plane outage dependency is auth-core JWKS, where get_jwks returns 500 once the 300 s cache expires with no stale-if-error. Provider exposure is small today: Browserless is constructed only in tests, Browserbase is registered only when keys are set and only in the scrape driver registry (agent runs use chromiumoxide), and neither the gateway nor the SPA consumes Quarry's live-view route.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserbase.rs:95-130 (non-2xx: details include the raw body text)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:315-345 (error message embeds the raw upstream body)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs:165-184 (non-success: raw body in details)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/browserless.rs:210-250 (live-view URL appends the provider token; expiry set to 10 minutes; constructed only in tests at :341-376)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:290-340 (only Browserbase is registered, gated on API key and project id)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1280-1290 (agent driver is chromiumoxide)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:440-460 (usage meter: NATS or noop; no synchronous billing call)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:196-300 (JWKS cache TTL 300 s; fetch failure returns 500; no stale fallback)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1116-1122,2608-2639 (driver_err serialises the whole QuarryError; live_view route returns the provider reference)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/envelope.rs:42-50 (Envelope::err carries the full error including details)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3873-3885 and apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs:1594-1600 (error bodies forwarded unchanged)",
+    "apps/Ingestion Plane/docker-compose.yml:1015-1055 (ingestion-postgres: shared_buffers and memory flags only)",
+    "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md:5-25 (driver failure cascade; no Control Plane or billing outage matrix)",
+    "grep (negative): no entitlement, plan_limit, quota or rate-limiter symbol under quarry-edge/src or quarry crates; no autovacuum, pg_cron or REINDEX in Ingestion Plane yml, sql, conf or md"
+   ],
+   "reuse": [
+    "QuarryError.details redaction at construction time in the driver crates (a ProviderError type in quarry-browser)",
+    "Existing retryable flag and quarry-runtime retry.rs classification (keep retry semantics while hiding bodies)",
+    "auth.rs JWKS cache structure for a bounded stale-if-error window",
+    "RUNBOOKS.md as the home for the failure-policy matrix"
+   ],
+   "constraints": "Ingestion Plane only for the Quarry changes, which keeps plane ownership clean. Fail-closed rules stay: grants (BrowserBroker validation), ZDR posture and billing must not fail open; a bounded stale-if-error JWKS window must still reject unknown kid values and expired tokens. Live-view capability URLs allow session takeover, so they must never reach SPA, logs or receipts; if a provider live view is ever surfaced it goes through a gateway proxy with a short-lived token. ZDR: redacted errors must not hide the decision that a run was ZDR-refused.",
+   "approachAdjustment": "Replace the 'fail open for rate and plan limits' premise with what Quarry actually depends on: add a bounded stale-if-error window to auth.rs get_jwks (S) and document in RUNBOOKS.md that grants, ZDR and billing stay fail-closed while billing is async. Keep ProviderError redaction (S) for the Browserbase, Kernel and Browserless drivers, and also redact the chromiumoxide details.error strings if they reach users. Defer the live-view proxy until a provider live view is actually surfaced (no gateway or SPA consumer exists). Check the production compose and the real Postgres deployment before adding autovacuum settings (only docker-compose.yml was read for flags; the grep covered the production file but found nothing).",
+   "effortRevised": "S",
+   "effortNote": "Unchanged: each corrected piece is small (JWKS stale-if-error, error redaction, runbook, autovacuum settings).",
+   "verdict": "reword",
+   "verdictReason": "The hardening is real (raw provider bodies and no autovacuum are confirmed) but low urgency, and the headline premise (fail open on Control Plane limits) has no counterpart in Quarry, whose real outage exposure is JWKS expiry; rewrite around that and keep it a late small item.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

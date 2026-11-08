@@ -1,0 +1,95 @@
+{
+ "finalId": "F-t2-048",
+ "tier": "recommended",
+ "rank": 24,
+ "title": "Org-scoped URL cache with explicit freshness, and a cache-only no-egress mode",
+ "summary": "Add a URL plus variant keyed cache in Ingestion Plane over the existing artifact storage (Postgres metadata, Redis hot path), keyed by org, with maxAge/minAge/store flags on scrape and agent fetches, cacheState and cachedAt in the output metadata, and negative caching. ZDR orgs bypass it entirely. In a second phase add a no_egress policy flag that pins the driver plan to cache and Data Plane artifacts and returns a typed miss without logging the URL.",
+ "whyItMatters": "Repeated agent research becomes cheaper and faster, fewer requests hit target sites (which also reduces blocks), and the Model gets explicit freshness it can reason about. The no-egress mode gives regulated or sovereign workspaces a hard guarantee of no outbound traffic.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (SRC)",
+  "others": [],
+  "prevalence": "1 of 4 sources (Firecrawl); unique, with lockdown as a further unique mode",
+  "mechanism": "Key = hash(normalised URL) plus variant (mobile, country, stealth, blockAds, wait, screenshot options). Raw body goes to object storage, a metadata row to an index table, hot entries to a Redis LRU that fails fast. The read path resolves maxAge (explicit, then dynamic per domain via a 200 ms race, then a 2-day default), queries the newest entry in the window and returns cacheState hit/miss plus cachedAt; negative windows skip the DB on repeat misses and entries whose body is missing are deleted. Lockdown rewrites the engine plan to index-only, disables robots/sitemap/redirect fetching, forces ZDR and returns a typed cache-miss error that does not log the URL."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:1-7",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:430-436",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:480",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:218",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:286",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:92-118"
+  ],
+  "gap": "The Quarry cache is keyed by content fingerprint and is read only when the caller sends prev_fingerprint (and never under ZDR), so there is no URL or maxAge cache, no cacheState metadata, no negative caching and no cache-only mode; SWR claimed in PRESETS.md is absent. The gateway has separate 4 h search and scrape-preview caches (see R-t2-04-02). Artifact storage and Data Plane document storage already exist as bodies to serve from."
+ },
+ "approach": "Ingestion Plane: after R-t2-04-02 lands the shared should_cache(), build the URL index with org-scoped keys, store bodies in the existing artifact store, hot path in Redis, flags maxAge/minAge/store on scrape and agent observation fetches, cacheState and cachedAt in NormalizedOutput, negative cache for failures, self-healing when a body is missing. Never cache credentialed, action or profile requests, or anything produced under ZDR. Phase 2: no_egress policy flag (carried by the org policy floor, R-t2-04-05) that pins DriverPlan to a cache/Data-Plane-artifact driver, calling Data Plane APIs rather than its database, and returns a typed miss error without logging the URL.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-003 cache admission",
+  "F-t2-022 org policy floor (for no_egress)",
+  "Artifact store",
+  "Data Plane retrieval API (phase 2)"
+ ],
+ "planeOwner": "Ingestion Plane; Data Plane for the artifact-backed no-egress path",
+ "risks": "Cross-tenant leakage if keys are not org-scoped or authenticated content is cached; stale answers surprise users, so always show cachedAt. Lockdown value is limited to a niche of regulated orgs.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-04-10"
+ ],
+ "sourceClusters": [
+  "C-t2-04-020",
+  "C-t2-04-019"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-048",
+   "status": "partial",
+   "exactGap": "The CachePolicy contract (mode, max_age_s, vary_on, stale_while_revalidate_s) and should_read/should_write/effective_ttl in routes.rs are live and bypassed under ZDR, but the Redis PageCache is keyed quarry:page:{content fingerprint} (no org segment), is read only when the caller supplies prev_fingerprint, and has no URL key, minAge or store flag, cachedAt/cacheState in NormalizedOutput, negative caching, consumer for the SWR field or cache-only mode; a URL-plus-vary key helper, cache::fingerprint(), is dead scaffolding. The gateway keeps its own URL-keyed scrape-preview cache in Frontend-Plane Redis (key from the URL alone via a 64-bit DefaultHasher, 4 h fresh, 24 h store, ZDR-aware), also not org-scoped.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:1-30 (PageCache keyed by fingerprint; lookup only with prev_fingerprint)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:84-105 (fingerprint(url, vary, js_required) marked allow(dead_code) scaffolding)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:108-125 (SearchCache::key is org-scoped: the pattern to copy)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:56-76 (should_read/should_write/effective_ttl), 430-440 (read skipped under ZDR; needs prev_fingerprint), 476-492 (write skipped under ZDR)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/cache.rs:1-40 (CachePolicy, CacheMode Bypass/ReadOnly/ReadWrite/WriteOnly)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs:112 (preset sets SWR 3600 s; no runtime consumer found by grep)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs:80-125,191-201 (lookup_within, cache_key with no org segment, DefaultHasher)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:80-135,196-210,255-290 (scrape-preview cache: URL-only key, CacheAdmission mirrors quarry-edge, ZDR denied)"
+   ],
+   "reuse": [
+    "CachePolicy/CacheMode and routes.rs should_read/should_write/effective_ttl (extend with minAge/store)",
+    "PageCache.put_with_ttl and the cached NormalizedOutput JSON (bodies already live in the cached value)",
+    "cache::fingerprint(url, vary_headers, js_required) with an org prefix, mirroring SearchCache::key",
+    "gateway CacheAdmission semantics as the spec for the shared should_cache()"
+   ],
+   "constraints": "ZDR is already bypassed at both read and write and must stay so; keys must be org-scoped and credentialed, cookie, profile or action requests must never be cached (the current fingerprint-keyed PageCache and gateway preview cache are not org-scoped, so extending them as-is would copy that weakness). Frontend Plane should not hold page bodies at all (the gateway comment cites the ownership matrix), so the gateway copy should be retired once Quarry serves freshness. no_egress needs an org policy floor from Control Plane, Data Plane artifacts only through its API (no DB access), and a typed miss that does not log the URL.",
+   "approachAdjustment": "Simplify phase 1: keep Redis as the store and reuse the existing PageCache value (no Postgres metadata or artifact-store indirection), key by (org, normalized URL, variant) via the existing helper, add maxAge/minAge/store and cachedAt/cacheState/negative-cache fields additively, and either implement or delete stale_while_revalidate_s. Fix org scoping of the existing fingerprint-keyed PageCache in the same change (a caller supplying another tenant's content fingerprint can read that tenant's cached NormalizedOutput, including its URL; verify) and retire the gateway scrape-preview cache. Keep no_egress as a separate phase 2 behind the policy floor.",
+   "effortRevised": "M",
+   "effortNote": "Phase 1 as simplified is M (L only if Postgres index plus artifact store are kept); phase 2 no_egress is a separate M.",
+   "verdict": "keep",
+   "verdictReason": "The described gap is accurate (no URL/maxAge cache, no cacheState, no cache-only mode) and nothing substantial exists; only the approach should be simplified, org scoping fixed and the effort lowered.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

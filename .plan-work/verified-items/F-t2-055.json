@@ -1,0 +1,95 @@
+{
+ "finalId": "F-t2-055",
+ "tier": "recommended",
+ "rank": 31,
+ "title": "Crawl planning: validate/preview endpoint, Model Plane crawl-plan tool and a stronger /v1/map",
+ "summary": "Add POST /v1/crawl/validate (a dry run that returns normalised effective options, violations and an estimated page count), a Model Plane crawl-planning tool that maps up to 50 site URLs, drafts crawl options from a plain-language goal and validates them, and a proposal-review step in the KnowledgeComposer before the crawl starts. Strengthen /v1/map by seeding from robots Sitemap: lines, adding an optional site: search pass through the smart router, reranking candidates through the Data Plane rerank contract, raising the limit and letting the planner call it with a service scope.",
+ "whyItMatters": "This matches the architecture exactly: the Model proposes crawl options, Quarry validates and executes or rejects, and the user sees the proposal for approval. It gives non-technical users a one-sentence way to scope a crawl and gives the planner better discovery on docs sites with weak sitemaps.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-009 params-preview; fc-013 map)",
+  "others": [],
+  "prevalence": "NL crawl planning: 1 of 4 sources (Firecrawl), unique; site map: 1 of 4 (Firecrawl), where Verevon is already at parity",
+  "mechanism": "Map up to 50 URLs of the site to ground the LLM, prompt it with URL structure plus the user goal, produce crawl options, overlay only the fields the caller did not set, re-run the normal validator (including pattern caps), then either return the options as a preview or start the crawl; the ZDR path runs the LLM step outside traces."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132 and :170-260 (shipped /v1/map with robots allow-filtering)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-668 (no prompt field or validate endpoint on crawl)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service principals cannot call /v1/map)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:521",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:549 (CrawlPagePicker UI)"
+  ],
+  "gap": "No crawl preview or validate endpoint and no Model Plane tool that proposes crawl options; /v1/map caps limit at 1000, does not read robots Sitemap: lines, has no search assist, ranks lexically, and is user-token-only so the Model Plane cannot call it. Map itself is shipped end to end (CrawlPagePicker), so only the planning layer is new."
+ },
+ "approach": "Ingestion Plane: add /v1/crawl/validate reusing the CrawlRequest validator from R-t2-01-03; extend map_routes.rs with robots Sitemap: seeding, an optional site: pass gated by allow_paid_providers, and a Data Plane rerank call (the data:rerank manifest row is already granted) instead of building ranking in Quarry; add a map:read service scope. Model Plane: crawl-planning tool that calls /v1/map, drafts options through the model and calls validate. Frontend: KnowledgeComposer shows scope, limit and sample URLs for approval before the gateway starts the crawl under the user token.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-016 scoped crawl options",
+  "F-t2-005 ScrapeOptions",
+  "Data Plane rerank contract"
+ ],
+ "planeOwner": "Ingestion Plane (validate, map) with Model Plane (planner tool) and Frontend Plane (review UI)",
+ "risks": "LLM-drafted regexes can be over-broad, so always show scope and limit before running; site: queries cost paid-provider budget; the planning LLM call must be suppressed from traces for ZDR.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-01-07"
+ ],
+ "sourceClusters": [
+  "C-t2-01-007",
+  "C-t2-01-010"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-055",
+   "status": "partial",
+   "exactGap": "SRC: /v1/map is shipped end to end (map_routes.rs:132-300, gateway discover_crawl_pages at knowledge/quarry.rs:507-535, CrawlPagePicker.tsx with KnowledgeComposer.tsx:538-556 and a user-curated batch capped at 200 by normalize_batch_body), so only the planning layer is new. SRC: there is no /v1/crawl/validate and CrawlRequest carries only url, max_pages, max_depth, ingest and zdr (routes.rs:533-554), so there are no scope options for a validate call to normalise until F-t2-016 lands; map seeds only {origin}/sitemap.xml plus five nested indexes and ignores the Sitemap: lines that robots.rs:80-82 already parses, caps at 1000 and ranks lexically only (map_routes.rs:22,189-212,266). SRC: the Model Plane cannot call map because service principals are limited to scrape/search/extract/artifacts/agent (auth.rs:514-535) and execution-core web_tools declares only search:read and extract:read (web_tools.rs:39-40), and crawl and batch are refused under ZDR (routes.rs:563-575).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:1-22 (read-only, ZDR-safe, MAX_LIMIT 1000), :111-115, :132-137, :173-186 (robots allow-filter), :189-212 (sitemap.xml seeding), :266-270 (LexicalRanker)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs:80-82 (Sitemap: directives collected)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-554 (CrawlRequest) and :563-575 (ZDR refusal)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-535 (service route scopes)",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:39-40 and :133, :152 (search and extract only)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:423 (normalize_batch_body), :467 (normalize_map_body), :507-535 (discover)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/CrawlPagePicker.tsx:9-30 and src/features/dashboard/home/KnowledgeComposer.tsx:538-556",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:29-39 (web-rerank granted:true; rerank only for caller-supplied candidates)",
+    "apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_INTEGRATION.md:70-75 (rerank degrades to lexical order when the token is unavailable)"
+   ],
+   "reuse": [
+    "CrawlPagePicker and the gateway discover route (extend to show an agent-proposed scope instead of a new review step)",
+    "quarry-transform robots parser already collecting Sitemap: lines",
+    "Data Plane web-rerank row (granted) for candidate ordering, with lexical fallback",
+    "gateway normalize_batch_body 200-URL cap and the durable /v1/batch path",
+    "execution-core web_tools.rs wrapper pattern for a new map tool with a map:read scope"
+   ],
+   "constraints": "SRC: /v1/crawl and /v1/batch are durable and refused under ZDR (routes.rs:563-575), so a ZDR plan can be proposed but not run and the planning tool must say so early; map itself is read-only and ZDR-safe (map_routes.rs:6-7). Model proposes / Quarry executes: LLM-drafted options remain a proposal that the user approves and the gateway starts under the user token, as the item says; a site: search pass spends paid-provider budget; the planning LLM call must be kept out of traces for ZDR orgs.",
+   "approachAdjustment": "Cut the validate endpoint to a thin map-based preview (count plus samples, no normalised effective options) until F-t2-016 adds crawl scope options; do not build a new proposal-review UI, extend CrawlPagePicker to display an agent-proposed scope; add the map:read service scope and robots Sitemap: seeding first (both S), then the Model Plane planning tool, and call the Data Plane rerank row only when its token is available, degrading to the lexical ranker.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged: map hardening and the service scope are S, the planner tool is M, and validate is blocked on F-t2-016.",
+   "verdict": "reword",
+   "verdictReason": "Map and the user-curated page picker already exist; the item should state the genuine delta (planner tool, service scope, robots Sitemap seeding, optional rerank, thin validate) and its dependency on F-t2-016 instead of presenting map and review as new.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

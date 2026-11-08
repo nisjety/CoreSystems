@@ -1,0 +1,129 @@
+{
+ "finalId": "F-t2-064",
+ "tier": "recommended",
+ "rank": 40,
+ "title": "External contract: full OpenAPI, then an audience-bound MCP server for Quarry and read-only connectors, SDK call-and-wait and a first no-code connector",
+ "summary": "Generate the Quarry OpenAPI spec from the Rust request/response types with a CI route-coverage check (the checked-in spec lists about 46 paths against roughly 75 edge routes). Then expose a Verevon-hosted MCP server (Streamable HTTP, OAuth) whose tools map onto the same governed action contracts, so every call goes through the existing authority, approval, ZDR and audit path. Last, add waiters and origin pinning to the Rust client used by the gateway and Model Plane, delete or wire the dead SPA quarry-client, and ship installable agent skills or a CLI only if an external API is offered. || Build an MCP server front (Frontend Plane gateway domain or a dedicated edge service, not inside Quarry) that publishes search, scrape, map, extract, crawl-status and read-only provider actions to customers' own agents (Claude Code, Codex, Cursor). Authenticate with OAuth from Control Plane auth-core (resource indicators, audience-bound tokens, protected-resource metadata, introspection cached by token hash), translate calls to Quarry edge and IC with a short-lived purpose-tagged service token, and write one metadata-only audit row per call. Writes stay behind an in-product approval. As a standalone first step, classify MCP tool data categories at registration instead of 'unclassified'. || Add hand-written ergonomics on top of the OpenAPI-generated TypeScript and Python Quarry SDKs: a call-and-wait helper (submit crawl/batch/agent run, poll or subscribe, return results) and typed result iterators. Once outbound webhooks are tenant-safe, publish an n8n community node (self-hostable, open source) wrapping start-run, wait and fetch-results; Zapier and Make only if demand appears.",
+ "whyItMatters": "Three of four reference sources expose MCP, and it is the AI-first distribution channel for external agents (Claude Code, Codex, Cursor) to use Verevon's web stack without leaking credentials. A complete OpenAPI prevents contract drift that already exists and feeds Model Plane tool schemas; none of this is needed for the in-product experience, which is why it sits after the core API work. || Gives Verevon the developer-ecosystem parity both Firecrawl and Apify have, and lets customers use Verevon's governed web layer and connectors from their own agents with ZDR and audit intact. The audit companion also improves admin visibility of agent MCP usage today. || Distribution channel for the public Quarry API and cheap parity with Apify's run-and-chain pattern. It matters less for an AI-first product whose own agents orchestrate work, so it is a go-to-market item, not a core capability.",
+ "referenceBestPractice": {
+  "bestSource": "Apify (apify-platform 045/044 hosted Streamable-HTTP MCP with category tool loading and OAuth; 036 full OpenAPI)",
+  "others": [
+   "Aside (local MCP over stdio against the signed-in browser, credentials never leave it)",
+   "Firecrawl (MCP, CLI, SDKs with origin pinning and waiters)",
+   "Firecrawl (hosted MCP with OAuth introspection and audience binding; delegated short-lived HMAC credential; per-call tool log)",
+   "Apify (official Make, Zapier, n8n, Gumloop apps plus an SDK call() helper that blocks until the run ends)"
+  ],
+  "prevalence": "MCP exposure: 3 of 4 sources (Apify, Aside, Firecrawl), table-stakes; OpenAPI: 2 of 4, common; SDKs: 2 of 4, common; CLI and skills: 3 of 4 but DOC/INF-only evidence || 2 of 4 sources (both web platforms) for MCP exposure; per-call audit log in 1 of 4; common || 1 of 4 sources (Apify only; DOC records only); unique",
+  "mechanism": "OpenAPI generated from request/response types in CI and failing on route drift, driving SDKs and tool schemas. MCP: Streamable-HTTP endpoint behind OAuth, tool catalog generated from the action contracts, tool groups loaded on demand (?tools=), every call mapped to the same governed path as in-product calls. SDK: start* plus waitFor* with abort-triggered best-effort cancel, fetchAllPages with caps, and rewriting any server-provided next URL onto the configured origin before sending credentials. || Merged items add: The MCP service advertises protected-resource metadata in WWW-Authenticate, introspects the OAuth token (active, exp, aud == the MCP resource, credential_purpose) with a cache keyed by token hash that is isolated from outages. To call the core API it mints a short-lived signed credential {v, aud core, purpose, subject, iat, exp} (exp <= 120 s, iat skew <= 30 s) verified with a constant-time HMAC; the user token is never forwarded. Each call POSTs one row (tool, client, auth type, status, error class, request id) to an internal ingest; the team view omits objective/job id fields and ZDR teams get 202 with nothing stored. || Published connector apps per platform wrap the REST API (start run, poll/wait, fetch dataset items); the SDK call() helper starts a run, waits for completion and returns, enabling chained runs."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+   "apps/Ingestion Plane/Quarry-v2/sdks/typescript/src/apis/index.ts",
+   "apps/Ingestion Plane/Quarry-v2/sdks/python/quarry_client/api/__init__.py",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md (Quarry MCP explicitly deferred)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:44 and :52 (Verevon consumes MCP servers with OAuth connect; exposes none)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:30 (SPA client is dead code, no /api/quarry BFF route)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-20 (registry proxy to Model Plane MCP-server registry only)",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:30,112-113 (MCP server explicitly deferred: Verevon is the client; revisit only if third-party agent access becomes a goal)",
+   "apps/Control Plane/auth-core/src/auth/auth.ts:1066-1100 (Better Auth oidcProvider with optional dynamic client registration, behind OIDC_PROVIDER_ENABLED)",
+   "apps/Model Plane/rust/services/model-gateway/src/audit.rs:1-22 (reserve-before-execute audit outbox; MCP tools classed unclassified)",
+   "apps/Ingestion Plane/integration-corev2/internal/api/audit_outbox.go:46-48 (durable audit outbox to Audit Core for connection.action.* events)",
+   "apps/Ingestion Plane/Quarry-v2/sdks/typescript/src/apis (OpenAPI-generated clients: ScrapeApi, CrawlApi, BatchApi, AgentApi, SchedulesApi, ...)"
+  ],
+  "gap": "OpenAPI covers part of the surface (missing profiles, answer, audio, search verticals, most agent browser routes, fleets); generated TS and Python SDKs are 0.1.0 and unpublished with no waiters or origin pinning; no MCP server exposed; no customer API keys; no CLI or skills. || No MCP server, CLI, skills or framework wrappers for Quarry or IC, and no audience-bound token validation for external agent clients. Verevon consumes MCP (hardened client) but does not expose it. Tool-call audit exists internally but MCP calls are 'unclassified' and no team-readable, privacy-minimised tool-call view was found (Audit Core not inspected). || Generated SDKs exist; no hand-written wait/poll helper was found in sdks/typescript/src (only generated runtime.ts) and no Zapier/Make/n8n artefacts exist in the repo."
+ },
+ "approach": "Order matters: (1) generate full OpenAPI from the same types as F-t2-005 (46 of about 75 routes documented today, per baseline); (2) SDK call-and-wait helper on the public job lifecycle (F-t2-017); (3) an MCP front with audience-bound OAuth from Control Plane auth-core, short-lived purpose-tagged delegation to Quarry and integration-corev2, a privacy-minimised tool-call log (nothing under ZDR), and writes that still require in-product approval; (4) n8n node, CLI and skills. Step 3 reverses the documented OSS_PARITY_BACKLOG deferral and needs an owner decision. || Source detail: [R-t2-01-11] Ingestion Plane: derive OpenAPI from the Rust types (utoipa or schemars) with a CI route-coverage check, and feed JSON Schemas to the Model Plane. Model Plane tool catalog plus Frontend gateway (OAuth, endpoint): host the MCP server over the existing action contracts, with Quarry staying behind the gateway. Control Plane: customer auth and API keys as the prerequisite. Add waiters and origin pinning to the Rust client; delete or wire the SPA client. Skills wrapping MCP tools come after MCP; a CLI only if an external API is offered. || [R-t2-10-04] Frontend Plane gateway (Rust) or a new small edge service owns the MCP front; Control Plane auth-core is the authorization server (reuse the existing oidcProvider, enable DCR for MCP clients, add resource-indicator audience binding and an introspection endpoint; verify what the plugin already supports). Calls go to Quarry edge and IC with a short-lived, purpose-tagged service token from the cross-plane manifest, scoped to org and user. Tool set mirrors execution-core read tools (search, scrape, map, extract, crawl status, list_provider_actions, read actions); write actions create a pending approval in the product and return its id, never executing without in-product approval; browser control is explicitly out of scope until grants and approvals work for external callers. Audit: emit one tool.call event per invocation (tool, client id, auth type, status, error class, request id, no arguments or objective) through the existing outbox to Audit Core with a team query view; ZDR records metadata only. Phase 0 (S): classify MCP tool data categories at capability-core registration. Later: a CLI, skills and framework wrappers once request shapes stabilise. || [R-t2-10-06] Ingestion Plane, Quarry-v2 sdks/. Add a thin non-generated layer (kept outside the regenerated folders so sdks/generate.sh does not overwrite it) with startAndWait(kind, request, {timeout, onEvent}) using job status/events routes. Later, an n8n node package in a new repo folder calling the edge API with an API key; no plane changes.",
+ "effort": "L",
+ "dependencies": [
+  "Customer auth/API keys in Control Plane",
+  "F-t2-005 and F-t2-017 so the spec describes the final shapes",
+  "Owner decision to reverse the OSS_PARITY_BACKLOG deferral (third-party agent access becomes a goal)",
+  "Auth-core OAuth server with resource indicators/introspection (existing oidcProvider; scope of support to confirm)",
+  "Stable Quarry request shapes and a public async job lifecycle",
+  "Audit Core view for tool-call events",
+  "Stable public async job lifecycle and org-scoped webhooks (F-t2-031)",
+  "Stable Quarry request shapes"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry, integration-corev2) + Control Plane (auth-core OAuth)",
+ "risks": "Authority bypass if MCP calls skip approval gates; ZDR propagation; abuse and rate limits; maintaining several SDKs without external users. || Bypassing Model Plane approvals if writes are exposed; quota and abuse from external clients; ZDR propagation to clients outside Verevon; token replay across resources if audience is not enforced; logging arguments would leak intent and break ZDR; a second path into Quarry that skips the Model-proposes/Quarry-executes rule if browser actions are ever exposed. || API surface lock-in before Quarry request shapes stabilise; maintenance of third-party app listings.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 13,
+  "DOC": 12,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-10-06] Quarry-v2/docs/ROADMAP.md:58-62 (Phase 9 SDK ergonomics) covers the helper only; no connector apps planned"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-01-11",
+  "R-t2-10-04",
+  "R-t2-10-06"
+ ],
+ "sourceClusters": [
+  "C-t2-01-024",
+  "C-t2-01-025",
+  "C-t2-01-026",
+  "C-t2-01-027",
+  "C-t2-10-007",
+  "C-t2-10-008",
+  "C-t2-10-006"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface",
+  "Integration-plane overlap"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-064",
+   "status": "partial",
+   "exactGap": "SRC: docs/openapi.yaml has 46 path keys, is hand-maintained (no utoipa or schemars in any Cargo.toml) and omits registered edge routes such as /v1/profiles, /v1/answer, /v1/audio, /v1/search/images and the other search verticals, /v1/fleets*, and the agent frame/live-view/tabs/devtools routes; sdks/generate.sh builds the TypeScript and Python SDKs (0.1.0, @quarry/client) from that spec with no hand-written wait/poll layer. SRC: nothing serves MCP (gateway domains/mcp.rs is a registry proxy and model-gateway mcp_http.rs/mcp_jsonrpc.rs are client-side), no external API-key or audience-bound token path reaches Quarry or the gateway (auth-core has an opt-in apiKey plugin and an oidcProvider with a DCR flag but nothing consumes them for Quarry), no n8n, Zapier or CLI artefact exists (the Zapier tile in ChatbotStudio.tsx is a placeholder), and the SPA quarry-client.ts is imported only by its own test. DOC: OSS_PARITY_BACKLOG.md explicitly defers an MCP server until third-party agent access becomes a goal, so recommending it reverses an owner decision.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml:18 (first of 46 path keys; last key /v1/schedules/{schedule_id}/backfill at :1664)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:135-171 (profiles, audio, search/images, answer routes registered but absent from the spec)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs:219-222",
+    "apps/Ingestion Plane/Quarry-v2/sdks/generate.sh:6-9",
+    "apps/Ingestion Plane/Quarry-v2/sdks/typescript/package.json:2-3",
+    "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:30 and :112-113 (MCP server deferred)",
+    "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:59-62 (SDK ergonomics is Phase 9, planned)",
+    "apps/Ingestion Plane/Quarry-v2/docs/TRANSPORT.md:21-23 (REST chosen for heterogeneous clients incl. n8n)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-3 and :44-56 (consume-side registry proxy and OAuth connect only)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:30-33 and src/shared/api/quarry-client.test.ts:10 (only importer is the test)",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudio.tsx:543-544 (Zapier placeholder tile)",
+    "apps/Control Plane/auth-core/src/auth/auth.ts:1067-1075 (oidcProvider behind OIDC_PROVIDER_ENABLED) and :1112-1114 (apiKey behind API_KEY_ENABLED)",
+    "apps/Model Plane/rust/services/model-gateway/src/audit.rs:1-3 and :21 (Session Core is the sole Audit Core producer; unknown/MCP tools are unclassified)",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs:1-12 (client-side JSON-RPC framing)",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:39-40 (only search:read and extract:read scopes)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-535 (service principals limited to scrape, search, extract, artifacts, agent)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:563-575 (crawl and batch refused under ZDR)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/audit_outbox.go:44-50 (own durable audit outbox)"
+   ],
+   "reuse": [
+    "sdks/generate.sh plus the generated sdks/typescript and sdks/python clients as the base for a thin non-generated waiter layer kept outside the regenerated folders",
+    "quarry-edge auth.rs require_service_route_scope as the per-route scope model for any external caller",
+    "auth-core oidcProvider (DCR flag) and apiKey plugin (x-api-key) rather than a new authorization server",
+    "execution-core web_tools.rs search/extract wrappers and scope constants as the tool contract for any MCP surface",
+    "integration-corev2 audit_outbox.go durable outbox pattern for tool-call audit events"
+   ],
+   "constraints": "SRC: Session Core is the sole Audit Core producer for the gateway tool-call ledger (model-gateway audit.rs:1-3) and integration-corev2 runs its own durable outbox, so an MCP front must not become a third audit producer; route events through the existing owners. SRC: service principals can reach only scrape, search, extract, artifact reads and agent routes (auth.rs:504-535) and crawl/batch are refused under ZDR (routes.rs:563-575), so an external surface cannot offer map, crawl, batch or ZDR orgs without new scopes and an orchestrator ZDR carry. DOC: the MCP deferral is an owner decision; browser actions must stay Model-proposes/Quarry-executes and out of any external surface; external callers must never get raw service tokens into Quarry.",
+   "approachAdjustment": "Split the item. Keep only 'generate OpenAPI from the Rust request/response types plus a CI route-coverage check' as the near-term slice and merge it into F-t2-005 (it also fixes the 46-path drift); keep the SDK waiter helper as an optional follow-up. Move the MCP server, n8n node, CLI and skills behind an explicit owner decision to pursue third-party agent access plus a Control Plane customer API-key or audience-bound-token design; keep the MCP front out of Quarry (the item already says so) and route its audit through the existing producers.",
+   "effortRevised": "XL",
+   "effortNote": "As one item it is XL (MCP front, auth-core resource-indicator/introspection work, an Audit Core tool-call view, n8n). The OpenAPI-from-types plus CI coverage slice alone is M and the SDK waiter helper is S.",
+   "verdict": "demote",
+   "verdictReason": "The OpenAPI completeness half already belongs to F-t2-005; the MCP/n8n/CLI half reverses a documented deferral, depends on customer authentication that does not exist and has no committed consumer, so it should be a conditional later item rather than a recommendation.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

@@ -1,0 +1,116 @@
+{
+ "finalId": "F-t2-015",
+ "tier": "priority",
+ "rank": 15,
+ "title": "Actionability checks and trusted input for every ref-targeted action, then rich input actions",
+ "summary": "Change Quarry's ref-targeted click/type path from element.click() via Runtime.callFunctionOn to: scroll into view, wait for attached/visible/enabled/stable (poll content quads over two frames), hit-test the centre via DOM.getNodeForLocation including cross-process iframe hops, then dispatch trusted Input.dispatchMouseEvent/KeyEvent. Return typed errors (covered by <tag>, not_visible, disabled) and keep element.click() only as an explicit fallback. Follow-up phase: press with modifiers, drag, select_text and paste with a per-session virtual clipboard.",
+ "whyItMatters": "Every AI click passes through this executor. Untrusted synthetic clicks silently no-op on sites that ignore them or sit behind overlays; honest 'covered by cookie banner' errors let the model recover. Flaky agents are noticed immediately.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (CA056/CI115: hit-testing across nested and cross-process iframes returning hittable|covered(hitTag)|unpositioned; key synthesis bound to an input target)",
+  "others": [
+   "Aside AA022 (waitForReady attached|visible|enabled|stable with 32 ms stability sampling)",
+   "Codex clipboard shim and action set for the rich-input follow-up (1 of 3, DOC-backed)"
+  ],
+  "prevalence": "Actionability 2 of 3 sources (table-stakes); rich input 1 of 3 (unique)",
+  "mechanism": "DOM.scrollIntoViewIfNeeded; poll getContentQuads until stable over two frames; compute the centre; DOM.getNodeForLocation per frame hop with coordinate transforms; check the hit node is the target or a descendant, else error 'covered by <tag>'; then Input.dispatchMouseEvent moved/pressed/released and dispatchKeyEvent with modifiers."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1232-1300",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841-2880",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-760"
+  ],
+  "gap": "execute_native_target_action resolves the backend node and checks isConnected, then runs element.click() inside Runtime.callFunctionOn: a synthetic, untrusted click with no visibility, stability, scroll or covered-element check (SRC, read in this audit). Only coordinate click_point uses trusted Input.dispatchMouseEvent. Press carries only a key string, and a grep of contracts.rs finds no drag, paste, modifier or clipboard support."
+ },
+ "approach": "Ingestion Plane quarry-browser (chromiumoxide.rs): implement the actionability + hit-test pipeline with OOPIF coordinate transforms behind a driver capability first, add typed error codes to quarry-core contracts, then extend AgentAction (press{modifiers}, drag, select_text, paste{format}) with a per-session virtual clipboard in the page.",
+ "effort": "M",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Cross-origin iframe coordinate transforms are fiddly and regressions in existing flows are possible, so ship behind a capability flag. The rich-input phase is nice-to-have and can be deferred.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 1,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-09-05"
+ ],
+ "sourceClusters": [
+  "C-t2-09-011",
+  "C-t2-09-012"
+ ],
+ "sourceCategories": [
+  "AI-browser control"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-015",
+   "status": "partial",
+   "exactGap": "Ref-targeted click, type and select run as in-page DOM operations through Runtime.callFunctionOn: execute_native_target_action checks only isConnected, then calls element.click() or sets the value and dispatches synthetic events (chromiumoxide.rs:1232-1330), and the non-native verified-target path does the same in a page script (chromiumoxide.rs:2026-2093). There is no scroll-into-view, visibility, enabled, stability or covered-element check and no hit-test on the ref path; only click_point (chromiumoxide.rs:2841) dispatches trusted Input.dispatchMouseEvent, the legacy selector click and type use chromiumoxide's scrolling, trusted-event helpers (2828-2915), Press carries only a key string (contracts.rs:699), and the only typed target error is TargetRepairRequired (error.rs:30).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1232-1330",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2026-2093",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2284",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2828-2915",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2989-3001",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:269-286",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:304-315",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:398-405",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:695-705",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:8-60",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:225-262",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479-3512"
+   ],
+   "reuse": [
+    "execute_native_target_action backend-node resolution and per-frame execution-context lookup (chromiumoxide.rs:1232-1290)",
+    "click_point's moved/pressed/released Input.dispatchMouseEvent sequence as the trusted dispatch primitive (chromiumoxide.rs:2841-2896)",
+    "BrowserDriverCapabilities flag pattern (lib.rs:269-286) to gate the new pipeline per driver",
+    "ActionOutcome::unknown(postcondition_required) in observation.rs, which keeps Quarry from claiming a business effect"
+   ],
+   "constraints": "Ingestion Plane quarry-browser only; Quarry owns execution and must keep returning an unverified postcondition rather than claim success. The Model Plane browser.act wire schema is a closed list, so new inputs (modifiers, drag, paste) are not reachable by the model without a separate Model Plane contract change. Upload and download reuse the same native click helper and stay approval-gated, so changing the click semantics must not weaken or alter those gates.",
+   "approachAdjustment": "Direction is right. Express the new failures as ErrorCode::TargetRepairRequired (409) with details.reason (covered_by, not_visible, disabled, unstable) instead of new ErrorCode variants, since ErrorCode is a wire contract shared with the Go, TypeScript and Model Plane clients. Put the pipeline behind a new BrowserDriverCapabilities flag so Browserbase, Browserless and Kernel adapters are unaffected, and leave the synthetic path for governed download clicks until trusted-click download behaviour is verified. Sequence same-frame actionability and trusted dispatch first; the cross-process iframe hit-test and the rich-input phase (modifiers, drag, select_text, paste, virtual clipboard) are separate follow-ups.",
+   "effortRevised": "M",
+   "effortNote": "M holds for same-frame actionability, hit-test, trusted dispatch and typed errors; the OOPIF coordinate transforms and the rich-input phase together are L and should be split out.",
+   "verdict": "keep",
+   "verdictReason": "Accurately describes a real gap on every AI ref click and type; only the error-contract and capability-flag details need adjusting.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-015",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:17770 (SY=25 ms poll, CY=500 ms deadline, TY=0.5 px tolerance)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:17948-18010 (s0 hit test across frame hops, HO scroll+settle, covered-by-tag error)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:18044-18070 (MY/NY in-page probes using elementFromPoint through shadow roots, run via Runtime.callFunctionOn)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js (7 Input.dispatchMouseEvent call sites)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@3025205 (waitForReady attached|visible|enabled|stable, 32 ms stability sample, 5 s timeout, 'Element is moving')",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin ('obscured by another element', ACTIONABILITY_RETRY_DELAYS_MS)",
+    "findings/t2 records aside-agent-control-architecture-022/023, codexbrowser-automation-and-safety-056, codexbrowser-in-app-browser-081/100/115",
+    "REA tools not used; evidence re-read directly from pre-extracted/prettified copies and the Aside SEA blob via grep/dd"
+   ],
+   "corrections": "Mechanism must not say Codex uses DOM.getNodeForLocation: Codex hit-tests with an in-page elementFromPoint probe (shadow-root aware) injected via DOM.resolveNode + Runtime.callFunctionOn per frame hop, using getContentQuads/getBoxModel for coordinate transforms. Order is: hit-test first, DOM.scrollIntoViewIfNeeded only if not hittable, then poll every 25 ms (500 ms deadline, 0.5 px tolerance) for two consecutive matching samples (timer-based, not animation frames). Errors: 'covered by <tag> or otherwise not hittable', 'did not settle after scrolling', and 'couldn't be clicked' for unpositioned nodes. 'Rich input 1 of 3 (unique)' overstates: Aside also has trusted CDP input with modifiers, insertText, file-chooser interception and download events; only the virtual clipboard shim and held clicks/drag with xdotool key names are Codex-specific. Aside falls back to DOM activation (with checked-state verification) when the target is obscured rather than simply erroring.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Actionability is also built into Playwright (auto-wait), which Apify/Crawlee and Firecrawl's playwright-service inherit; the 2-of-3 count reflects custom implementations only (INF)",
+    "inputTargetToken semantics in Codex key synthesis are inferred from naming (INF); not a public CDP parameter",
+    "Codex AX action set (held clicks, drag, paste formats) is DOC-backed (plugin docs/api.json); clipboard bridge is SRC",
+    "Aside evidence comes from the daemon Node SEA blob (SRC), not a documented API"
+   ],
+   "confidence": "high"
+  }
+ }
+}

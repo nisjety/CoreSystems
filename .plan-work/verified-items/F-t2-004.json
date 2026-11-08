@@ -1,0 +1,119 @@
+{
+ "finalId": "F-t2-004",
+ "tier": "priority",
+ "rank": 4,
+ "title": "ZDR-safe telemetry: span sampler, late-ZDR registry, log filter and safe/sensitive log fields in Quarry and the gateway",
+ "summary": "In quarry-edge telemetry.rs add an OpenTelemetry sampler and span processor that drop spans for zdr=true requests (plus a bounded registry for runs that turn ZDR after a span started) and a tracing Layer that keeps events emitted inside ZDR spans out of the JSON fmt layer. Add one small shared helper (Rust crate plus the quarryotel Go package) whose log API forces two maps, safe (ids, enum outcomes, durations, counts) and sensitive (url, query, error text, selectors), with export sinks stripping sensitive by default. Propagate ZDR posture on internal hops as a header and NATS header, and add an operator kill switch that disables all exporters.",
+ "whyItMatters": "Architecture rule: Zero-Data-Retention must propagate. It currently stops at the observability boundary: telemetry.rs always installs a JSON fmt layer and an OTLP layer with no ZDR awareness, and change_routes.rs logs the source URL inside the very branch that says ZDR is active. A leak in logs or OTLP is invisible to users and would breach ZDR contracts, and it blocks safe SIEM export and support diagnostics.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (ZeroDataRetentionSampler returning NOT_RECORD, bounded late-ZDR trace registry, ZDR log-metadata filter, X-Zero-Data-Retention header honoured by helper services)",
+  "others": [
+   "Codex in-app browser (every lifecycle log entry is {safe, sensitive} with stable prefixes; BROWSER_USE_DISABLE_AMBIENT_NETWORK kill switch)"
+  ],
+  "prevalence": "2 of 4 sources for ZDR-aware telemetry and 2 of 4 for privacy-classified logs; differentiator (Firecrawl-only for the sampler and registry)",
+  "mechanism": "Rust: a custom opentelemetry Sampler returning Drop when parent context or attributes carry zdr=true; a bounded LRU of trace ids flagged ZDR after start, checked in a SpanProcessor on_end so descendants and in-flight spans are dropped; a tracing Layer that suppresses events inside zdr=true spans; a log helper with signature log(safe: Map, sensitive: Map) where sinks drop or hash sensitive and ZDR requests always drop it. Posture travels as an internal header (for example x-verevon-zdr) and a NATS header so receivers skip request-correlated logs. A QUARRY_DISABLE_AMBIENT_TELEMETRY switch turns off every exporter."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:25-45",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:632-637",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:110-118",
+   "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3860"
+  ],
+  "gap": "ZDR is carried on requests, events (emit_for_zdr) and artifact paths, but telemetry.rs installs the JSON fmt layer and the OTLP layer unconditionally with no ZDR sampler or filter (no \"zdr\" string in telemetry.rs or quarryotel). Logging relies on a documented convention of low-cardinality fields; about 295 tracing macro calls exist across the crates and several carry error text or URLs (change_routes.rs:635 logs url inside the ZDR-active branch at debug level; default filter is info, so it only surfaces with RUST_LOG=debug). No cross-plane ZDR telemetry header exists."
+ },
+ "approach": "Ingestion Plane first. quarry-edge/src/telemetry.rs: add ZdrSampler, a ZDR trace registry plus SpanProcessor, and a ZDR-aware tracing Layer; create a shared obs module (Rust) mirrored in pkg/quarryotel (Go) exposing safe/sensitive helpers; add the ZDR propagation header to the cross-plane contracts folder next to cross-plane-token-requests.json. Then Model Plane (execution-core, model-gateway) and the Frontend Plane gateway adopt the helper. Keep content-free counters (outcome, duration, driver) outside the ZDR filter so ZDR tenants still have operational metrics. Add a test that a ZDR scrape and a ZDR browser step export zero spans and no log line containing the URL, and a lint that url/query fields are only logged as sensitive.",
+ "effort": "M",
+ "dependencies": [
+  "Shared ZDR header name in the cross-plane contracts",
+  "Item F-t2-029 (span vocabulary builds on this sampler)"
+ ],
+ "planeOwner": "Ingestion Plane (adopted by Model Plane and Frontend Plane gateway)",
+ "risks": "Partial adoption gives false confidence, so enforce with a test or lint. Over-suppression hides incidents for ZDR tenants; keep counters outside the filter. The retrofit touches many call sites.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-07-01"
+ ],
+ "sourceClusters": [
+  "C-t2-07-008",
+  "C-t2-07-002"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-004",
+   "status": "partial",
+   "exactGap": "quarry-edge/src/telemetry.rs:25-64 installs a JSON fmt layer and an optional OTLP layer under one global EnvFilter with no ZDR awareness, and pkg/quarryotel/quarryotel.go:39-93 uses ParentBased(AlwaysSample); neither has a sampler, span processor, late-ZDR registry or safe/sensitive field helper. Practically the live exposure is JSON log events (for example change_routes.rs:632-637 logs source_url inside the ZDR-active branch at debug), because the edge only creates tower-http TraceLayer spans (routes.rs:303, debug level by tower-http default, INF) and a grep of the Go services finds quarryotel.Init but no tracer.Start or otelhttp, so almost no spans are exported at the default info filter. ZDR posture already propagates through the token floor plus body flag (auth.rs:121-139), emit_for_zdr (events.rs:137) and the NATS envelope zdr key (natsx/publisher.go:57); the only off-switch is leaving OTEL_EXPORTER_OTLP_ENDPOINT unset.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:1-64",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:303",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:632-637",
+    "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go:36-93",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:60-139",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/events.rs:125-153",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_renderer.rs:115-135",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_extract.rs:470-500",
+    "apps/Model Plane/go/pkg/natsx/publisher.go:36-60",
+    "apps/Model Plane/rust/crates/mp-telemetry/src/lib.rs:1-80",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr.rs:1-60",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs:1775-1790"
+   ],
+   "reuse": [
+    "ZdrMode and Claims::effective_zdr_mode as the single posture source inside Quarry (auth.rs:121-139)",
+    "emit_for_zdr and the natsx Publisher body-key suppression as the existing event-side ZDR guard",
+    "page_renderer.rs ZDR-gated debug log without URL fields as the field-discipline pattern",
+    "mp-telemetry (Model Plane) and gateway zdr.rs request_zdr/org_zdr_enabled as the plane-local adoption points"
+   ],
+   "constraints": "ZDR must propagate, but each plane owns its own telemetry init (quarry-edge telemetry.rs, mp-telemetry, gateway); a shared helper is a documented contract, not shared code across planes. Quarry derives posture from the verified token floor OR the body flag, and deliberately ignores a service principal zdr claim (auth.rs:104-120), so a new ZDR header or NATS header would be a third carrier that Quarry does not read (the gateway sets x-zdr at upstream.rs:1788 but Quarry reads token plus body). Content-free counters must stay available to ZDR tenants, yet the metrics crates in quarry-edge are inert (telemetry.rs:6-18), so there is no recorder to keep outside the filter yet.",
+   "approachAdjustment": "Reorder. Phase 1 (S): remove the url field at change_routes.rs:635, sweep the 250-plus tracing call sites for url, query and error text fields (reqwest errors embed URLs), and add a test or lint; carry effective ZDR in a task-local or span field so a per-layer filter on the JSON fmt layer can drop sensitive fields. Phase 2: sampler, late-ZDR registry and the shared safe/sensitive helper only once spans exist (F-t2-029), since today almost no spans are produced. Do not add a ZDR header or NATS header; reuse token claim plus body flag plus envelope zdr key, and add an explicit exporter disable flag if an operator kill switch is wanted.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged overall but split: Phase 1 is S and can ship alone; the sampler/registry/helper crates are M and depend on span instrumentation landing first.",
+   "verdict": "reword",
+   "verdictReason": "The gap is real and architecture-relevant, but the item centres on a span sampler and registry for spans that are barely created at the default filter; the live exposure is log fields (one known debug leak) and the posture carriers already exist, so the fix list and the proposed header need rewording.",
+   "confidence": "medium"
+  },
+  "reference": {
+   "finalId": "F-t2-004",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/lib/otel-tracer.ts:40-147 (withZeroDataRetention context key, ZeroDataRetentionSampler NOT_RECORD, late-ZDR trace Set capped at 100,000)",
+    "C:/dev/firecrawl/apps/api/src/lib/otel-tracer.ts:153-185 (ZeroDataRetentionSpanProcessor.onEnd drops flagged traces before export)",
+    "C:/dev/firecrawl/apps/api/src/lib/logger.ts:28-70 (winston zeroDataRetentionFilter)",
+    "C:/dev/firecrawl/apps/go-html-to-md-service/handler.go:100-112 (X-Zero-Data-Retention omits request_id from logs)",
+    "C:/dev/firecrawl/apps/api/src/lib/html-to-markdown-client.ts:67 (only sender of the header found by grep)",
+    "scratchpad/extract/codex/.vite/build/logger-CUwSCKgw.js (logger normalises tags to {safe, sensitive}; buffers then flushes to sink; no drop/hash of sensitive seen there)",
+    "scratchpad/tmp/cxib/main.pretty.js:36771, 33652, 47081 ({safe, sensitive} usage app-wide, IAB_LIFECYCLE prefix)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:1231, 2092, 5172, 5231-5243 (BROWSER_USE_DISABLE_AMBIENT_NETWORK skips gates, Sentry tagging, analytics)"
+   ],
+   "corrections": "Prevalence conflates two different things: ZDR-aware telemetry is Firecrawl-only (Codex's BROWSER_USE_DISABLE_AMBIENT_NETWORK is a sandbox/eval kill switch for gates, Sentry and analytics, not a ZDR mechanism), and safe/sensitive classified log fields are Codex-only (Firecrawl filters whole log lines by a zeroDataRetention flag). State 1 of 4 for each, both differentiators. The late-ZDR registry is a Set with oldest-first (FIFO) eviction, not an LRU. 'Helper services' is one service in source (Go html-to-md); only that client sends X-Zero-Data-Retention. Codex's safe/sensitive split is observed at call sites and in the logger shape, but how sinks treat 'sensitive' (drop/hash/upload) was not found, so 'sinks drop or hash sensitive' is a Verevon proposal (INF), not Codex behaviour. The {safe, sensitive} convention is app-wide in Codex, not limited to browser lifecycle logs. Firecrawl's implementation is TypeScript OpenTelemetry; the Rust Sampler/SpanProcessor/tracing Layer wording is a port, not observed.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Firecrawl tracing is off unless an OTLP endpoint is configured; the ZDR sampler matters only when tracing is enabled",
+    "Codex evidence is from the shipped minified bundle (SRC via extracted copy); sink behaviour for sensitive fields unverified",
+    "BROWSER_USE_DISABLE_AMBIENT_NETWORK is an environment switch in the browser-use plugin runtime, not a user-facing privacy setting"
+   ],
+   "confidence": "high"
+  }
+ }
+}

@@ -1,0 +1,135 @@
+{
+ "finalId": "F-t2-020",
+ "tier": "priority",
+ "rank": 20,
+ "title": "Harden persistent browser profiles: complete snapshots, per-org envelope encryption at rest, ordered saves, ZDR enforced inside Quarry",
+ "summary": "Capture cookie expiry, storage for every origin and IndexedDB in profile snapshots; envelope-encrypt snapshots (and secret job inputs) per org and owner with keys obtained through a Control Plane key API (env master key first, KMS later); add monotonic saved_at and deletion tombstones; wire the S3 store and the GDPR purge consumer; and enforce in Quarry, not only in the UI, that ZDR orgs get no persistent profile.",
+ "whyItMatters": "Persistent profiles hold live session cookies for users' signed-in sites. Today snapshots are incomplete and not encrypted at rest (SRC), which is a data-governance risk that grows with every login handed to the agent. Encryption is specified in docs/CONTRACTS.md:185-199 but not implemented.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl profiles (firecrawl-api-surface-058 and firecrawl-engine-and-infra-106, SRC)",
+  "others": [
+   "Apify SessionPool with session-to-proxy-IP pinning (apify-platform-059, DOC)",
+   "Firecrawl: caller cookies seeded through the browser cookie jar, not a header (firecrawl-engine-and-infra-010, SRC)",
+   "Apify (secret inputs encrypted per user and Actor, decrypted only inside the run)"
+  ],
+  "prevalence": "2 of 4 sources (apify, firecrawl), table-stakes || 1 of 4 sources; unique (adopted here as a security baseline, not a feature)",
+  "mechanism": "Profile = {id, scope, owner, fingerprint, egress affinity, snapshot blob ref, saved_at, deleted_at}. Save is an UPSERT with saved_at = GREATEST(saved_at, new) and is ignored when a newer deletion tombstone exists, so a late save cannot resurrect a deleted profile. Snapshot = all cookies (expiry, SameSite, partition key) + local/session storage per origin + IndexedDB export, encrypted with a per-org key. Profiles are refused under ZDR, lockdown and Safe Mode. Caller cookies go in with Network.setCookies at the registrable domain. || Merged items add: On save generate a random AES-256-GCM key, encrypt the value, wrap that key with an RSA-2048 public key unique to (user, tool) and persist ENCRYPTED_VALUE:<wrapped>:<ciphertext>. At run start the runtime receives the private key through a mounted file or env and decrypts in process; logs and stored input keep only ciphertext."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1771-1832 (capture_snapshot: expires: None, indexed_db: vec![], storage read by evaluating in the current page only, UA/locale/timezone captured via page JS)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:685 (snapshot capture with a 5 s timeout)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_profile_store.rs:247 (indexed_db: vec![]); grep: no encrypt/aes/kms in postgres_profile_store.rs, s3_profile_store.rs, cached_profile_store.rs, persistent_session.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:166 (S3ProfileStore exported but never constructed outside its module)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs:102-432 (CRUD, scopes, restore probe; no ZDR check found)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:174 (reject_zdr_persistent_profile exists only in the gateway)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_profile_store.rs:38-60",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_profile_store.rs:160-176",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/s3_profile_store.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/cached_profile_store.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:545-600",
+   "apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md:185-199"
+  ],
+  "gap": "Snapshots drop cookie expiry, capture storage only for the current origin, never capture IndexedDB, are not encrypted at rest, have no save ordering or tombstones, and the S3 store is unwired. page.get_cookies() may also return only the current URL's cookies rather than the whole context (inference from CDP Network.getCookies defaults; verify and prefer Storage.getCookies for the context). ZDR refusal is enforced only at the gateway. || SRC: profile snapshots are stored as a plain JSON snapshot column (PostgresProfileStore), as profiles/{org}/*.json objects (S3), and are held in a Redis read-through cache with a 3600 s TTL; no encryption code exists in any of the three. DOC: CONTRACTS.md specifies an encryption block (xchacha20poly1305 or aes-256-gcm, key from env or KMS, AAD binding org and profile) and the reliability doc lists encrypt-per-tenant plus erasure hooks, but neither is implemented. integration-corev2 has an AES-GCM vault (v1: prefix, one static key) used for connector tokens, so the pattern exists, in Go. There is no secret-field concept for job inputs."
+ },
+ "approach": "Ingestion Plane (quarry-browser profile snapshot, postgres_profile_store) + Control Plane key API. Profile pinning for scrape is F-t2-058. || Source detail: [R-t2-03-02] Ingestion Plane: in quarry-browser capture_snapshot use Storage.getCookies/Network.getAllCookies for the BrowserContext with expiry and SameSite, iterate visited origins for DOMStorage, add IndexedDB via the CDP IndexedDB domain, and re-apply UA/locale/timezone with Emulation overrides on restore. In quarry-runtime profile stores add an envelope-encryption layer (data key per profile wrapped by an org key; the Control Plane owns keys and Quarry fetches wrapped keys over its API, never through its DB), a saved_at monotonic upsert plus tombstone column in postgres_profile_store.rs, and construct S3ProfileStore in main.rs for blobs above a size threshold. In profile_routes.rs and session create, reject persistent profiles when the request or token ZDR floor is set. Keep scopes and the restore probe; Space access must never widen a profile's owner ACL. || [R-t2-06-03] Ingestion Plane, quarry-runtime: add an encrypting layer at the row/object serialization boundary of postgres_profile_store.rs and s3_profile_store.rs (not above the cache) so the Redis cache holds the ciphertext envelope, or bypass the cache for snapshots. Envelope format {enc_v, key_id, nonce, aad = org|profile|snapshot, ciphertext}; data key per (org, owner) wrapped by a master key from QUARRY_PROFILE_KEY or a KMS id with key_id for rotation. Lazy re-encrypt plaintext rows on next save plus a one-off backfill migration. Wire the existing GDPR purge consumer to delete the wrapped key (crypto-shredding). Mark isSecret in the pack schema (R-t2-06-06) so receipts and gateway logs redact them.",
+ "effort": "M",
+ "dependencies": [
+  "Control Plane key-management API for org keys",
+  "F-t2-007 (per-page emulation hooks used on restore)",
+  "Master key source (env now, KMS or Control Plane key service later)",
+  "GDPR purge consumer (baseline v-quarry-101, not re-verified)"
+ ],
+ "planeOwner": "Ingestion Plane + Control Plane (keys)",
+ "risks": "Session cookies are high-value data: key handling, erasure hooks and scope checks must be right; IndexedDB export can be large; restoring stale snapshots on changed sites can look like a hijack to the origin. || Key rotation and loss: losing the master key destroys all profiles. Restore latency is small but the cache path must not hold plaintext. ZDR already forbids persistent profiles, so only non-ZDR rows migrate. Rust AES-GCM implementation must be new (the Go vault cannot be reused directly) and nonce handling must be reviewed.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 12,
+  "DOC": 5,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-02] apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md Phase 3 (session health, encrypted profile TTLs, erasure hooks, ZDR/session persistence tests); the snapshot-completeness gaps are not listed || [R-t2-06-03] docs/CONTRACTS.md:185-199 (encryption block) and docs/SOVEREIGN_SCRAPING_RELIABILITY.md:134 and :289; not implemented"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-02",
+  "R-t2-06-03"
+ ],
+ "sourceClusters": [
+  "C-t2-03-008",
+  "C-t2-06-003"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Platform & ecosystem"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-020",
+   "status": "partial",
+   "exactGap": "Profile persistence works end to end (prod boot requires the Postgres store, Redis read-through cache, scopes, restore probe, and ZDR refusal at run creation inside Quarry at agent_routes.rs:527-533/1470-1476), but capture_snapshot (chromiumoxide.rs:1771-1832) calls Page::get_cookies, which in chromiumoxide 0.9.1 returns only cookies matching the tab's current URL, sets expires to None, reads storage only for the current origin and hardcodes indexed_db to empty. Snapshots are stored as plaintext JSON through a last-write-wins upsert with no saved_at ordering or tombstone (postgres_profile_store.rs:72-92), cached unencrypted in Redis (main.rs:597-600), S3ProfileStore is exported but never constructed (lib.rs:166, main.rs:545-600), the purge consumer covers page images only (page_image.rs:43-60), and the /v1/profiles routes check org id only, with no ZDR or owner check and GET returning raw cookie values (profile_routes.rs:102-125, 268-296).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1771-1832 (capture_snapshot: expires None, indexed_db vec![], storage via page evaluate)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:675-695 (persist_current_page with 5 s timeout)",
+    "C:/Users/ImaFernandesDaCosta/.cargo/registry/src/*/chromiumoxide-0.9.1/src/page.rs:900-907 (Page::get_cookies returns cookies matching the tab's current URL)",
+    "apps/Ingestion Plane/Quarry-v2/Cargo.lock:1153-1154 (chromiumoxide 0.9.1)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_profile_store.rs:30-92 (plain JSON snapshot column; upsert sets updated_at = NOW(), no ordering)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_profile_store.rs:247 is inside the test module (a fixture), not production code; the real gap is chromiumoxide.rs:1817",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:545-600 (Postgres or in-memory store, Redis cache, S3 store never built)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:692-708 (prod boot fails unless profiles are durable)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:527-533, 1466-1476 (ZDR refusal of persistent profile enforced inside Quarry at run creation)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs:102-125, 268-296, 298-312 (save, load, delete scoped by org id only; no ZDR check; no owner check)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_image.rs:43-61 (purge handling is page images / CAS)",
+    "apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md:183-200 (encryption block specified, not implemented)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:174, 470-476 (gateway-only reject_zdr_persistent_profile, applied in create_session)"
+   ],
+   "reuse": [
+    "PostgresProfileStore / ProfileStore trait as the single serialization boundary for an encryption layer (below the Redis cache so the cache holds ciphertext)",
+    "zdr_forbids_persistent_profile (agent_routes.rs:527) and Claims::zdr_floor for the same guard on /v1/profiles routes",
+    "profile_routes restore_probe and ProfileScope metadata",
+    "migrations directory (0002_profiles.sql, 0005_profile_metadata.sql) for a saved_at/tombstone migration",
+    "integration-corev2 AES-GCM vault is a pattern reference only (Go, not opened by this audit; cannot be linked into Rust)"
+   ],
+   "constraints": "Ingestion Plane owns profile data; keys must come from a Control Plane key API (no cross-plane DB access) and Quarry must never read Control Plane tables. GDPR erasure by crypto-shredding needs a Control Plane erasure event that Quarry consumes; today's consumer handles page images only. Quarry's store is keyed by (org_id, profile_id) with no owner column, so owner and Space isolation is enforced above it (gateway); a Space must never widen a profile's owner ACL, and the routes must not be exposed to a wider audience before an owner check exists. Model Plane must never see cookie values. ZDR orgs get no persistent profile at any entry point.",
+   "approachAdjustment": "Placement (Ingestion + Control Plane keys) is right. Fixes: (1) capture BrowserContext-wide cookies with expiry and SameSite via Storage.getCookies or Network.getAllCookies instead of Page::get_cookies, plus per-origin DOMStorage and IndexedDB; (2) drop 'wire the S3 store' from the first slice since prod already requires Postgres, and encrypt the Postgres row (and Redis payload) first; (3) retarget the ZDR item to the /v1/profiles routes because run creation already enforces it; (4) extend the purge consumer to profiles rather than merely wiring it; (5) decide whether GET /v1/profiles/:id should ever return raw cookie values; (6) correct the evidence note: indexed_db in postgres_profile_store.rs:247 is test code.",
+   "effortRevised": "L",
+   "effortNote": "Two independent halves: snapshot completeness over CDP including IndexedDB export and restore (M), and envelope encryption with a new Control Plane key API, tombstones and erasure hook (M to L). Recommend splitting.",
+   "verdict": "reword",
+   "verdictReason": "Gaps are real (current-URL cookies, no expiry, no IndexedDB, plaintext at rest, no ordering) but ZDR is already enforced inside Quarry for runs, the S3 path is unnecessary for the first slice, one evidence line is a test fixture, and the purge consumer does not touch profiles; reword and split.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-020",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/lib/browser-sessions.ts:115, 228-330 (save ignored unless savedAt > tombstone deletedAt; saved_at = GREATEST(...); tombstone stored as key browser-profile-deleted:<teamHash>_<name> via getValue/recordBrowserProfileDeleted, not a DB column; delete removes rows with saved_at <= deletedAt)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:850, 875-876 (profiles rejected with lockdown)",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:133-140 (ZDR rejects recordSession and profile)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/browser.ts:235-250 (409 while a session is saving to the profile)",
+    "grep 'encrypt' in C:/dev/firecrawl/apps/api/src/lib/hangar.ts and lib/browser-*.ts (no hits)",
+    "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:474-502 (Cookie header -> requestContext.addCookies with domain = last two host labels; Playwright API, not CDP Network.setCookies)",
+    "scratchpad/tmp/cxib/main.pretty.js (grep: 'persist:codex-browser-' partitions, browserStorageId, browserProfileImporter x4)",
+    "Apify isSecret / SessionPool records are DOC (docs.apify.com secret-input page, crawlee.dev session-management); not re-fetched"
+   ],
+   "corrections": "1) The snapshot spec (all cookies with expiry, SameSite and partition key, per-origin storage, IndexedDB export) and 'encrypted with a per-org key' must not be attributed to Firecrawl. Firecrawl keeps only a profile listing; the profile state lives in the external Hangar service, and no encryption code exists in the repo. These are Verevon requirements, from Verevon's own docs/CONTRACTS.md:185-199. 2) Apify's encryption (AES-256-GCM key wrapped by a per-(user, Actor) RSA key) applies to secret Actor input fields, not to browser profiles or session cookies. No reference shows envelope encryption of browser profiles, so present it as a security baseline borrowed from the input-secret pattern, not parity. 3) The Firecrawl tombstone is a key-value entry keyed by team hash and name, not a deleted_at column; the save-ordering mechanism is otherwise accurate. 4) Caller cookies are seeded with Playwright context.addCookies using a 'last two host labels' heuristic, which is not a registrable/public-suffix domain and is wrong for co.uk-style suffixes. It is not CDP Network.setCookies. Fix the wording. 5) Prevalence '2 of 4 (apify, firecrawl)' undercounts persistence: Codex keeps browser storage in persistent 'persist:codex-browser-*' partitions with a browserStorageId and a profile importer (SRC grep), and Aside is a full Chromium browser with profiles (INF). Apify's SessionPool cookie-per-proxy-session is only a weak analogue of a named profile.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Firecrawl profile contents and at-rest handling live in Hangar (closed and hosted); only the listing and ordering logic is SRC",
+    "Apify evidence is DOC only",
+    "Chromium-based agent browsers (Codex, Aside) likely protect cookies at rest with OS-bound keys (INF, not verified here); this is local-device encryption, not per-org",
+    "The per-org envelope encryption design is Verevon-internal intent (DOC CONTRACTS.md), not a reference feature"
+   ],
+   "confidence": "high"
+  }
+ }
+}

@@ -1,0 +1,96 @@
+{
+ "finalId": "F-t2-050",
+ "tier": "recommended",
+ "rank": 26,
+ "title": "Fail-closed PII redaction stage for scraped and crawled content",
+ "summary": "Add an optional redaction transform in the Ingestion Plane pipeline (after markdown, before LLM formats, diffing and Data Plane ingest) that calls the Model Plane language PII provider with entity types and a replace style (tag, mask, remove). Policy comes per org from the Control Plane; if redaction fails or exceeds a size limit the response returns empty content plus a warning.",
+ "whyItMatters": "GDPR posture: orgs can ingest web content into the Data Plane without storing personal data, which complements ZDR. Today only model input is filtered, not what Quarry stores.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (engine-and-infra-096 privacy service; api-surface-054 options)",
+  "others": [],
+  "prevalence": "1 of 4 sources in this record set (Firecrawl); unique",
+  "mechanism": "After markdown derivation and before downstream transformers and LLM formats, send markdown plus {mode, entities, replaceStyle} to a redaction service with model, Presidio and spaCy accuracy tiers; replace spans; if the call fails or the size limit is exceeded, return empty markdown with a warning (fail closed)."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1-20",
+   "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:83-106",
+   "apps/Model Plane/rust/services/inference-core/src/provider/language.rs:1-25",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:101"
+  ],
+  "gap": "The Model Plane gateway redacts emails and long number sequences from model input under a pii_filter policy, and inference-core has a language provider with a Pii operation. Quarry scrape and crawl output and Data Plane ingest are not redacted. agent_memory::redact_sensitive is re-exported in lib.rs with no caller. Cost: the model-gateway grant to Quarry is still refused (see R-t2-02-02)."
+ },
+ "approach": "Ingestion Plane: add a redact stage in the transform pipeline gated by a per-org policy (Control Plane) and a per-request option on FormatSpec; call a Model Plane PII route (language provider) over the markdown; fail closed with a warning; run before json/summary formats and before hashing for change tracking so monitors do not store raw PII. Reuse the Model Plane deterministic pii_filter as a cheap first pass.",
+ "effort": "M",
+ "dependencies": [
+  "model-gateway grant to quarry-edge (shared with F-t2-019)",
+  "Control Plane org policy field",
+  "F-t2-005 (option and warnings)"
+ ],
+ "planeOwner": "Ingestion Plane (stage) with Model Plane (PII model) and Control Plane (policy)",
+ "risks": "Over-redaction damages content and extraction quality; added latency on crawls; redaction accuracy claims need testing for Norwegian and other non-English text.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-02-09"
+ ],
+ "sourceClusters": [
+  "C-t2-02-019"
+ ],
+ "sourceCategories": [
+  "Output formats & content processing"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-050",
+   "status": "planned",
+   "exactGap": "SRC: nothing in the scrape/crawl path redacts content: PageRunner builds markdown, links and metadata (pipeline.rs:505-516) and persists the raw html artifact, the markdown artifact and meta.json (pipeline.rs:604-660) before the optional Data Plane ingest (pipeline.rs:855+), and quarry_runtime::redact_sensitive (agent_memory.rs:52) is used only by AgentScratchpad. SRC: the building blocks differ from the item's assumptions: Model Plane /v1/ai/language/pii accepts no entity-type or replace-style parameters (AiLanguageRequest, http_routes.rs:1947-1957; Azure parameters hard-code all categories and a '*' mask, language.rs:529), the deterministic pii_filter lives in model-gateway and is driven by capability-core safety_policies (moderation.rs:3-5,123), and quarry-edge holds no model-gateway audience (cross-plane-token-requests.json rows model-invoke, model-stream and model-audio are granted:false). DOC: SOVEREIGN_SCRAPING_RELIABILITY.md:97 and :218 already plan a redact_before_persist policy and a 'PII Redactor' pipeline stage, so this is planned but unbuilt rather than unplanned.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:505-516 (markdown, links, metadata built; no redaction step)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:525 (fingerprint over raw body bytes) and :604-660 (html, markdown, meta.json artifacts persisted)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:49-67 and :96-105 (whitespace-tokenizing redact_sensitive; emails, secret-like tokens, 13-19 digit runs only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:101 (re-export only)",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:1-20 and :83-135 (pii_filter policy and enforcement; capability-core owns the policy)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:442, :1947-1957, :4732-4739 (/v1/ai/language/pii and its request type)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/language.rs:25, :46, :517-530 (Pii operation; categories All, redactionCharacter *)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:40-73 (model rows granted:false at :45, :62, :73)",
+    "apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_INTEGRATION.md:70-80 (quarry-edge holds only the data-plane audience)",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:97 and :218 (planned redact_before_persist and PII Redactor stage)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/privacy.rs:65 (guard_third_party_processing)",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/redact.rs:1-30 (regex redaction for logs only)"
+   ],
+   "reuse": [
+    "model-gateway moderation.rs redact_pii (deterministic first pass pattern)",
+    "quarry-core PrivacyPolicy::guard_third_party_processing to gate any PII provider as a third-party processor",
+    "Data Plane retrieval-engine-rs redact.rs regex set (email, phone, card) as a reference for a shared deterministic redactor",
+    "quarry-transform crate as the home for a pure, dependency-light redactor",
+    "Model Plane /v1/ai/language/pii as an optional second tier once a grant exists"
+   ],
+   "constraints": "SRC: org PII policy is owned by capability-core safety_policies in the Model Plane (moderation.rs:3-5), not the Control Plane, so 'policy comes per org from the Control Plane' misassigns ownership; no cross-plane DB access means Quarry must read it through an API or accept a per-request flag. SRC: sending page text to the Model Plane PII route is third-party processing (Azure AI Language) that needs the PrivacyPolicy processor gate and ZDR-eligible terms, and the model-gateway grant is currently refused (decision D16/QB-T17). SRC: redaction must cover every persisted representation, not just markdown: raw html artifact, markdown, meta.json, the local search index, page screenshots for visual RAG, and Data Plane ingest.",
+   "approachAdjustment": "Start with a deterministic in-process redactor in quarry-transform (regex plus checksum validators for emails, phone numbers, IBAN, card Luhn and the Norwegian 11-digit fodselsnummer mod-11) behind a per-request redact option and an org default read from the existing policy source; do not reuse redact_sensitive as-is because it whitespace-tokenizes and would flatten markdown. Make it fail closed at the persistence boundary (no html, markdown, meta, index or ingest write when redaction errors) instead of only blanking the response. Treat the Model Plane PII model as an optional second tier after the model-gateway grant lands, and extend its route with categories and replace style if needed.",
+   "effortRevised": "L",
+   "effortNote": "A deterministic stage over markdown alone is M; covering all persisted representations, the policy source and an optional model tier makes the item L.",
+   "verdict": "reword",
+   "verdictReason": "Not shipped, but the item misstates policy ownership, ignores raw html and other persisted artifacts, assumes a Model Plane call that is not granted and parameters the route lacks, and omits that the sovereign scraping doc already plans the stage; reword to deterministic-first, persistence-boundary redaction.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

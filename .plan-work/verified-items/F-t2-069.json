@@ -1,0 +1,98 @@
+{
+ "finalId": "F-t2-069",
+ "tier": "nice-to-have",
+ "rank": 4,
+ "title": "Quarry-backed page utilities: find, zoom, print-to-PDF, full-page and area screenshot, viewport emulation, colour scheme",
+ "summary": "Expose what the Chromiumoxide driver already does (full-page screenshot and PDF) through the gateway and the shell, and add the missing pieces in Quarry: a find action that returns match rects to highlight in the frame, viewport_set and reset through device-metrics emulation, a colorScheme session option that follows the user's theme, and a zoom scale. Frontend adds a find bar, zoom control, device presets, area-select capture and copy-to-clipboard. Print and screenshot outputs are artifacts, withheld under ZDR.",
+ "whyItMatters": "Find, zoom, print and capture are table-stakes for a browser panel, and viewport control is one of the plan's own never-closed capabilities. Most of the capture work is already in the driver, so the gap is exposure rather than engine work.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (find, per-tab zoom, device metrics override, emulated colour scheme); Aside for the screenshot overlay with area handles",
+  "others": [
+   "Aside (viewport and full-page capture, copy to clipboard)",
+   "Codex screenshots attached to comments and cropped thumbnails"
+  ],
+  "prevalence": "Utilities: 2 of 3 sources, table-stakes. Screenshots: 2 of 3, table-stakes. Viewport emulation: 1 of 3 and colour scheme: 1 of 3, both unique.",
+  "mechanism": "findInPage open, query, next, previous and close; zoom percent persisted per tab with a banner; Emulation.setDeviceMetricsOverride {width, height, deviceScaleFactor, mobile} with an explicit reset; Emulation.setEmulatedMedia for prefers-color-scheme re-synced on theme change; full-page capture through captureBeyondViewport or scroll-and-stitch with a drag-area overlay. For Verevon: Quarry CDP calls plus a thin UI."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392-2400 (screenshot with capture_beyond_viewport(full_page))",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2440 (page.pdf with PrintToPdfParams)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:817-820 (Screenshot and Pdf actions)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1256 (viewport screenshot stored as an artifact)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1912-1940 (DevTools drawer: console, DOM, network, vision)",
+   "No set-device-metrics or emulated colour-scheme code found in apps/Ingestion Plane/Quarry-v2/crates by grep (INF); viewport is a session start parameter only",
+   "docs/BROWSER_WORKSPACE_PLAN.md target capability 12 (viewport and device controls) never closed (baseline)"
+  ],
+  "gap": "Viewport screenshot and the DevTools drawer ship. The shell exposes no full-page or area capture, no PDF, no find, no zoom, no device emulation and no copy to clipboard; colour scheme is not a session option."
+ },
+ "approach": "Ingestion Plane (Quarry): add find (DOM text search with rects), viewport_set and reset, colorScheme on session start, zoom scale; surface Pdf and full_page or clip screenshots as artifacts (withheld under ZDR). Frontend Plane: find bar, zoom control, device presets, area-select capture, copy to clipboard. Recording stays out of scope here (see dropped C-t2-08-032).",
+ "effort": "M",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane (Quarry) with Frontend Plane UI",
+ "risks": "Low. Colour-scheme emulation changes appearance in evidence screenshots; keep it a documented session option.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 11,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-08-12] docs/BROWSER_WORKSPACE_PLAN.md target capability 12 (viewport and device controls) listed but not closed; the plan is stale."
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-12"
+ ],
+ "sourceClusters": [
+  "C-t2-08-013",
+  "C-t2-08-031",
+  "C-t2-08-021",
+  "C-t2-08-045"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-069",
+   "status": "partial",
+   "exactGap": "Quarry already executes full-page screenshot (AgentAction::Screenshot { full_page }) and print-to-PDF (AgentAction::Pdf, default PrintToPdfParams) through a ZDR-gated artifact path, but the gateway UI allowlist accepts only screenshot (pdf falls to 'Unsupported browser action' in sanitize_action), its artifact proxy coerces any non-image, non-JSON media type including application/pdf to image/png, and the shell only fires screenshot with full_page false. Not present anywhere: find in page, zoom, runtime viewport or device emulation (viewport is a lease field applied when Chromium launches), emulated colour scheme, area or clip capture, copy to clipboard.",
+   "evidence": [
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:817-820 (Screenshot { full_page } and Pdf in AgentAction; no find, viewport or media action)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392-2400 (screenshot with capture_beyond_viewport(full_page)) and :2438-2444 (page.pdf with default params)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:375-381 (Screenshot/Pdf need driver full_visual_fidelity), :516-541 (both stored via put_artifact_if_allowed with request.zdr)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1882 (full_visual_fidelity: true), :194-215 (ensure_browser relaunches Chromium and clears all pages when the lease viewport differs), :1914-1925 (acquire), :1851-1860 (chromium_viewport)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1447-1451 and :1897-1913 (viewport accepted on run start, bounded 320x240 to 3840x2160, scale 0.5-4, mobile flag)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:345-348 (DEFAULT_VIEWPORT 1280x800), :463-492 (create_session forwards only width and height), :1490-1500 (ZDR run: artifact answered as withheld), :3702-3761 (sanitize_action: screenshot allowed, pdf and evaluate refused), :3922-3938 (safe_browser_artifact_content_type falls back to image/png), :2578 and :2700 (advertised capability lists have no pdf, find, zoom or viewport)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:14 (BrowserAction union has screenshot with full_page, no pdf)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1259 (screenshot button sends full_page false), :1448-1460 and :530-545 (viewport shown read-only and used only to size the frame URL); grep finds no find, zoom or clipboard-of-page code",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs (grep: no viewport field sent by Model Plane runs)"
+   ],
+   "reuse": [
+    "AgentAction::Screenshot { full_page } and AgentAction::Pdf plus the ZDR-aware put_artifact_if_allowed path (no engine work for full-page capture or PDF)",
+    "Gateway ZDR artifact-withheld response and the existing typed artifact viewer in BrowserChrome",
+    "BrowserAction union in browser-client.ts and the runAction helper",
+    "Quarry normalize_viewport bounds (reuse the same limits for any viewport_set)",
+    "DevTools drawer and live-frame stream sizing (maxWidth/maxHeight) in BrowserChrome"
+   ],
+   "constraints": "The shared chromiumoxide driver keeps one Chromium process with a process-wide active viewport: acquiring a lease whose viewport differs closes and relaunches the browser and clears every page, egress policy and dialog (chromiumoxide.rs:194-215). The gateway sends 1280x800 while Model Plane's quarry_agent.rs sends none, so a UI device preset applied through the lease would tear down concurrent runs; runtime viewport, zoom and colour-scheme control must be page or context scoped CDP emulation, never lease-viewport based. ZDR for screenshot and PDF artifacts is already enforced in Quarry and the gateway, so only the new UI must keep honouring the withheld state. Model proposes, Quarry executes: any new action (find, viewport_set, colour scheme) added to AgentAction is also a model-proposable action and needs a risk class (read-only for find, low for emulation); UI-only affordances such as zoom and find need not enter the model allowlist.",
+   "approachAdjustment": "Reword into two steps. Step 1 (S, gateway and frontend only): add pdf to sanitize_action, add application/pdf with attachment disposition and nosniff to safe_browser_artifact_content_type, add full_page and a PDF button to the shell, and do area capture and copy-to-clipboard client-side from the returned PNG. Step 2 (M, Quarry): add page-scoped Emulation (setDeviceMetricsOverride with reset, setEmulatedMedia for prefers-color-scheme, page scale for zoom so the JPEG live frame stays sharp) and a find action returning match rects; do not route device presets through the lease viewport.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged overall, but now two parts: Step 1 is S (exposure and one content-type fix); Step 2 is M because viewport emulation must avoid the process-wide relaunch behaviour.",
+   "verdict": "reword",
+   "verdictReason": "Partial is correct and the item rightly says capture is already in the driver, but it omits two real gateway blockers for PDF (allowlist and media-type coercion) and it misses that viewport changes through the lease relaunch the shared Chromium, which changes the approach for presets. ZDR withholding for these artifacts already exists, so that part should not be listed as new work.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

@@ -1,0 +1,143 @@
+{
+ "finalId": "F-t2-016",
+ "tier": "priority",
+ "rank": 16,
+ "title": "Scoped, robots-compliant crawl: wire CrawlFrontier scoping, robots enforcement and typed denials into the live crawl path",
+ "summary": "The Go CrawlJobWF enqueues every discovered link with no scope or robots check (workflows.go:396-610, SRC), while the Rust CrawlFrontier with typed denials and the RobotsCache/parser exist unused; robots.txt is applied only in /v1/map. Add the scoping vocabulary (include/exclude paths with ReDoS and size caps, subdomain and external-link switches, depth, sitemap mode) on a ScrapeOptions-backed CrawlRequest; enforce robots by default on crawl, batch and Model-proposed autonomous fetches, with ignore-robots as an audited Control Plane entitlement; report blocked URLs as typed per-URL errors with fix-it messages; and decide the ZDR posture of the durable orchestrator path (crawls are refused under ZDR today).",
+ "whyItMatters": "Scoping and robots compliance are table-stakes in both crawl benchmarks (Firecrawl SRC, Apify DOC). Repo docs claim robots handling is closed while the code does not enforce it (SRC). Unscoped crawls waste budget and expose every org to compliance risk.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (native Rust filter_links with typed denial map and remediation messages)",
+  "others": [
+   "Apify enqueueLinks (strategy, globs, transformRequest hook)",
+   "Firecrawl (api-surface fc-008 full scoping vocabulary)",
+   "Firecrawl (SRC)"
+  ],
+  "prevalence": "2 of 4 sources (both crawl platforms; Codex and Aside have no crawler); table-stakes || scoped crawl: 2 of 4 sources (Firecrawl, Apify), table-stakes || 2 of 4 sources (Firecrawl, Apify); table-stakes for the scraping half",
+  "mechanism": "filter_links(candidates, opts) returns (allowed, denials{url: reason}). Checks in order: parse, protocol, fragment-only, depth > maxDiscoveryDepth, scope (directory prefix of seed unless crawlEntireDomain/allowBackwardLinks), domain/subdomain/external, include then exclude patterns on path or full URL, file extension, social-media, robots. Patterns are validated with ReDoS caps (<=1000 patterns, <=2000 chars each, 100k total). Each denial reason maps to a message that names the matched pattern or depth and the option to set (for example allowSubdomains). Apify adds a transformRequest hook so callers can drop or retag requests. || Merged items add: CrawlRequest {url, includePaths[], excludePaths[] (regex, optionally matched on the full URL), maxDiscoveryDepth, limit, crawlEntireDomain, allowSubdomains, allowExternalLinks, sitemap skip|include|only, ignoreQueryParameters, delay, maxConcurrency, scrapeOptions, webhook}; reject over 1000 patterns or 2000 chars each; the frontier filters candidates through scope rules, a robots cache, canonicalisation and dedupe; a robots override exists only behind a team flag; limit is clamped to remaining credits. || Before enqueue/fetch, get robots.txt for the origin from a cache (TTL about 1 day), fetching it through the normal engine chain with a short timeout. Evaluate it for the product user agent. If disallowed, skip the URL and record {url, reason: robots} in a per-job blocked set that the errors endpoint returns. Crawl enforces by default and scrape is opt-in. Override flags (ignore robots, custom UA) are team entitlements checked at request time and forbidden under a compliance profile. Fetch errors fail open."
+ },
+ "verevonToday": {
+  "status": "stub",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:54-380",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:474-486",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:570-585",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386",
+   "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:36-38",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-560 (CrawlRequest has only url, max_pages, max_depth, ingest, zdr)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:560-668 (refuse_durable_job_under_zdr: crawl and batch are refused for ZDR because run_page runs without a zdr field)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516 (Temporal crawl BFS)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs (RobotsCache exists but is referenced only inside its own module and tests)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:170-260 (robots is applied only as an allow-filter in /v1/map, via quarry_transform::robots::RobotsTxt)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/crawl_denial.rs:15-16 (RobotsDisallowed denial reason exists)"
+  ],
+  "gap": "Crawl accepts url, max_pages, max_depth, ingest, zdr only; no scope filter, no robots on crawl/batch, respect_robots only changes the fingerprint; Quarry user-agent strings are inconsistent (Quarry/2.0, QuarryBot/1.0, QuarryBot) (SRC)."
+ },
+ "approach": "Ingestion Plane: call the Rust scope and robots filter from the Go workflow (edge endpoint or activity helper), add CrawlRequest fields, and unify the user-agent token as a first step (the rest of identity work is F-t2-067). Control Plane: ignore-robots entitlement and audit event. Sitemap seeding and URL canonicalisation follow in F-t2-041. || Source detail: [R-t2-05-01] Ingestion Plane (quarry-runtime, quarry-core, orchestrator, edge) with a thin Frontend change. Keep frontier mutation in Rust as ROADMAP Phase 5 states: add a filter_links entry point in quarry-runtime that takes (candidates, CrawlScopeConfig, RobotsCache) and returns allowed links plus a denial map; call it from the Go crawl activity before FrontierEnqueue (both the in-workflow slice and the durable frontier). Extend CrawlRequest/CrawlJobInput with includePaths, excludePaths, allowSubdomains, allowExternal, crawlEntireDomain, maxDiscoveryDepth; apply the same SSRF/egress guard the gateway already uses (normalize_public_http_url). Emit a crawl.links_denied event with per-reason counts and a remediation string, and include them in crawl status. Gateway: extend normalize_crawl_body and the crawl composer with scope fields. Ship explicit defaults (same host, directory prefix) and a flag for legacy behaviour. || [R-t2-01-03] Ingestion Plane. Extend CrawlRequest in routes.rs and the CrawlJobInput the Go workflow receives (workflows.go:396-516); put scope rules in the frontier (compile with the Rust regex crate to avoid ReDoS, or filter links in the run_page response); consult the existing RobotsCache before enqueue and emit RobotsDisallowed events that the /errors route (R-t2-01-02) returns; seed from robots Sitemap: lines using quarry_transform::sitemap; embed ScrapeOptions from R-t2-01-01; clamp limit to the org budget. ZDR: carry the zdr posture through the orchestrator and /v1/internal/run_page so a ZDR org can crawl with no durable artifacts or events, or keep refusing with a documented contract (Temporal history currently stores URLs, so this needs a design decision). Keep 'Model proposes, Quarry executes': do not add /v1/crawl to service-token scopes; the Model proposes a crawl, the user approves in the UI, and the gateway starts it under the user's token. A robots override must be an org policy set in Control Plane and audited. || [R-t2-04-01] Ingestion Plane (Quarry-v2). (1) Add an async robots preflight next to SecurityEngine.preflight / validate_navigation: resolve the product UA token (see R-t2-04-09), read robots from RobotsCache (about 24 h TTL, short fetch timeout) fetched through the same SSRF-guarded, DNS-pinned driver chain, evaluate with quarry-transform robots.rs. (2) Wherever crawl dispatch lives (Go CrawlJobWF today, Rust crawl workers per GAP.md Phase 5), check before dispatch and push (url, RobotsDisallowed) into CrawlFrontier.denials; surface the blocked list on crawl/batch status. (3) For agent runs, enforce on Model-proposed navigations under an org default, while human-driven manual browsing in the Verevon browser pane stays exempt as a user agent (policy decision to confirm). (4) Treat 4xx on /robots.txt as allow-all and 5xx or unreachable as disallow-all with a bounded retry, as RFC 9309 specifies (INF), rather than a blanket fail-open; make it configurable. (5) Control Plane: entitlement robots.ignore plus an audit event; the Model can never request a bypass. Change the fast preset to require it. (6) Fix the GAP.md rows that wrongly say closed.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-041 shares the scope filter for sitemap seeding",
+  "Go-to-Rust call path for filtering (edge endpoint or activity helper)",
+  "F-t2-005 ScrapeOptions",
+  "F-t2-017 errors and cancel routes",
+  "Control Plane org policy and audit for any robots override",
+  "ZDR design for the durable orchestrator path",
+  "RobotsCache and RobotsTxt parser (exist)",
+  "Single product user-agent token (F-t2-067)",
+  "Crawl dispatch path (Go CrawlJobWF or Rust crawl workers) to host the preflight call",
+  "Control Plane entitlements and audit events (shared with F-t2-022)"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-control workflow + quarry-runtime frontier); Control Plane (override entitlement, audit)",
+ "risks": "Changing the default scope alters existing crawl results; make defaults explicit and document the legacy opt-out. Over-tight directory-prefix scope can miss sibling sections users expect, so denial summaries must be visible in the UI. || Regex DoS (cap pattern count and length, use linear-time engine); robots override must be policy-controlled and audited; durable Temporal history conflicts with ZDR unless redesigned; politeness limits per host must still hold with higher concurrency. || Agent runs will be blocked more often on sites that disallow all bots, so the user-facing message must be clear (reuse the R-t2-04-03 state). Whether manual browsing is exempt is a product decision. Check that ReqwestRobotsFetcher goes through the DNS-pinned SSRF guard and sends the product UA (not verified).",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 20,
+  "DOC": 5,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-05-01] apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (sitemap, robots, include/exclude, typed denial reasons) and docs/PLAN.md; Rust types exist but are not wired into the crawl path"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-05-01",
+  "R-t2-01-03",
+  "R-t2-04-01"
+ ],
+ "sourceClusters": [
+  "C-t2-05-007",
+  "C-t2-01-006",
+  "C-t2-04-013"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale",
+  "Acquisition API surface",
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-016",
+   "status": "stub",
+   "exactGap": "The Go CrawlJobWF (workflows.go:396-516) and its durable-frontier variant (518-610) enqueue every extracted href after only a depth check (links::extract keeps external links and InternalRunPageResult.links is all hrefs, routes.rs:817-840), so there is no same-host scope, include/exclude, sitemap seeding or robots check, and CrawlRequest has only url, max_pages, max_depth, ingest and zdr (routes.rs:533-552); max_depth 0 and max_pages 0 mean unlimited. CrawlFrontier (crawl_frontier.rs), CrawlDenialReason (crawl_denial.rs) and RobotsCache/ReqwestRobotsFetcher (robots_cache.rs) have no production caller; the only live scope plus robots logic is /v1/map (map_routes.rs:87-109, 160-260), batch accepts any URL list unchecked, and crawl and batch are refused under ZDR (routes.rs:553-590).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:75-110",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:385-620",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-590",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:817-840",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/links.rs:1-23",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:87-135",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:160-260",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/robots_cache.rs:160-205",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:306-331",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386-405",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:568-571",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:440-460"
+   ],
+   "reuse": [
+    "map_routes.rs merge_and_scope and host_in_scope (87-109) for same-host and subdomain scoping",
+    "quarry_transform::robots::RobotsTxt and quarry_transform::sitemap, already used by /v1/map",
+    "CrawlFrontier and typed CrawlDenialReason (crawl_frontier.rs, crawl_denial.rs) for the Rust-side filter",
+    "RobotsCache TTL logic (robots_cache.rs) but with a guarded fetcher",
+    "Per-page page_failed and page_blocked events from runPage (workflows.go:174-202) for denial reporting",
+    "Gateway discover then select path (quarry.rs:312-331) that already sends curated subsets through batch",
+    "action-registry knowledge.crawl_site input schema (action-registry.ts:568) as the Model-proposable action to extend"
+   ],
+   "constraints": "Ingestion Plane owns crawl; a robots override must be an audited Control Plane entitlement and the Model can propose a crawl but never request a bypass. The Go orchestrator should not own frontier logic (ROADMAP Phase 5 keeps it in Rust), so filtering is an edge endpoint or activity call. ReqwestRobotsFetcher (robots_cache.rs:165-205) is a plain reqwest client without the SSRF guard or DNS pinning, so wiring it as-is opens an SSRF path on user-supplied hosts; robots must be fetched through the guarded driver chain that /v1/map uses (map_routes.rs:118-128, state.driver.fetch). ZDR: the durable path refuses ZDR because run_page carries no zdr field and Temporal history stores URLs (routes.rs:555-590); lifting it is a design decision.",
+   "approachAdjustment": "Sequence by risk. (1) S: default same-host (optionally subdomain) scope in both enqueue loops of the Go workflow, since a crawl today follows external links up to max_pages. (2) M: robots preflight at enqueue and for batch using the guarded fetch path and RobotsTxt, with typed denial events. (3) include/exclude patterns with ReDoS caps, sitemap seeding, ignore-robots entitlement and ZDR decision. Correct the GAP.md rows that call robots enforcement closed.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged. Step (1) alone is S; the full item stays L because of the Control Plane override entitlement and the ZDR design decision.",
+   "verdict": "keep",
+   "verdictReason": "The item description matches the code: scaffolding exists without a production path and robots is applied only in /v1/map; only the approach needs the guarded-fetch and sequencing notes.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-016",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/native/src/crawler.rs:124-130, 294-456 (_filter_links: denial_reasons map with code constants; order parse, protocol, depth, file type, section, backward, exclude, include, robots, social, external)",
+    "C:/dev/firecrawl/apps/api/src/lib/crawl-regex.ts:1-25 (MAX_PATH_PATTERNS 1000, MAX_PATH_PATTERN_LENGTH 2000, total 1000 patterns / 100k chars across both fields)",
+    "C:/dev/firecrawl/apps/api/src/scraper/WebScraper/crawler.ts:41-60, 186-200, 230-290 (DenialReason remediation messages and per-URL messages built in TypeScript)",
+    "C:/dev/firecrawl/apps/api/src/lib/robots-txt.ts:10,41-76 (fetched via forced engine list, timeout 8000, maxAge 1 day)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/shouldCheckRobots.ts (scrape checks robots only with safeMode.enforceRobots or team flag checkRobotsOnScrape; never in lockdown)",
+    "C:/dev/firecrawl/apps/api/src/lib/permissions.ts:80-100 (ignoreRobotsTxt / robotsUserAgent enterprise-gated; blocked under Safe Mode enforceRobots)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:363-368 (robots fetched at crawl start; failure tolerated; Crawl-delay commented out)"
+   ],
+   "corrections": "1) The Rust filter_links returns only typed codes; the remediation sentences are built in TypeScript (WebCrawler.filterLinks / DenialReason enum), so split 'native Rust filter_links with remediation messages'. 2) Several remediation texts still name v1 options (maxDepth, allowBackwardCrawling) and the ROBOTS_TXT text tells callers to set ignoreRobotsTxt, which is enterprise-gated; no message names allowSubdomains (external-link denials name allowExternalLinks). 3) Check order differs slightly: depth and file type come before fragment/scope, and robots is checked before social media. 4) Pattern caps: 1000 patterns total across include+exclude (not per field) and 100k characters total.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Apify enqueueLinks/transformRequestFunction and respectRobotsTxtFile are DOC-only, and robots is opt-in in Crawlee (not on by default)",
+    "Firecrawl robots enforcement is on by default for crawl only; scrape is opt-in via team flag or Safe Mode; overrides are enterprise flags",
+    "Firecrawl fails open when the robots.txt fetch fails and deliberately ignores Crawl-delay"
+   ],
+   "confidence": "high"
+  }
+ }
+}

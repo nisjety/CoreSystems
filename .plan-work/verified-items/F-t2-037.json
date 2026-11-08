@@ -1,0 +1,116 @@
+{
+ "finalId": "F-t2-037",
+ "tier": "recommended",
+ "rank": 13,
+ "title": "Document parsing depth: PDF classification and Model Plane OCR routing, Office and e-book conversion, bounded parsing and a per-org parse cache",
+ "summary": "Branch on PDF (content-type and %PDF magic) in the scrape/crawl pipeline: classify pages as text or scanned, extract text natively with the existing lopdf code, and route only pages that need OCR or layout to the Model Plane document-intelligence provider. Add parsers:[{type:pdf, mode: fast|auto|ocr, maxPages}], per-page markdown and optional layout blocks with bounding boxes, and reuse the same OCR path for raster image URLs. || Add a quarry-transform document module that detects DOCX, XLSX, PPTX, ODF, RTF, CSV and EPUB from bytes and converts them to markdown under zip-bomb and part-size budgets, branch to it by content-type in the scrape/crawl pipeline, and add a crawl option to follow and store linked office/PDF files as artifacts. Put resource governance around all document parsers (including the PDF path): a tokio semaphore, size ceilings, per-page time budgets, and a content-hash parse cache keyed per org and disabled under ZDR.",
+ "whyItMatters": "Enterprise knowledge is mostly PDF; crawls that skip PDFs leave the Data Plane incomplete and answers ungrounded. The pieces exist in separate planes (native text extraction in Quarry, Azure prebuilt-layout in the Model Plane) but nothing connects them for a crawl. || Company sites link office documents and enterprise users expect them ingested into the Data Plane. Untrusted binary parsing without budgets is also an availability and security risk for Quarry workers, so the guardrails must ship with the parsers.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (engine-and-infra-080/081 classification and native fast path, api-surface-052 parsers options, engine-and-infra-089 image OCR)",
+  "others": [
+   "Firecrawl (engine-and-infra-085 anydoc crate with ZipReadBudget; engine-and-infra-082/083/084 for async jobs, sha256 parse cache and parser semaphore; api-surface-053)"
+  ],
+  "prevalence": "1 of 4 sources in this record set (Firecrawl); unique here, though PDF handling is ordinary in crawl products (INF) || 2 of 4 sources (Firecrawl, Apify) for office conversion and file capture, table-stakes among scrape platforms; the cache and async-job mechanics are Firecrawl-only (unique)",
+  "mechanism": "Sniff content-type and bytes; classify per page (text-layer coverage, image area) into text, scanned, image or mixed with a confidence and pagesNeedingOcr; if text-based with high confidence convert natively with heading ranking; otherwise send only the pages needing OCR to an OCR/layout service and merge per page; emit markdown, optional pages[] and blocks[{type,label,bbox,content}]; mode fast fails with a typed OCR_REQUIRED error on scans. Images: if the parsers list includes image and OCR is enabled, submit as a one-page document, else return a typed unsupported-file error. || Merged items add: Detect by magic bytes plus extension hint. DOCX: unzip with byte and per-part budgets (128 MB total), parse document.xml, _rels and header/footer with roxmltree to markdown; XLSX: sheets to GFM tables (calamine); PPTX: slide text in order; CSV to table; EPUB: XHTML chapters to markdown. A crawl option (saveFiles/contentTypes) stores matched binaries. Guardrails: key = sha256(bytes)(+variant); check cache; acquire a semaphore permit (default 3, FIFO); large files go by reference to an async job that a second request for the same hash adopts; time budget estimated per page; refresh bypasses the cache only within a small per-org budget."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs:1-40",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:745",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:835-839",
+   "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs:1-20",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vision.rs:35-59",
+   "apps/Ingestion Plane/Quarry-v2/docs/GAP.md:85",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:1-30",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/lib.rs:12",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:430-500",
+   "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md:129",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:29"
+  ],
+  "gap": "lopdf text extraction (pdf.rs extract_text) is called only by the answer fetcher (answer.rs:835). pipeline.rs has no PDF branch (no application/pdf match), so PDF URLs in scrape or crawl are not converted, although docs/GAP.md:85 says routing is implemented there. No page classification, OCR, page selection or layout blocks. The Model Plane has an Azure Document Intelligence prebuilt-layout provider (doc_intel.rs) that Quarry never calls, and image URLs are not OCRed; Quarry's vision.rs only pre-conditions screenshots for an optional sidecar. || docx.rs extract_text exists and is declared in lib.rs but has no caller (grep finds no use outside the module), though PARITY_IMPLEMENTATION_PLAN.md:129 marks DOCX as shipped. No XLSX, PPTX, ODF, RTF or EPUB support, no zip-bomb budgets, no crawl capture of linked files. The pipeline has only a body-size cap: no parser concurrency limit, no parse cache, no async document jobs."
+ },
+ "approach": "After the S-sized routing fix (F-t2-009): native PDF fast path with classification, OCR only when needed via the Model Plane doc_intel provider over the model-gateway grant (ZDR-eligible providers only), typed layout blocks, a sha256 per-org parse cache (skipped under ZDR), and wiring docx.rs plus XLSX/PPTX/e-book parsers behind one parser semaphore. docs/PARITY_IMPLEMENTATION_PLAN.md:129 marks DOCX shipped although it has no caller (stale DOC). || Source detail: [R-t2-02-04] Ingestion Plane pipeline.rs: lift is_pdf from answer.rs into a shared content-type router; add the PDF branch with page classification (text-layer coverage via lopdf), native fast path, and a typed OCR_REQUIRED error in fast mode. For scanned pages call the Model Plane (it owns the provider, cost and ZDR choice): expose doc_intel as a Model Plane route reachable by Quarry under the same grant work as R-t2-02-02. Add parsers[] to the request contract (R-t2-02-01) and optional pages/blocks in the response. Reuse the OCR path for image content types. Under ZDR require a ZDR-eligible OCR provider or return a typed refusal. The semaphore and size ceilings from R-t2-02-07 should land with this item. || [R-t2-02-07] Ingestion Plane quarry-transform: a document module (zip + roxmltree + calamine) with ZipReadBudget-style limits, returning typed errors on budget breach; pipeline.rs routes by content-type and magic bytes to PDF (R-t2-02-04) or the document module; wrap every parser in one shared tokio semaphore and size ceiling; add a crawl option (contentTypes/saveFiles) that stores matched binaries as artifacts and converts them; content-hash cache keyed by (org, sha256), skipped entirely under ZDR; use a Temporal activity for large documents instead of Firecrawl's job-adoption machinery.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-005 (parsers and response fields)",
+  "Model Plane doc_intel exposed to Quarry plus model-gateway grant (shared with F-t2-019)",
+  "ZDR eligibility flag on the OCR provider",
+  "F-t2-005 (formats and warnings)"
+ ],
+ "planeOwner": "Ingestion Plane + Model Plane (doc_intel)",
+ "risks": "OCR cost and latency on large crawls (needs per-org page and cost caps); the external OCR provider must honour ZDR; the docs claim this is done, so planning may under-scope it. || Zip bombs and malformed files (the budgets are the mitigation); cross-tenant cache leaks if the key omits org; ZDR must skip the cache.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 13,
+  "DOC": 4,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-02-04] Quarry-v2 docs/GAP.md:34,54 and docs/OSS_PARITY_BACKLOG.md:29 record OCR/layout PDF as an open or partial gap; no scheduled task found. || [R-t2-02-07] Quarry-v2 docs/OSS_PARITY_BACKLOG.md:29,104 (P2: add DOCX and extended media parsing); docs/PARITY_IMPLEMENTATION_PLAN.md:129 marks DOCX shipped although it is not wired."
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-02-04",
+  "R-t2-02-07"
+ ],
+ "sourceClusters": [
+  "C-t2-02-015",
+  "C-t2-02-018",
+  "C-t2-02-017",
+  "C-t2-02-016"
+ ],
+ "sourceCategories": [
+  "Output formats & content processing"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-037",
+   "status": "partial",
+   "exactGap": "quarry-transform has lopdf text and heading extraction (pdf.rs) and a DOCX extractor (docx.rs) with no caller, while pipeline.rs has no content-type router (every body is charset-decoded and run through readability), so PDF is parsed only by the answer fetcher (answer.rs:835-839) even though docs/GAP.md:85 and PARITY_IMPLEMENTATION_PLAN.md:129 claim PDF routing and DOCX as shipped; there is no page classification, OCR, page selection, parser semaphore or time budget (extract_text is synchronous with only a 25 MiB size check), no per-org parse cache, and docx.rs reads document.xml with an unbounded read_to_string after only a compressed-size check. Quarry never calls the Model Plane layout route (/v1/ai/documents/layout, ZDR-gated, accepts a pages selector), and the Model Plane manifest grants quarry-edge no model call at all. The item also misses that Ingestion Plane's imports-core (Python) already ships production PDF, DOCX, XLSX and PPTX parsers with a zip-bomb budget (member, part, total and tree-part caps, read deadline) and an ephemeral bytes-in /api/v1/import/extract endpoint (1 MB input, 60k-char output cap).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:444-545 (content-type read for metadata only; charset decode then readability for every body), 557-558, 703, 779-785",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:737-757,835-839 (is_pdf by header or %PDF magic; only caller of pdf::extract_text)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/pdf.rs:40,69-85,89 (MAX_PDF_BYTES, synchronous extract_text over all pages)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:15-45 (25 MiB compressed cap; read_to_string on the zip entry; no callers)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/lib.rs:12-40 (module list: pdf, docx, no office/epub modules)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/Cargo.toml:28-31 (deps: lopdf, zip with deflate only)",
+    "apps/Ingestion Plane/Quarry-v2/docs/GAP.md:85 (claims PDF routing is implemented in the pipeline)",
+    "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md:129 (marks DOCX shipped; extract_text has no caller)",
+    "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:29 (media parsing PDF/DOCX row)",
+    "apps/Ingestion Plane/imports-core/app/parsers.py:30-60,104-112,140-215,1085-1130 (pypdf/docx parsers, zip budget, read deadline, extension router)",
+    "apps/Ingestion Plane/imports-core/app/main.py:204-212,271-285 (ephemeral /api/v1/import/extract; durable source import refuses ZDR)",
+    "apps/Ingestion Plane/imports-core/app/chat_extract.py:1-40 (local-only bounded extraction, 1 MB in, 60k chars out)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:434,4566-4650 (documents/layout route, decide_content_route ZDR gate, pages param)",
+    "apps/Model Plane/rust/services/inference-core/src/provider/doc_intel.rs:1-40 (prebuilt-layout provider)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-14 (every Quarry model feature is off by default; manifest grants none today)",
+    "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json:40-73 (model-invoke/stream/audio granted:false)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/page_extract.rs:332-343 (model_hop_allowed refuses all Model hops under ZDR)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/privacy.rs:65-80 (guard_third_party_processing)"
+   ],
+   "reuse": [
+    "pdf.rs extract_text/extract_headings and answer.rs is_pdf (lift into a shared content-type router; F-t2-009)",
+    "imports-core parsers.py zip budget constants and routing, or its /api/v1/import/extract endpoint, instead of new roxmltree/calamine code written from scratch",
+    "Model Plane /v1/ai/documents/layout with its pages selector and ZDR gate",
+    "page_extract::model_hop_allowed and PrivacyPolicy::guard_third_party_processing for the OCR hop",
+    "SearchCache-style org-scoped Redis keys for the parse cache"
+   ],
+   "constraints": "Quarry to Model Plane calls are all granted:false in the cross-plane manifest and the org-bound metered model path is a separate unfinished design (DEF-QB-T17-PART2), so OCR routing needs a new feature switch, a manifest row plus registry grant and a metered path before it can run. ZDR: model_hop_allowed currently refuses every Model hop under ZDR, so a ZDR-eligible OCR route needs an explicit exception design (typed refusal otherwise), and the parse cache must be disabled under ZDR. Data Plane owns retrieval and embeddings: Quarry returns markdown or blocks only. imports-core is Ingestion Plane too but refuses ZDR for durable imports; only its ephemeral extract endpoint is ZDR-compatible.",
+   "approachAdjustment": "Sequence it: (1) shared content-type router with the native lopdf path in pipeline.rs (S, F-t2-009), run in spawn_blocking with page and time budgets because extract_text is synchronous; (2) Office formats: decide by ADR between porting imports-core's budget design (member/part/total caps, deadline) into quarry-transform and calling imports-core's ephemeral extract endpoint (needs larger limits and service auth), and in either case do not wire docx.rs before it has an inflate budget; (3) OCR via the Model Plane layout route only after the manifest row, grant and ZDR exception exist; (4) per-org content-hash cache keyed (org, sha256) and skipped under ZDR. Fix the stale docs claims in the same change.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged. Split into S (router + native PDF), M (OCR route with grant and ZDR design) and M (Office parsers with budgets, reuse imports-core).",
+   "verdict": "reword",
+   "verdictReason": "The gap is real, but the item must say PDF is already extracted in the answer fetcher, that imports-core already has budgeted Office parsers to reuse, that DOCX is unwired and unbounded, and that OCR needs a Quarry to Model Plane grant that does not exist.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

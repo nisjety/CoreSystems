@@ -1,0 +1,125 @@
+{
+ "finalId": "F-t2-034",
+ "tier": "recommended",
+ "rank": 10,
+ "title": "Agent observation quality and budget: post-action settle, frame-aware AX snapshot with warnings, set-of-marks screenshots, capped projection and image budget",
+ "summary": "After each action wait for commit, first paint and a short AX/DOM quiet window with a cap (Codex) plus request tracking and ambient page-event notes (Aside); make the AX snapshot frame-aware with per-frame warnings and deadlines; produce set-of-marks screenshots from the existing ScreenshotAnnotated artifact kind as a visual fallback; cap the page projection by characters and elements; and give the model-facing image path detail levels and a per-run image budget.",
+ "whyItMatters": "The UI caps sessions at 12 steps and the AI loop at 5 (SRC), so every wasted observation is expensive. Settle and snapshot quality are table-stakes in both browser references; Verevon's native-AX refs are already stronger, so this is about reliability and cost, not a rewrite.",
+ "referenceBestPractice": {
+  "bestSource": "Codex: settle heuristics (codexbrowser-automation-and-safety-058, SRC) and frame-aware AX snapshot (codexbrowser-automation-and-safety-057, SRC)",
+  "others": [
+   "Firecrawl DOM flattening that tags inlined iframes with data-original-tag (firecrawl-engine-and-infra-015, SRC)",
+   "Firecrawl smart-wait cache (firecrawl-engine-and-infra-109, INF, low confidence because the engine is closed)",
+   "Aside (AA024/AA085: 350 ms quiet window with <=1% mutation ratio sampled twice, 1.2 s request tracking budget, 300 ms post-settle, queued ambient notes flushed into the next tool result; annotatedScreenshot draws ref labels)",
+   "Codex in-app browser (automation-and-safety-134 and in-app-browser-006 for the visible-DOM projection and frame snapshot; automation-and-safety-092 for image detail and budget)"
+  ],
+  "prevalence": "2 of 4 sources for each (codex, firecrawl), differentiator || 2 of 3 sources (Aside, Codex); table-stakes || 1 of 4 sources (Codex in-app browser); unique",
+  "mechanism": "Settle: after an action, if a navigation started await Page.frameNavigated/lifecycle commit (poll 10 ms, cap 5 s), then first paint (cap 5 s), then subscribe to Accessibility/DOM mutation events and resolve when none arrive for 50-100 ms or 750 ms elapsed; report the settle time and optionally keep a p90 per host as a prior. Snapshot: Page.getFrameTree + DOMSnapshot.captureSnapshot + Accessibility.getFullAXTree per frame session over auto-attached flat sessions, each with a per-frame timeout inside a global deadline; stitch child trees under their IFRAME owner node; collect {frameId, error} into warnings[]. || Merged items add: After act: wait for DOMContentLoaded (<=2 s), sample MutationObserver counts every 100 ms until a 350 ms window has <=1% mutation ratio twice; track same-site in-flight requests up to 1.2 s; extra dwell on SPA URL changes; queue framenavigated/dialog/popup/download events into the next observation. Marks: Page.captureScreenshot, overlay a box and label per interactive ref (from AX box model), return PNG plus legend; prompt rule to return to snapshots after a visual action. || A page-side function walks the DOM and keeps visible, in-viewport interactive elements (a, button, input, select, textarea, summary, details, option, interactive ARIA roles), emits tag plus allowlisted attributes (aria-*, name, placeholder, href, role, value) and short text, recurses into child frames, and stops at 200 elements or 20k chars; a second view lists frames with owner-element attributes. Images carry a detail hint; a preparation step downsizes to the target long edge for the detail level, appends a resize notice, and drops or downgrades older images when a per-conversation budget is reached."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:33-65,209-245 (scrape hydration settle: 3.5 s budget, 300 ms poll, waits for visible text growth or 600 chars; QUARRY_BROWSER_SETTLE_MS)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:640-651 (lifecycle events collected only as DevTools events, not used to wait)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1086-1100 (AX_PROJECTION_NODE_LIMIT = 300, FRAME_PROJECTION_LIMIT = 64, truncated flag) and :1236-1256 (TargetRepairRequired when a frame is gone)",
+   "grep: no settle/quiesc/quiet logic in chromiumoxide.rs, quarry-runtime/src/agent_loop.rs, observation.rs or agent_routes.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2800",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:445",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2791",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:671-710",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2841",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/artifact.rs:13",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:23",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:374"
+  ],
+  "gap": "No agent-action settle (agents rely on explicit wait/wait_for); no per-frame deadline or warning list was found around the CDP fetch of the AX tree (verify the capture call site near the native_projection_from_cdp caller); truncation is by order, not viewport priority. The Verevon UI cannot show or use AX refs. || Explicit wait_for actions and fixed waits exist, plus a typed event SSE for the UI, but no adaptive settle was found and page events are not shown to reach the model's next observation. ScreenshotAnnotated exists only as an enum/parse entry plus tests (grep in this audit finds no producer), so set-of-marks is absent; coordinate actions and screenshots are shipped. || Quarry already emits a CDP accessibility projection with frame topology and @eN refs (the stronger primitive, used by Model Plane browser.act), but no character budget or alternative visible-DOM view was found, and the Verevon UI's BrowserObservation type has no field for AX refs or frames. For images: the Model Plane execution-core browser observation carries only a screenshot_ref (an artifact id string), the only image limits found are a 20 MiB cap on the image-generation route, and grep over apps/Model Plane (Rust and Go) finds no image budget, downscale or detail hint. Whether browser screenshots are ever sent to the model as pixels was not established."
+ },
+ "approach": "Ingestion Plane quarry-browser (settle, snapshot, set-of-marks); Model Plane (image budget and cost accounting); Frontend frame view. || Source detail: [R-t2-03-07] Ingestion Plane, quarry-browser/chromiumoxide.rs: add settle() after navigate/click/type/press with per-action budgets (navigation vs click vs type) and emit settle_ms in BrowserTelemetry; for snapshots fetch AX per frame target with timeouts inside a global deadline, return warnings[] in the observation contract (quarry-core BrowserObservation), and reorder truncation by viewport proximity. Frontend Plane: surface refs and warnings in BrowserChrome for co-browsing. Keep truncation explicit so token cost stays visible. || [R-t2-09-11] Ingestion Plane quarry-browser: settle stage after act with same-site request filtering and caps for long-polling pages; extend the observation contract with a bounded events list rendered by the Model Plane into the tool result. Add a mark renderer fed by native AX boxes (no page injection), keep marks tied to the observation revision, and make the PNG ephemeral under ZDR. || [R-t2-02-10] Ingestion Plane observation.rs: add a character budget (and truncation marker) to the AX projection, with an optional visible-DOM projection behind a flag; Frontend Plane: extend BrowserObservation in browser-client.ts with snapshot refs and frames (coordinate with the browser-automation category, which owns the UI action vocabulary). Model Plane (session-core or inference-core): first confirm how screenshots enter model context; only if pixels are sent, add a detail hint on image parts, resize before the provider call, and a per-session image budget that evicts the oldest screenshots, accounted through the cost plane.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-015 trusted input (coordinate path)",
+  "browser observation contract",
+  "UI action vocabulary migration to AX refs",
+  "Model Plane cost accounting for the image part"
+ ],
+ "planeOwner": "Ingestion Plane + Model Plane",
+ "risks": "Long-polling pages never quiesce, so caps are essential; larger snapshots cost tokens; adding a field to the observation contract needs the Model Plane client to tolerate it. || Long-polling pages (websockets, analytics beacons) need same-site filtering and caps; marks must map to refs from the same observation revision; screenshots under ZDR stay ephemeral. || Two projections to maintain; attribute text from pages reaches the model (injection surface, keep the allowlist); low-detail images misread small text.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 18,
+  "DOC": 2,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-07",
+  "R-t2-09-11",
+  "R-t2-02-10"
+ ],
+ "sourceClusters": [
+  "C-t2-03-014",
+  "C-t2-03-015",
+  "C-t2-09-013",
+  "C-t2-09-014",
+  "C-t2-02-005",
+  "C-t2-02-007"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "AI-browser control",
+  "Output formats & content processing"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-034",
+   "status": "partial",
+   "exactGap": "Quarry already returns a bounded AX and frame projection on every observation (300 AX nodes with a truncated flag, 64 frames, 50 snapshot targets, a 500-char text snippet), console and network summaries, an observation delta, challenge classification and telemetry (usable_observation_latency_ms, estimated_snapshot_tokens), has an explicit frame-ref action contract, and has a scrape-only hydration settle (3.5 s budget, 300 ms poll) in browser_driver.rs; what is missing is any settle after agent actions (observation.rs captures page state, DevTools events, HTML and the AX projection immediately), per-frame deadlines and a warnings field (one root-frame GetFullAxTree call at depth 8), and viewport-priority truncation. On the Model Plane side observation_from_wire forwards only url, title, text snippet, screenshot id and snapshot targets (console/network summaries are dropped), the planner prompt shows at most 40 targets, no screenshot pixels reach the planner (it is text-only; only the UI suggest-action route sends a screenshot to a separate AnalyzeImage summarizer, capped at 6 MiB with 16k/8k-char prompt budgets), and ScreenshotAnnotated is already produced by the vision sidecar as a red changed-region overlay, not as set-of-marks.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:576-640 (page_state, DevTools events, content, native projection captured immediately after the action; no settle)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1573-1612 (native AX targets capped at 50)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:2133-2147 (500-char text_snippet; byte slice at 2140-2141)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:673-700 (screenshot_annotated artifact from the visual processor, only when ZDR is off)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:965-995,1823-1880 (BrowserObservation fields, console/network summaries)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:640-651 (lifecycle events collected, not used to wait)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1086-1128 (AX_PROJECTION_NODE_LIMIT 300, FRAME_PROJECTION_LIMIT 64, truncated flag, order-based truncation)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2681-2722 (single GetFullAxTree depth 8 + GetFrameTree; no per-frame deadline)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1988-2011,2800-2826,3050-3062 (goto, wait_for polling, fixed 100 ms sleeps on back/forward)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:28-70,205-250 (scrape-only settle: DEFAULT_SETTLE_MS 3500, SETTLE_POLL 300 ms)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:347-361,366-395 (DomSummary.click_map, BrowserSnapshot frames, AccessibilityProjection.truncated; no warnings field)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/artifact.rs:13 (ScreenshotAnnotated kind)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-vision-sidecar/app/main.py:240-256 (annotation = changed-region red overlay)",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:405-474 (observation_from_wire keeps url/title/snippet/screenshot id/targets)",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:200-235 (text-only prompt, targets .take(40))",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:1987-1989,2085-2160,2175-2200 (6 MiB screenshot cap, 16k/8k prompt-char budgets, VLM summary via analyze_image, non-ZDR only)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:3-49 (BrowserAction is selector-based; BrowserObservation has no snapshot/frames)"
+   ],
+   "reuse": [
+    "browser_driver.rs visible_text_len/looks_unhydrated settle loop as the model for an agent-action settle",
+    "BrowserTelemetry (usable_observation_latency_ms, estimated_snapshot_tokens) to report settle_ms",
+    "AccessibilityProjection.truncated, BrowserFrame topology and the frame_*_ref action contract",
+    "DomSummary.click_map / ElementClickTarget (ref ids already aligned with snapshot refs) as the mark source",
+    "vision sidecar annotation pipeline and put_artifact_if_allowed ZDR gating",
+    "model-gateway compact_json_for_prompt budgets already applied on the suggest-action path"
+   ],
+   "constraints": "Model proposes / Quarry executes: settle, snapshot and truncation are executor concerns and stay in Quarry; the wire change must be additive with serde defaults because execution-core parses WireObservation separately. CDP node handles must stay private (BrowserNativeProjection never serializes backend ids). ZDR: screenshots, annotated PNGs and the visual processor run only when ZDR is off, so any set-of-marks artifact must follow put_artifact_if_allowed and stay ephemeral. The UI still acts through CSS selectors, so AX refs and warnings reach the Model Plane first and the co-browsing UI only after a UI action-vocabulary change.",
+   "approachAdjustment": "Narrow to what is missing and has a consumer: (1) agent-action settle with per-action budgets, same-site request filtering and a hard cap, reported as settle_ms, living in observation.rs/driver (not copied from the scrape-only loop in the adapter); (2) add warnings[] to AccessibilityProjection and fetch per-frame AX only if cross-origin iframe coverage is needed (getFullAXTree without frameId defaults to the root frame per CDP docs, INF) under a global deadline; (3) prioritise truncation by viewport and interactivity and align the 50-target Quarry cap with the planner's 40-target view; (4) carry console/network summaries through observation_from_wire if the model should see page events. Defer set-of-marks until the planner actually receives images and give it a new artifact kind (ScreenshotAnnotated already means changed-region overlay); drop the model image detail/budget sub-item until screenshots become model input. Side bug: observation.rs:2140 slices a byte index (&trimmed[..500]) and can panic on a multi-byte boundary.",
+   "effortRevised": "M",
+   "effortNote": "Settle + warnings + prioritised truncation is M; set-of-marks (M) and image budget have no consumer yet and should be split out or dropped.",
+   "verdict": "reword",
+   "verdictReason": "Several claimed gaps are partly built (bounded projection, frame refs, console/network summaries, char budgets on the suggest path, an annotated artifact kind), the image budget has no consumer, and the real gaps are the missing settle, per-frame warnings and Model Plane forwarding.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

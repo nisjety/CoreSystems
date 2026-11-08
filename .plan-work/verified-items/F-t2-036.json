@@ -1,0 +1,110 @@
+{
+ "finalId": "F-t2-036",
+ "tier": "recommended",
+ "rank": 12,
+ "title": "Durable, tenant-scoped authority and one audit record for every permission and approval decision",
+ "summary": "Persist BrowserBroker grants (today an in-memory map), add a production issuance path and scope inheritance for child runs and fleets, and put evaluate and raw-CSS actions behind a sensitive one-shot grant. Add org_id to the quarry-control Webhook model, front webhook CRUD through edge with JWT org scoping, and add a dispatch-id header, a test endpoint and a longer retry ladder. Define an AuthzDecision event in audit-core (schema_version, permission, decision, decision_context, a decided_by enum separating user, saved, policy, reviewer and system, policy_id, reason_code, origin only, run_id, actor_id, duration_ms) that execution-core approvals, browser-broker validations and Quarry policy denials publish to verevon.audit.v2.*; record only denials for high-volume per-navigation checks.",
+ "whyItMatters": "It keeps the authority model credible (Quarry executes only what a grant allows and scope cannot widen through child runs or webhooks) and completes the evidence chain for \"the Model proposes, Quarry executes or rejects\", which enterprise compliance reviews ask for. Without tenant-scoped webhooks, crawl and monitor webhooks cannot be exposed to customers.",
+ "referenceBestPractice": {
+  "bestSource": "Codex (one structured record per permission decision with decided_by, decision_context, origin only and duration_ms, denials-only for URL checks; Allow/Prompt/Forbidden policy vocabulary) and Apify (limited-permission default with scoped, expiring tokens inherited by runs and webhooks)",
+  "others": [
+   "Aside (read methods whitelisted; lifecycle mutations only through ownership-tracking tools)",
+   "Apify webhooks (11 retries over about 32 hours, dispatch-id header, test button, no HMAC)"
+  ],
+  "prevalence": "Least-privilege permissions 3 of 4 (table-stakes); decision audit record 1 of 4 (Codex, unique); webhook reliability 1 of 4 (Apify, DOC)",
+  "mechanism": "Grant = {principal, scopes[], allowed_domains[], budget, expires_at, parent_grant}; children inherit min(parent scopes) and escalation needs a recorded human approval. The component that decides emits AuthzDecision with an outcome enum {not_needed, policy_allowed, reviewer_approved, reviewer_denied, user_approved, user_approved_for_session, user_denied, user_aborted, timeout}. Webhooks are (org_id, url, secret, events), HMAC signed, retried with exponential backoff, DLQ at the end, registered only through edge."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-74",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2257-2266",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:694",
+   "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:144-148",
+   "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:34",
+   "apps/Control Plane/audit-core/internal/subscriber/subscriber.go:27-29",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34"
+  ],
+  "gap": "Grants are validated before every action (15 minute TTL, host allowlist, org and owner scope) and sensitive one-shot grants exist, but the store is a mutex-guarded in-memory map and no production path issues grants, so history is lost on restart. The sensitive-action allowlist is only respond_dialog, upload_ref and download_ref, so evaluate and raw-CSS run on an ordinary grant (unless the Model Plane risk gate separately prompts; not verified here). The Webhook struct has no OrgID and the routes are not exposed through edge; delivery is HMAC signed with 5 attempts then a DLQ. Browser approvals record (decision, decided_by, reason) and tool_action audit events carry ZDR tags, but there is no cross-plane schema, no decided_by enum, no duration, and grant validations and Quarry policy denials do not reach audit-core."
+ },
+ "approach": "Model Plane browser-broker: durable grant store (Postgres) with issuance from the run-start path, scope inheritance and revocation. Ingestion Plane: add evaluate and raw CSS to the sensitive-action allowlist and the edge enforcement, add org_id to Webhook with a migration for unscoped rows, and expose org-scoped CRUD through edge. Control Plane audit-core defines the AuthzDecision event type; Model Plane (execution-core approvals, browser-broker) and Ingestion Plane (policy denials) publish it with origin only, never full URLs.",
+ "effort": "L",
+ "dependencies": [
+  "browser-broker persistence",
+  "audit-core subjects",
+  "Item F-t2-014 for correlation ids"
+ ],
+ "planeOwner": "Model Plane (browser-broker, execution-core) with Control Plane audit-core and Ingestion Plane quarry-control",
+ "risks": "Breaking dev flows that rely on dev-bypass tokens; migrating existing webhook rows that have no scope; audit volume from per-navigation checks and accidental URL storage.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 8,
+  "DOC": 3,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-06"
+ ],
+ "sourceClusters": [
+  "C-t2-07-017",
+  "C-t2-07-012",
+  "C-t2-07-033"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-036",
+   "status": "partial",
+   "exactGap": "Confirmed: BrowserBroker's grant store is a mutex-guarded in-process map with no database; AcquireGrant has no production caller (only an unused Quarry client method and tests, while the gateway sends an interim grant_id of the form session:<id>); the sensitive allowlist is exactly respond_dialog, upload_ref and download_ref; Quarry-control's Webhook struct and table have no org_id and /v1/webhooks is mounted on quarry-control only, not quarry-edge; and approval decisions never reach audit-core in a uniform shape (the browser decided event leaves decided_by empty, session-core publishes tool_action, tool_action_reserved and run_started_zdr_waived but no permission or approval decision event, and Quarry has no audit publisher at all). Corrected: evaluate and raw CSS are not reachable on an ordinary grant through either Verevon facade, because the gateway sanitize_action rejects evaluate and execution-core's browser.act closed schema has no JavaScript, selector or URL, so a sensitive grant for them is quarry-edge defense in depth rather than a live hole. Also understated: webhook delivery already has HMAC signing, five attempts and a DLQ, and the durable approvals table already records decided_by (including system:* deciders) and decision_reason under an org filter, so the audit gap is publication and schema, not capture.",
+   "evidence": [
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-36,39-58,62-64 (sensitive allowlist; Grant fields; Store is a mutex-guarded in-memory map)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:104-125 (CreateScopedSensitiveApproval: parent_grant_id binding is the only inheritance primitive)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:41-107 (AcquireGrant mints into the in-memory store; sensitive grants need parent_grant_id)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs:96-135 (legacy acquire path, deny-by-default, no callers)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235,1258-1263 (interim session:<id> grant_id; issuance still unbuilt)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3702-3760 (sanitize_action rejects evaluate)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479-3508,4209-4212 (browser.act schema and description exclude JavaScript, selectors and URLs)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:98-102,144-300 (one-shot sensitive approvals, parent grant required, exact-scope validation)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:144-280,670-780 (sensitive_approval_for_action returns None for AgentAction::Evaluate, so the edge step path applies no sensitive gating to it; inference from the match arms)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:129-151,328-432 (decided event with empty decided_by; system:* deciders written to the durable approval)",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs:753-760 (decided_by and org required on every decision)",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-60,604-632 and retention_receipt.rs:28-34 (events on verevon.audit.v2.model.session-core.*: tool_action, tool_action_reserved, run_started_zdr_waived; no approval or permission decision event)",
+    "apps/Control Plane/audit-core/internal/subscriber/subscriber.go:1-40,287-295 (verevon.audit.v2.> and usage.v2.> durable consumers; an event is accepted only when subject plane, producer and event tokens match the payload)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383 and store/pg/migrations/002_webhooks_blocklist.sql:6-12 (Webhook has no org_id)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:9 (mountSimple /v1/webhooks on quarry-control)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-34,111-123 (5 attempts, 1s to 1h ladder, DLQ, X-Quarry-Signature HMAC)",
+    "negative searches: no AcquireGrant callers outside the Quarry client method, broker and tests; no verevon.audit.v2 publisher in Quarry-v2; no /v1/webhooks route in quarry-edge other than the change webhook"
+   ],
+   "reuse": [
+    "audit-core flat AuditEvent shape and verevon.audit.v2.<plane>.<producer>.<event> subjects: model AuthzDecision as a new event name with a details map rather than a new top-level schema",
+    "the session-core audit outbox (audit_publisher.rs) for transactional publication of approval decisions",
+    "the durable approvals table (decided_by, decision_reason, org filter) and the existing system:* decider values as the seed of the decided_by enum",
+    "broker CreateScopedSensitiveApproval parent_grant_id binding as the existing grant-inheritance primitive",
+    "quarry-control dispatcher HMAC, backoff and DLQ for webhook delivery; the org_id scoping pattern of quarry-control sources, schedules and jobs migrations"
+   ],
+   "constraints": "Plane ownership: grants belong to the Model Plane (browser-broker, Go with no database today, so durable storage adds a datastore dependency); Quarry only validates. No cross-plane DB access: Quarry must publish AuthzDecision over NATS and never write audit-core tables, and because Quarry has no audit publisher one must be added with its own plane/producer/event subject family and publish grant (audit-core rejects an event whose subject tokens do not match the payload). Privacy and ZDR: events carry origin only and ZDR tags, never full URLs, and per-navigation validations should be recorded denials-only. Space authority: child-run and fleet grants may only narrow (min of parent scopes) and never inherit wider authority through a Space. The webhook org_id migration must handle existing unscoped rows fail-closed.",
+   "approachAdjustment": "Split into three independently shippable items. (a) Durable, issued BrowserBroker grants, merged with F-t2-001 rather than treating persistence and issuance separately, with parent/child inheritance on the existing parent_grant_id binding. (b) Quarry webhook tenant scoping: org_id column with migration, edge-fronted org-scoped CRUD, dispatch-id header. (c) AuthzDecision audit as a new event name on the existing verevon.audit.v2 flat shape, first published by session-core/execution-core approval decisions with decided_by filled from the durable record, and only later by Quarry policy denials. Demote the evaluate/raw-CSS sensitive-allowlist change to low-priority hardening because both facades already refuse those actions.",
+   "effortRevised": "XL",
+   "effortNote": "As one item this bundles a new broker datastore plus issuance path, a Quarry webhook migration and edge exposure, and a cross-plane audit event with a new Quarry publisher. Split, it is roughly M (webhooks), M (audit) and L (durable grants plus issuance, overlapping F-t2-001).",
+   "verdict": "reword",
+   "verdictReason": "The gap description is mostly accurate but wrongly implies evaluate/raw CSS are model-reachable on ordinary grants, bundles four independent workstreams across three planes, and overlaps F-t2-001 on issuance. Reword and split.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

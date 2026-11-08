@@ -1,0 +1,108 @@
+{
+ "finalId": "F-t2-041",
+ "tier": "recommended",
+ "rank": 17,
+ "title": "Sitemap, robots and index-assisted crawl discovery, plus URL canonicalisation and redirect de-duplication",
+ "summary": "Extract the /v1/map sitemap code into a shared Rust discovery module that also reads robots.txt Sitemap lines, gzip sitemaps, scoped, root and registrable-domain sitemaps, and URLs already in the local index or tracked sources. Call it from crawl kickoff behind a sitemap include|only|skip option, seeding the durable frontier through the scope filter. In the same enqueue path add a canonical_url unique_key and a post-redirect check so the same page is not crawled twice.",
+ "whyItMatters": "Docs and product sites are Verevon's main knowledge sources; sitemap seeding makes crawls complete and cheap, and reusing the local index makes re-crawls incremental. Canonicalisation prevents duplicate documents reaching the Data Plane, which improves retrieval quality and cost.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (parallel sitemap kickoff, index seeding, URL permutation dedupe with redirect race handling)",
+  "others": [
+   "Apify (sitemap discovery with common-name probing)"
+  ],
+  "prevalence": "Sitemap discovery: 2 of 4 sources, table-stakes; URL canonicalisation: 1 of 4, differentiator",
+  "mechanism": "Kickoff scrapes the start page then queues sitemap jobs for every candidate in parallel (3 concurrent, 25 nested max): robots Sitemap lines, <scope dir>/sitemap.xml, /sitemap.xml and the registrable-domain sitemap (plus /sitemap.txt). It parses urlset versus sitemapindex, decompresses .gz, recurses to a cap, filters each URL through the same scope filter and enqueues at a lower priority than seed links. Map is the union of index, sitemaps and optional site search, with redirects resolved, robots filtered and results ranked by query similarity. For dedupe, normalise (drop fragment but keep hash routes, optionally strip query, lowercase host); compute permutations (http/https x www x trailing slash x index.html) and lock the canonical one in a visited set before enqueue; after fetch lock the redirect target and abort if another job holds it. The limit counts the unique set."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-516",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:26",
+   "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:38"
+  ],
+  "gap": "Live crawl has no sitemap seeding. /v1/map reads /sitemap.xml plus up to 5 nested indexes and seed links, but not robots Sitemap lines, gzip or index-assisted discovery. Crawl dedupes on the exact link string only (visited map in workflows.go); there is no canonicalisation or redirect reconciliation."
+ },
+ "approach": "Ingestion Plane. Move sitemap parsing into a shared quarry-runtime discovery module used by both map_routes.rs and crawl kickoff; add robots Sitemap lines, gzip, nested cap and URL cap with streaming into the frontier. Add canonical_url (unique_key) in quarry-core, a unique index on (queue/crawl id, unique_key) in the Postgres frontier, and a post-redirect check in run_page; keep aggressive normalisation (query stripping, index.html folding) opt-in per crawl. Seed from tracked sources and the local Tantivy index so repeat crawls only fetch new or changed URLs. Build after R-t2-05-01 so every sitemap URL passes the scope filter.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-016 scope filter",
+  "unique_key column on the Postgres frontier"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Huge sitemaps; cap URLs and stream. Over-aggressive normalisation merges distinct pages on query-driven sites, so keep it opt-in.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 4,
+  "DOC": 2,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-05-07] apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (sitemap, robots) and docs/PLAN.md:240 (ignoreSitemap, sitemapOnly)"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-05-07"
+ ],
+ "sourceClusters": [
+  "C-t2-05-008",
+  "C-t2-05-009"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-041",
+   "status": "partial",
+   "exactGap": "The substrate exists: quarry-transform parses sitemap urlset and index documents and robots Sitemap lines (robots.rs:14, 80-81), and /v1/map (map_routes.rs:132-250) already reads origin /sitemap.xml plus up to 5 nested indexes and the seed page's links, but ignores robots Sitemap lines and gzip. Live crawl has no sitemap seeding or scope options (CrawlRequest is only url, max_pages, max_depth, ingest and zdr, routes.rs:533-553) and both crawl workflows dedupe on the exact link string (workflows.go:417; durable frontier request_id is sha256(run+url), workflows.go:617-620), with no canonical key or post-redirect check; the Rust CrawlFrontier that has scope, include/exclude and fragment normalisation is scaffolding that the live path does not call.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:87",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:132-250",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs:14",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/robots.rs:80-81",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/sitemap.rs:1-40",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-575",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:776-830",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/queue_routes.rs:138-155",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:243-260",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:1-60",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:197-240",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/crawl_frontier.rs:400-407",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:113",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-430",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:513-535",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:612-620",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go:55-67",
+    "apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:35-41",
+    "apps/Ingestion Plane/Quarry-v2/docs/PLAN.md:232-246",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/CrawlPagePicker.tsx:1-60",
+    "apps/Frontend Plane/verevonv3/src/shared/api/knowledge-client.ts:455-486"
+   ],
+   "reuse": [
+    "quarry-transform sitemap.rs parser and robots.rs (sitemaps field already collected) as the shared discovery inputs; map_routes.rs merge_and_scope for host scoping and dedup.",
+    "Rust CrawlFrontier (crawl_frontier.rs): seed host scope, include/exclude patterns, CrawlDenialReason, fragment normalisation, hreflang dedupe. Wire its scope filter in front of the durable frontier rather than rewriting it (this is the F-t2-016 scope filter).",
+    "Postgres frontier idempotency: ON CONFLICT (org_id, request_id) DO NOTHING (postgres_queue.rs:248-256) and the edge enqueue route (queue_routes.rs:138-155).",
+    "The existing UI flow /crawl/discover (quarry /v1/map) then CrawlPagePicker then /v1/batch, which already uses sitemap discovery for user-selected crawls.",
+    "run_page output (final_url, links, fingerprint; routes.rs:776-830) for post-redirect reconciliation."
+   ],
+   "constraints": "All Ingestion Plane. Every sitemap-discovered URL is attacker-controlled, so it must pass the same security preflight and scope filter before enqueue, and robots Disallow must still apply (map_routes.rs applies the robots allow-filter and quarry_security::heur::check). /v1/crawl and /v1/batch are refused under ZDR (routes.rs:555-575), so none of this applies to ZDR callers. Do not pass thousands of discovered URLs through Temporal workflow input or history: enqueue them into the durable frontier from an activity. Aggressive normalisation (query stripping, index.html folding) must stay opt-in because it merges distinct pages on query-driven sites.",
+   "approachAdjustment": "Do not add a canonical_url unique_key column: the Postgres frontier already enforces uniqueness on (org_id, request_id), so derive request_id from the canonical URL (durableFrontierRequestID in workflows.go:617-620, or canonicalise in the edge enqueue handler using the Rust normaliser) and keep the original URL as payload. Order the work by user value: first make /v1/map read robots Sitemap lines, gzip sitemaps and a configurable nested cap (S), because the SPA discovery flow depends on it; then add a discovery activity that seeds the durable frontier behind a sitemap include|only|skip option, after the scope filter; then post-redirect reconciliation using final_url. Seeding from the local Tantivy index is a separate later step.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged. Canonical key via request_id and the /v1/map improvements are S; crawl seeding with scope filtering is M.",
+   "verdict": "keep",
+   "verdictReason": "Live crawl really has no sitemap seeding or canonicalisation, but /v1/map and the sitemap and robots parsers already exist, so the item should present itself as extending them. Keep with the corrected approach (reuse request_id uniqueness, improve /v1/map first, wire CrawlFrontier scope).",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

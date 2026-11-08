@@ -1,0 +1,119 @@
+{
+ "finalId": "F-t2-012",
+ "tier": "priority",
+ "rank": 12,
+ "title": "Chat beside the browser: a dockable browser panel bound to the chat run",
+ "summary": "Promote BrowserChrome from the dashboard Crawl composer to a dockable panel inside the chat view (right, bottom, maximised, hidden), bound to the chat run's Quarry session, reusing frame streaming, takeover, approvals and the timeline drawer. Add a floating composer over the page and a 'new chat per tab or keep the chat' rule. The chat live-run panel becomes a compact mode of the same component instead of a separate read-only viewer.",
+ "whyItMatters": "Both reference browsers converge on chat and page side by side. It is where the user watches, takes over and talks to the agent about the visible page in one view; Verevon has the pieces (frames in chat runs, takeover, approvals) but not the surface.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (docked browser with floating composer, iab-033)",
+  "others": [
+   "Aside (per-tab side-panel agent: aside-agent-control-architecture-072, aside-browser-product-012/013)"
+  ],
+  "prevalence": "2 of 3 sources (Codex, Aside); table-stakes for a chat-plus-browser product.",
+  "mechanism": "Codex hosts the browser as right, bottom, detached or hidden, chosen by a command with a layout-stepping command, and a floating composer posts into the active chat. Aside calls sidePanel.setOptions per tabId with a sessionId, resolves the target session when a tab activates, offers a new-session|keep-session setting, and injects a 'you are a sidecar to this page' framing block on the first tab mention."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (compact read-only frame view)",
+   "apps/Frontend Plane/verevonv3/src/app/App.tsx:172",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:20",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:402"
+  ],
+  "gap": "The interactive browser lives only in the dashboard Crawl composer with no standalone route; the chat panel cannot steer the browser or ask about the visible page in the same view."
+ },
+ "approach": "Frontend Plane: extract BrowserChrome into a layout-agnostic panel component, add dock state (right, bottom, maximised, hidden) persisted per user, bind it to the chat run's Quarry session via the gateway browser domain, and add the new-chat-or-keep-chat rule. Page context reaches the Model Plane only through governed attachments (R-t2-08-05); no direct DOM access from the SPA.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-001",
+  "F-t2-013"
+ ],
+ "planeOwner": "Frontend Plane",
+ "risks": "Layout complexity on small screens; frame bandwidth when docked next to streaming chat.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-04"
+ ],
+ "sourceClusters": [
+  "C-t2-08-008"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-012",
+   "status": "partial",
+   "exactGap": "A right-docked, collapsible chat split already exists (ChatPage.tsx:962-984 mounts ChatLiveRunPanel) and it already reuses BrowserChrome in compact mode (ChatLiveRunPanel.tsx:608) with pause/resume of the AI run (ChatLiveRunPanel.tsx:451), but only for planned and deep-research turns, read-only, and fed by per-step artifact screenshots: browserSessionFromChatRun leaves every live-frame URL null and sessionId undefined so all manual controls stay disabled (chat-run-watch.ts:402-452). The interactive BrowserChrome with takeover, approvals and frame streaming is mounted only in the dashboard Crawl composer (KnowledgeScrapePreview.tsx:253), and there is no dock position, floating composer or new-chat-or-keep rule (only a collapsed flag, chat-run-watch.ts:45).",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx:957-984",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-14",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:608",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts:45",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts:402-452",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:253",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:620-626",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:371-444",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1212-1237",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1262",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1311-1318",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3310-3347"
+   ],
+   "reuse": [
+    "ChatLiveRunPanel and its compact BrowserChrome mount (already the docked chat panel)",
+    "chat-run-watch.ts adapter (browserSessionFromChatRun) as the view-model seam",
+    "gateway browser routes for frames (frame, frames/stream, frames/ws), control (human takeover), timeline and owner-gated artifacts (browser.rs:371-444)",
+    "owned_orchestration_run ownership proof for execution-core-owned runs (browser.rs:3347)",
+    "ChatWorkspaceCanvas / workCanvasActive layout in ChatPage as the dock host",
+    "existing approval refresh and run pause/resume controls in ChatLiveRunPanel"
+   ],
+   "constraints": "Frontend Plane owns presentation only; page context may reach the Model Plane only through governed browser.observe results or attachments, never raw DOM from the SPA. A chat turn's browser runs inside execution-core with its own Quarry lease and BrowserBroker grant and is not a gateway browser session (browser.rs:3320-3345), while the dashboard's start_ai_run acquires a separate fresh lease and only re-navigates to the tab's URL (browser.rs:1237,1311-1318), so the user's page and the agent's page are different pages today. User takeover must go through the gateway control route and Quarry control_mode (Model proposes, Quarry executes), and ZDR chat runs have no frames, so dock state must not be persisted server-side and the panel must keep its honest ZDR copy. UI-driven runs still use an interim 'session:{id}' grant_id because real BrowserBroker grant issuance is unbuilt (browser.rs:1235,1258-1262).",
+   "approachAdjustment": "Split the item. (a) M frontend slice over the existing read-only compact panel: dock positions (right, bottom, maximised, hidden) persisted per user, floating composer, new-chat-or-keep rule. (b) L backend slice for a live, steerable browser in chat: either a gateway projection of execution-core-owned Quarry runs (owner-gated, exposing Quarry's existing frames/ws and control routes) or a chat turn that acts on a user-created session, plus real BrowserBroker grant issuance for UI-driven runs. 'Promote BrowserChrome from the Crawl composer' is also not a fresh extraction: the component is already shared and the chat uses its compact variant.",
+   "effortRevised": "L",
+   "effortNote": "M only covers the dock layout over the existing read-only panel; binding to a live, steerable chat-run session needs gateway, Model Plane and grant work, so the whole item is L.",
+   "verdict": "reword",
+   "verdictReason": "The docked chat split and the compact BrowserChrome reuse already ship; the real remaining work is dock modes plus a live/takeover session binding that the item underestimates.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-012",
+   "verdict": "confirmed",
+   "checked": [
+    "scratchpad/tmp/cxib/main.pretty.js:43373 (browser-sidebar-floating-composer-reveal when pointer is near the bottom)",
+    "scratchpad/tmp/cxib/main.pretty.js:34780 (hidden-browser-use host kind)",
+    "scratchpad/tmp/cxib/main.pretty.js:67644 (destination enum new-window|left|right|bottom|pin|chat|new-chat)",
+    "scratchpad/tmp/cxib/main.pretty.js and src-BJv.pretty.js (toggleBrowserPanel, stepWorkspaceLayout, openSideChat)",
+    "scratchpad/tmp/cxib/i18n_browser.txt (thread.browser.options.hideFloatingComposer / showFloatingComposer)",
+    "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:11385-11388 (chrome.sidePanel.setOptions with tabId and sessionId path), :11518, :11698 (sessions.tabs.resolveByTarget)",
+    "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/manifest.json (side_panel, Alt+Shift+B)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin (sidepanelSessionOnTabChangeSchema new-session|keep-session, default new-session; sidepanel_instructions via sidepanelPrompt)"
+   ],
+   "corrections": "Minor: Aside injects the sidecar framing (sidepanelPrompt) only on the first user message, for the first attached tab, not on every first mention of a tab. Codex destinations are new-window, left, right, bottom, pin, chat and new-chat, plus the hidden-browser-use host, so 'detached' corresponds to new-window. That the floating composer 'posts into the active chat' is inferred from the thread-scoped composer settings; the send path was not traced.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Codex browser pane sits behind the server-delivered gate browserPane (client default false), so it may be rollout-gated",
+    "Aside evidence comes from the installed extension and the daemon SEA blob (SRC of a shipped artifact); Aside is a local single-user browser"
+   ],
+   "confidence": "high"
+  }
+ }
+}

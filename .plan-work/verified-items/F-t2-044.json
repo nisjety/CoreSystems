@@ -1,0 +1,118 @@
+{
+ "finalId": "F-t2-044",
+ "tier": "recommended",
+ "rank": 20,
+ "title": "Hermetic browser and scrape evals in CI through the production tool contract, with injection and ZDR fixtures and per-release scores",
+ "summary": "Extend the existing in-process TestSite and lab/evals fixtures with prompt-injection pages and ZDR cases, add record/replay of driver HTTP and CDP exchanges (path-confined fixtures), and add a CI job that runs lab/evals on a labelled PR and after each deploy, writing the SCOREBOARD with the commit SHA. As a later increment on canary.rs, add a mirror-and-diff mode for non-ZDR, consenting, non-agent traffic. || Drive the existing browser benchmark corpus through the same path production uses (Model Plane browser.observe and act tools, BrowserBroker grant, quarry-edge agent routes) against recorded fixture sites, score task success, steps and cost, and publish the result per release in CI.",
+ "whyItMatters": "It keeps parity claims honest and catches regressions in driver escalation, ZDR behaviour and prompt-injection handling before users do. The harness is already substantial, but every scoreboard suite is pending and CI does not run it. || Agent quality regressions are caught before release only if evals exercise the real contract. Quarry's scoreboard is all pending and the Python eval-lab targets model-gateway, so the browser agent is currently benchmarked in neither place end to end.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (controlled test site with e2e snips gated by environment, CI matrix over engine, proxy and queue backends, mock record/replay, evals on a PR hashtag and after deploy)",
+  "others": [
+   "Firecrawl shadow traffic: sampled mirror or split to staging, skipped for ZDR and agent jobs, outputs compared asynchronously",
+   "Codex in-app browser (same runtime archives used by training and production)"
+  ],
+  "prevalence": "1 of 4 sources (Firecrawl); unique || 1 of 4 sources; unique (documentation only)",
+  "mechanism": "Serve a fixture site in CI and run e2e tests through the gateway; record mode writes driver exchanges to JSON fixtures and replay serves them by name; a CI job runs evals on a labelled PR and after deploy. Mirror mode: with probability r and only for consenting non-ZDR tenants, enqueue a job to the candidate driver, compare markdown similarity and latency, and store the result in an experiments table. || Merged items add: The eval harness installs the same CI-published runtime version as production and drives the same tool contract against a training browser service, so scores are comparable across releases."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/lab/evals/src/main.rs",
+   "apps/Ingestion Plane/Quarry-v2/lab/evals/src/browser_benchmark.rs",
+   "apps/Ingestion Plane/Quarry-v2/lab/evals/fixtures",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/test_site.rs:1-30",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/canary.rs:1-15",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/experiments.rs:1-20",
+   ".github/workflows/quarry-v2-ci.yml:205-211",
+   "apps/Ingestion Plane/Quarry-v2/lab/evals/browser_benchmark.json",
+   "apps/Ingestion Plane/Quarry-v2/docs/SCOREBOARD.md",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/test_site.rs",
+   "apps/Model Plane/python/eval-lab-py",
+   ".github/workflows/eval-lab.yml"
+  ],
+  "gap": "A Rust eval harness exists (bakeoff, browser_benchmark, provider_matrix, release_matrix, web_rerank_gate) with 12 HTML fixtures and a local TestSite (landing, login, gated dashboard, search), but every scoreboard suite is pending, quarry-v2-ci.yml runs cargo test only (no lab/evals job), and there is no record/replay and no prompt-injection or ZDR fixture. Canary splitting and experiment tagging are shipped; there is no mirror-and-diff mode. || SRC: Quarry lab/evals has a browser benchmark, a deterministic test site and a release-matrix binary, but the scoreboard suites are all pending. The Python eval-lab runs selftests in CI and live evals only against model-gateway with credentials. Nothing drives Model Plane browser.observe/act against quarry-edge with fixtures, so it is not established that evals cover the production tool contract."
+ },
+ "approach": "[R-t2-07-10] Ingestion Plane: add injection and ZDR pages to TestSite and lab/evals/fixtures, add a record/replay layer for driver exchanges, and wire lab/evals into a GitHub workflow triggered by a PR label and by deploy, publishing SCOREBOARD automatically. Mirror mode in canary.rs is optional and follows once evals exist; it must skip ZDR and agent runs. || [R-t2-06-10] Ingestion Plane lab/evals: add a runner that starts quarry-edge with the test site and a stub BrowserBroker, replays recorded planner traces or a fixed small model through the Model Plane tool protocol, and emits task-success, steps and cost; add it to the quarry-v2 CI workflow as a non-live job and to a scheduled live job. Publish release_matrix output with the new scores; use recorded fixtures instead of live sites to avoid flakiness.",
+ "effort": "M",
+ "dependencies": [
+  "Browser loop production wiring (cross-category)",
+  "F-t2-008 for cost scoring"
+ ],
+ "planeOwner": "Ingestion Plane + Model Plane (eval harness)",
+ "risks": "Flaky live-site evals (run live evals only after deploy); mirroring doubles third-party load and needs consent and ZDR exclusion. || Flaky live-site benchmarks (use recorded fixtures); model cost for live evals; CI runner limits for Chromium (the quarry-v2 workflow already documents build instability).",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 10,
+  "DOC": 2,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-10",
+  "R-t2-06-10"
+ ],
+ "sourceClusters": [
+  "C-t2-07-031",
+  "C-t2-07-032",
+  "C-t2-06-027"
+ ],
+ "sourceCategories": [
+  "Observability & operations",
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-044",
+   "status": "partial",
+   "exactGap": "lab/evals (quarry-eval, bakeoff, provider_matrix, release_matrix, web_rerank_gate, plus a checked-in 10/10 fixture scoreboard.json dated 2026-05-08) is a workspace member whose unit tests run in cargo test --workspace, but no workflow runs its binaries, the docs/SCOREBOARD.md comparison suites are all pending, and its 'browser benchmark' is a mock-driver preview-latency microbenchmark rather than a task-success corpus. TestSite has no consumer, canary.rs and experiments.rs are unwired dead-code scaffolding (not shipped), there are no injection fixtures or record/replay, and live Chromium tests self-skip because CHROMIUMOXIDE_TEST is set in no workflow. Execution-core does already have a real end-to-end test (tests/browser_agent_e2e.rs: Model Plane loop to QuarryAgentClient to quarry-edge to Chromium) with fixture-based planner probe cases, but it is #[ignore]d for needing a live stack and does no scoring, and ZDR rejection is already covered deterministically by quarry-edge/tests/zdr_behavior.rs and zdr_claim_floor.rs.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/src/browser_benchmark.rs:1-12 (mock BrowserDriver and ArtifactStore; measures screenshot-artifact vs live-frame preview)",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/scoreboard.json (10 results, 10 passed, generated 2026-05-08)",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/src/main.rs:1-12 (quarry-eval fixture runner)",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/src/release_matrix.rs:1-14 (release matrix aggregates sibling reports; does not run them)",
+    "apps/Ingestion Plane/Quarry-v2/docs/SCOREBOARD.md:13-17 (all comparison suites pending)",
+    "apps/Ingestion Plane/Quarry-v2/Cargo.toml:3-12 (lab/evals is a workspace member)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/test_site.rs:1-30 (TestSite landing/login/dashboard/search; no other reference anywhere)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:90 (module declaration only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/canary.rs:9 (scaffolding, dead_code allowed, wired in a follow-up)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/experiments.rs:16 (scaffolding, dead_code allowed, wired in a follow-up)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_behavior.rs:1-24 (ZDR rejection tests, no Chromium needed)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_claim_floor.rs:1-25 (real-auth ZDR claim-floor contract against golden Auth Core claims)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:3248-3256 (live tests skipped unless CHROMIUMOXIDE_TEST=1)",
+    ".github/workflows/quarry-v2-ci.yml:150-211 (cargo test --workspace only; documented linker/disk instability)",
+    ".github/workflows/eval-lab.yml:1-25 (credential-free selftests only)",
+    ".github/workflows/model-plane-rust-ci.yml:108-119 (browser_agent_e2e stays ignored)",
+    "apps/Model Plane/rust/services/execution-core/tests/browser_agent_e2e.rs:1-60,194-310 (real loop test and planner probe cases with judge)",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1-40 (injection screening lives at the Model Plane render seam)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/browser-live.spec.ts:1-45 (live-stack Playwright spec; verevonv3-ci.yml:255-320 runs only the product-demo probe)",
+    "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:302 (BrowserGym: adopt in Python evaluation lab)"
+   ],
+   "reuse": [
+    "lab/evals binaries (quarry-eval, bakeoff, release_matrix) and scoreboard.json for an immediate CI job",
+    "execution-core tests/browser_agent_e2e.rs (run_browser_agent_loop, QuarryAgentClient::new with a static token, deterministic planner, probe_cases + judge)",
+    "TestSite (landing/login/dashboard/search) as the hermetic site",
+    "quarry-edge zdr_behavior.rs / zdr_claim_floor.rs as the ZDR fixture base",
+    "eval-lab-py cases and the eval-lab.yml selftest pattern for a Model Plane injection suite"
+   ],
+   "constraints": "Prompt-injection screening is a Model Plane duty (execution-core provenance.rs, model-gateway moderation/semantic screening), so a Quarry-only fixture can prove only that hostile text is returned unmodified; an injection eval must include the Model Plane render seam. ZDR fixtures should assert no artifact, cache, checkpoint or timeline writes. The quarry-v2 CI already documents Chromium-link disk crashes, so browser evals belong in a labelled or scheduled job, hermetic via TestSite and recorded fixtures, with live-model evals only after deploy. No cross-plane DB access: the harness talks to quarry-edge over HTTP like production.",
+   "approachAdjustment": "Phase 0 (S): add a quarry-v2-ci job that runs quarry-eval, quarry-bakeoff and release_matrix and uploads scoreboard with the commit SHA. Phase 1 (M): make browser_agent_e2e hermetic (quarry-edge with the browser-agent feature plus a stub grant validator against TestSite, deterministic planner or recorded planner traces) and score success, steps and cost; add injection pages to TestSite and assert on the Model Plane screening verdict; add ZDR no-write assertions. Drop the canary mirror-and-diff clause: canary.rs and experiments.rs are unwired scaffolding, so it would be a separate feature. Correct the description: the 'browser benchmark corpus' is a preview-latency microbenchmark, not tasks.",
+   "effortRevised": "L",
+   "effortNote": "Phase 0 is S and phase 1 M; with record/replay and the production-contract harness the whole item is L, not M.",
+   "verdict": "reword",
+   "verdictReason": "The harness pieces exist but nothing runs in CI and the item mislabels canary/experiments as shipped, the browser benchmark as a task corpus, and misses the existing ignored real e2e test and the ZDR tests; scope and effort need correcting.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

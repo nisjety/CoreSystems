@@ -1,0 +1,116 @@
+{
+ "finalId": "F-t2-029",
+ "tier": "recommended",
+ "rank": 5,
+ "title": "Quarry /metrics recorder, per-run statistics and graceful drain, then a span vocabulary, memory-aware admission and alert rules",
+ "summary": "Phase 1 (S, ship first): install the metrics-exporter-prometheus recorder in quarry-edge, serve /metrics on an internal-only port with about 20 low-cardinality series (queue depth, browser pool active/idle/launch latency, driver outcome by driver and outcome, egress broker health, cache hit/miss, webhook delivery), and persist a RunStatistics object on the run row (finished/failed/retried, retry histogram, status-code counts, top error signatures). Phase 2: infrastructure alert rules on the existing Control Plane Prometheus, plus user-facing run-failure and data-quality alert rules in quarry-control delivered through notification-core. Phase 3, after item 01: a span vocabulary (browser.<action> with url.origin, driver, outcome, snapshot bytes; scrape.pipeline with engine attempted/winner and cache state) with approval wait excluded from agent latency, and W3C traceparent propagation gateway to execution-core to Quarry. || Install a Prometheus recorder and serve /metrics on quarry-edge with low-cardinality queue depth, lease pool, per-org active runs and step latency; add SIGTERM drain to edge and the orchestrator worker. Then wrap the browser lease pool with the existing AutoscaledPool driven by cgroup memory and Chromium RSS, refusing leases above a threshold with a typed RESOURCE_BUSY the Model Plane can retry, and report the host unhealthy after repeated refusals.",
+ "whyItMatters": "Quarry has no metrics, so there are no SLOs, capacity planning or alerts for the browser and crawl layer that users and agents depend on, and scheduled monitors can break silently. Latency attribution across gateway, Model and Quarry is how slow or failing agent runs get debugged. || Autoscaling, admission and the reaper all need real numbers. Today the metrics crates are inert, so there is no queue or lease-pool visibility, and the browser host has no protection against renderer OOM or cross-session disruption as concurrent AI and user sessions grow.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (prom-client registries on every worker with semaphore active/waiting/hold metrics and one canonical log line per operation; scrape-pipeline span attributes) combined with Apify (Crawlee Statistics persisted per run; threshold and dataset field-stat alerts, DOC)",
+  "others": [
+   "Codex in-app browser (per-command spans carrying only url.origin and snapshot size, with approval wait subtracted from duration)",
+   "Apify (AutoscaledPool with CPU, memory and event-loop driven step scaling)"
+  ],
+  "prevalence": "Metrics and per-run statistics 2 of 4 (differentiator); tracing spans 2 of 4 (differentiator); alerting 1 of 4 (Apify, DOC only, unique) || Autoscaling/admission: 2 of 4 sources, common; worker ops: 1 of 4, differentiator",
+  "mechanism": "Recorder at startup and an internal /metrics route; counters labelled by driver and outcome, never by URL or org id. Per run, a Statistics struct persisted to the run row and emitted at the end. Alert rules {metric, comparator, threshold, window} evaluated after each run and on a timer; data quality via per-field null rate and z-scores against the last N runs. Spans carry only origin-level attributes and set agent.net_ms = total minus approval wait. || Merged items add: Every ~0.5 s a pool checks whether current < desired and the system is not overloaded; every ~10 s the autoscaler samples CPU, memory (memory.current / memory.max from cgroup) and event-loop lag and moves desired concurrency by about 5%. Admission refuses to lease a job when CPU or memory exceeds 0.8, and after 25 consecutive refusals marks the worker unhealthy so it stops receiving work. Each process serves /health (1 s timeout) and /metrics, renews job locks on a timer and, on SIGTERM, stops claiming and finishes active jobs."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:6-14",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:230",
+   "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go",
+   "apps/Control Plane/observability/prometheus.yml",
+   "apps/Ingestion Plane/Quarry-v2/docs/PLAN.md:359",
+   "apps/Ingestion Plane/Quarry-v2/docs/GAP.md:257",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:331-340",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs",
+   "apps/Ingestion Plane/integration-corev2/internal/api/server.go:178"
+  ],
+  "gap": "The metrics and metrics-exporter-prometheus dependencies are inert: no recorder is installed and no /metrics route exists (stated in the telemetry.rs header comment), although docs/PLAN.md:359 and docs/GAP.md:257 describe it as wired, so the docs are stale. integration-corev2 serves /metrics and a Control Plane prometheus.yml exists, so only the Quarry exporter is missing. There is no per-run statistics object beyond receipts and BrowserTelemetry, no alert rules or alertmanager anywhere in Quarry, and no span vocabulary for driver escalation or approval-wait exclusion. OTLP export exists only when OTEL_EXPORTER_OTLP_ENDPOINT is set. The Go side sets a W3C TraceContext propagator (quarryotel.go:13-44), but a grep of the Rust crates finds no traceparent extraction in quarry-edge, so gateway to edge to Go context is not joined. || Quarry edge serves no /metrics (the metrics and exporter dependencies are inert, per the module doc comment); tracing goes out as OTLP events only. The HTTP fast path has an AutoscaledPool and per-host AIMD, but browser leases use a fixed pool of 2 on a single shared Chromium with no memory-aware admission, and a viewport change relaunches the browser for all sessions. integration-corev2 does serve /metrics. Graceful drain and Temporal worker health were not checked."
+ },
+ "approach": "Ingestion Plane: install the metrics recorder in quarry-edge (the metrics crates are inert), persist per-run statistics, add graceful drain and memory-aware browser admission; then spans (after the ZDR sampler in F-t2-004) and alert rules in the existing Control Plane Prometheus config, with notices via notification-core. || Source detail: [R-t2-07-04] Ingestion Plane: install the recorder in telemetry.rs, add an internal /metrics route not on the public edge listener, and add RunStatistics to the run/job record in quarry-control. Scrape from the existing Control Plane Prometheus and add alert rules there. quarry-control gets an alert rule store and evaluator delivering through Application Plane notification-core; quality statistics keep counts only for ZDR orgs. Spans: adopt the vocabulary in quarry-edge and quarryotel, propagate traceparent from the gateway through Model Plane execution-core to Quarry, and exclude approval wait where execution-core decides approvals. || [R-t2-05-09] Ingestion Plane. Step 1 (S): install the Prometheus recorder in quarry-edge main.rs, mount /metrics and /healthz, instrument queue depth, lease pool occupancy, per-org active runs and step latency with no URLs or secrets in labels (ZDR/privacy), and add SIGTERM drain. Step 2: feed cgroup memory and Chromium process RSS into the existing AutoscaledPool wrapping the browser lease pool, add a typed RESOURCE_BUSY refusal with retry-after, and scale the pool above 2 (ideally a pool of Chromium processes so a viewport change does not relaunch everyone). Model Plane treats RESOURCE_BUSY as a retryable tool result.",
+ "effort": "L",
+ "dependencies": [
+  "Control Plane observability stack (prometheus.yml)",
+  "notification-core",
+  "Item F-t2-004 (ZDR sampler before spans)",
+  "Item F-t2-014 (correlation ids for span joins)",
+  "browser pool scaling beyond 2 leases",
+  "F-t2-006 reaper so leases are released"
+ ],
+ "planeOwner": "Ingestion Plane + Control Plane observability stack",
+ "risks": "Label cardinality (never label hot series by URL or org id), exposing /metrics publicly, alert fatigue, and recording spans for ZDR runs before the sampler exists. The alerting reference is documentation only. || Thresholds tuned wrong can starve throughput, so ship metrics first and tune from data. Metric labels must not carry URLs, org secrets or content.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 8,
+  "DOC": 3,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-04",
+  "R-t2-05-09"
+ ],
+ "sourceClusters": [
+  "C-t2-07-003",
+  "C-t2-07-004",
+  "C-t2-07-006",
+  "C-t2-05-014",
+  "C-t2-05-003"
+ ],
+ "sourceCategories": [
+  "Observability & operations",
+  "Orchestration & scale"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-029",
+   "status": "stub",
+   "exactGap": "SRC: the Prometheus recorder is scaffolding only: metrics and metrics-exporter-prometheus are declared (Cargo.toml:115; quarry-edge/Cargo.toml:58) but no recorder is installed and no /metrics route exists (telemetry.rs:6-14; search_routes.rs:228-232), RuntimeLeasePool.metrics_snapshot (lease_pool.rs:53) has no caller, no RunStatistics type exists anywhere, the Rust edge extracts no traceparent (only the Go side sets the W3C propagator, quarryotel.go:36-50), and no Prometheus config or alert rule covers Quarry (Control Plane prometheus.yml:1-47 has no quarry job and no rule_files; the Application Plane config says to add targets only when an endpoint ships; the Ingestion Plane has no Prometheus config). SRC: graceful shutdown already exists but stops at the HTTP layer: the edge uses axum with_graceful_shutdown on SIGINT/SIGTERM and flushes the local index (main.rs:84-100,1517-1535) and the orchestrator cancels a root context on SIGTERM (orchestrator main.go:119-131), but nothing drains browser leases or agent runs. SRC: browser admission is a hard-coded RuntimeLeasePool of 2 over one shared Chromium that relaunches on viewport change (main.rs:337; chromiumoxide.rs:194-270) and the AutoscaledPool is sized from CPU parallelism with no memory or cgroup signal (autoscale.rs:1-35); docs/PLAN.md:359 and docs/GAP.md:257 wrongly say metrics are wired.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/telemetry.rs:6-14 (module comment: dependencies inert, no recorder, no /metrics)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:228-232",
+    "apps/Ingestion Plane/Quarry-v2/Cargo.toml:115 and crates/quarry-edge/Cargo.toml:58 (metrics crates declared)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:53 (metrics_snapshot, no caller)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:84-100, :323, :337, :1513-1535 (shutdown_signal, lease pools 4 and 2, single 0.0.0.0 listener, graceful shutdown and index flush)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:119-131 (root context on SIGINT/SIGTERM)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-270 (single shared Chromium, relaunch on viewport change)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/autoscale.rs:1-35 (CPU-sized AutoscaledPool)",
+    "apps/Control Plane/observability/prometheus.yml:1-47 (no quarry job, no rule_files)",
+    "apps/Application Plane/observability/prometheus.yml:1-16 (per-plane Prometheus; add targets only when the endpoint ships)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:178-189 (/metrics behind internal auth)",
+    "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/quarryotel.go:8-15 and :36-50 (Go propagator only)",
+    "apps/Ingestion Plane/Quarry-v2/docs/PLAN.md:359, docs/GAP.md:257, docs/gap-quarry.md:175 (stale claims)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/notify/sink.go:1-50 (HTTP sink to notification-core)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:100-122 (BrowserTelemetry as a per-run statistics source)"
+   ],
+   "reuse": [
+    "integration-corev2 /metrics-behind-internal-auth pattern (Go) as the shape for an internal Rust listener",
+    "quarry-control notify::HTTPSink for user-facing alerts into notification-core (no new transport)",
+    "AutoscaledPool AIMD and the HostScheduler for admission, extended with a memory signal",
+    "BrowserTelemetry and receipts as inputs to a persisted RunStatistics object",
+    "quarryotel and the existing OTLP setup for the span vocabulary phase"
+   ],
+   "constraints": "SRC: each plane runs its own Prometheus with a plane label (Control and Application have configs, Ingestion has none), so either add a plane-local Prometheus or have the Control Plane scrape across the inter-plane network as it already does for the gateway; /metrics must not share the public 0.0.0.0 listener (main.rs:1513). SRC: no Alertmanager or rule_files exists in any observability directory, so Phase 2 is new infrastructure rather than 'add rules'. ZDR/privacy: labels carry no URL, org id or content, quality statistics are counts only for ZDR orgs, and spans must wait for the ZDR sampler (F-t2-004). Model proposes / Quarry executes: RESOURCE_BUSY is a typed refusal the Model Plane must treat as retryable.",
+   "approachAdjustment": "Remove 'add SIGTERM drain to edge and orchestrator' as new work (it exists) and restate it as 'drain browser leases and in-flight agent runs on shutdown'. Install the recorder and serve /metrics on a separate internal listener first (S), fix PLAN.md and GAP.md in the same change, then persist RunStatistics in the Go run record (M), then memory-aware admission together with a multi-Chromium pool (a viewport change currently relaunches everyone), then alerting with a decision on where Prometheus and Alertmanager live. Reuse the notify sink for user-facing failure alerts.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged overall: recorder plus /metrics is S, RunStatistics M, drain extension S, memory-aware admission plus multi-process pool M to L, alert infrastructure M, span vocabulary M.",
+   "verdict": "reword",
+   "verdictReason": "The recorder and /metrics are genuinely missing (keep as the quick win), but graceful SIGTERM shutdown already exists, the docs claiming metrics are wired are stale, and the alerting phase needs new infrastructure rather than rules on an existing stack; reword accordingly.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

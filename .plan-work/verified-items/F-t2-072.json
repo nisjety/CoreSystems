@@ -1,0 +1,96 @@
+{
+ "finalId": "F-t2-072",
+ "tier": "nice-to-have",
+ "rank": 7,
+ "title": "Share an agent run and its evidence with Space members through the existing resource-grant authority",
+ "summary": "Let an owner share a finished browser or ingestion run (timeline, receipts, screenshots) read-only with named users or a Space, by adding a run resource kind to the user-core resource_grants facade that the ShareDialog already uses. The Ingestion owner plane checks the grant before serving artifacts and issues short-lived signed artifact URLs per viewer. No anonymous public links by default, and ZDR runs have nothing durable to share.",
+ "whyItMatters": "Sharing a browsing run with its evidence is a natural collaborative feature for a workspace product, and it is what Aside's published sessions deliver. It must respect 'Space access never widens an owner-plane ACL'.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (published shared sessions with tool outputs and capped images)",
+  "others": [
+   "Apify"
+  ],
+  "prevalence": "2 of 4 sources; differentiator",
+  "mechanism": "Aside publishes a snapshot of the transcript plus tool outputs and up to 20 images per tool result, with explicit size caps, into an immutable share record that resolves to a read-only view. Apify adds time-limited pre-signed URLs for single objects and scoped READ/WRITE grants on chosen storages via a resource picker."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1466",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:2090",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-12"
+  ],
+  "gap": "SRC and baseline: artifacts are served only after an owner-gated gateway check and the timeline and evidence replay viewer is read-only for the owner. The gateway's ShareDialog backend proxies user-core resource_grants for documents (view-only MVP), but there is no share-run, link or signed-URL mechanism. Whether resource_grants accepts non-document resource kinds was not verified."
+ },
+ "approach": "User-core (or Application Plane projection): add a run resource kind to resource_grants and a Space projection of the share. Ingestion Plane: before serving receipts and artifacts, check the grant through the owner-plane ACL API and return per-viewer, short-lived signed URLs. Frontend: reuse ShareDialog on the Browser and Ingestions run views. Redact or let the owner deselect screenshots before sharing.",
+ "effort": "M",
+ "dependencies": [
+  "resource_grants support for run resources (to verify)",
+  "Owner-plane ACL check API"
+ ],
+ "planeOwner": "Application Plane (projection) with Ingestion Plane (ACL and artifact serving)",
+ "risks": "Apify's link sharing is ACL-widening by design and must not be copied. Screenshots can contain secrets. Grants must be revoked when the owner leaves the org.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 3,
+  "DOC": 2,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-06-11"
+ ],
+ "sourceClusters": [
+  "C-t2-06-015"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-072",
+   "status": "absent",
+   "exactGap": "No run-sharing path exists: the gateway ShareDialog backend (shares.rs) hard-codes resource_type 'document' with a view role, and although resource_grants is generic by resource_type, user-core's taxonomy classes quarry_run as team_shared so ValidateUserGrant rejects any per-user grant on it (the Rust mirror in retrieval-engine and taxonomy_test.go pin the same). Browser run evidence is served only through the gateway owner check owned_browser_artifact_run, which the code comment calls the only isolation boundary because Quarry's artifact GET applies no tenant scoping.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/shares.rs:1-12,36,111 (document-only share backend proxying user-core resource_grants)",
+    "apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json:3-15 (ownable: document only; quarry_run is team_shared)",
+    "apps/Control Plane/user-core/internal/authztaxonomy/taxonomy.go:91-101 (ValidateUserGrant rejects team-shared and unknown types)",
+    "apps/Control Plane/user-core/internal/authztaxonomy/taxonomy_test.go:47 (pins quarry_run as team-shared)",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs:21 (Rust mirror lists quarry_run as team-shared)",
+    "apps/Control Plane/user-core/internal/users/acl_repository.go:66-70 (Grant calls ValidateUserGrant first)",
+    "apps/Control Plane/user-core/migrations/012_resource_grants.up.sql:15-30 (generic resource_grants table, user subjects only in MVP)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1463-1500 (artifact route: owner gate is the only boundary; ZDR runs answer Withheld)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3427-3453 (owned_browser_artifact_run)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:484 and :2360-2391 (caller_owns_live_run authorizes by bearer claims; receipts and checkpoints skipped when ZDR is active)",
+    "grep (negative): no user-core, resource_grants or authz client in quarry-edge/src or quarry-runtime/src",
+    "apps/master-ownership-matrix.md:165-166 (rules 9 and 10: identity and membership are Control-owned; projections only narrow access)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:54-60 (shareable chat link is listed as not built; owner decision pending)"
+   ],
+   "reuse": [
+    "user-core resource_grants table and the internal authz facade the ShareDialog already uses (shares.rs)",
+    "ShareDialog.tsx for the UI, mounted on the Browser and Ingestions run views",
+    "Gateway owned_browser_artifact_run as the single enforcement point, extended to accept a viewer grant",
+    "Existing ZDR Withheld response (browser.rs:1498) to disable sharing of ZDR runs"
+   ],
+   "constraints": "Identity and membership are Control Plane authority (matrix rules 9 and 10): a run share must be a user-core grant and any Space projection may only narrow it, resolved from Control at read time. The run share is therefore a taxonomy decision in Control Plane, not just a new facade call: quarry_run is deliberately org-team-shared today, so either reclassify it (affects the retrieval-engine mirror and lint script) or add a new ownable type. ZDR runs have no durable evidence to share (receipts and artifacts are skipped), so the affordance must be disabled. Revoke grants when the owner leaves the org. No anonymous links; Apify-style link sharing widens ACLs and must not be copied.",
+   "approachAdjustment": "Enforce the grant at the gateway, not in Quarry: Quarry has no user-core client and authorizes by bearer claims, while the gateway already is the artifact gate, so it can check the viewer grant through the user-core facade and stream artifacts itself, which makes per-viewer signed URLs unnecessary. As a prerequisite, tenant-scope Quarry's own artifact GET (the gateway comment says it is unscoped). Add a new ownable resource type (for example agent_run) or reclassify quarry_run through an ADR, updating resource_taxonomy.json, the Rust mirror and the parity lint together. Let the owner deselect screenshots before sharing.",
+   "effortRevised": "L",
+   "effortNote": "Raised from M: the taxonomy change touches Control Plane and the Data Plane mirror, the gateway needs a viewer path, Quarry artifact scoping is a prerequisite, and revocation on org leave must be covered.",
+   "verdict": "reword",
+   "verdictReason": "Absent and still a fair nice-to-have, but the stated mechanism (add a run kind to resource_grants, have Quarry check it and mint signed URLs) hits the quarry_run team-shared classification and misplaces enforcement; the item should name the taxonomy ADR and the gateway as enforcement point.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

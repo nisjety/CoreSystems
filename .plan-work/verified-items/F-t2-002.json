@@ -1,0 +1,118 @@
+{
+ "finalId": "F-t2-002",
+ "tier": "priority",
+ "rank": 2,
+ "title": "Gate Evaluate and raw script actions behind a grant capability and one-shot approval",
+ "summary": "Make AgentAction::Evaluate (and raw CSS selector paths) read-only by default: run in an isolated world with a non-mutating document proxy, JSON-only arguments and credential-field masking. Mutating script requires an explicit grant capability plus a one-shot approval, and the planner does not see Evaluate unless the grant allows it.",
+ "whyItMatters": "Quarry otherwise fails closed, but Evaluate has no approval branch, so any risky action (submit, delete, read a sensitive field) can be expressed as script and bypass the risk-classified approval model. The executor must be sound regardless of which caller reaches /step.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (CA018, CI114: three gates plus a domain allowlist for raw CDP; read-only isolated-world evaluate wrapper that cannot mutate the DOM)",
+  "others": [],
+  "prevalence": "1 of 3 sources (Codex); unique",
+  "mechanism": "Evaluate runs in Page.createIsolatedWorld against a frozen read-only proxy of document (no setters, no event dispatch), JSON-serializable args only, credential inputs masked. Raw CDP only when the grant has rawCdp=true and the method is on an allowlist; request/cookie params that carry URLs are authorised."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:821-823",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:144-204",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:694",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:380",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:243-260",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751"
+  ],
+  "gap": "The Verevon UI facade refuses raw script, but Quarry accepts Evaluate{script} on normal runs: sensitive_approval_for_action handles dialog, upload and download only, and Evaluate appears in agent_routes.rs just as a label mapping (SRC, this audit). The execution-core LLM planner schema does not emit evaluate today (llm_planner.rs:53-65), so current exposure is via direct /step callers, compiled procedures and any future code-mode."
+ },
+ "approach": "Ingestion Plane (quarry-browser, quarry-runtime, quarry-edge): isolated-world read-only evaluate by default; add 'evaluate_mutating' as a sensitive action needing a grant capability and one-shot approval (the same mechanism as upload/download). Model Plane: hide the action from the planner unless the grant allows it. Audit existing callers of Evaluate first.",
+ "effort": "S",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Some extraction flows may rely on mutating evaluate; audit callers before tightening.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-09-06"
+ ],
+ "sourceClusters": [
+  "C-t2-09-032"
+ ],
+ "sourceCategories": [
+  "AI-browser control"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-002",
+   "status": "partial",
+   "exactGap": "Quarry's /step path has no gate for AgentAction::Evaluate: sensitive_approval_for_action covers only respond_dialog, upload_ref and download_ref and falls through to Ok(None) at agent_routes.rs:280, the broker's sensitive-action allowlist has no evaluate (grant.go:30-36), and ChromiumoxideDriver::evaluate runs page.evaluate in the main world (chromiumoxide.rs:3003-3017). The Model Plane half is already done: execution-core's browser.act schema (agent.rs:3479-3512) and the planner ACTION_SCHEMA (llm_planner.rs:53-65) never offer evaluate and the gateway sanitize_action denies it (browser.rs:3751), so exposure is direct service callers of /step plus Quarry's own unwired ModelPlanePlanner prompt, which advertises evaluate and pdf (mp_client.rs:383). The /step path also discards the script's return value (observation.rs:542-543), so a read-only isolated-world evaluate has no consumer there; ActionRuntime::Evaluate (action_runtime.rs:380-392) has no production caller.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:821-823",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:144-170",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:276-310",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2230-2290",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:540-544",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:380-392",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grant_validator.rs:25-109",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs:345-395",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:3003-3017",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:30-36",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3479-3512",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:53-65",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:130-200",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751-3755",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235"
+   ],
+   "reuse": [
+    "sensitive_approval_for_action + validate_sensitive_approval + the used_sensitive_approval_grants one-shot set (agent_routes.rs:144-310, 2276-2290)",
+    "GrantValidation::authorizes_exact_sensitive_action single-action approval rule (grant_validator.rs:98-109)",
+    "BrowserBroker allowedSensitiveActions and scoped approval grants (grant.go:30-36)",
+    "gateway sanitize_action's typed browser_action_denied response as the denial shape (browser.rs:3751)",
+    "require_ephemeral_evidence_action, which already excludes Evaluate in the ephemeral tier (agent_routes.rs:1153-1176)"
+   ],
+   "constraints": "Model proposes, Quarry executes or rejects: the gate must live in quarry-edge/quarry-runtime, not only in the planner schema, and denials must be typed Quarry errors. Grant authority belongs to the Model Plane BrowserBroker (Go), so a new sensitive action class needs a broker allowlist and proto alignment change as well as the Quarry change; approvals are strict single-action one-shot grants and sensitive actions require a parent run grant (agent_routes.rs fails with Forbidden without one). UI-driven runs use an interim 'session:{id}' grant_id today (browser.rs:1235), so the gate must fail closed when no real parent grant exists. Practical severity is defense-in-depth (internal service callers only), not an open user-facing hole.",
+   "approachAdjustment": "Reduce to a default-deny gate on /step: add 'evaluate' to the broker's allowedSensitiveActions and to sensitive_approval_for_action (bind the script hash into the approval), or simply reject AgentAction::Evaluate on agent runs until a real consumer exists. Drop the 'hide it from the planner unless the grant allows it' sub-task (already true on the Model Plane side) and remove evaluate/pdf from the unwired mp_client planner prompt. Build the isolated-world read-only evaluator (Page.createIsolatedWorld, JSON-only args, size/time/result caps) only together with F-t2-023, because scrape-time actions are where a return value is consumed.",
+   "effortRevised": "S",
+   "effortNote": "S holds for the deny-by-default plus sensitive-approval gate; the isolated-world read-only evaluator is a separate M and should move under F-t2-023.",
+   "verdict": "reword",
+   "verdictReason": "The Quarry-side gap is real and cheap to close, but half the approach is already shipped on the Model Plane and the read-only-evaluate design is mis-scoped to a path that discards results.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-002",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/cxib/browser-service.pretty.js:20116-20170 (playwright.evaluate CM, browser-use-readonly-js isolated world, grantUniveralAccess:false, limits 8/2000/200/200000, import() regex guard)",
+    "browser-service.pretty.js:20224-20300 (T0 read-only wrappers, credential policy, readonlyError)",
+    "browser-service.pretty.js:22755-22775 (global defineProperty, delete and assignment blocked)",
+    "browser-service.pretty.js:18733-18736 (ZY/QY CDP domain sets, eZ method denylist, tZ hints, rZ)",
+    "browser-service.pretty.js:11647-11660 (JR per-origin full-cdp consent prompt)",
+    "browser-service.pretty.js:11879-11893,18859 (ensureRawCdpUrlAllowed for URL-bearing params)",
+    "browser-service.pretty.js:1226,24075-24080,24144 (full_cdp_access_enabled, browser_use_full_cdp_access requirement, maybeAutoAnswerBrowserUseRequest)",
+    "C:/dev/firecrawl/apps/api/src/lib/safe-mode.ts:20-35 (executeJavascript stripped and interactive browser sessions rejected under Safe Mode)",
+    "records aside-browser-product-013 and aside-agent-control-architecture-083 (Aside page.evaluate may mutate the page; REPL guest isolation)"
+   ],
+   "corrections": "Codex does not put playwright.evaluate behind a capability or an approval. It makes evaluate structurally safe instead: an isolated world, read-only wrappers, masked credential fields, a block on import(), and capped results. The consent and approval gates apply only to raw CDP: the full_cdp_access_enabled preference (default false), the enterprise requirement, and a per-origin consent that a preference can auto-answer. 'Domain allowlist' means CDP protocol domains (22 usable), together with a per-method denylist and parameter checks, not website domains. 'grant rawCdp=true' and 'one-shot approval' are Verevon proposals, not Codex mechanisms. 'Unique' holds only for the read-only evaluate. Gating raw script actions is also in Firecrawl, where Safe Mode strips executeJavascript and rejects interactive sessions, and Aside isolates the REPL guest from the raw CDP client, although Aside's page.evaluate can mutate the page subject only to permission rules.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Codex raw CDP is default-off and gated by preference and enterprise requirement; the source record says the docs mark it development-only (doc not re-opened)",
+    "Codex evidence comes from a beautified copy of the shipped browser plugin bundle (SRC of a shipped artifact)"
+   ],
+   "confidence": "high"
+  }
+ }
+}

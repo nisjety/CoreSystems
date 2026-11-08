@@ -1,0 +1,109 @@
+{
+ "finalId": "F-t2-061",
+ "tier": "recommended",
+ "rank": 37,
+ "title": "Agent routines: scheduled, heartbeat and event-triggered agent runs with per-fire browser grants",
+ "summary": "Let the agent create persistent routines through one confirmed tool: cron or one-shot runs in a new session, heartbeats that wake the same conversation later, and event routines fired by webhook, email or notification events. Build on the Model Plane's existing cron_schedules and fire-time Control authorization, and issue a fresh BrowserBroker grant scoped to the routine's allowed domains for each unattended fire.",
+ "whyItMatters": "It turns the agent from reactive to proactive (watch a page, follow up tomorrow, react to a webhook), a visible AI-first differentiator. Event triggers can reuse integration-corev2 webhook intake and the Quarry run.completed event from R-t2-05-08.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (single routine_update tool over a routines table)",
+  "others": [],
+  "prevalence": "1 of 4 sources; unique",
+  "mechanism": "routines(id, owner, kind cron|heartbeat, trigger schedule|event, schedule_kind once|recurring, rrule, tz, run_at, event_filter {source, from}, target_session_id, model, permission_mode, browser_binding, paused_by, pause_reason, expires_at, created_by_session). The scheduler fires schedule routines into a new session (cron) or appends a wake message to the target session (heartbeat); an inbox matcher fires event routines. One tool handles create, suggest, update, pause, resume, view and delete. Prompt rules: hide raw RRULE, update rather than duplicate, never pause silently. Plans cap active routines."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:16-69",
+   "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go:18-26",
+   "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:836-858"
+  ],
+  "gap": "The Model Plane has cron_schedules CRUD at /api/v1/cron, a sweeper that claims due slots with FOR UPDATE SKIP LOCKED, creates a task from a task_template, records the fire, and reauthorizes each slot with a Control decision (model.cron.create, model.cron.fire, model.schedule.run). Not verified: whether the agent can create schedules through a tool, whether heartbeat (wake the same session) or event triggers exist, how browser grants are issued for unattended fires, and whether ZDR routines avoid storing transcripts. The comparator also flagged this cluster as unknown."
+ },
+ "approach": "Model Plane owns routines because they start agent runs and carry model and permission settings; acquisition-only automation delegates to Quarry schedules (R-t2-05-02). Extend cron_schedules (or a sibling routines table) with kind, trigger, target_session_id, event_filter, budget and allowed domains. Each fire must pass the existing Control fire authorization and obtain a fresh BrowserBroker grant; ZDR routines persist no transcript. Expose a routine tool to the agent with explicit user confirmation on create and per-routine budgets. Event routines subscribe to integration-corev2 webhook intake and Quarry completion events.",
+ "effort": "L",
+ "dependencies": [
+  "Model Plane cron sweeper and Control fire authorization (exist)",
+  "BrowserBroker grants for unattended runs",
+  "F-t2-018 executable schedules",
+  "F-t2-031 completion events",
+  "integration-corev2 webhook intake"
+ ],
+ "planeOwner": "Model Plane",
+ "risks": "Unattended agent runs widen the blast radius; require explicit user approval, per-routine budgets and domain scope, and never let a stored routine act as standing authority (the existing fire-time reauthorization pattern addresses this).",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-05-12"
+ ],
+ "sourceClusters": [
+  "C-t2-05-011"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-061",
+   "status": "partial",
+   "exactGap": "Cron is shipped only as a user-authored, Space-bound, draft-only lane: capability-core cron_schedules (5-field cron only, no one-shot or RRULE) is swept with FOR UPDATE SKIP LOCKED, reauthorized per fire by Control (model.cron.fire, model.schedule.run), and each fire runs one inference-only scheduled step in execution-core (execute_scheduled_step_runtime, no tool loop) on a persistent lane. Missing: any agent-callable schedule or routine tool (execution-core offers none), heartbeat runs that wake an existing session, general event triggers (only the flagged-off self-forward mail-task webhook and a process_output Space-watch adapter exist), per-fire browser grants, and a non-persistent ZDR lane. Per-fire browser grants are blocked twice: the scheduled lane uses a service credential and refuses human-delegated bearers while browser tools require a delegated browser credential, and BrowserBroker has no issuance path; the ScheduleDialog doc comment also records an owner ruling that scheduled runs are draft-only through Wave 2 because a scheduled run hard-fails when a step needs approval (comment only, workflow code not opened).",
+   "evidence": [
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:16-69,82-175 (sweeper, FireAuthorizer; SKIP LOCKED at 113; failed fresh authorization disables the schedule)",
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go:140-263 (per-fire authorization, taskConfigJSON, fireOne creates a task and a cron_fires row)",
+    "apps/Model Plane/go/services/capability-core/internal/cron/cron.go:1-40 (5-field cron expression only)",
+    "apps/Model Plane/go/services/capability-core/internal/cron/control_authorizer.go:18-60 (model.cron.create, model.cron.fire, model.schedule.run Control decisions)",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go:839-1005 (CronHandler: create requires space_ref, creator, a Space schedule decision token and an idempotency key)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs:245-300,400-416 (scheduled step lane: claim, run lookup, a single Infer call)",
+    "apps/Model Plane/rust/services/execution-core/src/scheduled_inference_auth.rs:1-8 (scheduled work must not borrow a human delegated inference bearer)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs:861-870 (browser tools need a separately verified delegated BrowserBroker credential)",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs:4640-4672 (start_scheduled_run uses RunRetention::persistent; service credential never carries a waiver)",
+    "apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher.go:46-51,229-230 (scoped scheduled runs allow only InteractiveRunSupervision)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4089-4290 (offered tool list: no schedule, cron, routine or watch tool)",
+    "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-60,95-97 (general Watch primitive; only the process_output adapter; model-created watches are a later slice)",
+    "apps/Model Plane/rust/services/session-core/migrations/0036_space_watches.sql:1-40 (space_watches design: one resource, one Space, one member authority)",
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go:1-50 (terminal run events to notification-core; per-user watcher rows)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduleDialog.tsx:12-30 (draft-only owner ruling; no pause/resume for effectful tools in scheduled runs)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.tsx:7-25 (list/pause/delete from chat; results link not built)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs:40-110 (cron proxy; personal-Space create relaxed with the Control decision minted server-side)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs:3950-4025 (ingestions.create_schedule: Quarry-side schedules for acquisition-only automation)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:925-985 (mail-task inbound webhook, the first event-triggered run, self-forward only)",
+    "apps/Application Plane/notification-core/migrations/014_register_mail_task_drafted.up.sql:1-12",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts:120-132 (mail-task bridge principal exists but is dark)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:60-64 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1258-1263 (grant store in memory; grant issuance still unbuilt)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-wave2-specs-2026-09-28/schedule.md:160-200 (DOC: planned personal-Space schedule authoring and Phase B results)"
+   ],
+   "reuse": [
+    "capability-core cron_schedules + Sweeper + ControlFireAuthorizer (cron/sweeper.go, cron/control_authorizer.go) and the cron_fires ledger",
+    "the Space Watch primitive (capability-core internal/watch, session-core 0036_space_watches.sql) as the event-trigger mechanism: add source adapters instead of a new inbox matcher",
+    "runwatch consumer + notifyclient for routine-finished notifications",
+    "the gateway personal-Space schedule create path (agent_actions.rs create_cron) so an agent tool obtains the same user-bound Control create decision",
+    "the mail-task inbound webhook and thread origin mail_task as the first event-triggered run to generalize",
+    "ScheduleDialog / ScheduledRunsPanel UI for list, pause and delete"
+   ],
+   "constraints": "Space authority: a stored schedule is never authority, every create needs a Control decision bound to the user and every fire is reauthorized, so an agent-created routine must go through the same user-bound create decision, never a service insert. The scheduled lane must not borrow a human's delegated bearer, which conflicts with the item's 'fresh BrowserBroker grant per fire' because browser tools need a delegated browser credential and the broker has no issuance path. Owner ruling: unattended runs are draft-only through Wave 2 and effectful or browser tool use in scheduled runs is Wave-3 scope, needing a pause/resume path that does not exist. ZDR: the scheduled lane is hard-wired persistent, so 'ZDR routines persist no transcript' cannot hold; refuse routine creation for ZDR users or build a non-persistent lane. Model proposes, Quarry executes: browser steps in a routine still need the Quarry grant and per-action approvals, which cannot be answered unattended.",
+   "approachAdjustment": "Re-scope in stages. (1) An agent-proposed routine as a confirmed, user-bound schedule create (the tool returns a proposal the user approves, then the existing gateway create_cron path runs), draft-only and tool-free. (2) Event triggers by adding Watch adapters or generalizing mail-task, not by building a new matcher. (3) Tool-using or browser routines only after the Wave-3 approval pause/resume design, a scoped service-owned browser credential and BrowserBroker issuance exist. Keep acquisition-only automation (watch a page) on Quarry schedules (ingestions.create_schedule) rather than agent routines.",
+   "effortRevised": "XL",
+   "effortNote": "L sized this as an extension of cron_schedules, but per-fire browser grants and tool-using routines need a scheduled tool loop, approval pause/resume, a scoped service browser credential and a ZDR lane. The draft-only agent-proposed routine alone is M.",
+   "verdict": "demote",
+   "verdictReason": "The cron foundation exists, but the distinctive parts (heartbeat, event routines, per-fire browser grants) are blocked by the Wave-3 draft-only ruling and unbuilt prerequisites (grant issuance, scheduled tool loop, ZDR lane). Keep as a later-wave item with the narrowed first slice.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

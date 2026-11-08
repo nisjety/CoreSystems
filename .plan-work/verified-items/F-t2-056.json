@@ -1,0 +1,123 @@
+{
+ "finalId": "F-t2-056",
+ "tier": "recommended",
+ "rank": 32,
+ "title": "Provider APIs and export rewrites before rendering (Google Docs, GitHub, Notion, transcripts), after verifying current coverage",
+ "summary": "Add a URL normaliser with a rewrite table (Google Docs, Sheets, Slides and Drive links to export URLs, preserving gid) and a ProviderResolver in Quarry that, for hosts matching a connected provider, calls integration-corev2's action API with the requesting user's identity and returns a normal scrape result. Add config-driven domain-pattern to driver overrides next to the presets, and route fetched export files through the file routing from R-t2-03-04. || Add a transcript format that reads public caption tracks (no cookies by default; any cookie use requires a BrowserBroker sensitive-action grant), with a capability-advertising pattern (supported-URL patterns cached briefly, typed unsupported error). Route Google Docs, Sheets and Slides export to integration-corev2 provider actions with OAuth rather than browser cookies, and skip raw audio/video download. || Check two unknowns. First, whether the Data Plane document import and chat-attachment conversion already give the same HTML/PDF/office/e-book/image to markdown quality as the scrape pipeline; if so close it, if not extend the Data Plane import rather than adding a Quarry /v1/parse route. Second, whether integration-corev2 has Google Drive/Docs/Sheets/Slides export actions and whether Quarry has a YouTube transcript extractor; prefer OAuth provider actions over browser-session export and add a YouTube transcript extractor only if missing.",
+ "whyItMatters": "Pasting a Google Docs, GitHub or Notion link into Verevon should return a faithful document, not a rendered login wall or a ToS-risky scrape. integration-corev2 already owns OAuth tokens and provider actions, so the bridge is an API call, not new connectors. || Agents often need a video transcript or the text of a Google Doc. For documents, OAuth provider actions fit Verevon's authority and audit model better than reusing a user's browser session. || A single conversion stack keeps markdown quality consistent for chat attachments and ingested web pages, and exporting Google Docs natively beats scraping rendered Docs. Both are probably partly covered by the Data Plane and the Integration Plane already, so the first step is to avoid duplicating work across planes.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl official-API engines and rewriteUrl (firecrawl-engine-and-infra-022 and -023, SRC)",
+  "others": [
+   "Codex in-app browser (automation-and-safety-112: strict URL validation, type-to-format allowlist, signed-in session export)",
+   "Firecrawl (api-surface fc-019 signed upload then parse through the same format stack) and Codex in-app browser (in-app-browser-003 site-specific export via the page session, DOC only)"
+  ],
+  "prevalence": "1 of 4 sources (firecrawl), unique || 2 of 4 sources (Codex in-app browser, Firecrawl); differentiator || file parse: 1 of 4 sources (Firecrawl), unique; signed-in export: 1 of 4 (Codex, DOC only), unique",
+  "mechanism": "URL normaliser with a rewrite table (regex to export URL, for example docs/spreadsheets/presentation/drive ids to export endpoints keeping gid). Engine resolver: if the host matches a provider and the org has a connected account, call the provider action and return a ScrapeResult; API engines take part in the waterfall with high quality scores. Config map domain_pattern to forced driver. || Merged items add: Validate the URL against an allowlist pattern (for example docs.google.com /d/<id>, not /pub); map document type to allowed export formats; fetch the export URL with session cookies inside the browser context and store the file as an artifact. Media: GET a supported-urls list (cached), reject unsupported URLs with a typed error, POST a download request with cookies and a long timeout, return an artifact URL. || File parse: POST /parse/upload-url returns an HMAC-signed uploadRef (10-minute TTL, 50 MB cap, org-bound); the client PUTs to object storage; POST /parse {uploadRef, formats} runs the document converters and returns the same Document shape. Export: site adapters keyed by URL pattern call the site's own export endpoints with the session cookies and return an artifact (Verevon should use OAuth provider actions instead, for credential isolation)."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "grep: no docs.google.com or drive.google.com string anywhere under Quarry-v2/crates",
+   "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:164 (Service.Execute dispatches Microsoft, Slack, Google, GitHub and other provider operations)",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3499-3501",
+   "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:127-133",
+   "grep transcript|youtube|docs.google.com|export?format over Quarry-v2/crates *.rs: 7 incidental hits in 5 files (audio routes, URL signing, config, serp), no export or transcript format (SRC, grep)",
+   "No baseline record for either capability.",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293 (no /v1/parse route in the table)"
+  ],
+  "gap": "No URL rewrite table, no per-domain driver override, and Quarry does not prefer a connected-account action for provider URLs. integration-corev2 has the actions but nothing in Quarry calls them for scrape. || No transcript, document-export or media-download formats (download_ref and frame_download_ref agent actions require an approval_grant_id, so a grant path for downloads exists; /v1/audio is TTS/STT, not media fetch). Absence rests on the grep above and the comparator baseline; integration-corev2 provider coverage for Google and Microsoft documents was not inspected in this pass. || Unknown whether the Data Plane import pipeline already covers the same formats, and unknown whether integration-corev2 ships Google export actions or Quarry has YouTube transcript extraction; not checked in this audit."
+ },
+ "approach": "Step 0 (from R-t2-01-12): verify what the Data Plane import and integration-corev2 Google/Microsoft providers already cover. Then a planner override hook that sends matching URLs to connected-account provider actions over the integration-corev2 API, export-URL rewrites whose output goes through the file router (F-t2-009), and public-caption transcripts. No cookie-replay site APIs. || Source detail: [R-t2-03-10] Ingestion Plane: (1) rewrite table in the URL normaliser (S, no cross-plane dependency). (2) ProviderResolver in quarry-runtime that calls integration-corev2 over its API (no cross-plane DB access) with the caller's identity and returns content plus the provider's ACL metadata; ACLs must propagate into Data Plane ingestion and ZDR must propagate to integration-corev2. (3) domain_pattern to driver overrides in the preset config, consumed by the planner in R-t2-03-06. Use only the requesting user's own connection. || [R-t2-02-12] Integration Plane (integration-corev2): provider actions for Google Docs/Sheets/Slides and Microsoft documents with OAuth export (owned by the integration category). Ingestion Plane: a transcript format using public caption tracks, no cookies by default, with BrowserBroker grants for any session-authenticated variant; no raw media download. || [R-t2-01-12] Read the Data Plane v2 import and chat-attachment conversion code to compare formats and OCR, and the integration-corev2 provider action list for Google Workspace; then decide per item. Data Plane owns documents; Integration Plane owns provider actions; Quarry adds only a YouTube transcript extractor if absent.",
+ "effort": "M",
+ "dependencies": [
+  "integration-corev2 action API for document fetch",
+  "F-t2-009 (export files are PDFs or Office files)",
+  "F-t2-057 (override hook in the planner)",
+  "integration-corev2 Google/Microsoft providers",
+  "BrowserBroker grants",
+  "F-t2-005 (format registry)",
+  "Data Plane import review",
+  "integration-corev2 Google provider"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry planner + integration-corev2)",
+ "risks": "Must not widen access: user-scoped connections only; provider ACLs and ZDR must propagate; provider rate limits and token expiry need clear errors. || Site terms and copyright for media download; cookie exfiltration risk; overlap with the Integration Plane category. || Duplicating document conversion across planes; using browser sessions for export conflicts with credential isolation.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 8,
+  "DOC": 1,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-10",
+  "R-t2-02-12",
+  "R-t2-01-12"
+ ],
+ "sourceClusters": [
+  "C-t2-03-025",
+  "C-t2-02-024",
+  "C-t2-01-014",
+  "C-t2-01-030"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Output formats & content processing",
+  "Acquisition API surface"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-056",
+   "status": "partial",
+   "exactGap": "integration-corev2 already ships the provider reads this item wants: Google drive.file.content with exportAs=text or Office export (service.go:300, drive_read.go:30-60 and 594-615), Microsoft drive.file.content (service.go:219), GitHub contents.get and readme.get (service.go:348, 366) and list-only Notion databases and pages (service.go:463-466), and the SPA picker reaches the content ops through the gateway allowlist (browse.rs:33-41). Model Plane agents call integration-corev2 directly (integration_tools.rs:1-30) but the agent catalog omits every content op (integration_tools.rs:98-141), so those calls classify as unknown-means-write and need approval (permission/mod.rs:195-218), and any provider result shown to the model is cut at 2000 characters (integration_tools.rs:54, 817-825). Quarry itself has no URL rewrite table, no provider resolver, no transcript or caption format and no /v1/parse, and no Quarry crate references integration-corev2.",
+   "evidence": [
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:164-188",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:219",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:296-304",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:348",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:366",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:461-468",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/drive_read.go:30-60",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/drive_read.go:594-615",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:1-55",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:96-141",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:478-540",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:817-825",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:195-218",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:205-235",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/integrations/browse.rs:24-41",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:68",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/prepare-chat-attachments.ts:15-35",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:31-35",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/docx.rs:1-36",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:480-488",
+    "apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md:120-130"
+   ],
+   "reuse": [
+    "integration-corev2 Service.Execute actions (Google, Microsoft, GitHub contents/readme) and its OAuth broker",
+    "Model Plane integration_tools client, in particular read_action_json with an integration:read token (cannot perform writes)",
+    "Gateway browse allowlist and chat document extraction route /api/v1/chat/documents/extract",
+    "quarry-transform docx.rs and pdf.rs plus the existing quarry-edge file routing for export bytes that arrive as files",
+    "Model Plane fetch chokepoints (model-gateway fetch_url / deep_research, execution-core web_fetch) where the user's identity already exists"
+   ],
+   "constraints": "Provider reads must run on the requesting user's own connection: integration-corev2 owns the tokens and Model Plane already reaches it with an Auth Core ingestion-audience token minted per org and session (integration_tools.rs:20-23, 494-540). Quarry has no such path, so a Quarry ProviderResolver would add a new cross-plane service identity that must still carry the end user, and would put provider ACL and ZDR propagation inside the scraper. Space access never widens an owner-plane ACL, so provider ACL metadata must travel with ingested content into the Data Plane, and ZDR must propagate to integration-corev2 and to any stored export. Reusing browser-session cookies for export is excluded by credential isolation; Notion content needs a new integration-corev2 action because pages are list-only.",
+   "approachAdjustment": "Move provider-URL routing out of Quarry. (1) Add a dedicated read-only document tool at the Model Plane or gateway (URL to provider and file id, then drive.file.content with exportAs=text for Google, drive.file.content for Microsoft, contents.get or readme.get for GitHub) that decodes content to bounded text or stores it in the working set; merely adding catalog rows is not enough because content ops return base64 and the model only sees the first 2000 characters. (2) In Quarry keep only a small public-URL rewrite table (link-shared Google export URLs) whose output goes through the file router. (3) Demote the YouTube or caption transcript format, nothing exists and it needs a cookie-free design. Step 0 answers: no document converter was found under Data Plane v2 services (negative grep); chat attachments convert through the gateway (chat.rs:68, 1 MB and 60k character caps in prepare-chat-attachments.ts) and Quarry has its own docx.rs and pdf.rs, so a Quarry /v1/parse route is not justified without a quality comparison; the integration-corev2 Google and Microsoft content ops are not yet verified against live providers (drive_read.go header, task F10).",
+   "effortRevised": "M",
+   "effortNote": "Unchanged in total, but the bundle should be split: the document tool is S to M, the Quarry rewrite table is S, the transcript format is M and demoted.",
+   "verdict": "reword",
+   "verdictReason": "The item says integration-corev2 coverage was not inspected; it is substantial, and the real gap is routing plus agent-visible content tools, not new connectors or a Quarry ProviderResolver. Reword to the Model Plane or gateway chokepoint and drop the Quarry to integration-corev2 design.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

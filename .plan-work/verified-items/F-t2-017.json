@@ -1,0 +1,138 @@
+{
+ "finalId": "F-t2-017",
+ "tier": "priority",
+ "rank": 17,
+ "title": "Public async job lifecycle: status, paginated results, per-URL errors, cancel/pause/resume, origin and live tail",
+ "summary": "Expose the missing job lifecycle for crawl and batch: GET /v1/crawl/:id (status, completed/total, warnings, expiry, cursor-paged data capped at 100 docs or 10 MiB), GET /v1/crawl/:id/errors (per-URL failures including robots-blocked), GET /v1/crawl/ongoing, DELETE /v1/crawl/:id (cancel) and POST pause/resume, with /v1/batch aliases. Turn /v1/jobs/:id/events into a real live tail that sends a catch-up snapshot first and supports Last-Event-ID. || Add authenticated, org-checked routes on the Quarry edge and the gateway for crawl status, cancel, pause and resume that map onto the Temporal signals the crawl workflow already handles. Add a live SSE tail for job events, a recorded run origin (user, agent, schedule, webhook, api) and a stage timeline on the job record, and surface the controls in the crawl UI and as Model Plane tools.",
+ "whyItMatters": "Users notice immediately when a runaway crawl cannot be stopped or a failed page cannot be explained, and agents need a single poll call. This is also the dependency for webhooks, waiters, resumable timeouts and monitors. The Temporal cancel/pause/resume handlers already exist, so most of the work is route wiring rather than new engine logic. || A user or agent who starts a crawl today (up to 5000 pages) has no way to stop, pause or inspect it from the product. Agents need the same controls to honour budgets, and the audit model needs to know who or what started a run.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-010/011 status, errors, ongoing, cancel; fc-012 catchup/document/done stream)",
+  "others": [
+   "Apify (run GET/abort, DOC)",
+   "Apify (run lifecycle contract with graceful abort, resurrect, origin)"
+  ],
+  "prevalence": "job status/cancel: 2 of 4 sources (Firecrawl, Apify), common; live stream with catch-up: 1 of 4 (Firecrawl) || 2 of 4 sources (both crawl platforms); common",
+  "mechanism": "GET /crawl/:id returns {status, completed, total, creditsUsed, expiresAt, data[page], next, warnings[]} where the page ends at 100 docs or 10 MiB and the cursor advances by what was actually returned; /errors returns [{url, code, error, requiresAction}] plus robotsBlocked[]; DELETE sends a cancel signal; results expire by TTL. The stream sends {type:'catchup', data: status}, then each finished document, then done, with defined close codes; support Last-Event-ID so reconnects do not lose events (the reference polls once a second server-side and its SDK falls back to polling, so build the tail off durable event history instead). || Merged items add: A state machine is persisted on the run record with a timestamp per transition and an origin. Abort emits an aborting event, waits a grace period (30 s on Apify) and then hard-stops. State is persisted periodically and on a migrating event so a run can resume. Resurrect restarts the timer with the same storage ids. Firecrawl records an array of steps so a UI can draw a timeline."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293 (route table: no GET/DELETE /v1/crawl/:id, no pause/cancel for jobs; only /v1/schedules/:id/pause|unpause)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:976 (list_job_events)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1040-1057 (comment: events are drained from control once and the stream closes)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146 (Pause/Resume/Cancel signal channels plus state and progress query handlers already installed)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:27",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:185",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:87-146",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:435-455,488-496",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:133-134",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:229-232",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1037-1080",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:179-196"
+  ],
+  "gap": "Quarry has only a /v1/:kind/jobs list and a drain-once events stream; no GET /v1/crawl/:id, no result pagination, no errors route and no public cancel/pause/resume, although the Temporal signal handlers exist. A grep of the orchestrator and control Go services found only the signal definitions, no sender. || The workflow handles pause, resume and cancel signals and checkpoints every 50 pages, but the edge exposes only POST /v1/crawl, POST /v1/batch, a jobs list and a job-events drain; no route sends the signals. The gateway offers crawl start, discover, list and events only, with no status, cancel, pause or resume. /v1/jobs/:id/events drains once instead of tailing, and run origin is not recorded (INF). ZDR runs are intentionally not resumable."
+ },
+ "approach": "Ingestion Plane: wire a Temporal client into quarry-control (it is nil today, so trigger/backfill return 501), expose GET/DELETE /v1/crawl/:id and batch equivalents with cursor pages, a warnings list, a per-URL errors route (including robots-blocked URLs), pause/resume via the existing Temporal signals, a recorded run origin, and a resumable event stream (?from_seq) instead of the drain-once stream. Add a processing_continues timeout contract so SDK callers re-attach instead of retrying. || Source detail: [R-t2-01-02] Ingestion Plane. quarry-edge: add GET/DELETE /v1/crawl/:id (batch alias), POST /v1/crawl/:id/pause|resume, GET /v1/crawl/:id/errors and /ongoing; org-check every route against the job record. The component that sends Temporal signals and reads the QueryState/QueryProgress handlers needs a Temporal client (control or an internal orchestrator endpoint). Build errors from failed-page and robots-denied events (CrawlDenialReason in quarry-core crawl_denial.rs). Make /v1/jobs/:id/events tail the durable event history with a snapshot first and Last-Event-ID, with a per-org cap on open streams. Gateway ingestions/runs.rs and knowledge.rs proxy with the existing org check. ZDR jobs return status only, no stored documents. || [R-t2-05-03] Ingestion Plane edge and control, plus gateway and UI. Add GET /v1/crawl/:id, DELETE /v1/crawl/:id and POST /v1/crawl/:id/pause|resume that resolve the job in control, verify org ownership from the principal, and signal the Temporal workflow (control or orchestrator holds the Temporal client; reuse the client added for R-t2-05-02). Add an origin field to job records and audit events, store a steps timeline, and turn /v1/jobs/:id/events into a tailing SSE stream. Gateway: mirror the routes under /api/v1/knowledge/crawl/{id} and add cancel/pause buttons to the crawl progress UI. Model Plane: register crawl status and cancel as proposable crawl actions that Quarry executes.",
+ "effort": "M",
+ "dependencies": [
+  "Quarry control job store and durable event history",
+  "A Temporal client reachable from the service that serves cancel/pause/resume (INF: none is wired today)",
+  "Temporal client reachable from edge or control (shared with F-t2-018)"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-control, quarry-edge)",
+ "risks": "Result retention versus ZDR (status-only for ZDR); long-lived SSE connections need per-org limits; cancel must be idempotent and safe when the workflow already finished. || Low because the signals exist; cancel must not leave a half-written ingest, so keep the ingest-decision step idempotent. Resume of ZDR runs stays unsupported by design.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 11,
+  "DOC": 3,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-05-03] apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (Temporal start/pause/resume/backfill/cancel)"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-01-02",
+  "R-t2-05-03"
+ ],
+ "sourceClusters": [
+  "C-t2-01-008",
+  "C-t2-01-009",
+  "C-t2-05-013"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface",
+  "Orchestration & scale"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-017",
+   "status": "partial",
+   "exactGap": "The edge exposes only POST /v1/crawl and /v1/batch (routes.rs:133-134), the generic GET /v1/:kind/jobs list (192) and GET /v1/jobs/:id/events (232), which forwards after_seq and limit to control but drains once and ends with a done frame (resource_routes.rs:1057-1127); there is no status-by-id, errors, ongoing, cancel, pause or resume route and no result pagination. Pause, resume, cancel and state/progress queries exist only in CrawlJobWF (signals.go:87-146, workflows.go:400), BatchJobWF is sequential with no handlers (workflows.go:359-383), and nothing sends the signals: quarry-control temporal client is a NoopClient plus a commented SDK sketch (temporal/client.go:91-130) while only the orchestrator dials Temporal (main.go:66) and starts workflows as quarry-job-<jobID> (dispatcher.go:246). The gateway proxies only crawl start, discover, list and events (knowledge.rs:179-196) and DashboardCrawlRuns.tsx has no cancel or pause control.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:125-293",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:955-1130",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/signals.go:80-146",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:174-230",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:359-410",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:236-300",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:55-70",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:125-160",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/temporal/client.go:91-150",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:24-31",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:486-530",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs:170-200",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:1060-1140",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1316-1330",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:2558-2590"
+   ],
+   "reuse": [
+    "quarry-control GET and PUT /v1/jobs/{id} (resources.go:24-31, 486-530) as the org-scoped job record and desired-state carrier",
+    "Orchestrator jobs.Manager poll loop, Temporal client and deterministic workflow id quarry-job-<jobID> (dispatcher.go:246, main.go:145-151) to send signals",
+    "Control job events with after_seq (resource_routes.rs:1074) and per-page page_failed and page_blocked events (workflows.go:174-202) for the errors route",
+    "Gateway crawl_run_events proxy that already forwards Last-Event-ID (quarry.rs:1098-1120) and the Model Plane sse.rs replay pattern for the live tail",
+    "Verevon action registry ingestions.* and knowledge.crawl_site (action-registry.ts:1320, 2563-2590) as the place to add proposable status and cancel actions"
+   ],
+   "constraints": "Job records and events stay in quarry-control and the Temporal client stays in the orchestrator (Ingestion Plane); every route needs an org check from verified claims. The Model may propose cancel or pause as registry actions but Quarry executes. ZDR: crawl and batch are refused under ZDR today, so lifecycle APIs need no ZDR content handling now; any future ZDR crawl must be status-only. Temporal WorkflowExecutionTimeout is a fixed 30 minutes (dispatcher.go:254), which should surface as a typed terminal state. Cancel must be idempotent against finished workflows.",
+   "approachAdjustment": "Do not wire a Temporal client into quarry-control (it is a stubbed schedule client). Follow the repo reconciler pattern: edge route to control job record desired_state (cancel, pause, resume via the existing PUT /v1/jobs/{id}) to orchestrator jobs.Manager, which already holds the client, sends the signal; add control-signal handlers to BatchJobWF or document batch as non-cancellable. Build /errors from existing page_failed and page_blocked events, and implement the live tail in the edge handler by polling control with after_seq (no new bus). Treat paginated result data as a separate sub-item: crawl output is not stored per job today (events carry excerpts only; pages go to artifacts or Data Plane when ingest is on), so a result source must be decided first.",
+   "effortRevised": "L",
+   "effortNote": "Raised from M: lifecycle routes (status, cancel, pause, resume, errors, ongoing, tail) are M, but result pagination, run origin and stage timeline add a data-source decision and push the total to L.",
+   "verdict": "reword",
+   "verdictReason": "The gap is confirmed and the Temporal handlers do exist for crawl, but the item places the Temporal client in the wrong service, overlooks that batch has no signal handlers, and treats result pagination as route wiring when no per-job result store exists.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-017",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/routes/v2.ts:308-390 (crawl, /crawl/ongoing, /crawl/active, GET/DELETE /crawl/:jobId, WS /crawl/:jobId, /crawl/:jobId/errors)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status.ts:275-332 (pageSize 100, bytesLimit 10485760, next=?skip=start+iteratedOver)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-cancel.ts (sets sc.cancelled, cancels the NuQ group, 409 when already completed)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:2077-2088 (CrawlErrorsResponse errors[{id,timestamp,url,code,error,requiresAction}], robotsBlocked[])",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:206 (TTL from crawlTtlHours, default 24 h)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl-status-ws.ts (catchup/document/done messages; close codes 1008, 3003, 1000; setTimeout(loop,1000) polling)",
+    "grep 'pause' in controllers/v2 (only monitor.ts has paused/resume, not crawl)",
+    "https://docs.apify.com/platform/actors/running/runs-and-builds (statuses, graceful abort 30 s, resurrect with same storage and a timeout counted from resurrection, meta.origin list incl. MCP; no pause)",
+    "https://docs.apify.com/platform/actors/development/programming-interface/system-events (aborting, migrating {timeRemainingSecs}, persistState every 60 s as an SDK-level virtual event)"
+   ],
+   "corrections": "Pause/resume in the title is not a reference capability. Firecrawl crawls have only cancel (pause/resume exists only for Firecrawl monitors), and Apify has abort, graceful abort and resurrect of a finished run, but no pause. Say that pause/resume comes from Quarry's own Temporal signals, or that it is a Verevon addition. Last-Event-ID resume and an event-history tail are recommendations: neither reference has them. The Firecrawl WS has no resume cursor and polls once a second, and the source has no SSE. Apify's 30 s grace period comes from the runs page; the system-events page gives no duration. The 'recorded steps' timeline comes from Firecrawl's legacy multi-page extract (extract-redis), not from crawl jobs.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Apify half is DOC-only (public docs, not code)",
+    "Firecrawl half is SRC and was verified in the local repo",
+    "Firecrawl stores a per-team crawlTtlHours override in account flags; the default is 24 h",
+    "Firecrawl only registers a WS route for /crawl/:jobId; a batch WS variant is SDK-side and unverified on the server",
+    "Firecrawl step timeline is legacy extract only (medium confidence)"
+   ],
+   "confidence": "high"
+  }
+ }
+}

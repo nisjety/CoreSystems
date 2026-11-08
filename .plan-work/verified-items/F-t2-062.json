@@ -1,0 +1,107 @@
+{
+ "finalId": "F-t2-062",
+ "tier": "recommended",
+ "rank": 38,
+ "title": "Budgeted web research job contract with run-context cost attribution",
+ "summary": "Package the existing search, scrape and browser-agent steps as one research run in the Model Plane: input {prompt, urls?, output schema?, max cost/credits, effort}, output {status, data, partial, partialSchemaValid, stopReason such as credit_limit_reached, creditsUsed}, with one active run per thread (409 thread_busy plus the running run id). Quarry accepts a signed run-context header {requestId, parentRunId} from the Model Plane so its cost events attach to the parent run and are not billed twice.",
+ "whyItMatters": "A predictable, budgeted research call gives other features, and any future external API user, one contract with partial results and a clear stop reason instead of stitching step-level agent routes together. Accurate per-run cost in the Model Plane cost service depends on Quarry knowing the parent run.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-020 agent job and fc-022 threads; fc-021 trusted internal calls with requestId and shouldBill)",
+  "others": [
+   "Apify (Actor runs with max-charge limits, DOC)"
+  ],
+  "prevalence": "research-agent job API: 1 of 4 sources (Firecrawl), unique; internal service call attribution: 1 of 4 (Firecrawl)",
+  "mechanism": "POST /agent {prompt, urls?, schema?, maxCredits, effort, strictConstrainToURLs, webhook} returns an id; GET returns {status, data, partial, partialSchemaValid, stopReason, creditsUsed, pendingApproval}; a thread rejects a new turn with 409 while a run is active. Internal agent services call the public endpoints with a shared-secret block {requestId, shouldBill} so tool calls are attributed to the parent run; Verevon should use its stronger scoped service tokens plus a signed header rather than one shared secret."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3659-3729",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1273-1667",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2228-2410",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/fleet_routes.rs:219-222 (fleets are in-process only, per baseline)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:369",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:451",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service scopes: scrape, search, extract, artifacts, agent; no map/crawl/answer)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:898-1066"
+  ],
+  "gap": "Model Plane owns sessions/runs and Quarry exposes step-level /v1/agent/runs, but there is no single research-job contract with output schema, budget, stopReason and partial results; propagation of a parent run id into Quarry cost events was not verified; the gateway browser path depends on the grant fix in R-t2-01-05."
+ },
+ "approach": "Model Plane: add a research-run type over the existing sessions/runs with schema validation (using the json format from R-t2-01-04), a budget and partial-result semantics; it calls Quarry search/scrape/agent steps under service tokens. Ingestion Plane: accept a signed run-context header and tag cost events with run id; widen service scopes deliberately (map yes; crawl starts stay approval-gated so 'Model proposes, Quarry executes' holds). Cost service integration records per-run cost.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001 browser grant issuance",
+  "F-t2-019 json format",
+  "Model Plane cost service"
+ ],
+ "planeOwner": "Model Plane (run contract) with Ingestion Plane (run-context attribution)",
+ "risks": "Cost runaway (enforce the budget server-side); schema-valid but wrong outputs; ZDR must hold across every step.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 3,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-01-09"
+ ],
+ "sourceClusters": [
+  "C-t2-01-015",
+  "C-t2-01-016"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-062",
+   "status": "partial",
+   "exactGap": "A research pipeline already exists but as a chat feature: model-gateway deep_research.rs (plan, concurrent search, read, synthesize, cited document artifact) runs under a session run when a request sets deepResearch, with spend caps (sub-queries, pages read, corpus chars, wall clock), a coverage report with a halt_code stop reason and a cancelled/partial outcome, yet it is in-process, dies with the stream, is not an addressable job, takes no caller budget or output schema, and has no thread-busy guard (no thread_busy or 409 concept found in Model Plane). Quarry exposes only step-level routes (/v1/search, /v1/extract, /v1/agent/runs, job listing) and meters billing UsageEvents keyed by its own request id with free-form metadata, while execution-core's web tools send only a bearer and x-quarry-org, so no parent run id reaches Quarry and Quarry usage flows to billing-core rather than the Model Plane cost-core (cost-core ingestion of Quarry cost was not traced). A USD ceiling exists only for browser runs (Quarry AgentConstraints.max_cost_usd, gateway max_cost_usd); there is no credits budget for search or scrape.",
+   "evidence": [
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:1-24 (pipeline shape; deliberately not Temporal; dies with the stream)",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:58-140,233 (caps are spend limits: sub-queries, pages, wall clock 410 s)",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:600-660,712 (Coverage, halt_code, DeepResearchOutcome with report, cancelled and partial path, DEEP_RESEARCH_TOOL)",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:2413 (run_deep_research entry point)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs:2354-2362,2425 (deep research runs under the turn session run; cancelled when the client stops the stream)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:6728,8937 (deepResearch request flag; refused for waived runs)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs (route list: /v1/search, /v1/extract, /v1/answer, /v1/crawl, /v1/batch, /v1/:kind/jobs; no /v1/research or /v1/agent job route)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:10 (job listing covers research and agent kinds only as a read model)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:1006-1030 (UsageEvent metadata: user_id, result_count, provider; no run id)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:47-83 (UsageEvent {event_id, org_id, metric, quantity, source, metadata}; billing-core wire shape)",
+    "apps/Model Plane/rust/services/execution-core/src/web_tools.rs:95-96,254-262 (only bearer and x-quarry-org sent; search body is query, limit, zdr)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:830-837 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235-1245 (browser-run max_cost_usd)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/resources.rs:246-250 (TeamCreditUsage: team-level credits only)",
+    "apps/Model Plane/go/services/cost-core/internal/server/server.go:142 (GET /api/v1/cost/run per-run totals; no Quarry linkage found)",
+    "negative searches: no research job, maxCredits, stopReason, thread_busy, partialSchemaValid, parent_run_id or run-context header in Model Plane, quarry-edge or the gateway"
+   ],
+   "reuse": [
+    "model-gateway deep_research pipeline with its Coverage and read_halt_code vocabulary as the source of stopReason and partial results",
+    "the session run already created for a deep-research turn (sse.rs:2356) as the job record to expose",
+    "Quarry UsageEvent.metadata (free-form JSON) to carry parent_run_id and request id without a schema change",
+    "Quarry AgentConstraints.max_cost_usd and MaxCostExceeded as the budget semantics already enforced server-side for browser runs",
+    "quarry-edge /v1/answer search-then-fetch pipeline (answer_routes.rs) for server-side fan-out",
+    "scoped Auth Core service tokens plus a signed header, instead of a shared secret"
+   ],
+   "constraints": "Model Plane owns the run and its cost; Quarry only executes and meters and must treat a run-context header as advisory attribution, never authority (signed, org-checked). ZDR must hold across every step: deep research is already refused for waived runs and the chat pipeline persists nothing precisely because it dies with the stream, so a durable job record must not retain content for ZDR callers. Budgets must be enforced server-side in the Model Plane, since Quarry usage reaches billing-core asynchronously. Crawl starts remain approval-gated (Model proposes, Quarry executes).",
+   "approachAdjustment": "Do not build a new research-run type from raw steps: promote the existing deep_research pipeline to an addressable run (GET status, partial results, stopReason mapped from halt_code, one active run per thread returning 409 and the running run id), map the caller budget onto the existing caps plus a credit or USD ceiling, and add output-schema validation only after the JSON-format item lands. Add the signed run-context header as a separate small cross-plane change (web_tools.rs and the model-gateway Quarry client send requestId and parentRunId; Quarry writes them into UsageEvent.metadata). Defer the external-API-user justification until such a consumer exists.",
+   "effortRevised": "M",
+   "effortNote": "Reworded scope (addressable wrapper over the existing pipeline, budget mapping, thread-busy guard, run-context attribution) is M because the pipeline and its session run already exist. Output-schema validation and fully durable partial state would return it to L.",
+   "verdict": "reword",
+   "verdictReason": "The item proposes packaging steps that deep_research already packages for chat. The real gaps are addressability, a caller budget, thread-busy semantics and run-context attribution to Quarry; reword to those.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}
