@@ -795,6 +795,7 @@ export default function VerevonIngestionsPage() {
             onRerun={rerun}
             onControl={controlJob}
             controlError={controlError()}
+            onIngestStarted={() => void loadWorkspace()}
           />
         </Show>
 

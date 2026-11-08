@@ -46,6 +46,8 @@ interface ImportMetaEnv {
 	readonly VITE_QUOTA_READOUT_METRIC?: string;
 	/** "1"/"0" forces the Space command palette on/off; unset is on in dev only (WS13-S6). */
 	readonly VITE_SPACE_COMMAND_PALETTE_UI?: string;
+	/** "true" shows row checkboxes and "Ingest selected" on a run's fetched pages (re-fetch, then ingest). Default off. */
+	readonly VITE_INGEST_SELECTED?: string;
 }
 
 interface ImportMeta {

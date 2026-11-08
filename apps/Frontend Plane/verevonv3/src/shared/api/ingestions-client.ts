@@ -163,6 +163,8 @@ export type RunCreateRequest =
   | {
        kind: 'batch'
        urls: string[]
+       /** Re-fetch each URL and persist its page to Knowledge. Absent, the pages are not persisted. */
+       ingest?: boolean
      }
   | {
        kind: 'extract'

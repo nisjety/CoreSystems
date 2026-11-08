@@ -7,6 +7,7 @@ import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import {
+  createIngestionRun,
   getIngestionArtifactText,
   getIngestionJob,
   getIngestionJobErrors,
@@ -20,6 +21,14 @@ import {
   type RunItem,
 } from '@/shared/api/ingestions-client'
 import { jobResultsMessage } from '@/features/ingestions/lib/errors'
+import {
+  INGEST_BATCH_LIMIT,
+  ingestBatchRequest,
+  ingestSelectedEnabled,
+  ingestSelectedMessage,
+  planIngest,
+  togglePick,
+} from '@/features/ingestions/lib/ingest-selected'
 import {
   countRunsByGroup,
   filterRuns,
@@ -58,6 +67,8 @@ export function IngestionsRunsView(props: {
   onRerun: (run: RunItem) => void
   onControl: (jobId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
   controlError: string | null
+  /** A batch started from a run's pages: the page reloads its run list. */
+  onIngestStarted?: () => void
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -205,6 +216,7 @@ export function IngestionsRunsView(props: {
             onClose={() => props.onSelectRun(null)}
             onRerun={() => props.onRerun(run())}
             onControl={props.onControl}
+            onIngestStarted={props.onIngestStarted}
           />
         )}
       </Show>
@@ -264,6 +276,7 @@ function RunDetail(props: {
   onClose: () => void
   onRerun: () => void
   onControl: (jobId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
+  onIngestStarted?: () => void
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -568,7 +581,7 @@ function RunDetail(props: {
             )}
           </Show>
         </Show>
-        <RunResults runId={props.run.id} />
+        <RunResults runId={props.run.id} onIngestStarted={props.onIngestStarted} />
         <Show when={statLines().length === 0 && !errorsLoading() && !errors()}>
           <pre class="ingestions-json-pre">{JSON.stringify(props.run.stats, null, 2)}</pre>
         </Show>
@@ -578,9 +591,10 @@ function RunDetail(props: {
 }
 
 /** The pages a run fetched, one page at a time, as Apify's dataset lists them. A page's markdown is read on demand. */
-function RunResults(props: { runId: string }) {
+function RunResults(props: { runId: string; onIngestStarted?: () => void }) {
   const i18n = useI18n()
   const tr = i18n.tr
+  const ingestOn = ingestSelectedEnabled()
   const [page, setPage] = createSignal<JobResultsPage | null>(null)
   const [cursor, setCursor] = createSignal<number | undefined>(undefined)
   const [earlier, setEarlier] = createSignal<Array<number | undefined>>([])
@@ -590,6 +604,12 @@ function RunResults(props: { runId: string }) {
   const [opened, setOpened] = createSignal<JobResultItem | null>(null)
   const [markdown, setMarkdown] = createSignal<ArtifactText | null>(null)
   const [markdownError, setMarkdownError] = createSignal<string | null>(null)
+  const [picked, setPicked] = createSignal<ReadonlySet<number>>(new Set())
+  const [dryRun, setDryRun] = createSignal(true)
+  const [ingesting, setIngesting] = createSignal(false)
+  const [ingestError, setIngestError] = createSignal<string | null>(null)
+  const [ingestReceipt, setIngestReceipt] = createSignal<string | null>(null)
+  const plan = createMemo(() => planIngest((page()?.items ?? []).map((item) => ({ seq: item.seq, url: item.url })), picked()))
 
   createEffect(
     () => `${props.runId}|${cursor() ?? ''}|${latest()}`,
@@ -597,8 +617,13 @@ function RunResults(props: { runId: string }) {
       const controller = new AbortController()
       setLoading(true)
       setError(null)
+      // A pick is for the page on screen only: moving the page or the run clears it.
+      setPicked(new Set<number>())
       getIngestionJobResults(props.runId, { afterSeq: cursor(), latest: latest(), limit: 50 }, controller.signal)
-        .then(setPage)
+        .then((next) => {
+          setPicked(new Set<number>())
+          setPage(next)
+        })
         .catch((cause: unknown) => {
           if (controller.signal.aborted) return
           setPage(null)
@@ -643,6 +668,45 @@ function RunResults(props: { runId: string }) {
     }
   }
 
+  function countText() {
+    if (picked().size === 0) return tr('Velg sider for å hente dem på nytt og lagre dem.', 'Pick pages to re-fetch and ingest them.')
+    const skipped = plan().duplicates
+    return tr(
+      `${picked().size} valgt · ${plan().urls.length} unike URL-er${skipped ? ` · ${skipped} hoppes over (samme URL)` : ''}`,
+      `${picked().size} selected · ${plan().urls.length} unique URLs${skipped ? ` · ${skipped} skipped (same URL)` : ''}`,
+    )
+  }
+
+  async function ingestPicked() {
+    const urls = plan().urls
+    if (urls.length === 0) return
+    setIngestError(null)
+    setIngestReceipt(null)
+    if (dryRun()) {
+      setIngestReceipt(
+        tr(
+          `Tørrkjøring: ${urls.length} URL-er ville blitt hentet på nytt og lagret. Ingenting er sendt.`,
+          `Dry run: ${urls.length} URLs would be re-fetched and stored. Nothing was sent.`,
+        ),
+      )
+      return
+    }
+    setIngesting(true)
+    try {
+      const created = await createIngestionRun(ingestBatchRequest(urls))
+      setPicked(new Set<number>())
+      setDryRun(true)
+      setIngestReceipt(
+        tr(`Batch startet: ${urls.length} URL-er, jobb ${created.run.id}.`, `Batch started: ${urls.length} URLs, job ${created.run.id}.`),
+      )
+      props.onIngestStarted?.()
+    } catch (caught) {
+      setIngestError(ingestSelectedMessage(caught, tr))
+    } finally {
+      setIngesting(false)
+    }
+  }
+
   return (
     <>
       <h3 class="ingestions-section-title">{tr('Sider som ble hentet', 'Pages fetched')}</h3>
@@ -661,6 +725,31 @@ function RunResults(props: { runId: string }) {
                 {tr('Kjøringen er så stor at bare de første sidene er gått gjennom.', 'The run is so large that only the first pages were checked.')}
               </p>
             </Show>
+            <Show when={ingestOn && view().items.length > 0}>
+              <div class="ingestions-meta-row" role="group" aria-label={tr('Hent på nytt og lagre valgte sider', 'Re-fetch and ingest the picked pages')}>
+                <span class="ingestions-muted">{countText()}</span>
+                <label class="ingestions-toggle">
+                  <input type="checkbox" checked={dryRun()} disabled={ingesting()} onChange={(event) => setDryRun(event.currentTarget.checked)} />
+                  <span>
+                    <strong>{tr('Tørrkjøring', 'Dry run')}</strong>
+                    <small>{tr('Ingen forespørsel sendes før du slår den av.', 'Nothing is sent until you turn it off.')}</small>
+                  </span>
+                </label>
+                <Button size="xs" disabled={ingesting() || plan().urls.length === 0} onClick={() => void ingestPicked()}>
+                  {dryRun() ? tr('Tell valgte', 'Count selected') : tr('Hent på nytt og lagre', 'Re-fetch and ingest')}
+                </Button>
+              </div>
+              <Show when={!dryRun()}>
+                <p class="ingestions-muted">
+                  {tr(
+                    `Listen har ikke sidenes innhold, så hver valgte side hentes på nytt før den lagres. Høyst ${INGEST_BATCH_LIMIT} per batch.`,
+                    `The list has no page content, so each picked page is fetched again before it is stored. At most ${INGEST_BATCH_LIMIT} per batch.`,
+                  )}
+                </p>
+              </Show>
+              <Show when={ingestError()}>{(message) => <div class="ingestions-alert" role="alert">{message()}</div>}</Show>
+              <Show when={ingestReceipt()}>{(text) => <p class="ingestions-muted" role="status">{text()}</p>}</Show>
+            </Show>
             <Show
               when={view().items.length > 0}
               fallback={
@@ -672,7 +761,16 @@ function RunResults(props: { runId: string }) {
               <ul class="ingestions-error-list">
                 <For each={view().items}>
                   {(item) => (
-                    <li>
+                    <li class={ingestOn && item.url ? 'ingestions-pick-row' : undefined}>
+                      <Show when={ingestOn && item.url}>
+                        <input
+                          type="checkbox"
+                          aria-label={tr(`Velg ${item.url}`, `Pick ${item.url}`)}
+                          checked={picked().has(item.seq)}
+                          disabled={!picked().has(item.seq) && picked().size >= INGEST_BATCH_LIMIT}
+                          onChange={() => setPicked((current) => togglePick(current, item.seq))}
+                        />
+                      </Show>
                       <button type="button" class="ingestions-truncate" onClick={() => void openPage(item)}>
                         {item.url}
                       </button>
