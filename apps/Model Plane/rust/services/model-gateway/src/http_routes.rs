@@ -13431,6 +13431,7 @@ async fn list_models(
 
     // One catalogue snapshot prices the whole listing, and none is taken while the switch is off.
     let rates = crate::catalogue_prices::snapshot_for_listing(&state.pricing).await;
+    let context_refs_on = crate::context_refs::enabled();
     let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
@@ -13438,12 +13439,14 @@ async fn list_models(
             let price = rates.as_ref().and_then(|rates| {
                 crate::catalogue_prices::model_price(rates, &m.id, &m.provider, &m.modality)
             });
+            let features =
+                crate::context_refs::catalogue_features(m.features, &m.modality, context_refs_on);
             ModelDescriptor {
                 id: m.id,
                 provider: m.provider,
                 modality: m.modality,
                 streaming: m.streaming,
-                features: m.features,
+                features,
                 privacy_tier: privacy_tier_label(m.privacy_tier),
                 residency: m.residency,
                 effort_levels: m.effort_levels,

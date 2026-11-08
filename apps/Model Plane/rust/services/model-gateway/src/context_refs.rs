@@ -51,6 +51,23 @@ pub fn enabled() -> bool {
     parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
+/// The catalogue feature a chat model lists while the switch is on (`features` on `GET /v1/models`).
+/// The composer shows its reference chips only where the catalogue says the gateway resolves them.
+pub const CATALOGUE_FEATURE: &str = "context_refs";
+
+/// A model's catalogue features, with [`CATALOGUE_FEATURE`] added once to a chat model while the switch
+/// is on. Every other model, and every model while the switch is off, keeps its features as they were.
+#[must_use]
+pub fn catalogue_features(mut features: Vec<String>, modality: &str, enabled: bool) -> Vec<String> {
+    if enabled
+        && modality == "chat"
+        && !features.iter().any(|feature| feature == CATALOGUE_FEATURE)
+    {
+        features.push(CATALOGUE_FEATURE.to_owned());
+    }
+    features
+}
+
 /// Whether a request carries references at all: anything but an absent field, `null` or `[]`. A
 /// malformed value counts, so a ZDR turn that sent one is refused rather than let through.
 #[must_use]
@@ -429,6 +446,19 @@ mod tests {
         for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on")] {
             assert!(!parse_enabled(value), "{value:?}");
         }
+    }
+
+    #[test]
+    fn a_chat_model_lists_context_refs_only_while_the_switch_is_on() {
+        let listed = || vec!["tools".to_owned(), "reasoning".to_owned()];
+        assert_eq!(catalogue_features(listed(), "chat", false), listed());
+        assert_eq!(
+            catalogue_features(listed(), "chat", true),
+            vec!["tools".to_owned(), "reasoning".to_owned(), "context_refs".to_owned()]
+        );
+        assert_eq!(catalogue_features(listed(), "image", true), listed());
+        let once = vec!["context_refs".to_owned()];
+        assert_eq!(catalogue_features(once.clone(), "chat", true), once, "listed once");
     }
 
     #[test]

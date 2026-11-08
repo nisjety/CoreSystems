@@ -237,8 +237,8 @@ pub(crate) async fn list_artifact_revisions(
     })))
 }
 
-/// What the composer and the Output panel may offer, from this gateway's own switches. Only
-/// `artifact_history` has a server half today; each later EP-3 slice wires its own field here.
+/// What the composer and the Output panel may offer, from this gateway's own switches. Each field
+/// follows the switch behind it; the two reference fields are set by `with_reference_switches`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -261,6 +261,19 @@ fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> Co
     }
 }
 
+/// The reference features follow their own switches (EP-3 S5 and S7). A ZDR caller is offered neither:
+/// a turn that carries a reference is refused for ZDR, and a ZDR credential is refused every thread read.
+fn with_reference_switches(
+    mut capabilities: ComposerCapabilities,
+    context_refs: bool,
+    thread_references: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.context_refs = context_refs && !zdr;
+    capabilities.thread_references = thread_references && !zdr;
+    capabilities
+}
+
 pub(crate) async fn composer_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -272,7 +285,12 @@ pub(crate) async fn composer_capabilities(
     )
     .unwrap_or(true);
     Json(json!({
-        "data": capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr)
+        "data": with_reference_switches(
+            capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+            crate::context_refs::enabled(),
+            crate::thread_reference_tools::enabled(),
+            zdr,
+        )
     }))
 }
 
@@ -598,6 +616,20 @@ mod tests {
         assert!(!capabilities_for(ArtifactRevisionsMode::On, false, true).artifact_history);
         let on = capabilities_for(ArtifactRevisionsMode::On, false, false);
         assert!(!on.artifact_editing && !on.context_refs && !on.thread_references && !on.selection_edit);
+    }
+
+    #[test]
+    fn reference_switches_are_offered_only_when_on_and_not_zdr() {
+        let base = || capabilities_for(ArtifactRevisionsMode::Off, false, false);
+        let on = with_reference_switches(base(), true, true, false);
+        assert!(on.context_refs && on.thread_references);
+        let zdr = with_reference_switches(base(), true, true, true);
+        assert!(
+            !zdr.context_refs && !zdr.thread_references,
+            "a ZDR caller is offered no reference"
+        );
+        let off = with_reference_switches(base(), false, false, false);
+        assert!(!off.context_refs && !off.thread_references);
     }
 
     #[test]
