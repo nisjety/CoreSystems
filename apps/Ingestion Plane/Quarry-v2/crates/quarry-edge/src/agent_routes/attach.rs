@@ -813,12 +813,15 @@ fn matches_borrowed_origin(raw: &str, tab: &BorrowedTab) -> bool {
     Url::parse(raw).is_ok_and(|url| url.origin() == tab.origin)
 }
 
+/// `read_denial` is `QUARRY_EDGE__FILL_OTP` (W3-E3.1-e / CW-3): with it off no page can be
+/// marked, so the delegate's read-denial check and settle are skipped.
 pub(super) async fn delegate_step(
     state: &AppState,
     handle: &RunHandle,
     claims: &crate::auth::Claims,
     request_id: &str,
     body: StepBody,
+    read_denial: bool,
 ) -> Result<Json<Envelope<BrowserObservation>>, ApiErr> {
     let not_found = || status_err(StatusCode::NOT_FOUND, request_id, "agent run not found");
     let _in_flight = handle.live.in_flight_guard();
@@ -982,6 +985,16 @@ pub(super) async fn delegate_step(
         zdr: entry.zdr,
         extraction_profile: body.extraction_profile,
     };
+    // W3-E3.1-e / CW-3: a pure read of a page a one-time code was delivered into is refused
+    // before its step key is reserved, as on the person's lane. The page is the lane's own:
+    // a delegate lane has no observation until its first step, so its context is the record.
+    let otp_run = entry.run_id.to_string();
+    let otp_before = quarry_runtime::observation_redaction::page_address(&lane.ctx.current_url);
+    if read_denial {
+        quarry_runtime::observation_redaction::credential_delivered_reads()
+            .check_before(&otp_run, &req.action, Some(&otp_before))
+            .map_err(|error| driver_err(request_id, error))?;
+    }
     // WS8.H: the step key is reserved after admission (a refusal takes none), shared with
     // the person's lane, so the events and receipts of the two lanes never collide.
     let receipt_step = handle.live.reserve_step();
@@ -1024,6 +1037,18 @@ pub(super) async fn delegate_step(
         attached && held
     }));
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
+    // W3-E3.1-e / CW-3: the observation of a delivered page is withheld before the landing
+    // check, the receipt and the checkpoint see it (the runner already withheld what it stores).
+    let step_result = if read_denial {
+        quarry_runtime::observation_redaction::credential_delivered_reads().settle(
+            &otp_run,
+            &receipt_action,
+            Some(&otp_before),
+            step_result,
+        )
+    } else {
+        step_result
+    };
     lane.ctx.live_attach_id = None;
     lane.ctx.live_attach_valid = None;
     let mut entry = handle.entry.lock().await;
@@ -1472,7 +1497,7 @@ mod delegate_lane_tests {
         assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut marking).await.is_err());
         drop(in_flight);
         let _ = marking.await.unwrap().unwrap();
-        let err = delegate_step(&f.state, &f.handle, &service_claims(), "after_mark", wait_step("grant_attach"))
+        let err = delegate_step(&f.state, &f.handle, &service_claims(), "after_mark", wait_step("grant_attach"), false)
             .await.expect_err("no delegate step may run after the handoff starts");
         assert_eq!(err.0, StatusCode::CONFLICT);
         assert_eq!(f.handle.live.tabs().get("tab_agent").unwrap().holder, BrowserTabHolder::Human);
@@ -1517,7 +1542,7 @@ mod delegate_lane_tests {
         );
         let mut request = wait_step("grant_attach");
         request.action = AgentAction::Click { selector: "button".to_owned() };
-        let (status, _) = delegate_step(&f.state, &f.handle, &service_claims(), "req_policy", request)
+        let (status, _) = delegate_step(&f.state, &f.handle, &service_claims(), "req_policy", request, false)
             .await.expect_err("the delegate policy must refuse the click");
         assert_eq!(status, StatusCode::FORBIDDEN);
         let rid: RunKind = f.run_id.parse().unwrap();
@@ -1538,7 +1563,7 @@ mod delegate_lane_tests {
         let state = f.state.clone();
         let handle = f.handle.clone();
         let step = tokio::spawn(async move {
-            delegate_step(&state, &handle, &service_claims(), "req_race", wait_step("grant_attach")).await
+            delegate_step(&state, &handle, &service_claims(), "req_race", wait_step("grant_attach"), false).await
         });
         // The step is inside the browser: admitted, charged, its entry lock released.
         tokio::time::timeout(std::time::Duration::from_secs(10), f.driver.entered.notified())
@@ -1578,7 +1603,7 @@ mod delegate_lane_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_delegate_step_on_a_live_attachment_still_completes() {
         let f = fixture(&["tab_home", "tab_agent"]).await;
-        let reply = delegate_step(&f.state, &f.handle, &service_claims(), "req_ok", wait_step("grant_attach"))
+        let reply = delegate_step(&f.state, &f.handle, &service_claims(), "req_ok", wait_step("grant_attach"), false)
             .await
             .expect("the live delegate's step completes");
         assert!(!reply.0.data.is_none());
@@ -1586,6 +1611,42 @@ mod delegate_lane_tests {
         let receipts = f.state.receipts.list(&rid).await.unwrap();
         assert_eq!(receipts.len(), 1);
         assert!(matches!(receipts[0].outcome, StepOutcome::Completed { .. }), "{receipts:?}");
+    }
+
+    /// W3-E3.1-e / CW-3: a delegate's page read of a page a one-time code was delivered into is
+    /// refused before its step key is reserved: no receipt, no budget, the run's step does not move.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delegate_page_read_of_a_delivered_page_is_refused_before_its_step_key() {
+        use quarry_runtime::observation_redaction::credential_delivered_reads;
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        credential_delivered_reads().mark(&f.run_id, "https://example.com/");
+        let mut request = wait_step("grant_attach");
+        request.action = AgentAction::GetContent;
+        let (status, _) = delegate_step(&f.state, &f.handle, &service_claims(), "req_read", request, true)
+            .await
+            .expect_err("a delegate's page read of a delivered page is refused");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let rid: RunKind = f.run_id.parse().unwrap();
+        assert!(f.state.receipts.list(&rid).await.unwrap().is_empty(), "no step key, no receipt");
+        assert_eq!(f.handle.live.attaches().live().unwrap().budget.steps_used, 0);
+        assert_eq!(f.handle.entry.lock().await.summary.step, 0);
+        credential_delivered_reads().release(&f.run_id);
+    }
+
+    /// W3-E3.1-e / CW-3: a delegate's step that reads nothing, on a delivered page, completes with
+    /// its observation withheld: the page's reads are gone and the withholding is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delegate_step_on_a_delivered_page_returns_its_observation_withheld() {
+        use quarry_runtime::observation_redaction::{credential_delivered_reads, OTP_READ_DENIAL};
+        let f = fixture(&["tab_home", "tab_agent"]).await;
+        credential_delivered_reads().mark(&f.run_id, "https://example.com/");
+        let reply = delegate_step(&f.state, &f.handle, &service_claims(), "req_marked", wait_step("grant_attach"), true)
+            .await
+            .expect("a delegate's step that reads nothing completes");
+        let observation = reply.0.data.expect("an observation");
+        assert!(observation.dom_summary.is_none());
+        assert!(observation.policy_denials.iter().any(|d| d == OTP_READ_DENIAL));
+        credential_delivered_reads().release(&f.run_id);
     }
 
     async fn list_as(

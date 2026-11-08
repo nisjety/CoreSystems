@@ -1246,6 +1246,13 @@ fn page_key(url: &str) -> &str {
     url.split_once('#').map_or(url, |(page, _)| page)
 }
 
+/// A page's address as an observation carries it (`Redactor::live_url`), so the
+/// runner and the edge key a mark on the same string. Userinfo is masked there.
+#[must_use]
+pub fn page_address(url: &str) -> String {
+    redact_url_with(redaction::mode(), url, Profile::Live, &mut Tally::new()).into_owned()
+}
+
 /// Whether `action` loads a new document for the page it lands on (E3.1-e: the
 /// "navigation" that ends the denial). A navigation to the same page that only
 /// changes the fragment is a same-document move and is not one; back and forward
@@ -1434,6 +1441,10 @@ pub fn credential_delivered_reads() -> &'static CredentialDeliveredReads {
 /// `policy_denials` and one [`OTP_READ_DENIED_RULE`] count in its stamp (a
 /// withheld screenshot is stamped `withheld`).
 pub fn deny_reads_after_otp(obs: &mut quarry_core::contracts::BrowserObservation) {
+    // Already withheld (the runner settles it, then the edge settles again): one count.
+    if obs.policy_denials.iter().any(|d| d == OTP_READ_DENIAL) {
+        return;
+    }
     if let Some(snapshot) = obs.snapshot.as_mut() {
         snapshot.targets.clear();
         snapshot.accessibility = None;
@@ -1571,9 +1582,21 @@ mod otp_read_denial_tests {
         // The address and title stay: the caller still knows where it is.
         assert_eq!(obs.url, PAGE);
         assert_eq!(obs.title.as_deref(), Some("Verify"));
-        // Twice is one marker.
+        // Twice is one marker and one count.
+        let counted = obs.redaction.as_ref().unwrap().values_masked;
         deny_reads_after_otp(&mut obs);
         assert_eq!(obs.policy_denials.len(), 1);
+        let stamp = obs.redaction.as_ref().unwrap();
+        assert_eq!(stamp.values_masked, counted);
+        assert_eq!(stamp.by_rule.get(OTP_READ_DENIED_RULE), Some(&1));
+    }
+
+    #[test]
+    fn a_page_is_keyed_by_the_address_its_observation_carries() {
+        let url = "https://user:secret@login.example.com/verify?step=2";
+        assert_eq!(page_address(url), Redactor::new().live_url(url));
+        assert!(!page_address(url).contains("secret"), "{}", page_address(url));
+        assert_eq!(page_address(PAGE), PAGE);
     }
 
     #[test]

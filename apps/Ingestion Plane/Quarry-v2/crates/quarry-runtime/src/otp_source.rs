@@ -51,6 +51,10 @@ const MAX_CODE_LEN: usize = 10;
 /// Whether `QUARRY_EDGE__FILL_OTP` is on in this process (`1`, `true`, `yes`, `on`).
 /// Read per call; default off.
 pub fn fill_otp_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TEST_FILL_OTP.with(std::cell::Cell::get) {
+        return enabled;
+    }
     std::env::var(FILL_OTP_FLAG)
         .map(|v| {
             matches!(
@@ -59,6 +63,13 @@ pub fn fill_otp_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own setting of the flag on its thread, so no test touches the process env.
+    pub(crate) static TEST_FILL_OTP: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Which code to read. Opaque ids only: never a mail address, never a subject line.
