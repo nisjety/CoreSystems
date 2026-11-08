@@ -3,6 +3,7 @@ mod deck_templates;
 pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
+mod library;
 pub(crate) mod shared;
 mod search;
 mod streams;
@@ -149,6 +150,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(documents::upload_chat_document),
         )
         .route("/api/v1/chat/documents/extract", post(documents::extract_chat_document))
+        // The chat library (F-t3-080): saved artifacts and uploaded text, one filtered Data Plane view. 404 while
+        // the artifact-promote switch is off.
+        .route("/api/v1/chat/library", get(library::list_chat_library))
         .route(
             "/api/v1/chat/feedback",
             post(json_handlers::submit_feedback),

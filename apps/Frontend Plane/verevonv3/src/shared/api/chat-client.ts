@@ -3500,6 +3500,77 @@ export async function uploadChatDocument(
   }
 }
 
+/** Which saved documents the chat library lists: generated artifact copies, uploaded text, or both (F-t3-080). */
+export type ChatLibraryKind = 'generated' | 'uploaded' | 'all'
+
+/** One chat library row: the document's metadata. Its text is read by id, never carried on a page. */
+export type ChatLibraryItem = {
+  documentId: string
+  title: string
+  kind: 'generated' | 'uploaded'
+  ownerId: string
+  visibility: string
+  contentBytes: number
+  createdAt: string
+  updatedAt: string
+  /** The thread a generated copy was saved from, from its source trace. Absent for an upload. */
+  threadId?: string
+}
+
+/** One page of the chat library and the total it pages over. */
+export type ChatLibraryPage = {
+  items: ChatLibraryItem[]
+  total: number
+}
+
+function chatLibraryItem(value: unknown): ChatLibraryItem | null {
+  const record = objectValue(value)
+  if (!record || typeof record.document_id !== 'string' || !record.document_id) return null
+  const metadata = objectValue(record.metadata)
+  const threadValue = objectValue(metadata?.source_ref)?.thread_id
+  const threadId = typeof threadValue === 'string' && threadValue ? threadValue : undefined
+  return {
+    documentId: record.document_id,
+    title: typeof record.title === 'string' ? record.title : '',
+    kind: metadata?.origin === 'chat-artifact' ? 'generated' : 'uploaded',
+    ownerId: typeof record.owner_id === 'string' ? record.owner_id : '',
+    visibility: typeof record.visibility === 'string' ? record.visibility : '',
+    contentBytes: typeof record.content_bytes === 'number' ? record.content_bytes : 0,
+    createdAt: typeof record.created_at === 'string' ? record.created_at : '',
+    updatedAt: typeof record.updated_at === 'string' ? record.updated_at : '',
+    threadId,
+  }
+}
+
+/**
+ * One page of the person's chat library (F-t3-080), newest first. Read only: nothing is stored.
+ * The gateway answers 404 `library_disabled` while the artifact-promote switch is off, so a caller
+ * reads a failure as "no library" and shows nothing.
+ */
+export async function listChatLibrary(
+  options: { kind?: ChatLibraryKind; limit?: number; offset?: number } = {},
+): Promise<ChatLibraryPage> {
+  const params = new URLSearchParams({
+    kind: options.kind ?? 'all',
+    limit: String(options.limit ?? 20),
+    offset: String(options.offset ?? 0),
+  })
+  const raw = await requestJson<unknown>(`/api/v1/chat/library?${params.toString()}`)
+  const record = objectValue(raw)
+  const documents = Array.isArray(record?.documents) ? record.documents : []
+  return {
+    items: documents.flatMap((value) => chatLibraryItem(value) ?? []),
+    total: typeof record?.total === 'number' ? record.total : 0,
+  }
+}
+
+/** The text of one library document, read by id through the knowledge document route. */
+export async function readChatLibraryText(documentId: string): Promise<string> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/documents/${encodeURIComponent(documentId)}`)
+  const content = objectValue(raw)?.content
+  return typeof content === 'string' ? content : ''
+}
+
 export async function getThreadContext(
   threadId: string,
   runId?: string,
