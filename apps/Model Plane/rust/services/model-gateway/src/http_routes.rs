@@ -8,7 +8,13 @@ use std::{convert::Infallible, env, fmt::Write as _};
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{
+            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERRER_POLICY,
+            X_CONTENT_TYPE_OPTIONS,
+        },
+        HeaderMap, HeaderValue, StatusCode,
+    },
     middleware,
     response::{
         sse::{Event as SseEvent, Sse},
@@ -728,6 +734,9 @@ fn proxy_routes() -> Router<AppState> {
         // The HTML app an MCP tool declares, read with the viewer's authority and never stored
         // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
         .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // The same app as the document its frame loads, with the frame's content security policy
+        // in it (Wave 4 W4-D M1c); 404 while MCP_APPS_ENABLED is off.
+        .route("/v1/mcp-apps/frame", get(get_mcp_app_frame))
         // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
         // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
         .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
@@ -840,6 +849,27 @@ async fn mcp_app_resource(
             "no such route",
         ));
     }
+    let (server_id, tool, bearer) = app_read_checks(&claims, bearer, &query)?;
+    let resource = read_viewer_app(&state, &claims, &bearer, server_id, tool).await?;
+    let network = if crate::mcp_apps::network_enabled() {
+        let origins = mcp_app_granted_origins(&state, &claims, &bearer).await;
+        Some(crate::mcp_app_csp::build(&resource.declared, &origins))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "data": crate::mcp_apps::resource_body(&resource, network.as_ref()),
+    })))
+}
+
+/// The checks every app read makes before anything is read, shared by the resource and the frame: a
+/// zero-retention caller is refused with feature `mcp_execution`, the server and the tool must be named, and
+/// the viewer's capability credential must be present. Returns the trimmed names and the credential.
+fn app_read_checks<'query>(
+    claims: &Claims,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: &'query McpAppResourceQuery,
+) -> Result<(&'query str, &'query str, VerifiedCapabilityBearer), HttpJsonError> {
     if claims.zdr {
         return Err((
             StatusCode::FORBIDDEN,
@@ -863,7 +893,8 @@ async fn mcp_app_resource(
             "server_id and tool are required",
         ));
     }
-    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    let Some(Extension(bearer)) =
+        bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
     else {
         return Err(run_trace_error(
             StatusCode::UNAUTHORIZED,
@@ -871,6 +902,19 @@ async fn mcp_app_resource(
             "reading an MCP app needs a verified capability credential",
         ));
     };
+    Ok((server_id, tool, bearer))
+}
+
+/// The app `tool` declares on `server_id`, read with the viewer's authority (`crate::mcp_apps`) for the resource and
+/// the frame alike: the registry is refreshed from capability-core with the viewer's credential, and the server's
+/// stored OAuth token is used when it has one.
+async fn read_viewer_app(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+    server_id: &str,
+    tool: &str,
+) -> Result<std::sync::Arc<crate::mcp_apps::AppResource>, HttpJsonError> {
     if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
         &state.mcp,
         &state.ownership,
@@ -896,7 +940,7 @@ async fn mcp_app_resource(
         server_id,
     )
     .await;
-    let resource = crate::mcp_apps::read_app_resource(
+    crate::mcp_apps::read_app_resource(
         &state.mcp,
         &state.ownership,
         crate::mcp_apps::AppResourceCache::global(),
@@ -907,24 +951,83 @@ async fn mcp_app_resource(
         oauth_token.as_deref(),
     )
     .await
-    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
-    let network = if crate::mcp_apps::network_enabled() {
-        let origins = crate::org_agent_policy::mcp_app_network_origins(
-            crate::org_agent_policy::policy_mode(),
-            crate::org_agent_policy::shared_cache(),
-            &state.http_client,
-            &state.capability_core_base_url,
-            &claims.org_id,
-            bearer.as_str(),
-        )
-        .await;
-        Some(crate::mcp_app_csp::build(&resource.declared, &origins))
+    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))
+}
+
+/// The origins the org grants an app's frame (`crate::org_agent_policy`). Callers read them only while
+/// `MCP_APPS_NETWORK_ENABLED` is on.
+async fn mcp_app_granted_origins(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+) -> Vec<String> {
+    crate::org_agent_policy::mcp_app_network_origins(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        bearer.as_str(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 W4-D M1c: `GET /v1/mcp-apps/frame` - an MCP tool's app, as the document its frame loads.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/mcp-apps/frame` - see [`mcp_app_frame`].
+async fn get_mcp_app_frame(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: Query<McpAppResourceQuery>,
+) -> Result<Response, HttpJsonError> {
+    mcp_app_frame(state, claims, bearer, query, crate::mcp_apps::enabled()).await
+}
+
+/// The app `tool` on `server_id` declares, as the document an app frame loads: the app's own markup behind the
+/// frame's policy (`crate::mcp_app_csp`). The policy is in the document's `<meta>`; the response carries `sandbox`
+/// and `frame-ancestors`, which a `<meta>` cannot. The policy is the no-network one while `MCP_APPS_NETWORK_ENABLED`
+/// is off, so the frame is what the SPA draws today; with the switch on it grants the origins the org allows. The
+/// checks, the cache and the read are those of `mcp_app_resource`. With `MCP_APPS_ENABLED` off the route is a 404
+/// as if it did not exist.
+async fn mcp_app_frame(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Query(query): Query<McpAppResourceQuery>,
+    enabled: bool,
+) -> Result<Response, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    let (server_id, tool, bearer) = app_read_checks(&claims, bearer, &query)?;
+    let resource = read_viewer_app(&state, &claims, &bearer, server_id, tool).await?;
+    let origins = if crate::mcp_apps::network_enabled() {
+        mcp_app_granted_origins(&state, &claims, &bearer).await
     } else {
-        None
+        Vec::new()
     };
-    Ok(Json(json!({
-        "data": crate::mcp_apps::resource_body(&resource, network.as_ref()),
-    })))
+    let policy = crate::mcp_app_csp::build(&resource.declared, &origins).policy;
+    Ok((
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                CONTENT_SECURITY_POLICY,
+                "sandbox allow-scripts; frame-ancestors 'self'",
+            ),
+            (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (REFERRER_POLICY, "no-referrer"),
+            (CACHE_CONTROL, "no-store"),
+        ],
+        crate::mcp_app_csp::frame_document(&policy, &resource.html),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------

@@ -145,6 +145,20 @@ fn directive(name: &str, keywords: &[&str], origins: &[&str]) -> String {
     }
 }
 
+/// The document an app frame loads (Wave 4 W4-D M1c): `policy` in a `<meta>` first in the head, then the app's own
+/// markup in the body, the shape the SPA gives a frame. A `<meta>` applies every directive except `frame-ancestors`,
+/// `report-uri` and `sandbox`, which the frame route sends as response headers. `policy` comes from [`build`], whose
+/// origins are canonical https origins, so no quote or markup reaches the attribute.
+#[must_use]
+pub fn frame_document(policy: &str, html: &str) -> String {
+    format!(
+        "<!doctype html><html><head>\
+         <meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\">\
+         </head><body>{}</body></html>",
+        html.trim()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

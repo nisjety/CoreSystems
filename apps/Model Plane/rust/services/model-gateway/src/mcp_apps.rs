@@ -15,8 +15,10 @@
 //! uri changes only what is drawn. Network domains an app declares are reported
 //! as `needs_network`. With `MCP_APPS_NETWORK_ENABLED` on, the response also
 //! carries the frame's policy, built by [`crate::mcp_app_csp`] from what the app
-//! declares and what the org's `mcp_apps.network_origins` allows. The frame keeps
-//! its no-network policy until the SPA serves that one (Wave 4 W4-D M1, D12).
+//! declares and what the org's `mcp_apps.network_origins` allows. The frame route
+//! (`GET /v1/mcp-apps/frame`, Wave 4 W4-D M1c) serves the app as a document with
+//! that policy in it. The SPA keeps its no-network policy until it draws the frame
+//! from that route (D12).
 //!
 //! Every extension key lives in this file, because the extension is young and
 //! its `_meta` keys may still move (checked against the 2026-01-26 revision:
@@ -80,8 +82,9 @@ pub fn enabled() -> bool {
     *ENABLED.get_or_init(|| enabled_from_env_value(std::env::var(ENABLED_VAR).ok().as_deref()))
 }
 
-/// The switch that serves the frame's policy and the origins it grants on the resource response (Wave 4 W4-D M1).
-/// Only the literal `true` turns it on; off, the response is exactly what it was before the switch existed.
+/// The switch that serves the frame's policy and the origins it grants on the resource response and in the frame
+/// document (Wave 4 W4-D M1). Only the literal `true` turns it on; off, the resource response is exactly what it was
+/// before the switch existed, and the frame keeps the no-network policy.
 pub const NETWORK_ENABLED_VAR: &str = "MCP_APPS_NETWORK_ENABLED";
 
 /// `MCP_APPS_NETWORK_ENABLED`: only the literal `true` turns it on.
