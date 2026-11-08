@@ -199,6 +199,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "browser.get_org_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:f72b88ea61a7570cb169b69fdb462f8b5e3a7cdbd903f2849ce32eac36f816de",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "browser.set_org_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:740d216bebe8f547a143bbb9401de76329f7928217a996ea78755118a076a232",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "browser_action.run",
       "registry": true,
       "access": "none",

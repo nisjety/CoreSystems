@@ -702,3 +702,13 @@ Open from the fixers:
 - Under the enforce claim mode an org claim with an empty layer and a real rev still stamps org_rev into the digest, so the caches stay off for that org.
 - The agent_hit_test matrix row says 501 until the E3.3-h driver method lands; edit it then.
 - E3.6-5: a crawl does not refuse redact_pii yet (UNSUPPORTED_KEYS in crawl_scrape.rs).
+
+## W3 B4 completion (W3), integrated 2026-11-07
+
+Units: W3-E3.5-4 documentation (ba15d31dc: CHANGE_TRACKING.md, RUNBOOKS.md, openapi-internal.yaml; the docs-contract phantom-name guard now accepts the E3.5-4 name and pins it to change_routes.rs; no code change, flag default off). W3-E3.2-g1 (cf54d1ef5 gateway proxy behind BROWSER_POLICY_ADMIN_API, default off; ddf826ad0 registry, model-access rows, port and mount behind VITE_BROWSER_POLICY_SETTINGS, default off; admission golden +2 rows). Status: .plan-work/quarry-w1w2/W23-W3-E3.2-g1-status.md.
+
+Checks: gateway cargo check exit 0, the 10 new gateway tests pass, the full gateway bin suite 1812 passed, 0 failed, 4 ignored; SPA tsc6 exit 0, 0 errors; the specs of the touched folders as recorded in the unit status file. docs-contract node suite: 68 pass, 5 fail, the same five as before (route count pin and the known inherited ones).
+
+Cross-plane: zdr-contract-sync reports one new red row, the SPA admission copy against the canonical Model Plane golden. The Model Plane copies were not edited (FINISH-QUEUE rule); the ask is in MP-ASKS.md (W3-E3.2-g1).
+
+Not built in this step: W3-E3.4-8 wiring (nothing calls DownloadHandoff; it needs the E3.4-7 gateway arm and an edge route that loads the admitted artifact, W23-b-E347-1); B5 (E3.5-1, E3.5-7, E3.7.7, E3.5-5), B6, B7 and B8 open items are not started in this step.

@@ -91,6 +91,10 @@ pub struct DiffRecord {
 - `Unreachable` — fetch failed (4xx/5xx/timeout). Baseline chain not
   advanced; the previous baseline remains "latest".
 
+## Text-fingerprint switch (E3.5-4)
+
+`QUARRY_EDGE__CHANGE_TEXT_FP` (edge, default off) compares the normalised text fingerprint (`text_fp` of `run_page`) instead of the raw-byte hash, so a rotating nonce or a reflowed attribute is not a change. The baseline records its scheme with a `text:` mark. A scheme flip is detected and re-baselined silently: the first check after the flip saves a new baseline, diffs nothing, sends no change event and no webhook, and answers `status: unchanged` with `rebaselined: true`. The raw-byte hash comes back as `raw_fingerprint` when the text one was compared. The internal record call carries the text fingerprint as `fresh_text_fingerprint`. The rollout order (orchestrator first, never with mixed orchestrator versions) is in `RUNBOOKS.md`, "Change text fingerprint".
+
 ## Tenant isolation
 
 Every wire shape carries `org_id`. The persistence layer (cycle 27+)

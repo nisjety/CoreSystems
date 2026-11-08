@@ -2206,6 +2206,27 @@ The pages a crawl or batch fetched, with the ids of what was stored for each, co
 
 **ZDR.** A ZDR run stores no artifact and its `page_fetched` carries none of the ids; the routes are refused for a ZDR caller anyway. The events already hold each page's url and title (existing posture); this makes them easy to read, which is why the routes are dark. To check by hand on a side-by-side stack: crawl five fixture pages, call `GET /v1/crawl/{id}/results` and confirm five rows whose `markdown_artifact_id` each return the page from `GET /v1/artifacts/{id}`; repeat with a ZDR token and confirm 403. Not done here: Go and Rust unit and route tests only, no stack, no Temporal and no Postgres were run.
 
+## Change text fingerprint: enable and roll out (E3.5-4, built, NOT run, 2026-11-04)
+
+A change monitor compares a fingerprint of each fetch. The raw-byte fingerprint moves when a page shows a rotating nonce, a CSRF token or a reflowed attribute, and each move reads as a change. `QUARRY_EDGE__CHANGE_TEXT_FP` switches the comparison to the normalised text fingerprint (`text_fp` of `run_page`, whitespace and case normalised).
+
+**Off by default.** The variable is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Roll out in this order:
+
+1. Deploy the orchestrator first. Its `ChangeMonitorWF` is guarded by the `change-text-fp-v1` version marker and sends `fresh_text_fingerprint` on the record call. An orchestrator that predates the marker sends none, so the edge compares raw bytes for it.
+2. Set `QUARRY_EDGE__CHANGE_TEXT_FP=1` (also `true`, `yes`, `on`) on the edge and restart it.
+
+Do not turn the flag on while orchestrator versions are mixed. Some probes then send a text fingerprint and some do not, so the scheme of a monitor's baseline flips back and forth, and each flip re-baselines silently: a real change in that window can be missed (D-E354-1).
+
+**What the switch does.** With the flag on and a text fingerprint sent, the baseline stores the marked form `text:blake3:...`. The record response's `fingerprint` and the change event carry that marked form (D-E354-4). The raw-byte fingerprint comes back as `raw_fingerprint`, which is omitted when the raw one was compared. A consumer that reads `fingerprint` as a hash of the raw body must accept the `text:` mark. No consumer in the edge does; control and the SPA were not checked.
+
+**Silent re-baseline.** The first check after the scheme flips, in either direction, saves a new baseline and diffs nothing. The response says `status: unchanged` with `rebaselined: true`. No change event and no webhook follow, so a deploy or a rollback does not flood the event log.
+
+**Disable.** Unset the flag and restart the edge. The next check of each monitor re-baselines silently to the raw-byte form.
+
+**Not yet checked.** That the Postgres column holding the baseline fingerprint accepts `text:` values (no database run), and the workflow replay with `change-text-fp-v1` (not run).
+
 ## Webhook subscriptions: enable, disable, rotate, retry, erase (INNH-5, built, NOT run, 2026-10-31)
 
 Customers can register an HTTPS endpoint that receives their organization's `change_detected` events, signed. The contract is `docs/CONTRACTS.md`, section 4 (what the endpoint receives) and "Webhook subscriptions" (the API). It is off: neither `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` nor `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` is set in the default composes, and no compose line is needed. Two things are not behind a switch and ship with the control image: the fan-out only delivers to the subscriptions of the event's own organization (an event of unknown owner delivers to nobody), and `/v1/webhooks` and `/v1/webhook-deliveries` on control answer 410.

@@ -1744,6 +1744,8 @@ describe('action registry', () => {
     // ingestions and monitoring domains (job_control, start_agent_run, create_monitor, delete_monitor),
     // the six ingestions run and schedule controls (get_run_status, pause_run, resume_run, cancel_run,
     // pause_schedule, change_schedule_state) that replace run_schedule_action, and browser_run.steer.
+    // 272 after W3-E3.2-g1 registered browser.get_org_policy and browser.set_org_policy (Settings > Browser).
+    // 320 after main EP-2/EP-3/EP-4/EP-6/EP-7/EP-9/EP-10/EP-11/EP-12/EP-14 (chat/skills/templates/policy/widget/thread actions).
     // 270 after EP-14-S7 registered chat.inspect_run_request, the request inspector read.
     // 271 after EP-6-S2 registered schedule.run_now.
     // 273 after EP-10-S7 registered integrations.list_connector_policies and integrations.set_connector_policy.
@@ -1777,7 +1779,8 @@ describe('action registry', () => {
     // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
     // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
     // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
-    expect(ids).toHaveLength(320)
+    // Union with HEAD (W3-E3.2-g1 browser.get/set_org_policy): 320 + 2 = 322.
+    expect(ids).toHaveLength(322)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

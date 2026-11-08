@@ -108,6 +108,9 @@ use super::dispatchers_spaces::ws14::{
     dispatch_space_files_read_text,
 };
 use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
+use super::dispatchers_browser_policy::{
+    dispatch_browser_get_org_policy, dispatch_browser_set_org_policy,
+};
 use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
@@ -780,6 +783,12 @@ pub(super) async fn execute_action(
         "spaces.apply_effect_preset" => {
             dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
                 .await
+        }
+        "browser.get_org_policy" => {
+            dispatch_browser_get_org_policy(&state, &user, &body.input).await
+        }
+        "browser.set_org_policy" => {
+            dispatch_browser_set_org_policy(&state, &user, &body.input).await
         }
         "space.files.attach" => dispatch_space_files_attach().await,
         "space.files.list" => {

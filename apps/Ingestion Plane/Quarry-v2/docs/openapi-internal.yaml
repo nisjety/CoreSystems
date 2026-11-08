@@ -1648,6 +1648,12 @@ components:
           type: boolean
           nullable: true
           description: The posture of the schedule. When it is true the durable ChangeDetected event and the control webhook are suppressed.
+        fresh_text_fingerprint:
+          type: string
+          description: >-
+            E3.5-4. The normalised text fingerprint of the fresh fetch (`text_fp` of run_page). Read
+            only with QUARRY_EDGE__CHANGE_TEXT_FP on; then it is compared and kept on the baseline with
+            a `text:` mark. Absent from an orchestrator that predates change-text-fp-v1.
         markdown_artifact_id:
           type: string
           description: >-
@@ -1679,6 +1685,14 @@ components:
         diff_id:
           type: string
           description: Present only when the page changed.
+        raw_fingerprint:
+          type: string
+          description: E3.5-4. The raw-byte fingerprint when fingerprint is the text one. Absent when the raw one was compared.
+        rebaselined:
+          type: boolean
+          description: >-
+            E3.5-4. True on the first check after the fingerprint scheme flipped: the baseline was saved
+            silently, status is unchanged and no change event or webhook followed. Absent when false.
     InternalSchedulePreflightRequest:
       type: object
       required:

@@ -261,6 +261,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'org.set_agent_policy': exempt('human_identity_or_security', 'external_write'),
   'org.set_web_policy': exempt('human_identity_or_security', 'external_write'),
   'org.preview_effective_policy': exempt('ui_state_only', 'read'),
+  'browser.get_org_policy': exempt('ui_state_only', 'read'),
+  'browser.set_org_policy': exempt('human_identity_or_security', 'external_write'),
   'policy.read_effective': exempt('ui_state_only', 'read'),
   'org.create_hook': exempt('human_identity_or_security', 'external_write'),
   'org.update_hook': exempt('human_identity_or_security', 'external_write'),

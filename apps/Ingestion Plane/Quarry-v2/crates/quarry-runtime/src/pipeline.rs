@@ -443,7 +443,7 @@ impl PiiRedactionSettings {
 
 /// The settings a run reads. A test installs its own for the thread it runs on
 /// instead of touching the process environment (as for the challenge config).
-fn pii_redaction_settings() -> PiiRedactionSettings {
+pub(crate) fn pii_redaction_settings() -> PiiRedactionSettings {
     #[cfg(test)]
     if let Some(settings) = TEST_PII_REDACTION.with(|slot| slot.borrow().clone()) {
         return settings;
@@ -453,7 +453,7 @@ fn pii_redaction_settings() -> PiiRedactionSettings {
 
 #[cfg(test)]
 thread_local! {
-    static TEST_PII_REDACTION: std::cell::RefCell<Option<PiiRedactionSettings>> =
+    pub(crate) static TEST_PII_REDACTION: std::cell::RefCell<Option<PiiRedactionSettings>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -472,7 +472,7 @@ const PII_REDACT_MAX_PASSES: usize = 3;
 
 /// Why the stage refused a page. Each is a typed `details.cause`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PiiRedactionFailure {
+pub(crate) enum PiiRedactionFailure {
     /// The text is over [`PII_REDACT_MAX_BYTES`].
     TooLarge,
     /// The scanner panicked.
@@ -501,7 +501,7 @@ impl PiiRedactionFailure {
 
 /// The typed per-page failure. Not retryable (the same page fails the same
 /// way), and nothing of the page in it: the field name and the cause only.
-fn pii_redaction_error(failure: PiiRedactionFailure, field: &'static str) -> QuarryError {
+pub(crate) fn pii_redaction_error(failure: PiiRedactionFailure, field: &'static str) -> QuarryError {
     QuarryError::new(
         ErrorCode::Forbidden,
         "the page could not be redacted for personal data, so nothing of it was kept or returned",

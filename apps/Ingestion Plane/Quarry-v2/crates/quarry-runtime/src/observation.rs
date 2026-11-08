@@ -34,6 +34,7 @@ use crate::artifact_store::ArtifactStore;
 use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
 use crate::observation_redaction::{self, Redactor, ScreenshotReport};
+use crate::pipeline::{pii_redaction_error, pii_redaction_settings, PiiRedactionFailure};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
 fn agent_scroll_action(target: &str, viewport: Option<BrowserViewport>) -> Action {
@@ -410,6 +411,28 @@ impl ObservationRunner {
     ) -> QuarryResult<BrowserObservation> {
         let observation_started_at = Instant::now();
         let run_id = &request.run_id;
+        // W3-E3.1-e / CW-3: a page a one-time code was delivered into is read with nothing
+        // stored or announced. Only a `fill_otp_ref` step marks a page, and that step is
+        // admitted only while QUARRY_EDGE__FILL_OTP is on, so this is inert with it off.
+        let read_denial = crate::otp_source::fill_otp_enabled();
+        let otp_run = run_id.to_string();
+        let otp_before = if read_denial {
+            observation_redaction::page_address(&ctx.current_url)
+        } else {
+            String::new()
+        };
+        if read_denial && observation_redaction::is_pure_page_read(&request.action) {
+            // A pure read is refused before the browser is touched, on the page it is on now.
+            let page = match self.browser.current_url(session).await {
+                Ok(Some(url)) => url,
+                _ => ctx.current_url.clone(),
+            };
+            observation_redaction::credential_delivered_reads().check_before(
+                &otp_run,
+                &request.action,
+                Some(&observation_redaction::page_address(&page)),
+            )?;
+        }
         if ctx.live_attach_id.is_some() {
             // The attachment's policy is installed on its own tab at open.
             // The session policy belongs to the owner and all their tabs.
@@ -666,6 +689,19 @@ impl ObservationRunner {
                     );
                 }
                 AgentAction::Screenshot { full_page } => {
+                    // CW-2: a PII-redacting run cannot keep a capture. The scrape
+                    // pipeline refuses the page with `pii_redaction_failed`
+                    // (capture_not_redactable); the agent path must do the same
+                    // instead of CAS-storing a page screenshot. ZDR-guarded
+                    // calls reach storage via `put_artifact_if_allowed` (ZDR-only check).
+                    if pii_redaction_settings()
+                        .applies(false, Some(self.org_id.as_str()))
+                    {
+                        return Err(pii_redaction_error(
+                            PiiRedactionFailure::CaptureNotRedactable,
+                            "screenshot",
+                        ));
+                    }
                     // WS12.S5: a withheld screenshot is a `SecurityBlocked` error
                     // (403) with the same reason the observation note carries.
                     let masked = self.browser.screenshot_masked(session, *full_page).await?;
@@ -688,6 +724,16 @@ impl ObservationRunner {
                     current_screenshot = Some(payload);
                 }
                 AgentAction::Pdf => {
+                    // CW-2: same refusal as the screenshot arm — a redacting run
+                    // cannot keep a PDF capture either.
+                    if pii_redaction_settings()
+                        .applies(false, Some(self.org_id.as_str()))
+                    {
+                        return Err(pii_redaction_error(
+                            PiiRedactionFailure::CaptureNotRedactable,
+                            "pdf",
+                        ));
+                    }
                     let bytes = self.browser.pdf(session).await?;
                     let _ = self
                         .put_artifact_if_allowed(
@@ -772,6 +818,14 @@ impl ObservationRunner {
         if let Some(url) = page_state.url.as_deref().filter(|url| !url.is_empty()) {
             ctx.current_url = url.to_owned();
         }
+        // The page this step landed on decides the denial before anything is stored.
+        let otp_denied = read_denial
+            && observation_redaction::credential_delivered_reads().after_step(
+                &otp_run,
+                &request.action,
+                Some(otp_before.as_str()),
+                Some(&observation_redaction::page_address(&ctx.current_url)),
+            );
         let devtools_events = self
             .browser
             .devtools_events(session, 0, 512)
@@ -876,7 +930,11 @@ impl ObservationRunner {
             redactor.extraction(result);
         }
 
-        if screenshot_artifact_id.is_none() {
+        if otp_denied {
+            // A withheld page keeps no frame, not even as the next diff's baseline.
+            current_screenshot = None;
+            ctx.previous_screenshot = None;
+        } else if screenshot_artifact_id.is_none() {
             if let Ok(masked) = self.browser.screenshot_masked(session, false).await {
                 screenshot_report = Some(ScreenshotReport::of(&masked));
                 if let Some(bytes) = masked.bytes {
@@ -1125,8 +1183,10 @@ impl ObservationRunner {
                 .as_ref()
                 .map(ToString::to_string),
         };
-        let evidence_delta_artifact_id = self
-            .put_json_artifact_if_allowed(
+        let evidence_delta_artifact_id = if otp_denied {
+            None
+        } else {
+            self.put_json_artifact_if_allowed(
                 request.zdr,
                 run_id,
                 &ctx.page_hash,
@@ -1137,7 +1197,8 @@ impl ObservationRunner {
             .unwrap_or_else(|error| {
                 tracing::warn!(error_class = error.code.wire_name(), "evidence delta artifact write failed");
                 None
-            });
+            })
+        };
         let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
         let text_snippet = dom_summary
             .as_ref()
@@ -1246,7 +1307,7 @@ impl ObservationRunner {
                 "quarry.redaction.observation"
             );
         }
-        let observation = BrowserObservation {
+        let mut observation = BrowserObservation {
             run_id: run_id.clone(),
             step: ctx.step,
             url: observation_url,
@@ -1272,6 +1333,9 @@ impl ObservationRunner {
             redaction: Some(redaction_stamp),
             observed_at: Utc::now(),
         };
+        if otp_denied {
+            observation_redaction::deny_reads_after_otp(&mut observation);
+        }
 
         ctx.previous_observation = Some(current_observation);
         ctx.previous_network_keys = observation
@@ -3774,6 +3838,8 @@ mod tests {
         egress_sequences: &'static [u64],
         /// SC4 D1: every `ensure_page` call.
         ensured: std::sync::atomic::AtomicUsize,
+        /// What `current_url` reports; unset means the driver cannot say.
+        current_url: Option<&'static str>,
     }
 
     /// The typed timeout the chromiumoxide driver returns for `op`.
@@ -3841,6 +3907,12 @@ mod tests {
             self.ensured
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
+        }
+        async fn current_url(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+        ) -> QuarryResult<Option<String>> {
+            Ok(self.current_url.map(str::to_owned))
         }
         async fn click(
             &self,
@@ -5090,5 +5162,277 @@ mod tests {
         assert_eq!(error.code, ErrorCode::SecurityBlocked);
         let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
         assert_eq!(reason, Some("screenshot_withheld:sensitive_field_unresolved"));
+    }
+
+    #[tokio::test]
+    async fn a_redacting_run_refuses_the_screenshot_and_stores_nothing() {
+        use crate::pipeline::{PiiRedactionMode, PiiRedactionSettings, TEST_PII_REDACTION};
+        crate::pipeline::TEST_PII_REDACTION.with(|slot| {
+            *slot.borrow_mut() = Some(PiiRedactionSettings {
+                mode: PiiRedactionMode::On,
+                org_default: crate::pipeline::PiiOrgDefault::All,
+            })
+        });
+        let result = async {
+            let store = Arc::new(InMemoryStore::new());
+            let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+            masked.state = quarry_core::redaction::ScreenshotState::Masked;
+            let browser = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                masked_screenshot: Some(masked),
+                visual_fidelity: true,
+                ..Default::default()
+            });
+            let runner = ObservationRunner {
+                browser: browser.clone(),
+                artifacts: Some(store.clone()),
+                events: None,
+                visual_processor: None,
+                org_id: "org_a".into(),
+            };
+            let lease = mask_test_lease();
+            let session = browser.acquire(&lease).await.unwrap();
+            let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+            let mut ctx = mask_test_ctx();
+            let error = runner.execute(&request, &session, &mut ctx).await.expect_err("a redacting run refuses the capture");
+            let listed = store
+                .list("org_a", &quarry_core::pagination::ListFilter::default())
+                .await
+                .unwrap();
+            (error, listed.items.is_empty())
+        }
+        .await;
+        crate::pipeline::TEST_PII_REDACTION.with(|slot| *slot.borrow_mut() = None);
+        let (error, no_artifacts) = result;
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some(crate::pipeline::PII_REDACTION_FAILED));
+        let cause = error.details.as_ref().and_then(|d| d["cause"].as_str());
+        assert_eq!(cause, Some("capture_not_redactable"));
+        assert!(no_artifacts, "a redacting run stores no capture");
+    }
+
+    /// W3-E3.1-e / CW-3: the page a one-time code went into, as the runner sees it.
+    const OTP_PAGE: &str = "https://login.example.com/verify?step=2";
+
+    /// The flag for this test's thread only (no process env), cleared when dropped.
+    struct FillOtpFlag;
+
+    impl FillOtpFlag {
+        fn set(on: bool) -> Self {
+            crate::otp_source::TEST_FILL_OTP.with(|slot| slot.set(Some(on)));
+            Self
+        }
+    }
+
+    impl Drop for FillOtpFlag {
+        fn drop(&mut self) {
+            crate::otp_source::TEST_FILL_OTP.with(|slot| slot.set(None));
+        }
+    }
+
+    fn observation_ready(
+        rx: &mut tokio::sync::mpsc::Receiver<quarry_core::event::Event>,
+    ) -> Option<quarry_core::event::Event> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|event| matches!(event.event_type, EventType::ObservationReady))
+    }
+
+    fn withheld_run_driver(current_url: Option<&'static str>) -> Arc<ContentDriver> {
+        let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+        masked.state = quarry_core::redaction::ScreenshotState::Masked;
+        Arc::new(ContentDriver {
+            html: b"<html><body><p>Your code 482913</p></body></html>",
+            masked_screenshot: Some(masked),
+            visual_fidelity: true,
+            current_url,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn a_delivered_page_stores_no_capture_and_announces_no_screenshot() {
+        use crate::observation_redaction::{credential_delivered_reads, OTP_READ_DENIAL};
+        let _flag = FillOtpFlag::set(true);
+        let store = Arc::new(InMemoryStore::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let browser = withheld_run_driver(None);
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: Some(EventSink::new(tx)),
+            visual_processor: Some(Arc::new(MockVisualProcessor)),
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let run = request.run_id.to_string();
+        credential_delivered_reads().mark(&run, OTP_PAGE);
+        let mut ctx = mask_test_ctx();
+        ctx.current_url = OTP_PAGE.into();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_none());
+        assert!(observation.visual_observation_artifact_id.is_none());
+        assert!(observation.evidence_delta_artifact_id.is_none());
+        assert!(observation.dom_summary.is_none());
+        assert!(observation.policy_denials.iter().any(|d| d == OTP_READ_DENIAL));
+        assert!(ctx.previous_screenshot.is_none(), "a withheld frame is no diff baseline");
+        let stored = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(stored.items.is_empty(), "a delivered page stores no artifact");
+        let ready = observation_ready(&mut rx).expect("the observation is announced");
+        assert_eq!(ready.payload["has_screenshot"], json!(false));
+        assert_eq!(ready.payload["has_evidence_delta"], json!(false));
+        credential_delivered_reads().release(&run);
+    }
+
+    #[tokio::test]
+    async fn a_pure_read_of_a_delivered_page_is_refused_before_the_browser_runs() {
+        use crate::observation_redaction::{
+            credential_delivered_reads, OTP_READ_DENIED_REASON,
+        };
+        use std::sync::atomic::Ordering;
+        let _flag = FillOtpFlag::set(true);
+        let store = Arc::new(InMemoryStore::new());
+        let browser = withheld_run_driver(None);
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+        let run = request.run_id.to_string();
+        credential_delivered_reads().mark(&run, OTP_PAGE);
+        let mut ctx = mask_test_ctx();
+        ctx.current_url = OTP_PAGE.into();
+
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("a delivered page's screenshot is refused");
+
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some(OTP_READ_DENIED_REASON));
+        assert_eq!(browser.ensured.load(Ordering::SeqCst), 0, "no page was touched");
+        assert_eq!(browser.reads.load(Ordering::SeqCst), 0, "no page was read");
+        assert!(ctx.previous_screenshot.is_some(), "a refused read changes nothing");
+        let stored = store
+            .list("org_a", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(stored.items.is_empty());
+        credential_delivered_reads().release(&run);
+    }
+
+    #[tokio::test]
+    async fn a_pure_read_asks_the_browser_which_page_it_is_on() {
+        use crate::observation_redaction::{
+            credential_delivered_reads, OTP_READ_DENIED_REASON,
+        };
+        let _flag = FillOtpFlag::set(true);
+        let browser = withheld_run_driver(Some(OTP_PAGE));
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Screenshot { full_page: false });
+        let run = request.run_id.to_string();
+        credential_delivered_reads().mark(&run, OTP_PAGE);
+        let mut ctx = mask_test_ctx();
+        ctx.current_url = String::new();
+
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("the page the browser is on is the delivered one");
+
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        let reason = error.details.as_ref().and_then(|d| d["reason"].as_str());
+        assert_eq!(reason, Some(OTP_READ_DENIED_REASON));
+        credential_delivered_reads().release(&run);
+    }
+
+    #[tokio::test]
+    async fn landing_back_on_a_delivered_page_is_withheld_and_landing_elsewhere_is_not() {
+        use crate::observation_redaction::{credential_delivered_reads, OTP_READ_DENIAL};
+        for (lands_on, withheld) in [(OTP_PAGE, true), ("https://login.example.com/home", false)] {
+            let _flag = FillOtpFlag::set(true);
+            let store = Arc::new(InMemoryStore::new());
+            let mut masked = quarry_browser::MaskedScreenshot::unmasked(Bytes::from_static(b"png"));
+            masked.state = quarry_core::redaction::ScreenshotState::Masked;
+            let browser = Arc::new(ContentDriver {
+                html: b"<html><body><p>hello</p></body></html>",
+                masked_screenshot: Some(masked),
+                back_lands_on: Some(lands_on),
+                ..Default::default()
+            });
+            let runner = ObservationRunner {
+                browser: browser.clone(),
+                artifacts: Some(store.clone()),
+                events: None,
+                visual_processor: None,
+                org_id: "org_a".into(),
+            };
+            let lease = mask_test_lease();
+            let session = browser.acquire(&lease).await.unwrap();
+            let request = mask_test_request(&lease, AgentAction::Back);
+            let run = request.run_id.to_string();
+            credential_delivered_reads().mark(&run, OTP_PAGE);
+            let mut ctx = mask_test_ctx();
+            ctx.current_url = OTP_PAGE.into();
+
+            let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+            assert_eq!(observation.screenshot_artifact_id.is_none(), withheld, "landing on {lands_on}");
+            assert_eq!(
+                observation.policy_denials.iter().any(|d| d == OTP_READ_DENIAL),
+                withheld,
+                "landing on {lands_on}"
+            );
+            credential_delivered_reads().release(&run);
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_a_marked_page_is_observed_as_before() {
+        use crate::observation_redaction::{credential_delivered_reads, OTP_READ_DENIAL};
+        let _flag = FillOtpFlag::set(false);
+        let store = Arc::new(InMemoryStore::new());
+        let browser = withheld_run_driver(None);
+        let runner = ObservationRunner {
+            browser: browser.clone(),
+            artifacts: Some(store.clone()),
+            events: None,
+            visual_processor: None,
+            org_id: "org_a".into(),
+        };
+        let lease = mask_test_lease();
+        let session = browser.acquire(&lease).await.unwrap();
+        let request = mask_test_request(&lease, AgentAction::Wait { ms: 0 });
+        let run = request.run_id.to_string();
+        credential_delivered_reads().mark(&run, OTP_PAGE);
+        let mut ctx = mask_test_ctx();
+        ctx.current_url = OTP_PAGE.into();
+
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+
+        assert!(observation.screenshot_artifact_id.is_some());
+        assert!(!observation.policy_denials.iter().any(|d| d == OTP_READ_DENIAL));
+        credential_delivered_reads().release(&run);
     }
 }

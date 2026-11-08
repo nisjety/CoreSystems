@@ -1593,6 +1593,39 @@ pub struct BatchRequest {
     /// See [`crate::crawl_request::ParsedCrawl::zdr`].
     #[serde(default)]
     pub zdr: Option<bool>,
+    /// CW-1: read only to refuse it, see [`batch_redaction_refusal`].
+    #[serde(default)]
+    pub redact_pii: Option<serde_json::Value>,
+    #[serde(default, rename = "redactPii")]
+    pub redact_pii_camel: Option<serde_json::Value>,
+}
+
+/// CW-1: a batch page runs without per-page scrape options, so it cannot be redacted.
+/// A request that asks for redaction is refused, never run unredacted. `off` is the
+/// default, and an absent or null value asks for nothing.
+fn batch_redaction_refusal(req: &BatchRequest) -> Option<QuarryError> {
+    let path = [
+        ("redact_pii", &req.redact_pii),
+        ("redactPii", &req.redact_pii_camel),
+    ]
+    .into_iter()
+    .find_map(|(path, value)| {
+        value
+            .as_ref()
+            .filter(|value| value.as_str() != Some("off"))
+            .map(|_| path)
+    })?;
+    let error = QuarryError::new(
+        ErrorCode::BadRequest,
+        "the batch does not accept redact_pii",
+    );
+    Some(error.with_details(serde_json::json!({
+        "fields": [{
+            "path": path,
+            "code": "unsupported_option",
+            "message": "cannot apply to a batch: its pages carry no per-page scrape options",
+        }]
+    })))
 }
 
 async fn batch_handoff(
@@ -1603,6 +1636,12 @@ async fn batch_handoff(
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
+    if let Some(err) = batch_redaction_refusal(&req) {
+        return Err((
+            StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(Envelope::<()>::err(&request_id, err)),
+        ));
+    }
     refuse_while_draining(&request_id)?;
     // WS14.S5: every URL is checked statically before anything is created (no network work).
     // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
@@ -2259,6 +2298,22 @@ async fn internal_run_page(
     // WS14.S2: a malformed `crawl` is refused before anything is fetched.
     let crawl_scope = compile_crawl(req.crawl.clone(), &request_id)?;
 
+    // CW-1: a page that asks for redaction runs only where the pipeline stage redacts it and the
+    // crawl options are on. Otherwise it is refused, not run unredacted, even when its job was
+    // stamped while they were on.
+    if let Some(err) = crate::crawl_scrape::redaction_refusal(
+        req.scrape
+            .as_ref()
+            .is_some_and(crate::crawl_scrape::stamped_requests_redaction),
+        crate::crawl_policy::CrawlFeatures::current().scrape_options,
+        quarry_runtime::pipeline::PiiRedactionSettings::cached().mode
+            == quarry_runtime::pipeline::PiiRedactionMode::On,
+    ) {
+        return Err((
+            StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
+            Json(Envelope::<()>::err(&request_id, err)),
+        ));
+    }
     // INNH-6b: the crawl's per-page options, re-checked here with the rules the handoff used.
     // Off (the default), the field is ignored and the response says nothing of it, so an
     // orchestrator that sent options sees they were not applied and ends the run.
@@ -2299,6 +2354,19 @@ async fn internal_run_page(
     let scrape_cache_ok = scrape_options
         .as_ref()
         .map_or(true, crate::crawl_scrape::CrawlScrapeOptions::cache_admissible);
+    let redact_pii = scrape_options
+        .as_ref()
+        .is_some_and(|options| options.redact_pii == Some(quarry_core::scrape::PiiRedaction::On));
+    // CW-1: a redacting page keeps no text the scanner has not cleared (every write goes
+    // through the enforcing store), renders no picture, and takes no local index or model
+    // title enricher, as on /v1/scrape.
+    let artifacts: Arc<dyn quarry_runtime::artifact_store::ArtifactStore> = if redact_pii {
+        Arc::new(quarry_runtime::artifact_store::PiiEnforcingStore::new(
+            state.artifacts.clone(),
+        ))
+    } else {
+        state.artifacts.clone()
+    };
 
     // WS7.C: no JWT on this route. The caller is the orchestrator, an autonomous
     // principal, so the decision is the baseline and the invariants (no ask).
@@ -2330,7 +2398,7 @@ async fn internal_run_page(
     let runner = PageRunner {
         driver,
         security: crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision),
-        artifacts: state.artifacts.clone(),
+        artifacts,
         event_sink: state.event_sink.clone(),
         zdr,
         ingest: ingest_client,
@@ -2338,7 +2406,11 @@ async fn internal_run_page(
         user_id: req.user_id.clone(),
         privacy,
         cancel_token: None,
-        local_index: state.local_index.clone(),
+        local_index: if redact_pii {
+            None
+        } else {
+            state.local_index.clone()
+        },
         policy: quarry_runtime::RunPolicy::from(decision.policy()),
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
@@ -2347,7 +2419,11 @@ async fn internal_run_page(
             .clone()
             .map(RenderHints::from)
             .unwrap_or_default(),
-        page_renderer: state.page_renderer.clone(),
+        page_renderer: if redact_pii {
+            None
+        } else {
+            state.page_renderer.clone()
+        },
         // P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): this is the
         // orchestrator-driven per-page route used for durable crawl/batch
         // execution (quarry-orchestrator calls it once per page). Wiring the
@@ -2359,7 +2435,11 @@ async fn internal_run_page(
                 state: state.clone(),
             },
         )),
-        title_enricher: state.page_title_enricher.clone(),
+        title_enricher: if redact_pii {
+            None
+        } else {
+            state.page_title_enricher.clone()
+        },
         doc_routing: quarry_runtime::DocRouting::cached(),
         // WS14.S4: a crawl or batch page is gated on robots.txt when its context says
         // `robots: respect`, the gate exists and the mode is not off.
@@ -2413,7 +2493,13 @@ async fn internal_run_page(
                 clean: options.clean_options(),
                 ..quarry_runtime::InlineRequest::default_for(zdr)
             };
-            let run = runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request);
+            let run = runner.run_with_inline_request_redacting(
+                &run_id,
+                &url,
+                prev_fp,
+                &inline_request,
+                redact_pii,
+            );
             let finished = match options.timeout_ms {
                 Some(ms) => tokio::time::timeout(Duration::from_millis(ms), run)
                     .await
@@ -3333,6 +3419,28 @@ mod tests {
         let mut drivers = DriverRegistry::new(DriverKind::Static);
         drivers.register(driver.clone());
         test_state(driver, drivers, None)
+    }
+
+    #[test]
+    fn a_batch_that_asks_for_redaction_is_refused_not_run_unredacted() {
+        // CW-1: a batch page has no per-page scrape options, so it cannot be redacted. The
+        // request that asks is refused; an absent, null or `off` value asks for nothing.
+        let refusal = |body: serde_json::Value| {
+            let req: BatchRequest = serde_json::from_value(body).unwrap();
+            batch_redaction_refusal(&req)
+        };
+        assert!(refusal(serde_json::json!({ "urls": [] })).is_none());
+        assert!(refusal(serde_json::json!({ "urls": [], "redact_pii": null })).is_none());
+        assert!(refusal(serde_json::json!({ "urls": [], "redact_pii": "off" })).is_none());
+        for body in [
+            serde_json::json!({ "urls": [], "redact_pii": "on" }),
+            serde_json::json!({ "urls": [], "redactPii": "on" }),
+        ] {
+            let err = refusal(body).expect("refused");
+            assert_eq!(err.code, ErrorCode::BadRequest);
+            let details = err.details.expect("details");
+            assert_eq!(details["fields"][0]["code"], "unsupported_option");
+        }
     }
 
     #[tokio::test]

@@ -354,6 +354,46 @@ pub(crate) async fn proxy_json(
     actor: Option<&ActionActor>,
     content_type: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
+    proxy_json_with_extra_headers(
+        state,
+        method,
+        url,
+        body,
+        org_id,
+        actor,
+        content_type,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+/// `proxy_json` with an `If-Match` precondition the upstream checks itself (org-core's web
+/// policy, WS7.H, answers a stale revision 409). The header is added after the identity headers
+/// and never replaces one.
+pub(crate) async fn proxy_json_with_if_match(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    actor: Option<&ActionActor>,
+    if_match: &str,
+) -> (StatusCode, Json<Value>) {
+    let extra = BTreeMap::from([("if-match".to_owned(), if_match.to_owned())]);
+    proxy_json_with_extra_headers(state, method, url, body, org_id, actor, None, extra).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_json_with_extra_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    actor: Option<&ActionActor>,
+    content_type: Option<&str>,
+    extra: BTreeMap<String, String>,
+) -> (StatusCode, Json<Value>) {
     let actor_present = actor.is_some();
     let actor = actor_with_defaults(actor);
     let is_user_core = same_upstream_origin(url, &state.user_core_url);
@@ -427,6 +467,9 @@ pub(crate) async fn proxy_json(
     }
     if let Some(org_id) = org_id.filter(|value| !value.trim().is_empty()) {
         headers.insert("x-org-id".to_owned(), org_id.trim().to_owned());
+    }
+    for (name, value) in extra {
+        headers.entry(name).or_insert(value);
     }
 
     proxy_json_with_headers(state, method, url, body, headers, content_type).await

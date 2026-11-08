@@ -177,7 +177,15 @@ pub async fn step(
     // WS8.F: a caller that does not own the run is refused unless it is the delegate of the
     // run's live attachment (the lane check); the delegate lane has its own admission.
     if !handle.live.owned_by(&claims) {
-        return super::attach::delegate_step(&state, &handle, &claims, &request_id, body).await;
+        return super::attach::delegate_step(
+            &state,
+            &handle,
+            &claims,
+            &request_id,
+            body,
+            quarry_runtime::otp_source::fill_otp_enabled(),
+        )
+        .await;
     }
 
     // Counts as in flight from before it waits for its lane, so the sweeper

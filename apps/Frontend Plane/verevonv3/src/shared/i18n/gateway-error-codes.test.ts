@@ -143,6 +143,7 @@ const CALLER_WORDS_IT: Record<string, string> = {
   audit_scope_denied: 'a 403 for a member who may read only their own audit events; the audit client keeps the typed error and the Trust Center draws its own self-scope notice (the 403 status class answers anywhere else)',
   room_admin_unavailable: 'SpaceRoomArchive words it for the archive and restore it belongs to ("Nothing was changed"); a code-level sentence would override that',
   space_policy_admin_disabled: 'a 404 that hides the org Space policy console; OrgSpacePolicySection draws its own "not switched on for this installation" notice',
+  browser_policy_admin_disabled: 'a 404 that hides the organization browser policy section; BrowserPolicySection is not mounted unless VITE_BROWSER_POLICY_SETTINGS is on, and a failed load hides it too, so no person sees this code',
   space_room_artifacts_disabled: 'a 404 that turns the room Artifacts tab into its disabled state; SpaceArtifactsTab draws its own notice',
   edit_requires_grant: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
   edit_requires_once: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',

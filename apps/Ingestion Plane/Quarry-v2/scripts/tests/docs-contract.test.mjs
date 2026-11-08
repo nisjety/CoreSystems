@@ -665,6 +665,13 @@ test("the change text diff switch is read by the code, documented, and not turne
   const source = read(join(quarry, "crates", "quarry-edge", "src", "change_diff.rs"));
   assert.match(source, /pub const ENV_CHANGE_TEXT_DIFF: &str = "QUARRY_EDGE__CHANGE_TEXT_DIFF";/, "the code reads the switch");
   const name = "QUARRY_EDGE__CHANGE_TEXT_DIFF";
+  // E3.5-4 adds a second switch under the same prefix; the code must read it too.
+  const textFpName = "QUARRY_EDGE__CHANGE_TEXT_FP";
+  assert.match(
+    read(join(quarry, "crates", "quarry-edge", "src", "change_routes.rs")),
+    /pub const ENV_CHANGE_TEXT_FP: &str = "QUARRY_EDGE__CHANGE_TEXT_FP";/,
+    "the code reads the text-fingerprint switch",
+  );
   const docs = [
     ["RUNBOOKS", paths.runbooks],
     ["CONTRACTS", join(quarry, "docs", "CONTRACTS.md")],
@@ -674,9 +681,10 @@ test("the change text diff switch is read by the code, documented, and not turne
   for (const [label, path] of docs) {
     const text = read(path);
     assert.ok(text.includes(name), `${label} names ${name}`);
-    // Every spelling of the switch in a document is the one the code reads.
+    // Every spelling of a switch in a document is one the code reads.
     for (const match of text.matchAll(/QUARRY_EDGE__?CHANGE_TEXT_[A-Z0-9_]*/g)) {
-      assert.equal(match[0].replace(/_+$/, ""), name, `${label} names ${match[0]}, which the code does not read`);
+      const spelled = match[0].replace(/_+$/, "");
+      assert.ok([name, textFpName].includes(spelled), `${label} names ${match[0]}, which the code does not read`);
     }
   }
   // Dark by default: a compose either leaves it out or sets it to 0.
