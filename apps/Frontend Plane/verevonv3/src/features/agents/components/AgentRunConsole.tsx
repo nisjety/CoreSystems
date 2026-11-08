@@ -91,6 +91,19 @@ import {
 import type { RunMeter } from '@/features/chat/components/chat-types'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
 import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
+import {
+  browserActionBriefEnabled,
+  browserActionLines,
+  browserActionPill,
+  browserActionRowId,
+  browserActionTitle,
+  emptyBrowserActionFacts,
+  withBrowserApprovalRequired,
+  withBrowserDecided,
+  withBrowserDispatched,
+  withBrowserObserved,
+  type BrowserActionFacts,
+} from '@/features/browser/replay/browser-action-brief'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -138,6 +151,12 @@ type TimelineEntry = {
    * screenshot" is a correct and expected state rather than a failure.
    */
   screenshotRef?: string
+  /**
+   * The facts of one browser action, while the per-action brief is on (F-t3-050 R2). Its title,
+   * pill and lines are read from these at render time, and a later event for the same action
+   * updates the row rather than adding one.
+   */
+  browser?: BrowserActionFacts
 }
 
 type Citation = {
@@ -388,6 +407,27 @@ export default function AgentRunConsole() {
     })
   }
 
+  // The per-action brief (F-t3-050 R2): one row per browser action, built up as its dispatch,
+  // gate, decision and observation arrive. Used only while the switch is on; off, every browser
+  // event keeps its own row as before.
+  const upsertBrowserAction = (
+    planId: string | undefined,
+    actionId: string,
+    at: string | undefined,
+    merge: (facts: BrowserActionFacts) => BrowserActionFacts,
+  ) => {
+    const id = browserActionRowId(planId, actionId)
+    const existing = state.timeline.find((item) => item.id === id)
+    upsertById({
+      id,
+      kind: 'browser',
+      title: '',
+      detail: '',
+      at: existing?.at ?? at ?? new Date().toISOString(),
+      browser: merge(existing?.browser ?? emptyBrowserActionFacts(actionId)),
+    })
+  }
+
   // ── Approvals ────────────────────────────────────────────────────────────
 
   const refreshApprovals = async (runId: string) => {
@@ -583,6 +623,10 @@ export default function AgentRunConsole() {
         })
       },
       onBrowserAction: (event) => {
+        if (browserActionBriefEnabled() && event.actionId) {
+          upsertBrowserAction(event.planId, event.actionId, event.at, (facts) => withBrowserDispatched(facts, event))
+          return
+        }
         append({
           id: `browse-act-${event.actionId ?? state.timeline.length}`,
           kind: 'browser',
@@ -593,6 +637,10 @@ export default function AgentRunConsole() {
         })
       },
       onBrowserObservation: (event) => {
+        if (browserActionBriefEnabled() && event.actionId) {
+          upsertBrowserAction(event.planId, event.actionId, event.at, (facts) => withBrowserObserved(facts, event))
+          return
+        }
         append({
           id: `browse-obs-${event.actionId ?? state.timeline.length}`,
           kind: 'browser',
@@ -602,6 +650,20 @@ export default function AgentRunConsole() {
           at: event.at ?? new Date().toISOString(),
           screenshotRef: event.screenshotRef,
         })
+      },
+      onBrowserActionApprovalRequired: (event) => {
+        const actionId = event.actionId
+        // A run-level gate names no action. It stays with the approvals and gets no row here.
+        if (!browserActionBriefEnabled() || !actionId) return
+        upsertBrowserAction(event.planId, actionId, event.at, (facts) => withBrowserApprovalRequired(facts, event))
+      },
+      onBrowserActionDecided: (event) => {
+        const actionId = event.actionId
+        if (!browserActionBriefEnabled() || !actionId) return
+        // A decision on an action that raised no gate is the run's own start, not a step.
+        const row = state.timeline.find((item) => item.id === browserActionRowId(event.planId, actionId))
+        if (!row?.browser?.gated) return
+        upsertBrowserAction(event.planId, actionId, event.at, (facts) => withBrowserDecided(facts, event))
       },
       onSubagentAttached: (event) => {
         // Wide-research fan-out (chat-wave2-specs, 2026-09-28): prefer the
@@ -2175,10 +2237,27 @@ function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
 
 function TimelineRow(props: { entry: TimelineEntry }) {
   const i18n = useI18n()
+  const tr = (noText: string, enText: string) => i18n.tr(noText, enText)
   const Icon = createMemo(() => TIMELINE_ICON[props.entry.kind])
-  const statusTone = () => normalizeStatusTone(props.entry.status)
+  // A browser action's row reads its title, pill and lines from its facts (F-t3-050 R2).
+  const brief = () => props.entry.browser
+  const briefPill = () => {
+    const facts = brief()
+    return facts ? browserActionPill(facts, tr) : null
+  }
+  const statusTone = () => briefPill()?.tone ?? normalizeStatusTone(props.entry.status)
   const time = () => formatClock(props.entry.at)
+  const title = () => {
+    const facts = brief()
+    return facts ? browserActionTitle(facts, tr) : props.entry.title
+  }
+  const shotPage = () => {
+    const facts = brief()
+    return facts ? facts.pageUrl || facts.url : props.entry.detail
+  }
   const pill = () => {
+    const current = briefPill()
+    if (current) return current.label
     const status = props.entry.status
     if (!status) return null
     const label = statusLabel(i18n, status)
@@ -2196,7 +2275,7 @@ function TimelineRow(props: { entry: TimelineEntry }) {
       </span>
       <div class="verevon-run-timeline__copy">
         <div class="verevon-run-timeline__title-row">
-          <span class="verevon-run-timeline__title">{props.entry.title}</span>
+          <span class="verevon-run-timeline__title">{title()}</span>
           <Show when={time()}>
             <time class="verevon-run-timeline__time">{time()}</time>
           </Show>
@@ -2208,11 +2287,22 @@ function TimelineRow(props: { entry: TimelineEntry }) {
             )}
           </Show>
         </div>
-        <Show when={props.entry.detail}>
-          <p class="verevon-run-timeline__detail">{props.entry.detail}</p>
+        <Show
+          when={brief()}
+          fallback={(
+            <Show when={props.entry.detail}>
+              <p class="verevon-run-timeline__detail">{props.entry.detail}</p>
+            </Show>
+          )}
+        >
+          {(facts) => (
+            <For each={browserActionLines(facts(), tr)}>
+              {(line) => <p class="verevon-run-timeline__detail">{line}</p>}
+            </For>
+          )}
         </Show>
-        <Show when={props.entry.screenshotRef}>
-          {(ref) => <BrowserObservationShot artifactId={ref()} pageUrl={props.entry.detail} />}
+        <Show when={brief()?.screenshotRef || props.entry.screenshotRef}>
+          {(ref) => <BrowserObservationShot artifactId={ref()} pageUrl={shotPage()} />}
         </Show>
       </div>
     </li>
