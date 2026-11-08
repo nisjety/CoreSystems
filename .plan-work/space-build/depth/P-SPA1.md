@@ -1,0 +1,10 @@
+- P1 gap: node --test action-surface-contract.test.mjs dispatcher-equality fails at HEAD already (11 registry ids have no handlers.rs arm: mcp.approve_tool, tools.set_policy, chat.execute_approved_plan, chat.run.continue, chat.answer_question, approvals.decide, audit.verify_chain, audit.export_log, audit.*_siem_destination); registry ids are byte-identical to HEAD, so this comes from the sibling Model Plane build, not from the move.
+- P2 decision: spaces-client is split as core.ts (the whole pre-split client, unchanged) plus an index.ts barrel; a per-feature split of core.ts into spaces-client/<feature>.ts is left for the slices that add calls (pure-move scope).
+- P2 decision: the existing 13 spaces.* contracts live in a single fragment base.ts (no workstream owns them); new fragments are added to domains/spaces/index.ts.
+- P2 decision: the gateway contract test reads every domains/spaces/*.ts except *.test.ts; a fragment must therefore not contain unrelated `id: '...'` literals.
+- P2 gap: the dispatchers_spaces/<ws>.rs gateway half of the action seam belongs to P-GW1/each WS slice; not touched here.
+- P3 decision: SpaceTabDefinition.enabled and SpacePaneDefinition.enabled are presentation switches only, never authorisation (documented in the files).
+- P3 follow-up: SpacePage still renders the thread pane inline; a pane registered later needs its own render branch next to it (the registry only resolves which pane the URL asks for).
+- P3 follow-up: the pane registry exports SpacePaneId = 'thread' as a closed union; each new pane widens it.
+- P3 gap: SpacePage.tsx now imports the pane registry; WS01-S7b and later slices that edit SpacePage should rebase on this commit.
+- P3 risk: SpaceCockpit evaluates visibleSpaceTabs() once per render (non-reactive); a flag that flips at runtime will not re-show a tab until remount.

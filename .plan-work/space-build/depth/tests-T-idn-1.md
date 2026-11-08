@@ -1,0 +1,7 @@
+- P2 deferred: audit-role-gate.spec.ts (4 e2e cases): written and listed by Playwright but skipped without E2E_ADMIN_STORAGE_STATE and E2E_MEMBER_STORAGE_STATE; the later tier needs a stack plus an admin and a member session of one org.
+- P2 deferred: db/scim_redaction_postgres_test.go: runs migration 0014 twice on seeded scim/stripe/slack rows, needs INTEGRATION_TEST_DATABASE_URL (disposable DB); the text contract test for 0014 runs and passes.
+- P3 test-gap: audit-core ListAudit/ListUsage SQL is never exercised (stub store); the user_id narrowing is asserted on the filter passed to the store, not on rows returned by Postgres.
+- P3 test-gap: WS05-S1 gateway scope is tested against wiremock doubles; no test proves the real audit-core accepts the gateway's delegated role header end to end (the e2e spec above covers that later).
+- P3 test-gap: auth-core has no real-auth.ts import path in Jest (better-auth and jose are ESM-only, not transformed); sso-provisioning.spec.ts stubs them, so it proves the options auth.ts builds, not Better Auth's runtime use of defaultRole.
+- P3 test-gap: TestServiceScopeTableCoversNewPaths only proves each Space route resolves to some spaces:* scope, not that it is the intended one; the per-path table in TestServiceScopeForRequest stays the source for that.
+- P3 pre-existing: integration-corev2 internal/codexsubscription/appserver_test.go still lists SCIM_ORG_BEARER_TOKENS as a broker-secret name; harmless (env filter fixture), left unchanged.

@@ -1,0 +1,998 @@
+{
+ "rows": [
+  {
+   "id": "M0-BASE",
+   "what": "base branch cut, ledger entry, decisions SD-11/15",
+   "lane": "L0",
+   "ms": "M0",
+   "size": "S",
+   "deps_raw": "none",
+   "soft_raw": "-",
+   "blocks_raw": "M0-T0, M0-CI, P-SC1, P-GW1, P-UC1, P-CX1, P-SPA1, +85 more",
+   "deps": [],
+   "cond": false
+  },
+  {
+   "id": "M0-T0",
+   "what": "T0 seed script, fixtures, baseline capture",
+   "lane": "L0",
+   "ms": "M0",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "WS03-S1",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "M0-CI",
+   "what": "space-gate.yml, convex-core.yml, buf path fix",
+   "lane": "L0",
+   "ms": "M0",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-SC1",
+   "what": "session-core space/ module, append_as seam, read-service skeleton, model-gateway space_routes seam",
+   "lane": "L1",
+   "ms": "M0",
+   "size": "S/M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S1, WS02-S1, WS07-S9, WS13-S1, WS15-S5, WS17-S1",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-GW1",
+   "what": "gateway spaces/ module tree, SpaceFeatureFlags, error_with_details, org_zdr_lookup",
+   "lane": "L7",
+   "ms": "M0",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S5, WS02-S4, WS03-S4, WS03-S5, WS04-S6, WS04-S9, WS07-S3, +14 more",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-UC1",
+   "what": "user-core route and scope-table seams",
+   "lane": "L4",
+   "ms": "M0",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S2, WS02-S2, WS03-S3, WS04-S3, WS04-S4, WS04-S7, WS04-S8, +21 more",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-CX1",
+   "what": "Convex schema.ts split per feature",
+   "lane": "L6",
+   "ms": "M0",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S5, WS04-S12, WS08-S5, WS11-S3, WS11-S6, WS11-S9, WS11-S10, +8 more",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-SPA1",
+   "what": "SPA tab registry, spaces-client and action-registry fragments, errors.ts sections",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS01-S7a",
+   "soft_raw": "-",
+   "blocks_raw": "P-SPA2, WS01-S6, WS01-S7b, WS01-S8, WS02-S5, WS03-S6, WS03-S7, +41 more",
+   "deps": [
+    "WS01-S7a"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-SPA2",
+   "what": "composer extension slots and send pipeline seam",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S6, WS08-S6, WS09-S2, WS12-S7, WS13-S7, WS14-S8, WS15-S2, +1 more",
+   "deps": [
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "P-CFG",
+   "what": "Control PR train for principals, nats.conf, compose (6 trains)",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S1",
+   "what": "Session Core schema, post_kind, containment filters",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S2, WS01-S3, WS01-S8, WS06-S12, WS08-S2, WS12-S4, WS15-S6, +3 more",
+   "deps": [
+    "P-SC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S2",
+   "what": "Control thread-append v2 and verifier golden",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-UC1, WS01-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S3, WS01-S5",
+   "deps": [
+    "P-UC1",
+    "WS01-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S3",
+   "what": "Session Core member append path",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "L",
+   "deps_raw": "WS01-S1, WS01-S2 (c)",
+   "soft_raw": "WS09-S1",
+   "blocks_raw": "WS01-S4, WS10-S6, WS10-S7, WS13-S10, WS13-S11",
+   "deps": [
+    "WS01-S1",
+    "WS01-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S4",
+   "what": "model-gateway post routes, error map, ZDR",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS01-S3",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S5, WS01-S8, WS08-S3, WS13-S10, WS13-S11",
+   "deps": [
+    "WS01-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S5",
+   "what": "BFF post routes, flags, features, action contracts",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-GW1, WS01-S2 (c), WS01-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S6, WS08-S4, WS12-S3, WS12-S8, WS13-S10, WS15-S10, WS16-S8, +4 more",
+   "deps": [
+    "P-GW1",
+    "WS01-S2",
+    "WS01-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S6",
+   "what": "SPA post composer, journal, optimistic row",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SPA2, P-SPA1, WS01-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS01-S7b, WS08-S6, WS12-S3, WS17-S6",
+   "deps": [
+    "P-SPA2",
+    "P-SPA1",
+    "WS01-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S7a",
+   "what": "SPA AuxPane, read-only thread panel, deep link",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "P-SPA1, WS01-S7b, WS12-S7, WS13-S4a, WS17-S6, WS20-S5",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S7b",
+   "what": "reply composer in pane, collapse, unread parity",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "S/M",
+   "deps_raw": "WS01-S6, WS01-S7a, P-SPA1",
+   "soft_raw": "WS01-S1, WS01-S4",
+   "blocks_raw": "WS12-S3, WS12-S7",
+   "deps": [
+    "WS01-S6",
+    "WS01-S7a",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS01-S8",
+   "what": "reliable send on the agent path (F-t1-033)",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-SPA1, WS01-S1 (c), WS01-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS01-S1",
+    "WS01-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS02-S1",
+   "what": "space event log, triggers, tailer, erasure hooks",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS02-S3, WS02-S7, WS11-S5",
+   "deps": [
+    "P-SC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS02-S2",
+   "what": "Control stream-read audience",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS02-S3",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS02-S3",
+   "what": "SpaceEvents gRPC, delivery gate, model-gateway SSE",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "L",
+   "deps_raw": "WS02-S1, WS02-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS02-S4, WS02-S6, WS19-S10",
+   "deps": [
+    "WS02-S1",
+    "WS02-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS02-S4",
+   "what": "BFF stream route, frame validator, limiter",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-GW1, WS02-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS02-S5",
+   "deps": [
+    "P-GW1",
+    "WS02-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS02-S5",
+   "what": "SPA stream controller, indicator, presence decoupling",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS02-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS02-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S1",
+   "what": "catalogue-driven UpsertEffectPolicy, events, outbox audit",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS03-S3, WS05-S5",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S2",
+   "what": "typed denial vocabulary and issuer retrofit",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS03-S5, WS03-S7",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S3",
+   "what": "org-admin policy routes, presets, write switch",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS03-S1, P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS03-S4",
+   "deps": [
+    "WS03-S1",
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S4",
+   "what": "gateway admin routes, flag, dispatchers, registry entries",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-GW1, WS03-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS03-S6",
+   "deps": [
+    "P-GW1",
+    "WS03-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S5",
+   "what": "gateway typed denial mapping",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-GW1, WS03-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS03-S7",
+   "deps": [
+    "P-GW1",
+    "WS03-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S6",
+   "what": "SPA policy console",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS03-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS03-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS03-S7",
+   "what": "SPA denial presenter and copy",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS03-S2 (c), WS03-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS03-S2",
+    "WS03-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S1",
+   "what": "org-room roster reconcile cron and hook",
+   "lane": "L6",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S2",
+   "what": "room name and topic end to end",
+   "lane": "L6",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S3",
+   "what": "people search (user-core SQL, route, picker)",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S9",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S4",
+   "what": "Control membership writer, ledger, scopes",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S5, WS04-S6, WS04-S7, WS04-S8, WS04-S10, WS15-S11, WS17-S4",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S5",
+   "what": "recipient audience follows the roster",
+   "lane": "L6",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-CX1, WS04-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S6, WS04-S8, WS04-S11",
+   "deps": [
+    "P-CX1",
+    "WS04-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S6",
+   "what": "Members tab on the Control writer",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-GW1, WS04-S4 (c), WS04-S5 (c)",
+   "soft_raw": "WS04-S3",
+   "blocks_raw": "WS04-S8, WS04-S12",
+   "deps": [
+    "P-GW1",
+    "WS04-S4",
+    "WS04-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S7",
+   "what": "archive and restore",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS04-S4, P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS04-S4",
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S1",
+   "what": "role-gated audit reads",
+   "lane": "L5",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S4",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S2",
+   "what": "SCIM stub to 501, redaction migration",
+   "lane": "L5",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S8",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S3",
+   "what": "remove SSO attribute-to-admin rule (+ S3b user-core `/retrieval-decision` scope, L4 file, no migration)",
+   "lane": "L5",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S7",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S1",
+   "what": "type the 11 Session Core refusals, inventory test",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S2",
+   "what": "gate Space decision ZDR flag (observe/enforce)",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S3",
+   "what": "metric-label guard",
+   "lane": "L3",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S4",
+   "what": "route-class registry (model-gateway, BFF table)",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S5",
+   "what": "Control capability decision: egress vocabulary",
+   "lane": "L4",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS06-S6, WS06-S9",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S7",
+   "what": "container limits, bounded output",
+   "lane": "L3",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS06-S8, WS06-S10",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S1",
+   "what": "RegionBoundary, FailureCard, classifier",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S2",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S2",
+   "what": "build id, version.json, nginx snippets, chunk recovery",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S1, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S3, WS07-S6",
+   "deps": [
+    "WS07-S1",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S3",
+   "what": "gateway client-config, contract constants",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S2, P-GW1",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S6",
+   "deps": [
+    "WS07-S2",
+    "P-GW1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S4",
+   "what": "restricted state for shared_read",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-SPA1, WS01-S7a",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S9",
+   "deps": [
+    "P-SPA1",
+    "WS01-S7a"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S5",
+   "what": "link safety and sandbox wrapper fix",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S10, WS15-S4, WS15-S10",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S6",
+   "what": "CSP report-only and csp-report route",
+   "lane": "L7",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S2, WS07-S3, P-GW1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS07-S2",
+    "WS07-S3",
+    "P-GW1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S7",
+   "what": "avatar read path and AgentAvatar",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S8",
+   "deps": [
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S8",
+   "what": "identity hover card",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S7, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS07-S7",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S9",
+   "what": "Session Core SpaceRoomReadService, artifact aggregate",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "L",
+   "deps_raw": "P-SC1, WS07-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S12",
+   "deps": [
+    "P-SC1",
+    "WS07-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S9a",
+   "what": "room metadata allowlist in model-gateway",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S10",
+   "what": "viewer registry and surfaces",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S5, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS07-S11",
+   "deps": [
+    "WS07-S5",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S11",
+   "what": "turn mapper, artifact chips, per-thread sheet",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S10, P-SPA1",
+   "soft_raw": "WS07-S9a",
+   "blocks_raw": "WS07-S12",
+   "deps": [
+    "WS07-S10",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S12",
+   "what": "Artifacts tab on the aggregate",
+   "lane": "L8",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "WS07-S11, P-SPA1, WS07-S9 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS07-S11",
+    "P-SPA1",
+    "WS07-S9"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS07-S13",
+   "what": "artifact-first instruction snippet",
+   "lane": "L9",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S1",
+   "what": "honest run phase, per-thread run guard",
+   "lane": "L2",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S2, WS20-S3",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS17-S1",
+   "what": "memory containment (space_kind claim, memory_scope.rs)",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "M",
+   "deps_raw": "P-SC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS17-S2, WS17-S3, WS17-S9",
+   "deps": [
+    "P-SC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS17-S2",
+   "what": "withheld legacy rows visible to owner, panel badge",
+   "lane": "L1",
+   "ms": "M1",
+   "size": "S",
+   "deps_raw": "WS17-S1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS17-S1"
+   ],
+   "cond": false
+  }
+ ],
+ "level": {
+  "M0-BASE": 0,
+  "M0-T0": 1,
+  "M0-CI": 1,
+  "P-SC1": 1,
+  "P-GW1": 1,
+  "P-UC1": 1,
+  "P-CX1": 1,
+  "WS01-S7a": 1,
+  "P-SPA1": 2,
+  "P-SPA2": 3,
+  "P-CFG": 1,
+  "WS01-S1": 2,
+  "WS01-S2": 3,
+  "WS01-S3": 4,
+  "WS01-S4": 5,
+  "WS01-S5": 6,
+  "WS01-S6": 7,
+  "WS01-S7b": 8,
+  "WS01-S8": 6,
+  "WS02-S1": 2,
+  "WS02-S2": 2,
+  "WS02-S3": 3,
+  "WS02-S4": 4,
+  "WS02-S5": 5,
+  "WS03-S1": 1,
+  "WS03-S2": 1,
+  "WS03-S3": 2,
+  "WS03-S4": 3,
+  "WS03-S5": 2,
+  "WS03-S6": 4,
+  "WS03-S7": 3,
+  "WS04-S1": 1,
+  "WS04-S2": 1,
+  "WS04-S3": 2,
+  "WS04-S4": 2,
+  "WS04-S5": 3,
+  "WS04-S6": 4,
+  "WS04-S7": 3,
+  "WS05-S1": 1,
+  "WS05-S2": 1,
+  "WS05-S3": 1,
+  "WS06-S1": 1,
+  "WS06-S2": 1,
+  "WS06-S3": 1,
+  "WS06-S4": 1,
+  "WS06-S5": 1,
+  "WS06-S7": 1,
+  "WS07-S1": 1,
+  "WS07-S2": 3,
+  "WS07-S3": 4,
+  "WS07-S4": 3,
+  "WS07-S5": 1,
+  "WS07-S6": 5,
+  "WS07-S7": 3,
+  "WS07-S8": 4,
+  "WS07-S9": 4,
+  "WS07-S9a": 1,
+  "WS07-S10": 3,
+  "WS07-S11": 4,
+  "WS07-S12": 5,
+  "WS07-S13": 1,
+  "WS09-S1": 1,
+  "WS17-S1": 2,
+  "WS17-S2": 3
+ }
+}

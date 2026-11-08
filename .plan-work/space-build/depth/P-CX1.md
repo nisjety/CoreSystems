@@ -1,0 +1,4 @@
+- P1 risk: UNVERIFIED that Convex deploy/codegen accepts table definitions imported from convex/schema/*.ts; the TS type and exported-JSON equivalence are verified, the live push (docker restart convex-gateway, wait for "Convex functions ready!") is not.
+- P2 follow-up: Convex treats files under convex/schema/ as modules, so the next `convex codegen` may add `schema/*` entries to _generated/api.d.ts; regenerate rather than hand-edit.
+- P3 decision: the comment block on recipient-set ownership sat above spaceMemberGrants but describes spaceRecipientAudiences; moved with its table (comment-only change).
+- P3 decision: grouping chosen by feature (identity, chat, planner, agents, ingest, spaces, spaceDeletion, spaceAudience, conversationProjection); later slices may add new files (e.g. schema/spaceAttention.ts) and one line in schema.ts.

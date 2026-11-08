@@ -1,0 +1,3 @@
+- P3 test-gap: SpaceIdentityHoverCard positioning (flip above, viewport clamp): jsdom has no layout, so placement is not asserted; covered by a later browser tier.
+- P3 test-gap: hover card blocking line (agent awaiting_approval): exercised only as a model/unit case, because the server does not yet derive awaiting_approval into the thread projection (WS09/WS10).
+- P3 test-gap: Convex createSpaceAgentForGateway: driven through a mocked ctx (handler._handler); no real Convex deployment test.

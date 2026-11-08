@@ -1,0 +1,32 @@
+{
+ "slice": "WS04-S7",
+ "status": "built",
+ "commit": "7bd8a2b21",
+ "files": [
+  "apps/Control Plane/user-core/migrations/035_space_archived_state.up.sql",
+  "apps/Control Plane/user-core/migrations/035_space_archived_state.down.sql",
+  "apps/Control Plane/user-core/internal/spaces/archive.go",
+  "apps/Control Plane/user-core/internal/spaces/repository.go",
+  "apps/Control Plane/user-core/internal/spaces/authority.go",
+  "apps/Control Plane/user-core/internal/http/space_room_state.go",
+  "apps/Control Plane/user-core/internal/http/routes_space_archive.go",
+  "apps/Control Plane/user-core/internal/http/scopes_space_archive.go",
+  "apps/Control Plane/user-core/internal/http/spaces.go"
+ ],
+ "compile": "ok (go build ./... and go vet ./internal/spaces ./internal/http)",
+ "migrations": [
+  "migration user-core 035 apps/Control Plane/user-core/migrations/035_space_archived_state.up.sql (+ .down.sql)"
+ ],
+ "flags": [
+  "space_room_archive_api gateway flag: NOT built here (gateway leg); Control routes dark by credential spaces:membership:act, default off in production"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/user-core/internal/spaces/registration_state_scan_test.go: reads repository.go as text and asserts exactly RosterForSpace, SpacesForSubject, resolveUserMembership (via ResolveReadableUserMembership only), ResolveSharedRetrievalDecisionEvidence, ResolveSharedThreadReadDecisionEvidence and fenceActiveSpaces contain 'archived'; every other registration_state='active' untouched; resolveUserMembership callers pass active-only except ResolveReadableUserMembership",
+  "apps/Control Plane/user-core/internal/spaces/archive_live_test.go (TEST_DATABASE_URL): archived room fails thread-create, append, schedule, import, run-action, sandbox evidence; roster, index (state=archived), readable membership, thread-read and retrieval-read succeed; unarchive restores writes; Register replay of an active lifecycle event keeps archived, suspended/deleting/deleted win; org room gives room_not_archivable; viewer/editor give room_role_forbidden; non-member and other-org get room_not_found byte-equal to unknown; suspended room gives room_state_conflict; archive twice gives changed=false; idempotency replay and key reuse; authority_revision advances once per change; ledger rows archived/unarchived",
+  "apps/Control Plane/user-core/internal/database/space_archived_migration_contract_test.go: 035 text contract (idempotent, state CHECK contains archived, archived_at and archived_by columns)",
+  "apps/Control Plane/user-core/internal/http/space_room_state_test.go: ACT guard (wrong principal 403, missing scope 403, missing delegation 403), unknown JSON field 400 typed, thread-decision and thread-append-decision give 409 room_archived for an archived-room member and the unchanged denial for a non-member",
+  "apps/Control Plane/user-core/internal/http/service_auth_test.go: POST /spaces/{ref}/archive and /unarchive map to spaces:membership:act (delegated), never users:write:self; GET /membership?readable=1 still spaces:resolve",
+  "apps/Control Plane/user-core/internal/http: GET /spaces/{ref}/membership?readable=1 returns state archived and archived_at for an archived room, 403 without the flag"
+ ],
+ "notes": "Control leg only (my lock group). NOT built (other lock groups): gateway control_membership_url helper at six read sites, room_admin.rs archive routes and space_room_archive_api flag, action registry spaces.archive_room/unarchive_room, SPA banner/settings/composer prop/sidebar group, ADR amendment note, audit ledger doc. Archive/unarchive reuse scope spaces:membership:act. Retrieval decision now resolves via the readable membership so archived rooms stay retrievable. Test runs must not use verevon/budget/genius models (user order)."
+}

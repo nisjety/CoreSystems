@@ -1,0 +1,5 @@
+- P2 deferred: scripts/tests/space-contract-vectors-sync.test.sh: Go testdata/room-role-matrix.v1.json and roles_test.go do not exist, so the Go-vs-SPA role matrix equality check is a skip until the Control S4 test creates the Go golden.
+- P2 pre-existing: apps/gateway/scripts/action-surface-contract.test.mjs "every registered action has exactly one live gateway dispatcher contract": registry/handler id sets differ (reported red by T-gw-1 too, predates these slices).
+- P3 test-gap: spaces/directory.rs: the handler's active_membership_required branch is unreachable through the router (middleware answers organization_membership_required first), so it is tested by calling the handler directly.
+- P3 test-gap: spaces/mod.rs: the /membership read route (current_membership) is a plain pass-through that does not use typed_response, so no typed mapping applies to it (only to membership refusals on the read routes).
+- P3 test-gap: SPA SpacePage.tsx wiring of writer_api, SpaceMemberRoleSelect and SpaceLeaveRoomButton is not covered here (component tests cover the pieces); a SpacePage level test belongs to the later tier.

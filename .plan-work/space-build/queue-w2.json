@@ -1,0 +1,1587 @@
+{
+ "rows": [
+  {
+   "id": "WS04-S8",
+   "what": "visibility, directory policy, self-join",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "M/L",
+   "deps_raw": "WS04-S4, P-UC1, WS04-S5 (c), WS04-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S11",
+   "deps": [
+    "WS04-S4",
+    "P-UC1",
+    "WS04-S5",
+    "WS04-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S9",
+   "what": "composed people and agent directory",
+   "lane": "L7",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-GW1, WS04-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-GW1",
+    "WS04-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S10",
+   "what": "durable membership events",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "S/M",
+   "deps_raw": "WS04-S4, P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS04-S11, WS05-S8, WS05-S9",
+   "deps": [
+    "WS04-S4",
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S11",
+   "what": "opt-in history window (since_join)",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "WS04-S10, P-UC1, WS04-S5 (c), WS04-S8 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS04-S10",
+    "P-UC1",
+    "WS04-S5",
+    "WS04-S8"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS04-S12",
+   "what": "retire Application member list",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "S",
+   "deps_raw": "WS04-S6, P-CX1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS04-S6",
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S4",
+   "what": "audit list v2, admin view (no export)",
+   "lane": "L5",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS05-S1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS05-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S5",
+   "what": "Space decision audit events",
+   "lane": "L4",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS03-S1, P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS03-S1",
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S6",
+   "what": "DNS domain verification, identity audit outbox",
+   "lane": "L5",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S7, WS05-S8",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S7",
+   "what": "SSO policy, break-glass, enforcement hook",
+   "lane": "L5",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS05-S3, WS05-S6",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S8",
+   "deps": [
+    "WS05-S3",
+    "WS05-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S8",
+   "what": "SCIM Users in org-core, deprovision",
+   "lane": "L5",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS05-S2, WS05-S6, WS05-S7, WS04-S10 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS05-S9",
+   "deps": [
+    "WS05-S2",
+    "WS05-S6",
+    "WS05-S7",
+    "WS04-S10"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS05-S9",
+   "what": "deprovision propagation probe, runbook",
+   "lane": "L5",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS05-S8, WS04-S10 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS05-S8",
+    "WS04-S10"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S6",
+   "what": "sandbox-manager ZDR gate interceptor",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS06-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS06-S6b",
+   "deps": [
+    "WS06-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S8",
+   "what": "per-spawn prlimit, limit classification",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS06-S7",
+   "soft_raw": "-",
+   "blocks_raw": "WS06-S10",
+   "deps": [
+    "WS06-S7"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S9",
+   "what": "SpawnAdmission, shell lease, cleared env",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS06-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS06-S10, WS06-S11",
+   "deps": [
+    "WS06-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS06-S10",
+   "what": "production-profile verification and calibration",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS06-S7, WS06-S8, WS06-S9",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS06-S7",
+    "WS06-S8",
+    "WS06-S9"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S1",
+   "what": "Control model.run.wake decision",
+   "lane": "L4",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S2, WS08-S4",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S2",
+   "what": "Session Core mentions, wake verification, run columns",
+   "lane": "L1",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "WS01-S1, WS09-S1, WS08-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S3, WS10-S7, WS18-S8",
+   "deps": [
+    "WS01-S1",
+    "WS09-S1",
+    "WS08-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S3",
+   "what": "model-gateway wake mode, skip-append, history splice",
+   "lane": "L1",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "WS08-S2, WS01-S4",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S4",
+   "deps": [
+    "WS08-S2",
+    "WS01-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S4",
+   "what": "BFF plan_mentions, policy split, wake injector",
+   "lane": "L7",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "P-GW1, WS08-S1 (c), WS08-S3 (c), WS01-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S6",
+   "deps": [
+    "P-GW1",
+    "WS08-S1",
+    "WS08-S3",
+    "WS01-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S5",
+   "what": "binding wake policy (Convex, PATCH route, retire group)",
+   "lane": "L6",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-CX1",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S8",
+   "deps": [
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S6",
+   "what": "SPA structured mentions, picker, sequential wakes",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "WS01-S6, P-SPA2, P-SPA1, WS08-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS08-S8",
+   "deps": [
+    "WS01-S6",
+    "P-SPA2",
+    "P-SPA1",
+    "WS08-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS08-S8",
+   "what": "Agent tab policy editor, why-no-answer copy",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "S",
+   "deps_raw": "WS08-S6, P-SPA1, WS08-S5 (c)",
+   "soft_raw": "WS10-S5b",
+   "blocks_raw": "-",
+   "deps": [
+    "WS08-S6",
+    "P-SPA1",
+    "WS08-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S2",
+   "what": "owner mid-run steer in room composer",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "S",
+   "deps_raw": "P-SPA2, P-SPA1",
+   "soft_raw": "WS09-S1",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA2",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S3",
+   "what": "room-safe projector, run pointer, work summary",
+   "lane": "L2",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS09-S4",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S4",
+   "what": "member live attach (Session Core, SSE, gateway)",
+   "lane": "L2",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "WS09-S3",
+   "soft_raw": "-",
+   "blocks_raw": "WS09-S5, WS09-S8, WS09-S9, WS20-S4",
+   "deps": [
+    "WS09-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S5",
+   "what": "run card, work disclosure, Work and Activity adapter",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS09-S4 (c)",
+   "soft_raw": "WS09-S3",
+   "blocks_raw": "WS09-S6",
+   "deps": [
+    "P-SPA1",
+    "WS09-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S6",
+   "what": "activity strip, sidebar working state",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "S",
+   "deps_raw": "WS09-S5, P-SPA1",
+   "soft_raw": "WS01-S7a",
+   "blocks_raw": "-",
+   "deps": [
+    "WS09-S5",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S7",
+   "what": "Control model.run.control and entitlement bit",
+   "lane": "L4",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "WS03-S1",
+   "blocks_raw": "WS09-S8, WS20-S9",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS09-S8",
+   "what": "manager Stop end to end",
+   "lane": "L2",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "WS09-S4, WS09-S7 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS20-S9",
+   "deps": [
+    "WS09-S4",
+    "WS09-S7"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S1",
+   "what": "honest approval card, typed context, derived continuation",
+   "lane": "L2",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS10-S3, WS10-S4, WS10-S6, WS10-S8, WS10-S9",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S2",
+   "what": "Control grants, approval policy, gate/use endpoints",
+   "lane": "L4",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "WS03-S1",
+   "blocks_raw": "WS10-S3, WS10-S4, WS10-S5a",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S3",
+   "what": "execution-core gate, once-token, grant pass",
+   "lane": "L3",
+   "ms": "M2.1",
+   "size": "L",
+   "deps_raw": "WS10-S1, WS10-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS10-S4, WS10-S6, WS10-S8, WS10-S9",
+   "deps": [
+    "WS10-S1",
+    "WS10-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S4",
+   "what": "Space decide route, scope picker, standing list",
+   "lane": "L7",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-GW1, WS10-S1 (c), WS10-S2 (c), WS10-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-GW1",
+    "WS10-S1",
+    "WS10-S2",
+    "WS10-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S5a",
+   "what": "tool policy store (Space ceiling, agent layer)",
+   "lane": "L4",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "WS10-S2, P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS10-S5b",
+   "deps": [
+    "WS10-S2",
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S5b",
+   "what": "editor routes, Convex projection, Agent-tab editor",
+   "lane": "L8",
+   "ms": "M2.1",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS10-S5a (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS10-S5a"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S6",
+   "what": "addressee routing, member decide in Session Core",
+   "lane": "L2",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS10-S1, WS10-S3 (c), WS01-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS10-S7, WS10-S8",
+   "deps": [
+    "WS10-S1",
+    "WS10-S3",
+    "WS01-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S7",
+   "what": "turn_origin rules",
+   "lane": "L2",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS10-S6, WS01-S3 (c), WS08-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS10-S6",
+    "WS01-S3",
+    "WS08-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S8",
+   "what": "quarantine approval kind, hold and release",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS10-S1, WS10-S3, WS10-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS10-S1",
+    "WS10-S3",
+    "WS10-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS10-S9",
+   "what": "resumable-kind registry and parity test",
+   "lane": "L3",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS10-S1, WS10-S3",
+   "soft_raw": "-",
+   "blocks_raw": "WS18-S9",
+   "deps": [
+    "WS10-S1",
+    "WS10-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S1",
+   "what": "Control bulk read decisions",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "S",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S2, WS11-S3",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S2",
+   "what": "Session Core SpaceAttention RPC",
+   "lane": "L2",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "WS15-S5, WS11-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S3, WS11-S7",
+   "deps": [
+    "WS15-S5",
+    "WS11-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S3",
+   "what": "Convex read-state extensions, BFF aggregate",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "P-CX1, WS11-S1 (c), WS11-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S4, WS11-S6, WS11-S10, WS16-S10",
+   "deps": [
+    "P-CX1",
+    "WS11-S1",
+    "WS11-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S4",
+   "what": "SPA store, sidebar counts, mark all read",
+   "lane": "L9",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-SPA1, WS11-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS16-S10",
+   "deps": [
+    "P-SPA1",
+    "WS11-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S5",
+   "what": "Session Core attention outbox, NATS stream",
+   "lane": "L2",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "WS02-S1",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S6",
+   "deps": [
+    "WS02-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S6",
+   "what": "Convex ingest, rules, items, follows",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "WS11-S3, P-CX1, WS11-S5 (c)",
+   "soft_raw": "WS08-S2",
+   "blocks_raw": "WS11-S7, WS11-S8, WS11-S9, WS11-S10, WS11-S11, WS19-S10",
+   "deps": [
+    "WS11-S3",
+    "P-CX1",
+    "WS11-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S7",
+   "what": "items API, /attention page, follow control",
+   "lane": "L9",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "P-SPA1, WS11-S2 (c), WS11-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S11",
+   "deps": [
+    "P-SPA1",
+    "WS11-S2",
+    "WS11-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S8",
+   "what": "invite signal from gateway add-member",
+   "lane": "L7",
+   "ms": "M2.2",
+   "size": "S",
+   "deps_raw": "P-GW1, WS11-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-GW1",
+    "WS11-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S9",
+   "what": "notification-core principal, allowlist, courier",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "WS11-S6, P-CX1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS11-S6",
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S10",
+   "what": "org status text and agent availability chips",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "WS11-S3, WS11-S6, P-CX1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS11-S3",
+    "WS11-S6",
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS11-S11",
+   "what": "reminders",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "WS11-S6, P-CX1, WS11-S7 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS11-S6",
+    "P-CX1",
+    "WS11-S7"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S1",
+   "what": "Control DM kinds, participant_hash, eligibility",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS12-S2, WS12-S3",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S2",
+   "what": "Application DM open, hide, legacy guards",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-CX1, WS12-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS12-S3",
+   "deps": [
+    "P-CX1",
+    "WS12-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S3",
+   "what": "gateway DM routes, SPA sidebar group, start dialog",
+   "lane": "L7",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "P-GW1, WS12-S1 (c), WS12-S2 (c), WS01-S5 (c), WS01-S6 (c), WS01-S7b (c)",
+   "soft_raw": "WS04-S3, WS04-S9",
+   "blocks_raw": "-",
+   "deps": [
+    "P-GW1",
+    "WS12-S1",
+    "WS12-S2",
+    "WS01-S5",
+    "WS01-S6",
+    "WS01-S7b"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S4",
+   "what": "Session Core revisions, fold, ReviseMessage",
+   "lane": "L1",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "WS01-S1",
+   "soft_raw": "-",
+   "blocks_raw": "WS12-S5, WS12-S6, WS12-S8, WS13-S11",
+   "deps": [
+    "WS01-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S5",
+   "what": "Control revise decision, message policies",
+   "lane": "L4",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-UC1, WS12-S4 (c)",
+   "soft_raw": "WS03-S1",
+   "blocks_raw": "WS12-S6, WS12-S7",
+   "deps": [
+    "P-UC1",
+    "WS12-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S6",
+   "what": "model-gateway PATCH/DELETE/target routes",
+   "lane": "L1",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "WS12-S4, WS12-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS12-S7",
+   "deps": [
+    "WS12-S4",
+    "WS12-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S7",
+   "what": "gateway lifecycle routes, SPA toolbar, edit, delete",
+   "lane": "L8",
+   "ms": "M2.2",
+   "size": "L",
+   "deps_raw": "WS01-S7a, P-SPA2, P-SPA1, WS12-S5 (c), WS12-S6 (c), WS01-S7b (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS12-S8",
+   "deps": [
+    "WS01-S7a",
+    "P-SPA2",
+    "P-SPA1",
+    "WS12-S5",
+    "WS12-S6",
+    "WS01-S7b"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS12-S8",
+   "what": "reactions (Convex, routes, chips)",
+   "lane": "L6",
+   "ms": "M2.2",
+   "size": "M",
+   "deps_raw": "P-CX1, WS12-S7 (c), WS12-S4 (c), WS01-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-CX1",
+    "WS12-S7",
+    "WS12-S4",
+    "WS01-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S1",
+   "what": "Session Core SpaceHistoryService, FTS index",
+   "lane": "L1",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "P-SC1",
+   "soft_raw": "WS04-S11",
+   "blocks_raw": "WS13-S2, WS13-S9, WS13-S10",
+   "deps": [
+    "P-SC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S2",
+   "what": "model-gateway search routes and client",
+   "lane": "L1",
+   "ms": "M2.3",
+   "size": "S/M",
+   "deps_raw": "WS13-S1",
+   "soft_raw": "-",
+   "blocks_raw": "WS13-S3, WS13-S9",
+   "deps": [
+    "WS13-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S3",
+   "what": "BFF search routes, entries, features",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-GW1, WS13-S2 (c)",
+   "soft_raw": "WS01-S5",
+   "blocks_raw": "WS13-S4b, WS13-S5, WS13-S9",
+   "deps": [
+    "P-GW1",
+    "WS13-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S4a",
+   "what": "SPA entry links, entity router, highlight",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS01-S7a, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS13-S4b, WS13-S5",
+   "deps": [
+    "WS01-S7a",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S4b",
+   "what": "/m/:messageId permalink route",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS13-S4a, P-SPA1, WS13-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS13-S4a",
+    "P-SPA1",
+    "WS13-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S5",
+   "what": "in-room search UI",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS13-S4a, P-SPA1, WS13-S3 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS13-S4a",
+    "P-SPA1",
+    "WS13-S3"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S6",
+   "what": "command layer: registry, palette, switcher",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS13-S7, WS13-S9",
+   "deps": [
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S7",
+   "what": "platform slash commands in composer",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS13-S6, P-SPA2, P-SPA1",
+   "soft_raw": "WS13-S5",
+   "blocks_raw": "-",
+   "deps": [
+    "WS13-S6",
+    "P-SPA2",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS13-S8",
+   "what": "room pins (Convex, routes)",
+   "lane": "L6",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-CX1",
+   "soft_raw": "WS04-S4",
+   "blocks_raw": "-",
+   "deps": [
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S1",
+   "what": "Control shared import decision",
+   "lane": "L4",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS14-S3, WS14-S6, WS14-S7",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S2",
+   "what": "Control grants: owner-asserted, Space subject",
+   "lane": "L4",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS14-S3, WS14-S4, WS14-S5",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S3",
+   "what": "documents-api space upload",
+   "lane": "L10",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS14-S1 (c), WS14-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS14-S1",
+    "WS14-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S4",
+   "what": "sharing un-fence (documents-api, gateway)",
+   "lane": "L10",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS14-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS14-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S5",
+   "what": "retrieval-engine listing provenance, grants union",
+   "lane": "L10",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS14-S2 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS14-S7",
+   "deps": [
+    "WS14-S2"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S6",
+   "what": "imports-core space-upload",
+   "lane": "L10",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS14-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS14-S7",
+   "deps": [
+    "WS14-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S7",
+   "what": "gateway space_files.rs R1-R6",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-GW1, WS14-S1 (c), WS14-S5 (c), WS14-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS14-S9",
+   "deps": [
+    "P-GW1",
+    "WS14-S1",
+    "WS14-S5",
+    "WS14-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S8",
+   "what": "SPA per-turn attachments, chips, typed ZDR copy",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-SPA2, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA2",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS14-S9",
+   "what": "SPA Files tab, preview, delete",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "P-SPA1, WS14-S7 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA1",
+    "WS14-S7"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S1",
+   "what": "client timeline: truncation fix, anchoring, jump pill",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S8",
+   "deps": [
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S2",
+   "what": "per-room per-thread drafts",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "P-SPA2, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA2",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S3",
+   "what": "markdown toolbar, preview, counter",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-SPA2, P-SPA1",
+   "soft_raw": "WS01-S6",
+   "blocks_raw": "-",
+   "deps": [
+    "P-SPA2",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S4",
+   "what": "human posts rendered as markdown",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS07-S5, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS07-S5",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S5",
+   "what": "Session Core thread activity summary",
+   "lane": "L1",
+   "ms": "M2.2 (pulled by R7)",
+   "size": "M",
+   "deps_raw": "P-SC1",
+   "soft_raw": "-",
+   "blocks_raw": "WS11-S2, WS15-S6",
+   "deps": [
+    "P-SC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S6",
+   "what": "ListSpaceTimeline, tail transcript",
+   "lane": "L1",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS15-S5, WS01-S1 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S7, WS15-S9",
+   "deps": [
+    "WS15-S5",
+    "WS01-S1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S7",
+   "what": "BFF timeline routes, legacy fallback",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-GW1, WS15-S6 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S8",
+   "deps": [
+    "P-GW1",
+    "WS15-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S8",
+   "what": "SPA timeline store, paged UI, lazy transcripts",
+   "lane": "L8",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "WS15-S1, P-SPA1, WS15-S7 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S11, WS15-S13",
+   "deps": [
+    "WS15-S1",
+    "P-SPA1",
+    "WS15-S7"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S9",
+   "what": "typed entry plumbing and registry",
+   "lane": "L1",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS01-S1, WS15-S6",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S10, WS15-S11, WS18-S7",
+   "deps": [
+    "WS01-S1",
+    "WS15-S6"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S11",
+   "what": "room system rows from Control ledger",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-GW1, WS15-S8 (c), WS15-S9 (c), WS04-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS15-S12",
+   "deps": [
+    "P-GW1",
+    "WS15-S8",
+    "WS15-S9",
+    "WS04-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS15-S12",
+   "what": "Application room notices",
+   "lane": "L6",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-CX1, WS15-S11 (c)",
+   "soft_raw": "WS04-S2",
+   "blocks_raw": "-",
+   "deps": [
+    "P-CX1",
+    "WS15-S11"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S1",
+   "what": "locale-correct Space copy and dates",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "M0-BASE",
+   "soft_raw": "-",
+   "blocks_raw": "WS16-S3, WS16-S4",
+   "deps": [
+    "M0-BASE"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S2",
+   "what": "Control preference contract v2",
+   "lane": "L4",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "P-UC1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-UC1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S3",
+   "what": "preferences bootstrap, locale, density",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS16-S1, P-SPA1",
+   "soft_raw": "WS16-S2",
+   "blocks_raw": "WS16-S5",
+   "deps": [
+    "WS16-S1",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S4",
+   "what": "shared announcer, Space narration",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS16-S1, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS16-S1",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S5",
+   "what": "forced-colors, contrast, density CSS",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS16-S3, P-SPA1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS16-S3",
+    "P-SPA1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S6",
+   "what": "viewer locale hint on Space turns",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "P-GW1",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "P-GW1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S7",
+   "what": "Convex spaceSidebarPreferences",
+   "lane": "L6",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-CX1",
+   "soft_raw": "-",
+   "blocks_raw": "WS16-S8, WS16-S11",
+   "deps": [
+    "P-CX1"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S8",
+   "what": "BFF sidebar routes, ZDR split",
+   "lane": "L7",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "P-GW1, WS16-S7 (c), WS01-S5 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS16-S9",
+   "deps": [
+    "P-GW1",
+    "WS16-S7",
+    "WS01-S5"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S9",
+   "what": "organiser core, grouped panel, stars, drag",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "L",
+   "deps_raw": "P-SPA1, WS16-S8 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "WS16-S10",
+   "deps": [
+    "P-SPA1",
+    "WS16-S8"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S10",
+   "what": "computed sections, mute entry, more-unread pill",
+   "lane": "L9",
+   "ms": "M2.3",
+   "size": "M",
+   "deps_raw": "WS16-S9, P-SPA1, WS11-S3 (c), WS11-S4 (c)",
+   "soft_raw": "-",
+   "blocks_raw": "-",
+   "deps": [
+    "WS16-S9",
+    "P-SPA1",
+    "WS11-S3",
+    "WS11-S4"
+   ],
+   "cond": false
+  },
+  {
+   "id": "WS16-S11",
+   "what": "orphan sweep cron",
+   "lane": "L6",
+   "ms": "M2.3",
+   "size": "S",
+   "deps_raw": "WS16-S7, P-CX1",
+   "soft_raw": "WS04-S1",
+   "blocks_raw": "-",
+   "deps": [
+    "WS16-S7",
+    "P-CX1"
+   ],
+   "cond": false
+  }
+ ],
+ "level": {
+  "WS04-S8": 0,
+  "WS04-S9": 0,
+  "WS04-S10": 0,
+  "WS04-S11": 1,
+  "WS04-S12": 0,
+  "WS05-S4": 0,
+  "WS05-S5": 0,
+  "WS05-S6": 0,
+  "WS05-S7": 1,
+  "WS05-S8": 2,
+  "WS05-S9": 3,
+  "WS06-S6": 0,
+  "WS06-S8": 0,
+  "WS06-S9": 0,
+  "WS06-S10": 1,
+  "WS08-S1": 0,
+  "WS08-S2": 1,
+  "WS08-S3": 2,
+  "WS08-S4": 3,
+  "WS08-S5": 0,
+  "WS08-S6": 4,
+  "WS08-S8": 5,
+  "WS09-S2": 0,
+  "WS09-S3": 0,
+  "WS09-S4": 1,
+  "WS09-S5": 2,
+  "WS09-S6": 3,
+  "WS09-S7": 0,
+  "WS09-S8": 2,
+  "WS10-S1": 0,
+  "WS10-S2": 0,
+  "WS10-S3": 1,
+  "WS10-S4": 2,
+  "WS10-S5a": 1,
+  "WS10-S5b": 2,
+  "WS10-S6": 2,
+  "WS10-S7": 3,
+  "WS10-S8": 3,
+  "WS10-S9": 2,
+  "WS11-S1": 0,
+  "WS15-S5": 0,
+  "WS11-S2": 1,
+  "WS11-S3": 2,
+  "WS11-S4": 3,
+  "WS11-S5": 0,
+  "WS11-S6": 3,
+  "WS11-S7": 4,
+  "WS11-S8": 4,
+  "WS11-S9": 4,
+  "WS11-S10": 4,
+  "WS11-S11": 5,
+  "WS12-S1": 0,
+  "WS12-S2": 1,
+  "WS12-S3": 2,
+  "WS12-S4": 0,
+  "WS12-S5": 1,
+  "WS12-S6": 2,
+  "WS12-S7": 3,
+  "WS12-S8": 4,
+  "WS13-S1": 0,
+  "WS13-S2": 1,
+  "WS13-S3": 2,
+  "WS13-S4a": 0,
+  "WS13-S4b": 3,
+  "WS13-S5": 3,
+  "WS13-S6": 0,
+  "WS13-S7": 1,
+  "WS13-S8": 0,
+  "WS14-S1": 0,
+  "WS14-S2": 0,
+  "WS14-S3": 1,
+  "WS14-S4": 1,
+  "WS14-S5": 1,
+  "WS14-S6": 1,
+  "WS14-S7": 2,
+  "WS14-S8": 0,
+  "WS14-S9": 3,
+  "WS15-S1": 0,
+  "WS15-S2": 0,
+  "WS15-S3": 0,
+  "WS15-S4": 0,
+  "WS15-S6": 1,
+  "WS15-S7": 2,
+  "WS15-S8": 3,
+  "WS15-S9": 2,
+  "WS15-S11": 4,
+  "WS15-S12": 5,
+  "WS16-S1": 0,
+  "WS16-S2": 0,
+  "WS16-S3": 1,
+  "WS16-S4": 1,
+  "WS16-S5": 2,
+  "WS16-S6": 0,
+  "WS16-S7": 0,
+  "WS16-S8": 1,
+  "WS16-S9": 2,
+  "WS16-S10": 4,
+  "WS16-S11": 1
+ }
+}

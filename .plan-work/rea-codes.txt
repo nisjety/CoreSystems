@@ -1,0 +1,197 @@
+approval_already_decided  hits=1
+    domains\spaces\approvals.rs:301  This approval has already been decided.
+approval_authority_unavailable  hits=2
+    domains\spaces\approvals.rs:86  Approval authority is unavailable. Nothing was changed.
+    domains\spaces\approvals.rs:403  
+approval_expired  hits=3
+    domains\orchestration.rs:781  The approval has expired.
+    domains\orchestration.rs:1696  approval_not_resumable
+    domains\spaces\approvals.rs:307  This approval has expired.
+approval_id  hits=20
+    domains\orchestration.rs:738  claim_token
+    domains\orchestration.rs:1297  claim_token
+    domains\orchestration.rs:1326  ,
+            
+approval_not_addressed_to_you  hits=2
+    domains\spaces\approvals.rs:290  This approval is waiting for the member who started the run.
+    domains\spaces\approvals.rs:455  A viewer cannot decide an approval.
+approval_not_found  hits=17
+    upstream.rs:3345  The approval was not found.
+    upstream.rs:3448  : UPSTREAM_TEXT}}),
+                ),
+            ),
+            (
+                
+    upstream.rs:3524  )];
+        for list in [RELAYED, WITH_401] {
+            let upstream_body =
+                json!({
+approval_scope_not_permitted  hits=1
+    domains\spaces\approvals.rs:107  This approval scope is not available here.
+decision  hits=74
+    domains\browser_evidence.rs:349  decision
+    domains\browser_evidence.rs:349  : receipt.get(
+    domains\browser_evidence.rs:519  ) => allow += 1,
+            Some(
+feature_unavailable  hits=4
+    domains\spaces\run_live.rs:73  The live run view is not enabled.
+    domains\spaces\run_live.rs:87  Stopping runs is not enabled.
+    domains\spaces\run_live.rs:156  The live run view is not enabled.
+files_binding_unavailable  hits=1
+    domains\spaces\files.rs:803  This room is not bound to a Data Plane knowledge target.
+files_read_not_authorized  hits=1
+    domains\spaces\files.rs:767  Reading this room's files is not authorized.
+files_upstream_unavailable  hits=1
+    domains\spaces\files.rs:809  Data Plane could not return this room's files.
+grant_id  hits=25
+    domains\browser.rs:630  /v1/agent/runs
+    domains\browser.rs:1660  profile_id
+    domains\browser.rs:2000  Model Gateway did not return a browser grant id.
+history_mode  hits=7
+    domains\actions\dispatchers_spaces\ws04.rs:135  idempotency_key
+    domains\spaces\room_admin.rs:1003  idempotency_key
+    domains\spaces\room_admin.rs:1026  history_mode
+idempotency_key_invalid  hits=1
+    domains\spaces\files.rs:425  An Idempotency-Key header of 8 to 128 characters is required.
+identity_admin_required  hits=1
+    domains\org_identity.rs:111  Identity administration requires an organization owner or admin role.
+invalid_before_ms  hits=1
+    domains\spaces\attention.rs:1631  before_ms must be a time in epoch milliseconds.
+invalid_document  hits=1
+    domains\spaces\files.rs:873  A document id is required.
+invalid_domain  hits=3
+    domains\org_identity.rs:238  The request body must be a JSON object with a domain.
+    domains\org_identity.rs:273  The domain is not valid.
+    domains\org_identity.rs:304  The domain is not valid.
+invalid_kind  hits=4
+    domains\spaces\attention.rs:193  kind is not a known attention kind.
+    domains\spaces\attention.rs:1362  kinds can only be mention or reply.
+    domains\spaces\attention.rs:1430  invalid_kind
+invalid_limit  hits=5
+    domains\spaces\attention.rs:205  limit must be between 1 and 100.
+    domains\spaces\files.rs:749  The limit must be between 1 and 200.
+    domains\spaces\room_artifacts.rs:160  limit must be between 1 and 200.
+invalid_max_chars  hits=1
+    domains\spaces\files.rs:938  max_chars must be a positive number.
+invalid_reason  hits=1
+    domains\spaces\mod.rs:2507  reason must be enter or while_open.
+invalid_refs  hits=3
+    domains\spaces\attention.rs:1007  refs must be Space references separated by commas.
+    domains\spaces\attention.rs:1018  At most 60 Spaces can be asked about at once.
+    domains\spaces\attention.rs:1375  space_refs must hold at most 60 Space references.
+invalid_reminder_time  hits=2
+    domains\spaces\reminders.rs:107  remind_at must be a time between five seconds and 366 days from now.
+    domains\spaces\reminders.rs:267  too_many_reminders
+invalid_run  hits=2
+    domains\spaces\run_live.rs:179  A valid run id is required.
+    domains\spaces\run_live.rs:348  A valid run id is required.
+invalid_sidebar_doc  hits=1
+    domains\spaces\sidebar.rs:95  The sidebar layout is not valid.
+invalid_state  hits=4
+    domains\spaces\attention.rs:183  state must be open, snoozed or done.
+    domains\spaces\attention.rs:720  state must be open, snoozed or done.
+    domains\spaces\attention.rs:766  state must be open, snoozed or done.
+invalid_status  hits=2
+    domains\spaces\status.rs:102  state must be available, away, dnd or offline; text at most 80 characters; expiry within 7 days.
+    domains\spaces\status.rs:229  
+invalid_thread  hits=7
+    domains\spaces\attention.rs:795  A thread id is required.
+    domains\spaces\attention.rs:917  A thread id is required.
+    domains\spaces\pins.rs:112  A thread id is required.
+invalid_upload  hits=2
+    domains\spaces\files.rs:444  The upload is empty.
+    domains\spaces\files.rs:549  The upload could not be accepted.
+invalid_wake  hits=2
+    domains\spaces\mod.rs:495  The wake request is not valid.
+    domains\spaces\mod.rs:4981  A wake needs message_id and client_wake_id.
+join_role  hits=9
+    domains\actions\dispatchers_spaces\ws04.rs:132  historyMode
+    domains\spaces\directory.rs:821  join_role
+    domains\spaces\directory.rs:821  
+participants  hits=6
+    domains\actions\dispatchers_spaces\ws12.rs:25  spaces.open_dm requires a 'participants' array
+    domains\actions\dispatchers_spaces\ws12.rs:34  client_request_id
+    domains\spaces\dm.rs:394  
+pins_unavailable  hits=2
+    domains\spaces\mod.rs:1578  Application Plane could not return the room's pins.
+    domains\spaces\timeline.rs:481  Application Plane could not return the room's pins.
+reason  hits=165
+    domains\ag_ui.rs:1336  provider_exhausted
+    domains\ag_ui.rs:1371  rate_limited
+    domains\browser.rs:5097  global_run_cap
+reminder_not_found  hits=2
+    domains\spaces\reminders.rs:115  That reminder was not found.
+    domains\spaces\reminders.rs:388  
+reminders_unavailable  hits=1
+    domains\spaces\reminders.rs:91  Reminders are unavailable right now. Nothing was changed.
+room_notices_unavailable  hits=1
+    domains\spaces\timeline.rs:449  Application Plane could not return the room's agent and room changes.
+room_pins_limit  hits=2
+    domains\spaces\pins.rs:252  room_pins_limit
+    domains\spaces\pins.rs:254  This room has reached its pin limit. Unpin a post first.
+room_pins_unavailable  hits=1
+    domains\spaces\pins.rs:72  The pin could not be changed. Nothing was changed.
+run_control_unavailable  hits=4
+    domains\chat\json_handlers.rs:783  too many messages already waiting for this run
+    domains\spaces\run_live.rs:89  Run control is temporarily unavailable.
+    domains\spaces\run_live.rs:479  Run control is temporarily unavailable.
+scope  hits=63
+    cache.rs:201  ).cloned()?;
+        let cached_at = entry.get(
+    cache.rs:222  cached_at
+    cache.rs:234  
+sidebar_too_large  hits=2
+    domains\spaces\sidebar.rs:264  The sidebar layout is too large to save.
+    domains\spaces\sidebar.rs:308  The sidebar layout is too large to save.
+space_reminders_disabled  hits=1
+    domains\spaces\reminders.rs:75  Space reminders are not enabled.
+space_run_control_not_authorized  hits=3
+    domains\spaces\run_live.rs:82  Stopping this run is not authorized.
+    domains\spaces\run_live.rs:468  space_run_control_not_authorized
+    domains\spaces\run_live.rs:472  run_control_unavailable
+space_sidebar_conflict  hits=1
+    domains\spaces\sidebar.rs:346  The sidebar layout changed somewhere else. Reload it and apply your change again.
+space_sidebar_disabled  hits=1
+    domains\spaces\sidebar.rs:78  The Spaces sidebar layout is not enabled.
+space_sidebar_unavailable  hits=1
+    domains\spaces\sidebar.rs:86  The sidebar layout is unavailable. Nothing was changed.
+space_status_disabled  hits=1
+    domains\spaces\status.rs:70  Space status is not enabled.
+sso_policy_unavailable  hits=1
+    domains\auth\public.rs:239  Sign-in policy could not be verified. Try again shortly.
+sso_required  hits=1
+    domains\auth\public.rs:229  Your organization requires single sign-on.
+stable_code  hits=1
+    domains\shares.rs:77  
+status_unavailable  hits=1
+    domains\spaces\status.rs:86  Status is unavailable right now. Nothing was changed.
+system_entries_unavailable  hits=1
+    domains\spaces\timeline.rs:442  Control could not return the room's membership changes.
+too_many_reminders  hits=2
+    domains\spaces\reminders.rs:269  too_many_reminders
+    domains\spaces\reminders.rs:273  You have the most pending reminders allowed. Cancel one to add another.
+turn_origin  hits=3
+    domains\spaces\mod.rs:81  participants
+    domains\spaces\mod.rs:201  ,
+                    
+    domains\spaces\mod.rs:273  );
+            wake_context[
+upload_length_required  hits=1
+    domains\spaces\files.rs:437  The upload must declare its length.
+visibility  hits=21
+    domains\actions\dispatchers.rs:1531  );
+    if !matches!(visibility, 
+    domains\actions\dispatchers.rs:1543  .to_string(), json!({ 
+    domains\actions\dispatchers.rs:2136  ) {
+            return ticket_bad_request(
+wake  hits=3
+    domains\spaces\mentions.rs:328   } else { 
+    domains\spaces\mod.rs:81  wake_context
+    domains\spaces\mod.rs:4913  
+wake_context  hits=2
+    domains\spaces\mod.rs:81  turn_origin
+    domains\spaces\mod.rs:275  
+zdr_feature_not_supported  hits=4
+    domains\orchestration.rs:1798  model_error
+    domains\spaces\run_live.rs:68  Live agent runs are not supported with zero data retention.
+    domains\spaces\run_live.rs:121  This is not supported with zero data retention yet: agent runs. The request was refused before any model call.
