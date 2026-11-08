@@ -2,9 +2,9 @@
  * Settled-turn folding (EP-14 S1): the work a settled agent turn did folds into
  * one row, and its answer stays in view.
  *
- * Pure. The page passes the thread and the turns a run is still on, and gets back
- * the fold of each turn that has one. Nothing here is stored or sent. The reader's
- * own choice lives with the view (see `settled-fold-choices.ts`). Behind
+ * Pure. The page passes the thread and the turn a run is still on, and gets back
+ * the fold of each turn that has one. Nothing here is stored or sent, and the
+ * folded state is per view (see `settled-fold-state.ts`). Behind
  * `VITE_CHAT_SETTLED_FOLD`, which the page reads: off, no plan is built and the
  * transcript renders as it did.
  */
@@ -25,28 +25,8 @@ export const settledFoldEnabled = isSettledFoldEnabled(import.meta.env.VITE_CHAT
 /** The fields of a turn the fold reads. */
 export type FoldTurn = Pick<
   ChatTurn,
-  | 'id'
-  | 'role'
-  | 'createdAt'
-  | 'settledAt'
-  | 'streaming'
-  | 'status'
-  | 'reasoning'
-  | 'toolCalls'
-  | 'files'
-  | 'pendingApprovals'
-  | 'planMode'
-  | 'grantedRung'
-  | 'planRejected'
+  'id' | 'role' | 'streaming' | 'status' | 'reasoning' | 'toolCalls' | 'files' | 'timing'
 >
-
-/** The turns a run is still on. Neither one is ever settled. */
-export type FoldRun = {
-  /** The turn the run is on: streaming, waiting, or held for the person by an open question. */
-  activeTurnId?: string | null
-  /** The turn whose run parked on a recoverable failure. It is not finished, and it may resume. */
-  parkedTurnId?: string | null
-}
 
 /** What the transcript needs to draw one settled turn's fold row. */
 export type SettledFold = {
@@ -56,10 +36,7 @@ export type SettledFold = {
   steps: number
   /** Files the turn produced. Generated images are left out: they show as previews. */
   files: number
-  /**
-   * From the triggering user message to the turn's terminal frame, in ms. Absent when either end is unknown on
-   * this client (a restored turn has no terminal frame), and the row then shows counts only.
-   */
+  /** The gateway's own span for the turn, in ms. Absent when the turn reported none. */
   durationMs?: number
 }
 
@@ -94,59 +71,64 @@ const FOLDED_KINDS: Record<ConversationNodeKind, boolean> = {
 }
 
 /**
- * A settled turn: an assistant turn the run is not still on, that has its outcome
- * recorded (done, error or stopped), and that holds no decision for the person. A
- * turn waiting on an approval, or on a plan that is neither granted nor rejected,
- * is not settled until it is decided: its decision stays in view, and it has no row.
+ * A settled turn: an assistant turn whose outcome is recorded (done, error or
+ * stopped) and that the run is not still on. A streaming or waiting turn is not.
  */
-export function isSettled(turn: FoldTurn, run: FoldRun = {}): boolean {
-  if (turn.role !== 'assistant' || turn.streaming || turn.status === 'waiting') return false
-  if (turn.id === run.activeTurnId || turn.id === run.parkedTurnId) return false
-  if ((turn.pendingApprovals?.length ?? 0) > 0) return false
-  return !(turn.planMode === true && turn.grantedRung === undefined && turn.planRejected !== true)
+export function isSettled(turn: FoldTurn, activeTurnId?: string | null): boolean {
+  return turn.role === 'assistant' && !turn.streaming && turn.status !== 'waiting' && turn.id !== activeTurnId
 }
 
 /**
- * The time from the triggering user message to the turn's terminal frame. The
- * triggering message is the nearest user turn before the answer. Both ends are on
- * this client's clock: the message's send time and the turn's `settledAt`. A
- * missing end, or a span that runs backwards, gives no time. It is never estimated.
+ * The span the gateway measured for the turn, from admission to its end. It runs
+ * on the gateway's clock, so no browser time enters it, and a restored turn keeps
+ * it with the other timing totals. A turn that reported none gets no time at all,
+ * not an estimate.
  */
-function turnDurationMs(turn: FoldTurn, triggering: FoldTurn | undefined): number | undefined {
-  if (!turn.settledAt || !triggering) return undefined
-  const span = Date.parse(turn.settledAt) - Date.parse(triggering.createdAt)
-  return Number.isFinite(span) && span >= 0 ? span : undefined
+function turnDurationMs(turn: FoldTurn): number | undefined {
+  const ms = turn.timing?.serverMs
+  return ms !== undefined && Number.isFinite(ms) && ms >= 0 ? ms : undefined
+}
+
+/**
+ * The turn a run is still on, which the fold never settles: the newest turn while a
+ * reply streams or a run is live, and none once the page is idle. When the newest
+ * turn is the person's own message, that message is the one named, so the answer
+ * before it still settles.
+ */
+export function activeFoldTurnId(
+  turns: readonly FoldTurn[],
+  options: { streaming: boolean; liveRunId: string | null | undefined },
+): string | undefined {
+  if (!options.streaming && !options.liveRunId) return undefined
+  return turns.at(-1)?.id
 }
 
 /**
  * The fold of each settled turn that ran something to fold, keyed by turn id. A
- * turn that ran no reasoning and no tool step has no row. A turn that errored has
- * none either: a failed run's trail and its error stay whole, as the never-fold set
- * requires (EP-14 S1).
+ * turn that ran no reasoning and no tool step has no row.
  *
- * The default keeps the reader's place: a turn older than the last two turns is
- * folded, except the last settled turn, which stays open.
+ * The default keeps the reader's place: a turn older than the last two is folded,
+ * except the last settled turn, which stays open.
  */
-export function foldPlan(turns: readonly FoldTurn[], run: FoldRun = {}): Map<string, SettledFold> {
+export function foldPlan(
+  turns: readonly FoldTurn[],
+  options: { activeTurnId?: string | null } = {},
+): Map<string, SettledFold> {
+  const { activeTurnId } = options
   let lastSettled = -1
   turns.forEach((turn, index) => {
-    if (isSettled(turn, run)) lastSettled = index
+    if (isSettled(turn, activeTurnId)) lastSettled = index
   })
   const plan = new Map<string, SettledFold>()
-  let triggering: FoldTurn | undefined
   turns.forEach((turn, index) => {
-    if (turn.role === 'user') {
-      triggering = turn
-      return
-    }
-    if (!isSettled(turn, run) || turn.status === 'error') return
+    if (!isSettled(turn, activeTurnId)) return
     const steps = turn.toolCalls?.length ?? 0
     if (steps === 0 && !turn.reasoning) return
     plan.set(turn.id, {
       defaultFolded: index < turns.length - 2 && index !== lastSettled,
       steps,
       files: (turn.files ?? []).filter((file) => !isGeneratedImageFile(file)).length,
-      durationMs: turnDurationMs(turn, triggering),
+      durationMs: turnDurationMs(turn),
     })
   })
   return plan
@@ -170,7 +152,7 @@ export function splitForFold<T extends { node: { kind: ConversationNodeKind } }>
 
 /**
  * The row's label, for example "Worked for 4 min 12 s · 9 steps · 2 files". The
- * time is left out when either end was unknown, and so is a zero count.
+ * time is left out when the turn reported none, and so is a zero count.
  */
 export function settledFoldSummary(fold: SettledFold, i18n: Translator): string {
   const { durationMs, steps, files } = fold

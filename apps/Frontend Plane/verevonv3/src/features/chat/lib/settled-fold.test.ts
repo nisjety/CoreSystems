@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  activeFoldTurnId,
   foldPlan,
   isSettled,
   isSettledFoldEnabled,
@@ -261,6 +262,40 @@ describe('foldPlan', () => {
   })
 })
 
+describe('activeFoldTurnId', () => {
+  it('names the newest turn while a reply streams', () => {
+    const turns = [assistant('a1', { toolCalls: calls(1) }), user('u2'), assistant('a2', { streaming: true })]
+    expect(activeFoldTurnId(turns, { streaming: true, liveRunId: null })).toBe('a2')
+  })
+
+  it('names the newest turn while a run is live, even when that turn is the person\'s own message', () => {
+    const turns = [assistant('a1', { toolCalls: calls(1) }), user('u2')]
+    const activeTurnId = activeFoldTurnId(turns, { streaming: false, liveRunId: 'run_2' })
+    expect(activeTurnId).toBe('u2')
+    // The answer before the message is settled, so it keeps its row.
+    expect(foldPlan(turns, { activeTurnId }).has('a1')).toBe(true)
+  })
+
+  it('names no turn once the page is idle, or when there is no turn', () => {
+    const turns = [assistant('a1', { toolCalls: calls(1) }), user('u2')]
+    expect(activeFoldTurnId(turns, { streaming: false, liveRunId: null })).toBeUndefined()
+    expect(activeFoldTurnId(turns, { streaming: false, liveRunId: undefined })).toBeUndefined()
+    expect(activeFoldTurnId([], { streaming: true, liveRunId: null })).toBeUndefined()
+  })
+
+  it('never folds a waiting turn, whichever turn it is named as', () => {
+    const turns = [assistant('a1', { toolCalls: calls(1) }), user('u2'), assistant('a2', { toolCalls: calls(1), status: 'waiting' })]
+    for (const options of [
+      { streaming: false, liveRunId: null },
+      { streaming: true, liveRunId: null },
+      { streaming: false, liveRunId: 'run_2' },
+    ]) {
+      const plan = foldPlan(turns, { activeTurnId: activeFoldTurnId(turns, options) })
+      expect(plan.has('a2')).toBe(false)
+    }
+  })
+})
+
 describe('splitForFold', () => {
   it('folds only the process trail, and every other kind stays in view', () => {
     const folded = splitForFold(ALL_KINDS.map((kind) => ({ node: { kind } }))).folded.map((entry) => entry.node.kind)
@@ -275,6 +310,7 @@ describe('splitForFold', () => {
       'approvals',
       'plan-approval',
       'source-scope',
+      'search-provenance',
       'lifecycle-notices',
       'truncated',
       'files',
