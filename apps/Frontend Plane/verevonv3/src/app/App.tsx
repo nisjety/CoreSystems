@@ -61,6 +61,12 @@ const ScenePage = import.meta.env.DEV && shouldEnableSceneMode(import.meta.env.V
   ? lazy(() => import('@/demo/ScenePage'))
   : undefined
 
+// Product-scene route (plans/product-scenes/CONTRACT.md). Exists only when
+// VITE_SCENE_MODE=1; a normal build has no /scene route and no src/demo chunk.
+const sceneRoutes = import.meta.env.VITE_SCENE_MODE === '1'
+  ? [{ path: '/scene/:id', component: lazy(() => import('@/demo/ScenePage')) }]
+  : []
+
 function SessionLoading() {
   return (
     <div class="session-loading" role="status" aria-live="polite" aria-busy="true">
@@ -285,6 +291,7 @@ export const Router = createRouter({
         },
       ],
     },
+    ...sceneRoutes,
     { path: '*404', component: NotFoundPage },
   ],
   explicitLinks: true,
