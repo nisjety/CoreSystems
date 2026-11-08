@@ -82,6 +82,17 @@
     "only_main_content": {
       "type": "boolean"
     },
+    "page_emulation": {
+      "description": "E4.4-a: the locale, timezone and location the page emulated. Absent when the request\nasked for none.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PageEmulation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "redact_pii": {
       "description": "E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)\nwhen it did not. Always reported, so a caller can see what was applied.",
       "$ref": "#/$defs/PiiRedaction",
@@ -191,6 +202,63 @@
         "clean_full",
         "raw"
       ]
+    },
+    "Location": {
+      "description": "A geolocation override, in decimal degrees.",
+      "type": "object",
+      "properties": {
+        "accuracy": {
+          "description": "Metres. Absent in a request means [`DEFAULT_ACCURACY_M`]; a checked location always has one.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "latitude": {
+          "type": "number",
+          "format": "double"
+        },
+        "longitude": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
+      ]
+    },
+    "PageEmulation": {
+      "description": "What the page emulates. A field the request did not set is absent.",
+      "type": "object",
+      "properties": {
+        "locale": {
+          "description": "ICU style, `nb_NO`. The request's `nb-NO` is stored with `_`, which is what Chromium takes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "The position `navigator.geolocation` reports to the origin the scrape navigates to.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timezone": {
+          "description": "An IANA name, `Europe/Oslo`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "PiiRedaction": {
       "description": "E3.6-5: whether the text a scrape returns goes through the PII scanner\n(`quarry_transform::pii`). `Off` is the default. `On` is served under zero data\nretention only, and never with a capture or an action (see `ScrapeOptions::resolve`).",
