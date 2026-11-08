@@ -544,6 +544,10 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             post(restore_profile_probe),
         )
         .route(
+            "/api/v1/browser/profiles/{profile_id}/clear-data",
+            post(clear_browser_profile_data),
+        )
+        .route(
             "/api/v1/browser/profiles/{profile_id}",
             patch(rename_browser_profile).delete(delete_profile),
         );
@@ -3202,6 +3206,74 @@ pub(crate) async fn delete_profile(
         return forward_quarry_failure(status, body);
     }
     (StatusCode::OK, Json(ok(json!({ "deleted": true })))).into_response()
+}
+
+/// F-t2-068 - `POST /api/v1/browser/profiles/:profile_id/clear-data`. Removes a stored profile's
+/// cookies, web storage and IndexedDB; the answer carries counts only. The edge answers 501 unless
+/// its flag is on, and 409 while a browser session holds the profile. `dryRun` defaults to true: a
+/// call that does not send `"dryRun": false` only counts what it would remove.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClearProfileDataBody {
+    #[serde(default, rename = "dryRun")]
+    pub(crate) dry_run: Option<bool>,
+}
+
+pub(crate) async fn clear_browser_profile_data(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(body): Json<ClearProfileDataBody>,
+) -> Response {
+    if !is_valid_profile_id(&profile_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_profile",
+                "The requested browser profile id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, resp_body) = quarry_call(
+        &state,
+        Method::POST,
+        &format!(
+            "/v1/profiles/{}/clear-data",
+            urlencoding::encode(&profile_id)
+        ),
+        Some(json!({ "dry_run": body.dry_run.unwrap_or(true) })),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return clear_profile_data_failure(status, resp_body);
+    }
+    (StatusCode::OK, Json(ok(unwrap_data(&resp_body)))).into_response()
+}
+
+/// The answer to a clear the edge refused. A profile a browser session holds gets its own code, so
+/// the panel can say what to do; every other refusal passes through as before.
+fn clear_profile_data_failure(status: StatusCode, body: Value) -> Response {
+    if status == StatusCode::CONFLICT
+        && body
+            .pointer("/error/details/reason")
+            .and_then(Value::as_str)
+            == Some("profile_in_use")
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_profile_in_use",
+                "A browser session is open on this profile. Close it before clearing the profile.",
+            )),
+        )
+            .into_response();
+    }
+    forward_quarry_failure(status, body)
 }
 
 #[cfg(test)]
@@ -10267,5 +10339,55 @@ mod human_browse_session_tests {
         assert!(!caps.contains(&"human_browsing"));
         assert!(!caps.contains(&"tab_control"));
         assert!(!caps.contains(&"attach"));
+    }
+
+    #[tokio::test]
+    async fn clear_data_maps_a_profile_a_session_holds_to_its_own_code() {
+        let refusal = json!({
+            "error": {
+                "code": "CONFLICT",
+                "message": "a browser session is open on this profile; close it before clearing the profile",
+                "details": { "reason": "profile_in_use" }
+            }
+        });
+        let response = clear_profile_data_failure(StatusCode::CONFLICT, refusal);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_profile_in_use");
+    }
+
+    #[tokio::test]
+    async fn clear_data_passes_the_flag_refusal_and_a_busy_profile_through() {
+        let disabled = json!({
+            "error": {
+                "code": "UNSUPPORTED",
+                "message": "clearing a profile's browsing data is not enabled on this deployment",
+                "details": { "reason": "profile_clear_data_disabled", "env": "QUARRY_EDGE__PROFILE_CLEAR_DATA" }
+            }
+        });
+        let response = clear_profile_data_failure(StatusCode::NOT_IMPLEMENTED, disabled);
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["error"]["details"]["reason"],
+            "profile_clear_data_disabled"
+        );
+
+        let busy = json!({
+            "error": { "code": "CONFLICT", "details": { "reason": "profile_busy", "retry_after_seconds": 2 } }
+        });
+        let response = clear_profile_data_failure(StatusCode::CONFLICT, busy);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["details"]["reason"], "profile_busy");
     }
 }
