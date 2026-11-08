@@ -190,6 +190,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_devtools_query: { no: 'Filteret for konsoll og nettverk er ugyldig.', en: 'The console and network filter is not valid.' },
   browser_session_failed: { no: 'Nettleserøkten feilet. Prøv igjen.', en: 'The browser session failed. Try again.' },
   browser_session_invalid: { no: 'Denne nettleserøkten er ugyldig.', en: 'This browser session is invalid.' },
+  browser_profile_in_use: { no: 'Det er en nettleserøkt åpen på denne profilen. Lukk den først.', en: 'A browser session is open on this profile. Close it first.' },
   browser_run_conflict: { no: 'En annen kjøring pågår allerede for denne økten.', en: 'Another run is already active for this session.' },
   browser_run_invalid: { no: 'Ugyldig nettleserkjøring.', en: 'Invalid browser run.' },
   browser_owner_unavailable: { no: 'Fant ikke eieren av denne økten.', en: 'Could not find the owner of this session.' },

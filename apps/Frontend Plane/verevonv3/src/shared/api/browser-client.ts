@@ -109,6 +109,8 @@ export type BrowserProfileSummary = {
 
 export type BrowserProfileListResponse = {
   profiles: BrowserProfileSummary[]
+  /** True when the edge serves clear-data (F-t2-068). Absent or false keeps the clear control hidden. */
+  clear_data_enabled?: boolean
 }
 
 /**
@@ -117,6 +119,26 @@ export type BrowserProfileListResponse = {
  * browsing simply attaches no profile at all.
  */
 export type CreatableBrowserProfileScope = Exclude<BrowserProfileScope, 'ephemeral'>
+
+/** F-t2-068: what a clear of one profile's browsing data removes, by kind. Counts only. */
+export type BrowserProfileBrowsingDataCounts = {
+  cookies: number
+  local_storage_entries: number
+  session_storage_entries: number
+  indexed_db_rows: number
+  origins: number
+}
+
+/**
+ * F-t2-068: the answer to a clear. A dry run changes nothing; `cleared` is true only when this
+ * call removed data (false on a dry run, and when nothing was there).
+ */
+export type BrowserProfileClearResult = {
+  profile_id: string
+  dry_run: boolean
+  cleared: boolean
+  counts: BrowserProfileBrowsingDataCounts
+}
 
 export type BrowserProfileRestoreProbe = {
   cookies_count: number
@@ -894,6 +916,28 @@ export async function deleteBrowserProfile(
     `/api/v1/browser/profiles/${encodeURIComponent(profileId)}`,
     {
       method: 'DELETE',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/**
+ * F-t2-068: remove a stored profile's cookies, web storage and IndexedDB. `dryRun` defaults to
+ * true on the server as well: a call that does not pass `dryRun: false` only counts. The edge
+ * answers 409 `browser_profile_in_use` while a browser session holds the profile.
+ */
+export async function clearBrowserProfileData(
+  orgId: string,
+  profileId: string,
+  options: { dryRun: boolean },
+  signal?: AbortSignal,
+): Promise<BrowserProfileClearResult> {
+  return requestJson<BrowserProfileClearResult>(
+    `/api/v1/browser/profiles/${encodeURIComponent(profileId)}/clear-data`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ dryRun: options.dryRun }),
       headers: orgHeaders(orgId),
       signal,
     },

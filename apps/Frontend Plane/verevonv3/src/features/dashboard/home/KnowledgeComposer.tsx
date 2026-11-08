@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  Eraser,
   FileUp,
   Globe2,
   KeyRound,
@@ -27,6 +28,7 @@ import {
   createBrowserSession,
   createBrowserProfile,
   browserErrorMessage,
+  clearBrowserProfileData,
   deleteBrowserProfile,
   getBrowserOwnerTimeline,
   keepAliveBrowserSession,
@@ -40,12 +42,14 @@ import {
   type BrowserActionSuggestionResponse,
   type BrowserControlMode,
   type BrowserObservation,
+  type BrowserProfileBrowsingDataCounts,
   type BrowserProfileRestoreProbe,
   type BrowserProfileSummary,
   type BrowserSession,
   type BrowserSessionResponse,
   type CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
+import { browsingDataIsEmpty, browsingDataSummary, clearDataAvailable, clearKeepsProfileNote } from './browser-profile-clear'
 import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { decideApproval, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
@@ -216,6 +220,10 @@ export function KnowledgeComposer(props: {
   const [browserProfileDeleteArmed, setBrowserProfileDeleteArmed] = createSignal(false)
   const [renamingProfile, setRenamingProfile] = createSignal(false)
   const [renameProfileName, setRenameProfileName] = createSignal('')
+  const [browserProfileClearEnabled, setBrowserProfileClearEnabled] = createSignal(false)
+  const [browserProfileClearArmed, setBrowserProfileClearArmed] = createSignal(false)
+  const [browserProfileClearCounts, setBrowserProfileClearCounts] = createSignal<BrowserProfileBrowsingDataCounts | null>(null)
+  const [browserProfileClearNotice, setBrowserProfileClearNotice] = createSignal<string | null>(null)
   // Client-side mirror of the gateway's `reject_zdr_persistent_profile`
   // guard: when checked, the profile picker is forced back to isolated and
   // disabled — this NEVER replaces the server-side check (`createBrowserSession`
@@ -650,6 +658,7 @@ export function KnowledgeComposer(props: {
     try {
       const result = await listBrowserProfiles(id)
       setBrowserProfiles(result.profiles)
+      setBrowserProfileClearEnabled(clearDataAvailable(result))
       const selectedId = selectedBrowserProfileId()
       if (selectedId && !result.profiles.some((profile) => profile.profile_id === selectedId)) {
         setBrowserProfileChoice(isolatedProfileChoice)
@@ -685,6 +694,9 @@ export function KnowledgeComposer(props: {
     setBrowserProfileError(null)
     setRenamingProfile(false)
     setBrowserProfileDeleteArmed(false)
+    setBrowserProfileClearArmed(false)
+    setBrowserProfileClearCounts(null)
+    setBrowserProfileClearNotice(null)
   }
 
   const createNamedBrowserProfile = async () => {
@@ -762,6 +774,63 @@ export function KnowledgeComposer(props: {
       setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Profilen kunne ikke slettes.', en: 'The profile could not be deleted.' }))
     } finally {
       setBrowserProfileDeleteArmed(false)
+      setBrowserProfileMutating(false)
+    }
+  }
+
+  // F-t2-068, count first: the dialog asks for a dry run, shows what it would remove, and only the
+  // confirm sends the real clear. A profile a browser session holds is refused by the edge.
+  const armClearSelectedBrowserProfile = async () => {
+    const id = orgId()
+    const profileId = selectedBrowserProfileId()
+    if (!id || !profileId || browserProfileMutating()) return
+    setRenamingProfile(false)
+    setBrowserProfileDeleteArmed(false)
+    setBrowserProfileClearNotice(null)
+    setBrowserProfileError(null)
+    setBrowserProfileClearCounts(null)
+    setBrowserProfileClearArmed(true)
+    setBrowserProfileMutating(true)
+    try {
+      const preview = await clearBrowserProfileData(id, profileId, { dryRun: true })
+      setBrowserProfileClearCounts(preview.counts)
+    } catch (reason) {
+      setBrowserProfileClearArmed(false)
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke telle nettleserdataene.', en: 'Could not count the browsing data.' }))
+    } finally {
+      setBrowserProfileMutating(false)
+    }
+  }
+
+  const cancelClearSelectedBrowserProfile = () => {
+    setBrowserProfileClearArmed(false)
+    setBrowserProfileClearCounts(null)
+  }
+
+  const clearCountsNothingToDo = () => {
+    const counts = browserProfileClearCounts()
+    return !counts || browsingDataIsEmpty(counts)
+  }
+
+  const confirmClearSelectedBrowserProfile = async () => {
+    const id = orgId()
+    const profileId = selectedBrowserProfileId()
+    if (!id || !profileId || !browserProfileClearCounts() || browserProfileMutating()) return
+    setBrowserProfileMutating(true)
+    setBrowserProfileError(null)
+    try {
+      const cleared = await clearBrowserProfileData(id, profileId, { dryRun: false })
+      setBrowserProfileProbe(null)
+      setBrowserProfileClearNotice(
+        cleared.cleared
+          ? i18n.tr('Nettleserdataene er tømt.', 'The browsing data was cleared.')
+          : i18n.tr('Det var ingenting å tømme.', 'There was nothing to clear.'),
+      )
+    } catch (reason) {
+      setBrowserProfileError(browserErrorMessage(reason, i18n.tr, { no: 'Kunne ikke tømme nettleserdataene.', en: 'Could not clear the browsing data.' }))
+    } finally {
+      setBrowserProfileClearArmed(false)
+      setBrowserProfileClearCounts(null)
       setBrowserProfileMutating(false)
     }
   }
@@ -1519,6 +1588,14 @@ export function KnowledgeComposer(props: {
                   </span>
                 )}
               </Show>
+              <Show when={browserProfileClearNotice()}>
+                {(message) => (
+                  <span class="dashboard-knowledge-composer__browser-profile-status">
+                    <CheckCircle2 class="size-3.5" />
+                    {message()}
+                  </span>
+                )}
+              </Show>
               <Show when={browserProfileError()}>
                 {(message) => (
                   <span class="dashboard-knowledge-composer__browser-profile-error">
@@ -1592,6 +1669,39 @@ export function KnowledgeComposer(props: {
                       {i18n.tr('Lagre', 'Save')}
                     </button>
                     <button type="button" onClick={cancelRenamingBrowserProfile}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                  </Show>
+                  <Show when={browserProfileClearEnabled() && !renamingProfile() && !browserProfileDeleteArmed()}>
+                    <Show
+                      when={browserProfileClearArmed()}
+                      fallback={
+                        <button
+                          type="button"
+                          class="dashboard-knowledge-composer__browser-profile-clear"
+                          onClick={() => void armClearSelectedBrowserProfile()}
+                          disabled={browserProfileMutating()}
+                          aria-label={i18n.tr('Tøm nettleserdata for profilen', 'Clear browsing data for the profile')}
+                          title={i18n.tr('Tøm nettleserdata', 'Clear browsing data')}
+                        >
+                          <Eraser class="size-3.5" />
+                        </button>
+                      }
+                    >
+                      <div class="dashboard-knowledge-composer__browser-profile-clear-confirm" role="group" aria-label={i18n.tr('Tøm nettleserdata', 'Clear browsing data')}>
+                        <Show when={browserProfileClearCounts()} fallback={<span>{i18n.tr('Teller nettleserdata …', 'Counting browsing data …')}</span>}>
+                          {(counts) => <span>{browsingDataSummary(counts(), i18n.tr)}</span>}
+                        </Show>
+                        <span>{clearKeepsProfileNote(i18n.tr)}</span>
+                        <button
+                          type="button"
+                          class="dashboard-knowledge-composer__browser-profile-clear-confirm-button"
+                          onClick={() => void confirmClearSelectedBrowserProfile()}
+                          disabled={browserProfileMutating() || clearCountsNothingToDo()}
+                        >
+                          {i18n.tr('Tøm', 'Clear')}
+                        </button>
+                        <button type="button" onClick={cancelClearSelectedBrowserProfile}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                      </div>
+                    </Show>
                   </Show>
                   <Show
                     when={browserProfileDeleteArmed()}
