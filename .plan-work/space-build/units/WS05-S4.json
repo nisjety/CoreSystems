@@ -1,0 +1,38 @@
+{
+ "slice": "WS05-S4",
+ "status": "built",
+ "commit": "e10202329",
+ "files": [
+  "apps/Control Plane/audit-core/internal/api/api.go",
+  "apps/Control Plane/audit-core/internal/api/read_scope.go",
+  "apps/Control Plane/audit-core/internal/store/migrate.go",
+  "apps/Control Plane/audit-core/internal/store/store.go",
+  "apps/Control Plane/audit-core/internal/store/migrations/011_audit_read_indexes.sql",
+  "apps/Control Plane/audit-core/internal/store/migrations/revert/011_audit_read_indexes.down.sql",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs",
+  "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/settings-ui.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/audit-client.ts",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/AuditLogSection.tsx"
+ ],
+ "compile": "ok",
+ "migrations": [
+  "audit-core 011 internal/store/migrations/011_audit_read_indexes.sql"
+ ],
+ "flags": [],
+ "tests_owed": [
+  "apps/Control Plane/audit-core/internal/api/api_test.go: keyset cursor round-trip (next_cursor only when limit+1 rows came back, pages cover exactly the unpaged rows), tampered/non-base64/bad-JSON/id<=0 cursor is 400 invalid_cursor typed envelope, limit above 500 clamps to 500, plane/outcome/subject/resource_id forwarded to the store; member self scope narrows every filter (cannot widen via plane); org_redacted scope blanks subject and resource_id filters",
+  "apps/Control Plane/audit-core/internal/store/store_test.go (or a DB test): ListAudit orders by (ingested_at DESC, id DESC), cursor excludes the boundary row, same-timestamp rows page without loss or duplicate, filters narrow, Limit up to 501 honoured",
+  "apps/Control Plane/audit-core/internal/store migrate test: 011_audit_read_indexes is registered and idempotent; assert no /v1/audit/export route and no audit:export scope exist in audit-core (404)",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/audit.rs (tests module): plane/outcome/subject/resource_id/cursor forwarded; blank and over-512 values dropped; foreign user_id still 403 with no upstream call",
+  "apps/Frontend Plane/verevonv3/src/shared/api/audit-client.test.ts: listAuditPage sends plane/outcome/subject/resource_id/cursor and returns nextCursor from meta.next_cursor",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/AuditLogSection.test.tsx (new): admin sees rows, filters apply and reset to first page, Load more appends with the cursor, member renders the admin-only note and sends no request, stale page does not overwrite a newer query",
+  "apps/Frontend Plane/verevonv3/src/features/settings/components/SettingsPages.test.tsx and CoreSidebarSettingsPanels tests: 'audit-log' section exists, link shown to admins only, 'Open audit log' button navigates for admins and is inert for members",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts and model-eligibility test: audit.list_events registered, human-only, not in MODEL_EXECUTABLE_ACTION_IDS, no audit.export action added by this slice"
+ ],
+ "notes": "audit-core go build ok; gateway cargo check ok (warnings only, pre-existing); SPA tsc -p tsconfig.app.json clean for touched files. No new scope or flag: the gateway credential is unchanged because no export route exists (WS06 owns compliance export). Section id audit-log is new; sidebar link admin-only. Existing audit-core store/api stub tests still compile (ListAudit signature unchanged)."
+}

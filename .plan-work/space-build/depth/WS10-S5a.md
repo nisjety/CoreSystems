@@ -1,0 +1,10 @@
+- P1 gap: the gate view takes the agent from the request body (agent_subject_id, optional) because RunActionAuthority carries no agent; if execution-core omits it only the Space ceiling is folded, so S3 must always send it.
+- P1 gap: the `space_approval_gate` flag is enforced in execution-core (S3); nothing in Control gates the store, so the policy is stored and served whatever the flag says (it is tighten-only and never an authorization input).
+- P2 deviation: DEVIATION: org_floor layer dropped per plan ruling 2 (CHECK allows space_ceiling and agent only); no PUT .../org-tool-policy route; the floor will come from capability-core OrgAgentPolicy.
+- P2 deviation: DEVIATION: added table space_tool_policy_sets (one revision row per layer) beside space_tool_policies so the compare-and-set survives emptying a layer; plan named only space_tool_policies.
+- P2 deviation: DEVIATION: agent-layer write route is PUT /api/v1/internal/spaces/{ref}/agents/{agent_subject_id}/tool-policy (agent_subject_id, not binding_ref); the gateway (S5b) maps binding_ref to the agent subject.
+- P2 risk: agent-layer rows of an agent removed from the Space are left in place (they only tighten); ReplaceMemberships does not delete them, and a re-added agent inherits them. Consider clearing in revokeApprovalRulesForAgent.
+- P2 gap: policy writes write no audit event (the grant rules have an events table; tool policy has only updated_by/updated_at); WS05 audit export should cover it.
+- P2 decision: reading the policy is open to any readable member (keys and levels only); writing needs a current (not archived) manager/owner, refused on personal Spaces, no entitlement, allowed under ZDR.
+- P3 gap: legacy approvalMode presets (blocked => "*"=block) are not written as agent rows; that mapping belongs to the S5b editor/Convex projection.
+- P3 follow-up: ApprovalGateViewDigest (S2) is unchanged; the gate view now uses GateViewDigestWithTools, so S3 must cache on policy_digest.

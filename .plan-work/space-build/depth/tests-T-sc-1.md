@@ -1,0 +1,5 @@
+- P2 pre-existing: model-gateway tests/zdr_refusal_inventory.rs: fails on untyped ZDR refusal at browser_run.rs:802 (imported Quarry browser work, not W1); the space_routes rows are not flagged.
+- P2 deferred: session-core space::events db_tests (11, space_event_*): written, compile, never run; scripts/tests/space-event-log-postgres-test.sh needs docker and expects at least 8.
+- P2 deferred: session-core grpc.rs member/post DB tests (13) and dreaming DB test: need Postgres and env-set decision keys; fixtures (threads/messages NOT VALID checks, threads columns) are unverified until run.
+- P3 test-gap: authz flag-off authorize_append DB test and SpaceRoomReadService served-empty (unimplemented) call are DB/grpc-server tier; only the health-name list is asserted.
+- P3 test-gap: chat_path_forwards_client_message_id is covered only by session_flow send_receipt_id unit test, not an e2e invoke assertion.

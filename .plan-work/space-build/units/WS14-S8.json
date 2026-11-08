@@ -1,0 +1,23 @@
+{
+ "slice": "WS14-S8",
+ "status": "built",
+ "commit": "4d663fd2c",
+ "files": [
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/room-attachments.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-send-pipeline.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/space-send.css"
+ ],
+ "compile": "ok (tsc6 -p tsconfig.app.json --noEmit: no errors in touched files; only pre-existing schedule-contract.test.ts. pnpm exec tsc -b refused: pnpm wants to reinstall modules)",
+ "migrations": [],
+ "flags": [
+  "features.turn_attachments (gateway space_turn_attachments_ui) default off; dev override VITE_SPACE_TURN_ATTACHMENTS"
+ ],
+ "tests_owed": [
+  "src/features/spaces/lib/room-attachments.test.ts: vetRoomAttachments caps at 10 files, ZDR image gives typed zdr_feature_not_supported/attachments copy, over-4000 paste becomes a .txt chip, prepareRoomTurn appends the VEDLEGG fence and returns image attachments, splitRoomMessage round-trips",
+  "src/features/spaces/components/SpaceRoomComposer.test.tsx: attach button/paste/drop only with turn_attachments on and Ask mode; chips removable; Send sends fenced content and clears chips on acceptance; post mode with chips shows the notice and sends nothing; image refused under ZDR",
+  "src/features/spaces/components/sidepane/SpaceTurnList: a user turn with a fence renders words plus file chips"
+ ],
+ "notes": "Per-turn attachments only (no storage): text inlined under the labelled fence, images via streamChat attachments. Timeline chips live in SpaceTurnList, not SpaceRoomTimeline. errors.ts/en.ts/no.ts untouched (see depth)."
+}

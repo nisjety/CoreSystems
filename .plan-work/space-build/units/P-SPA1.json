@@ -1,0 +1,30 @@
+{
+ "slice": "P-SPA1",
+ "status": "built",
+ "commit": "541a6f835",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-pane-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-tab-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/base.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client.ts (moved to spaces-client/core.ts)",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/core.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts"
+ ],
+ "compile": "ok (pnpm exec tsc -b: no errors in touched files; only pre-existing RemoteSupportPage/@verevon/remote-core errors)",
+ "migrations": [],
+ "flags": [],
+ "tests_owed": [
+  "src/features/spaces/lib/space-tab-registry.test.ts: spaceTabFromHash resolves ids, legacy aliases (members/work/activity), unknown to chat, and skips a tab whose enabled() is false",
+  "src/features/spaces/lib/space-pane-registry.test.ts: resolveOpenSpacePane returns thread for ?thread_id, null for blank/array/over-200, null when the pane is disabled",
+  "src/features/spaces/components/SpaceCockpit.test.tsx + SpacePage.test.tsx + SpaceRoomComposer.test.tsx etc: unchanged and green after the spaces-client barrel move (vi.mock of '@/shared/api/spaces-client' still resolves to the barrel)",
+  "src/shared/actions/action-registry.test.ts: registry ids unchanged (187) and order of spaces.* entries preserved after the fragment move",
+  "apps/gateway/scripts/action-surface-contract.test.mjs: fragment-only id probe and live fragment discovery already added and passing; dispatcher-equality test fails from a pre-existing registry/handlers drift (see depth file)"
+ ],
+ "notes": "Pure moves: 13 spaces.* action entries + their zod schemas to domains/spaces/base.ts (registry spreads spaceActions, ids identical to HEAD); spaces-client.ts git mv to spaces-client/core.ts behind an index.ts barrel; SpaceCockpit tab list and SpacePage thread-param read now go through lib registries (behaviour identical). errors.ts got per-workstream banners. Contract test reads domains/spaces/*.ts and has the fragment self-test."
+}

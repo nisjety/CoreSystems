@@ -1,0 +1,6 @@
+- P1 risk: Room read is detected by a non-empty `space_read_decision_ref` only; session-core verifies it, so a bogus ref fails the read, but a future owner-path caller that sends a ref would also get the reduced view (safe direction).
+- P2 gap: Only `list_thread_messages` is reduced; other model-gateway reads that flatten message metadata (if any exist for Space readers) were not audited.
+- P2 decision: Kill switch accepts exactly `1` or `true` (case-insensitive); the env var is read per request, not cached in AppState (cheap, and lets ops flip it with a restart only).
+- P3 follow-up: WS09 must add `"work"` to `ROOM_VISIBLE_METADATA_KEYS`; non-artifact keys are passed whole (no per-key reduction) so WS09 should reduce `work` before adding it.
+- P2 test-gap: Unit tests in room_metadata.rs owed (see unit file); no integration test of the HTTP handler.
+- P3 polish: room_metadata.rs is LF while neighbouring http_routes.rs/lib.rs are CRLF (git autocrlf warning); consistent with other new Space files.

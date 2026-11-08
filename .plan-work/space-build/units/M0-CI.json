@@ -1,0 +1,22 @@
+{
+ "slice": "M0-CI",
+ "status": "built",
+ "commit": "c8dd68419",
+ "files": [
+  ".github/workflows/space-gate.yml",
+  ".github/workflows/convex-core.yml",
+  "scripts/gates/space-changed-areas.sh",
+  "scripts/gates/space-baseline-compare.sh",
+  "scripts/tests/baseline-capture.mjs"
+ ],
+ "compile": "ok",
+ "migrations": [],
+ "flags": [],
+ "tests_owed": [
+  "space-gate.yml on a real pull request: GitHub accepts the workflow, space-gate goes red on a seeded failing test in an area job and green on an untouched area (skipped jobs)",
+  "convex-core.yml on a real pull request: pnpm install --frozen-lockfile works with pnpm 11.3.0, and convex-test/typecheck/lint run and compare",
+  "scripts/gates/space-baseline-compare.sh <id>: with a committed docs/plans/evidence/baseline-<date>/ (M0-T0 capture), an unchanged failing set passes and a new failing id fails",
+  "scripts/gates/space-changed-areas.sh and space-baseline-compare.sh --self-test: already run locally and green; they also run in CI as the gate-self-test job"
+ ],
+ "notes": "Built to scope: space-gate.yml (base-agnostic, one job per touched area, single required check space-gate), convex-core.yml, two gate scripts with self-tests. Buf path fix: buf.yml already quotes every 'apps/Model Plane/proto' path (e45caa71c), so no edit; space-gate's proto job repeats lint ratchet, breaking and goldens for PRs buf.yml's branch filter skips. Workflows parsed locally as YAML; not run on GitHub. No model calls anywhere."
+}

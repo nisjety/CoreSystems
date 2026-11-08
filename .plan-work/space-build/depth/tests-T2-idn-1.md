@@ -1,0 +1,7 @@
+- P3 deferred: audit-core store ListAudit DB tests (order and ties, filters, limit 501, migration 011 re-apply): written in internal/store/audit_list_v2_db_test.go, skip without TEST_DATABASE_URL.
+- P3 deferred: org-core domain claim repository (idempotent add and refresh, 10-domain cap, verified-elsewhere on add and verify, outbox in the same tx, revoke under enforce, migration 028 over a legacy row): domain_postgres_test.go, skip without CONTROL_LIFECYCLE_TEST_DATABASE_URL.
+- P3 deferred: org-core SSO policy repository (revision CAS, enforce precondition order, by-domain lookup, provider lifecycle audit without secret, revoke blocked under enforce): sso_policy_postgres_test.go, same gate.
+- P3 deferred: tests/e2e/org-identity-admin.spec.ts (domain challenge against a stub resolver): parses (4 cases listed), needs a live stack, two role sessions and E2E_DNS_STUB_PUBLISH_URL.
+- P2 test-fail: org-core retention_posture_contract_test expected auth-core's compose scopes to be exactly three; S6 added org:domain:read:any to the compose block. Fixed test-side (stale expectation), no production change.
+- P3 test-gap: audit-core answers an unrouted path such as /v1/audit/export with 403 (no scope for it) rather than 404; the test accepts 403/404/405 because the point is that no export surface exists.
+- P3 test-gap: store.ListAudit silently falls back to the 100-row default for Limit above MaxAuditListLimit+1 while the API clamps to 500; the API never sends such a value, so only the store-level DB test pins it.

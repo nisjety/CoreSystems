@@ -1,0 +1,36 @@
+{
+ "slice": "WS08-S5",
+ "status": "built",
+ "commit": "3b82693af",
+ "files": [
+  "apps/Application Plane/convex-core/convex/schema/spaces.ts",
+  "apps/Application Plane/convex-core/convex/spaceAgents.ts",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/agent_policy.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/room_admin.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws08.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws08.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/agent-policy.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/index.ts"
+ ],
+ "compile": "ok: gateway cargo check green, SPA tsc shows no errors in touched files; Convex not typechecked (no node_modules in convex-core)",
+ "migrations": [],
+ "flags": [
+  "SPACE_AGENT_WAKE_POLICY_API (space_agent_wake_policy_api) default off in prod, on in dev"
+ ],
+ "tests_owed": [
+  "apps/Application Plane/convex-core/test/space-agent-registry.test.cjs: setSpaceAgentWakePolicyForGateway sets respondTo/respondToSubjects, bumps projectionVersion, appends one spaceAgentPolicyEvents row, 'policy_conflict' on stale expectedUpdatedAt, 'agent_binding_not_found' for wrong space/org/revoked/pending, 'invalid_policy' for empty/oversize/mismatched allowlist; upsertSpaceAgentBinding refuses triggerModes containing group; spaceAgentBindingsForGateway projects respondTo",
+  "apps/Application Plane/convex-core: npm test and npm run typecheck green (not run: no node_modules in this worktree)",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/agent_policy.rs (tests module): parse_policy table (unsupported field, unknown/group respond_to, allowlist empty, subjects with non-allowlist, >50, missing expected_updated_at); PATCH route 404 flag off, 403 space_role_cannot_manage_agent for editor/viewer, 409 policy_conflict, 404 agent_binding_not_found, 503 agent_binding_unavailable; no raw Convex error text reaches the browser",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs (tests): respond_to_allows matrix (members/managers/allowlist x viewer/editor/manager/owner, unknown value refuses) and mention path returns 403 agent_respond_to_denied; absent respond_to leaves the seven existing mention tests green",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: spaces ids list gains spaces.set_agent_wake_policy after the ws04 ids",
+  "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs: add ['ws08.ts', ['spaces.set_agent_wake_policy']] to the fragment loop and the id to the human-only model-access list; node --test green",
+  "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json: regenerate (new row spaces.set_agent_wake_policy, exempt agent_cannot_self_govern) so admission-contract.test.ts passes"
+ ],
+ "notes": "Convex: respondTo/respondToSubjects on spaceAgentBindings, append-only spaceAgentPolicyEvents, setSpaceAgentWakePolicyForGateway, group refused by upsert writer. Gateway: PATCH .../agents/{binding_ref}/policy (agent_policy.rs), action spaces.set_agent_wake_policy (ws08 fragment, human-only), respond_to enforced on the legacy mention injector when present. Client in spaces-client/agent-policy.ts (core.ts left alone: foreign uncommitted hunk). Lead: docker restart convex-gateway after merge."
+}

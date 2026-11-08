@@ -1,0 +1,35 @@
+{
+ "slice": "WS04-S8",
+ "status": "partial",
+ "commit": "10e972aa6",
+ "files": [
+  "apps/Control Plane/user-core/migrations/036_space_visibility_directory.up.sql",
+  "apps/Control Plane/user-core/migrations/036_space_visibility_directory.down.sql",
+  "apps/Control Plane/user-core/internal/spaces/directory_policy.go",
+  "apps/Control Plane/user-core/internal/spaces/directory_rooms.go",
+  "apps/Control Plane/user-core/internal/spaces/room_join_settings.go",
+  "apps/Control Plane/user-core/internal/spaces/authority.go",
+  "apps/Control Plane/user-core/internal/spaces/repository.go",
+  "apps/Control Plane/user-core/internal/http/space_room_directory.go",
+  "apps/Control Plane/user-core/internal/http/routes_space_directory.go",
+  "apps/Control Plane/user-core/internal/http/scopes_space_directory.go",
+  "apps/Control Plane/scripts/set-space-directory-policy.sh"
+ ],
+ "compile": "ok (go build ./... and go vet ./internal/spaces ./internal/http)",
+ "migrations": [
+  "migration user-core 036 apps/Control Plane/user-core/migrations/036_space_visibility_directory.up.sql (+ .down.sql)"
+ ],
+ "flags": [
+  "no new flag: Control routes are dark by credential (gateway spaces:membership:act and directory:read:self, already in dev compose); org_public rooms need a space_directory_policies row per org (absent = off)"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/user-core/internal/database/space_directory_migration_contract_test.go: 036 text contract (idempotent, visibility and join_role CHECKs, join_role never manager/owner, space_directory_policies has no INSERT default row, partial directory index, down drops in reverse)",
+  "apps/Control Plane/user-core/internal/spaces/directory_live_test.go (TEST_DATABASE_URL): org with no policy row lists enabled:false and rooms:[]; private, archived, personal, org_derived rooms and rooms the caller already belongs to are never listed; other-org user lists nothing; join on a private room, a disabled org, a personal Space, another org's room and an unknown ref return byte-equal 404 room_not_found; join grants role=join_role with source self_join, writes one member_joined ledger row and zero new resource_grants rows; second join is changed=false already_member; idempotency replay and key reuse (409); a removed member may rejoin; archived open room gives 409 room_archived; UpdateRoomSettings: viewer/editor 403 room_role_forbidden, org room 409 room_roster_derived, archived 409 room_archived, org_public with policy off 403 directory_disabled, visibility change advances privacy_revision and authority_revision once, join_role-only advances authority_revision only, unchanged request writes no ledger row, invalid values 400; UpsertDirectoryPolicy: first write inserts one event row, identical replay writes none, flip writes one",
+  "apps/Control Plane/user-core/internal/http/space_room_directory_test.go: join/settings with wrong principal, missing delegation or missing spaces:membership:act 403; unknown JSON field 400 typed; directory rooms needs directory:read:self, 403 member_not_in_organization for a non-member; directory-policy needs control-space-policy + spaces:policy:write, 400 when org_id or org_public_rooms_enabled is missing",
+  "apps/Control Plane/user-core/internal/http/service_auth_test.go: serviceScopeForRequest maps POST /spaces/{ref}/join and PATCH /spaces/{ref}/settings to spaces:membership:act (delegated), PUT /spaces/directory-policy to spaces:policy:write, GET /directory/rooms to directory:read:self; never users:write:self",
+  "apps/Control Plane/user-core/internal/http/routes_spaces_test.go: route table gains the four WS04-S8 routes",
+  "apps/Control Plane/user-core/internal/spaces: GET /spaces/{ref}/membership body carries visibility and join_role (resolveUserMembership)",
+  "apps/Control Plane/scripts: set-space-directory-policy.sh shellcheck and --enable/--disable exclusivity"
+ ],
+ "notes": "Control leg only (my lock group: user-core + Control config). NOT built (other lock groups): gateway directory.rs rooms route + room_admin.rs join/settings proxy + flag SPACE_ROOM_DIRECTORY_API, action registry/dispatcher spaces.join_room and spaces.update_room_settings, SPA SpacesDirectoryPage.tsx, App.tsx route, CoreSidebarSpacesPanel, SpaceRoomSettings, errors.ts copy (needs WS04-S8.gw and WS04-S8.spa). No compose change needed: gateway already holds directory:read:self and spaces:membership:act, control-space-policy holds spaces:policy:write. Migration 036 was already present untracked from an earlier attempt and is committed here."
+}

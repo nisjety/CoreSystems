@@ -1,0 +1,7 @@
+- P2 deviation: DEVIATION: the plan says the 5 test AppState literals compile unchanged, but adding the `space_features` field forces one `space_features: Default::default()` line into each; `for_tests()` then keeps future fields out of them.
+- P2 deviation: DEVIATION: `org_zdr_enabled` could not be a thin wrapper that distinguishes failure, so the body moved into `org_zdr_lookup` (tri-state `OrgZdrPosture`) and `org_zdr_enabled` now delegates via `treat_as_zdr()`; behaviour is identical (cache, non-caching of failures, empty org scope is ZDR).
+- P2 decision: `SpaceFeatureFlags` ships with no fields (each consumer slice appends one field plus one `from_env` line); `space_flag(key)` is the dev-on/prod-off reader and is unused until the first flag lands.
+- P2 decision: `AppState::for_tests()` delegates to `crate::tests::test_state(false)` in main.rs instead of duplicating the literal; if that test module is renamed the helper breaks.
+- P3 follow-up: the other 4 test literals (browser, chat/shared, orchestration, stream_e2e) could be rewritten to struct-update from `for_tests()` to shrink future churn; not done (not a pure seam).
+- P2 test-gap: `--all-targets` test build and clippy `-D warnings` were not run (rules forbid building tests now); the test-cfg `for_tests` path and the 5 literal edits are unverified by the compiler.
+- P2 risk: `spaces::module_routes()` is merged before `require_session`, so module routes inherit session gating; a module that needs a public route must not use this seam.

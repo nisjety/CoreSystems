@@ -1,0 +1,22 @@
+{
+ "slice": "WS07-S9.gw",
+ "status": "built",
+ "commit": "b7d923cd8",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/room_artifacts.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml"
+ ],
+ "compile": "ok",
+ "migrations": [],
+ "flags": [
+  "SPACE_ROOM_ARTIFACTS_API dev on, production false (SpaceFeatureFlags.room_artifacts; features.room_artifacts on space context)"
+ ],
+ "tests_owed": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/room_artifacts.rs (wiremock): flag off gives 404 space_room_artifacts_disabled; Control read decline gives 403 space_read_not_authorized and no token in any response body; limit 0/201/abc gives 400 invalid_limit, control-char or over-long cursor gives 400 invalid_cursor; foreign space_id item gives 502 invalid_model_gateway_response; unknown item fields dropped, content never present; next_cursor null on last page; retention.zdr true/false/null (org-core failure gives null); shared_read.available true; model-gateway 503 passes through; cache-control no-store",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs: space context features block includes room_artifacts"
+ ],
+ "notes": "Route registered through module_routes() (session-gated). Reuses space_lifecycle_by_ref and shared_thread_read_decision_for_typed; retention via zdr::org_zdr_lookup. SPA getSpaceArtifacts not in lock group (another builder is editing spaces-client). Ledger flag line appended."
+}

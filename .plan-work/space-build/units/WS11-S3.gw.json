@@ -1,0 +1,32 @@
+{
+ "slice": "WS11-S3.gw",
+ "status": "built",
+ "commit": "42f036af5",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/attention.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws11.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws11.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts"
+ ],
+ "compile": "ok (gateway cargo check clean for my files; 2 pre-existing marketing warnings). SPA actions TS not compiled: pnpm exec tsc6 fails its deps check, edits are schema-only",
+ "migrations": [],
+ "flags": [
+  "SPACE_ATTENTION_API already present from WS11-S7 (dev true, production false); gates every route here, no new flag or compose entry needed"
+ ],
+ "tests_owed": [
+  "apps/gateway/src/domains/spaces/attention.rs tests: attention_badge_rule_table (room_badge: n=needs_you+mentions count at every level; else all=muted count, mentions=dot, off=none; unread never added to totals.badge)",
+  "attention.rs: attention_rooms_intersect_control_index_and_cap_60 (refs narrow only, personal Spaces dropped, >60 refs 400 invalid_refs, truncated flag)",
+  "attention.rs: attention_degrades_to_gaps_when_session_core_down (200 with room gaps session_core and stale_sources, never 5xx; Control index down is 503 space_index_unavailable)",
+  "attention.rs: attention_zdr_org_makes_no_upstream_call (mode zdr_empty, no Control/Convex/model-gateway request; unknown posture counts as ZDR)",
+  "attention.rs: attention_never_returns_titles_without_decision (aggregate sends headline_thread_ids [] and returns no title; room without decision gets gap read_decision)",
+  "attention.rs: attention_rate_limits_six_per_minute_with_retry_after (429 rate_limited details.retry_after_seconds, own small bucket)",
+  "attention.rs: read_all_never_creates_markers_or_touches_needs_you (only index-intersected refs reach markAllReadForGateway, chunks of 60, kinds limited to mention/reply else 400 invalid_kind, flag off 404)",
+  "attention.rs: notify_get_put_and_invalid_level (400 invalid_level, empty body 400, member required 403, allowed under ZDR); unread_posts_floor_and_rejects_bad_before_ms (400 invalid_before_ms, forged fields rejected by deny_unknown_fields)",
+  "spaces/mod.rs: mark_read_enter_clears_floor (reason enter|while_open forwarded to markSpaceReadForGateway, absent/empty body unchanged, other word 400 invalid_reason, response carries manual_unread)",
+  "apps/gateway/scripts/action-surface-contract.test.mjs and SPA catalog-manifest.test.ts: three new ids (spaces.mark_all_read, spaces.mark_unread, spaces.set_notify_level) present, ownerPlane application, none model-eligible",
+  "dispatcher tests: dispatch_spaces_mark_all_read / mark_unread / set_notify_level map spaceRefs/kinds, spaceRef+beforeMs, spaceRef+level+hidePreview to the route bodies"
+ ],
+ "notes": "Items, item state and follow (S7) were already in attention.rs; this adds the aggregate (room_badge in Rust), read-all, GET|PUT notify, POST unread, reason on read, 3 action contracts + dispatchers + model-access exemptions. Committed with a temporary index to leave foreign WS12 hunks in handlers.rs, mod.rs, model-access.ts out. Compose/config flags needed no change."
+}

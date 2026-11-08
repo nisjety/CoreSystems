@@ -1,0 +1,37 @@
+{
+ "slice": "WS04-S4",
+ "status": "built",
+ "commit": "4f5c048ad",
+ "files": [
+  "apps/Control Plane/docker-compose.yml",
+  "apps/Control Plane/user-core/internal/http/spaces.go",
+  "apps/Control Plane/user-core/internal/nats/shared_publisher.go",
+  "apps/Control Plane/user-core/internal/spaces/authority.go",
+  "apps/Control Plane/user-core/internal/spaces/repository.go",
+  "apps/Control Plane/user-core/internal/users/gdpr_erasure_store.go",
+  "apps/Control Plane/user-core/internal/http/routes_space_membership_ops.go",
+  "apps/Control Plane/user-core/internal/http/scopes_space_membership_ops.go",
+  "apps/Control Plane/user-core/internal/http/space_membership_ops.go",
+  "apps/Control Plane/user-core/internal/spaces/membership_ops.go",
+  "apps/Control Plane/user-core/internal/spaces/roles.go",
+  "apps/Control Plane/user-core/migrations/034_space_membership_source_and_events.down.sql",
+  "apps/Control Plane/user-core/migrations/034_space_membership_source_and_events.up.sql"
+ ],
+ "compile": "ok (go build ./... and go vet ./internal/spaces ./internal/http)",
+ "migrations": [
+  "migration user-core 034 apps/Control Plane/user-core/migrations/034_space_membership_source_and_events.up.sql (+ .down.sql)"
+ ],
+ "flags": [
+  "scope spaces:membership:act on verevon-gateway and spaces:membership:read on application-space-lifecycle: dev compose only; absent from production credential registry (dark by credential)"
+ ],
+ "tests_owed": [
+  "apps/Control Plane/user-core/internal/spaces/roles_test.go + testdata/room-role-matrix.v1.json: CanAdd/CanChangeRole/CanRemove/CanJoin/CanManageRoom golden vectors (manager cannot grant manager/owner, self-demotion ok, self-promotion refused, sole owner 409, leave allowed)",
+  "apps/Control Plane/user-core/internal/spaces/membership_ops_live_test.go (TEST_DATABASE_URL): viewer/editor cannot add; manager cannot grant elevated or touch an owner; non-member and other-org user get room_not_found byte-equal to unknown Space; org_derived room gives room_roster_derived; sole owner cannot demote/remove/leave; two managers racing to demote the last two owners give exactly one success; expected_revision mismatch gives room_member_changed with current_revision; idempotency replay and idempotency_key_reused; AddMember on active target changed=false; non-org-member target 422; ledger row per change with space_seq=authority_revision; ReplaceMemberships skips member_ops/self_join rows (skipped_control_owned) and deactivates only application_sync rows",
+  "apps/Control Plane/user-core/internal/http/space_membership_ops_test.go: wrong principal 403; gateway without spaces:membership:act 403; missing delegation 403; unknown JSON field 400 typed; audience-candidates needs application-space-lifecycle + spaces:membership:read",
+  "apps/Control Plane/user-core/internal/http/service_auth_test.go: serviceScopeForRequest maps POST|PATCH|DELETE /spaces/{ref}/members[/{id}] to spaces:membership:act (delegated) and GET /spaces/{ref}/audience-candidates to spaces:membership:read (not delegated)",
+  "apps/Control Plane/user-core/internal/database/space_membership_events_migration_contract_test.go: 034 text contract (idempotent, source CHECK, roster_mode CHECK, unique idempotency index, pending index)",
+  "apps/Control Plane/user-core/internal/users: erasure saga postgres test pseudonymises space_membership_events actor_id and subject_id",
+  "scripts/tests/space-contract-vectors-sync.test.sh: role matrix golden vectors match the SPA mirror (WS04-S6)"
+ ],
+ "notes": "Control leg only. Routes dark by credential: gateway needs spaces:membership:act, Application needs spaces:membership:read (dev compose has both; production registry unverified). ReplaceMemberships kept its 5-value signature; new ReplaceMembershipsDetailed returns skipped_control_owned and ledger events, and PUT .../memberships now publishes the additive membership_changed payload for every user row that became active/inactive. Not built (other slices): gateway proxy, Convex audience reconcile (S5), SPA (S6). Test runs must not use verevon/budget/genius models (user order)."
+}

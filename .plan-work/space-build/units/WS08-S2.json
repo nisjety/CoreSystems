@@ -1,0 +1,39 @@
+{
+ "slice": "WS08-S2",
+ "status": "built",
+ "commit": "4b0c0638b",
+ "files": [
+  "apps/Model Plane/rust/services/session-core/migrations/0075_space_mentions_and_wake_origin.sql",
+  "apps/Model Plane/rust/services/session-core/migrations/revert/0075_space_mentions_and_wake_origin.down.sql",
+  "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+  "apps/Model Plane/rust/crates/mp-contracts/src/space_mentions.rs",
+  "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/mentions.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/mod.rs",
+  "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+  "apps/Model Plane/rust/services/session-core/tests/fixtures/run-wake-v1.golden.json",
+  "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+  "apps/Model Plane/deploy/docker-compose.yml",
+  "apps/Model Plane/deploy/docker-compose.override.yml"
+ ],
+ "compile": "ok: cargo check -p session-core -p model-gateway -p execution-core -p mp-contracts --lib --bins green (3 pre-existing-style warnings, none new in my files)",
+ "migrations": [
+  "session-core 0075 apps/Model Plane/rust/services/session-core/migrations/0075_space_mentions_and_wake_origin.sql"
+ ],
+ "flags": [
+  "SPACE_MENTION_RECORDS_CORE default off (dev override on)",
+  "SPACE_WAKE_CORE default off (dev override on)"
+ ],
+ "tests_owed": [
+  "apps/Model Plane/rust/services/session-core/src/space/mentions.rs: reply_slot_table (user tail open; assistant tail open only when newest user row is a post and assistants_since < min(expected,3); zero-mention case equals the old rule), mention_input_validation (caps 20/3, id pattern, duplicates, kind/source/expectation vocabulary, non-owner agent forced to refused/owner_only_thread, person with expectation refused), wake_verifier_table (digest recomputed from caller+thread, exact [run:wake] permission, subject, schema, expiry, tampered trigger/agent/origin), wake_state derivation table",
+  "apps/Model Plane/rust/services/session-core/src/space/mentions.rs: run_wake_payload_digest equals tests/fixtures/run-wake-v1.golden.json (expected.digest, content_digest of input.content)",
+  "apps/Model Plane/rust/services/session-core/src/grpc.rs (--ignored DB): mentions_are_written_with_the_message_and_cascade_on_thread_delete; non_owner_agent_mention_is_downgraded_to_owner_only_thread; client_metadata_cannot_forge_mentions_or_wake; wake_requires_own_post_with_bound_digest; wake_with_member_post_is_refused; second_agent_reply_is_allowed_third_is_not; replayed_start_key_returns_already_started (and another post/agent under the same key is already_exists); zdr_caller_gets_typed_refusal_and_no_rows; derived_wake_state_follows_run_phase; message_appended_payload_has_counts_only; post_context_cap keeps newest N posts",
+  "apps/Model Plane/rust/crates/mp-contracts/src/space_mentions.rs: unit tests already inline (switches, id pattern, origin mapping)",
+  "apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity.rs: still green with the new fields",
+  "Struct literals of AppendMessageRequest/AppendMessageResponse/SessionMessage/ListConversationRequest/StartManagedRunRequest in test targets (--tests) may need the new fields or ..Default::default(); not built now"
+ ],
+ "notes": "Wake verifier lives in grpc.rs (verify_run_wake_space_decision, beside the other decision verifiers, private claims struct); mentions logic and stored-fact checks in space/mentions.rs. Go/Python/TS generated stubs NOT regenerated (controlled buf generate owed; sessions.proto only). Commit made via a temporary index because the shared index held other builders' staged files and space/mod.rs + agent.rs carry foreign WS10 hunks (left unstaged in the working tree)."
+}

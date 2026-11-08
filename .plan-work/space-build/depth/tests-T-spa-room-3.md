@@ -1,0 +1,4 @@
+- P3 test-gap: SpaceThreadPanel: still reads getSpaceThreadTranscript (not migrated to loadSpaceTranscript, per WS07-S4 notes); no restricted/missing/error states there are tested.
+- P3 test-gap: ArtifactsPanel room surface: only the document text and "Run preview" gate are asserted; the iframe sandbox attributes after Run preview are not covered (needs a browser tier).
+- P3 test-gap: real stream to live chip path (streamChat events into createRoomLiveArtifacts through SpacePage) is covered in two halves (pipeline onArtifact, timeline liveArtifacts), not end to end.
+- P3 pre-existing: running the whole src/features/spaces tree at default vitest workers times out forks while other agents run in parallel; scoped runs with --maxWorkers=3 are green.

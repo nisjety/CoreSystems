@@ -1,0 +1,29 @@
+{
+ "slice": "WS04-S2.gw",
+ "status": "built",
+ "commit": "9a805bc26",
+ "files": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/room_admin.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws04.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml"
+ ],
+ "compile": "ok: gateway cargo check (bin) clean",
+ "migrations": [],
+ "flags": ["SPACE_ROOM_DETAILS_UI (SpaceFeatureFlags.room_details_ui) dev default on, production false in compose override and when APP_ENV=production unset"],
+ "tests_owed": [
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/room_admin.rs inline tests (wiremock through the real router, pattern a_viewer_cannot_add_or_remove_room_members): viewer and editor PATCH /api/v1/spaces/{ref} get 403 room_role_forbidden with ZERO Convex requests; owner and manager reach spaces:updateRoomDetailsForGateway and get {data:{space_ref,name,topic}}; Control membership error status passes through",
+  "same: Convex errorMessage mapping: room_details_invalid:name:too_long -> 400 room_details_invalid details {field,reason}; space_not_found -> 404; space_kind_not_editable -> 409; room_not_active -> 409; unknown or unreachable -> 503 room_details_unavailable; invalid_details_from rejects non-token field or reason",
+  "same: body validation before any upstream call: neither name nor topic -> 400 details empty_update; non-string -> not_a_string; over 2000 chars -> too_long; empty topic string is forwarded (clears topic) and answers topic null",
+  "same: flag_off_is_404 (feature_disabled before any Control or Convex request); zdr_org_room_admin_never_calls_the_model_plane (ZDR org still succeeds, zero model-gateway requests)",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs tests: GET /api/v1/spaces list and public_space carry topic (null when absent); space_context features.room_details mirrors SpaceFeatureFlags.room_details_ui",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws04.rs: dispatch_spaces_update_room_details 400 without spaceRef, forwards only name and topic, wraps the reply in the owner envelope, flag off gives 404",
+  "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs: spaces.update_room_details has a handlers.rs arm reaching dispatch_ (passes only once the SPA ws04.ts registry fragment lands); not in MODEL_EXECUTABLE_ACTION_IDS",
+  "config.rs: SpaceFeatureFlags::default() has room_details_ui off; from_env off under APP_ENV=production when unset",
+  "Test runs must not use verevon/budget/genius models (user order): these tests call no model"
+ ],
+ "notes": "PATCH /api/v1/spaces/{space_ref} in room_admin.rs: flag, org scope, body shape, Control live role (owner or manager, resolve_space_role) BEFORE any Convex call, then spaces:updateRoomDetailsForGateway through a local mutation helper that keeps Convex errorMessage (convex_gateway_call drops it). Convex stable messages map to 400/404/409/503 typed envelopes. Flag SPACE_ROOM_DETAILS_UI, topic in list/public_space, features.room_details in context, spaces.update_room_details dispatcher+arm. Live deploy not run; SPA leg (ws04.ts registry entry etc.) is another lock group."
+}

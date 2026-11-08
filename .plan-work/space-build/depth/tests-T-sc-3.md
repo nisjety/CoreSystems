@@ -1,0 +1,5 @@
+- P1 deferred: grpc_space_memory_tests.rs (15 DB tests: C1-C7 append/create/dream/index/search/list/flag-off/letta): written and compiling, never run against Postgres; first DB-tier run may expose seed or schema mismatches.
+- P2 test-gap: grpc.rs read_letta (context assembly) and retrieval_org_wide / retrieval_persist containment sites (grpc.rs ~6545, 9372, 9564): no test; they need a Letta/retrieval fake.
+- P2 test-gap: mp_session_memory_contained_total{op} counter labels are not asserted (the counter recorder in grpc_space_w1_tests.rs is private).
+- P3 test-gap: gateway list_memories handler mapping is inline, so only the serialised shape is tested, not the handler through a mocked session-core (e2e list_memory mock returns unimplemented).
+- P3 test-gap: containment_enabled() env read is untested (parallel env races); only the pure containment_enabled_from is covered.

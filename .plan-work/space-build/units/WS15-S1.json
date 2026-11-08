@@ -1,0 +1,22 @@
+{
+ "slice": "WS15-S1",
+ "status": "built",
+ "commit": "848da02ec",
+ "files": [
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/timeline-anchor.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/timeline-anchor-dom.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/space-timeline.css",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.tsx"
+ ],
+ "compile": "ok (tsc6 -p tsconfig.app.json: no errors in touched files; pnpm exec tsc -b could not run, pnpm deps check failed)",
+ "migrations": [],
+ "flags": ["features.timeline_anchor default off (dev override VITE_SPACE_TIMELINE_ANCHOR_UI)"],
+ "tests_owed": [
+  "src/features/spaces/lib/timeline-anchor.test.ts: decideScroll own send follows bottom; append pinned follows, append scrolled up shows jump with count; prepend/resize hold anchor by anchorShift or height delta, none under 1px; pinned resize follows; isPinnedToBottom 80px threshold; shouldShowJumpPill; postPosition",
+  "src/features/spaces/components/sidepane/SpaceTurnList (reading test): normalizeTranscriptTurns over the cap keeps first plus newest, not the first 30; earlierTurns row renders under the first turn and calls onExpand; turn after the gap is not grouped",
+  "src/features/spaces/components/SpaceRoomTimeline.test.tsx: a 45-turn transcript shows first turn + last 29 + '15 earlier turns' row, click shows all; flag off renders no data-anchored/aria-posinset/pill; flag on sets aria-posinset/aria-setsize",
+  "tests/e2e/space-timeline.spec.ts: mocked 2,000-post room perf probe, jump pill appears when scrolled up and a post arrives, no scroll movement for a scrolled-up reader, own send scrolls to bottom, at 390 and 1280 px"
+ ],
+ "notes": "Truncation fix ungated (first turn + newest 29 with 'N earlier turns' expander, TAIL_WINDOW_TURNS=12 exported). Anchoring, jump pill, content-visibility, aria-setsize/posinset behind features.timeline_anchor. No SpacePage edit (layout already single scroll root; own-send detected from pendingPosts). Gateway must send features.timeline_anchor."
+}

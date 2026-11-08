@@ -1,0 +1,10 @@
+- P1 deviation: DEVIATION: plan path `components/aux/` is unusable on Windows (`aux` is a reserved device name; tsc failed to resolve `./aux/*`), so the pane files live in `components/sidepane/`; WS01-S7b, WS12-S7, WS13-S4a, WS17-S6, WS20-S5 and P-SPA1 must use `sidepane/` (or the plan must be amended).
+- P2 deviation: DEVIATION: the pane is an absolutely positioned child of `.verevon-space-workroom` that reserves its width as right padding, not a grid column, because global.css has three conflicting grid definitions of the workroom; below 760px it covers the room.
+- P2 decision: `SpaceRestrictedNotice.adminCta` is `{label, href}` (plan names the prop but not its shape); WS07-S4 may change it.
+- P2 risk: the pane flag is a build-time constant (`VITE_SPACE_THREAD_PANE_UI`), so a production kill needs an SPA rebuild until WS01-S5 delivers `features.thread_pane`.
+- P2 gap: `SpaceTurnList` has no row slots yet (`run_card`, `work_summary` for WS09-S5/S6); add them when the first consumer lands.
+- P2 risk: the timeline re-renders posts on every 6 s poll (thread objects change), so the "Open thread" opener button can be disconnected before Escape and focus return then has no target.
+- P2 gap: the pane transcript refetches whenever the thread's `updated_at` changes, with no abort of an in-flight read; fine at 6 s polling, revisit with WS02 realtime.
+- P3 gap: the sidebar thread link now carries `?thread_id`, but the sidebar `spaceHref` for the Space row is unchanged; no `/chat?thread_id=` literal was added.
+- P3 gap: UNVERIFIED in a browser: Solid router `setSearchParams` keeping `#chat` and the 760px layout were not exercised (no dev server run in this slice; verification is the end-of-wave test phase).
+- P3 gap: only the first 30 turns of a post render inline in the timeline (existing cap); the pane shows up to 500.

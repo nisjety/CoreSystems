@@ -1,0 +1,7 @@
+- P1 test-fail: session-core metric_label_guard: mp_session_space_zdr_flag_total (WS06-S2) uses labels action and enforced that are not on METRIC_LABELS; closed values, so the list is stale; test exempts the two exact pairs under DEPTH-WS06S3-1 until the list is edited.
+- P2 pre-existing: execution-core a_hung_child_is_killed_at_the_timeout: test fn passes in seconds but the process takes about 300 s to exit on Windows (orphaned sleep holds a blocking pipe read; runtime shutdown waits); skip it when iterating.
+- P2 test-gap: WS06-S7 "memory flat" is asserted only as returned text under the 64 KiB cap plus the kill finishing early; no RSS measurement.
+- P2 test-gap: WS06-S7 deploy check is a text contract; `docker compose config` for base and production overlay is deferred (COMPOSE_CONFIG=1) to the docker tier.
+- P3 test-gap: WS06-S3 route test uses a synthetic Router with the same Router::layer ordering, not the full http_routes::router (needs AppState).
+- P3 test-gap: spawn_gate and its permit count are env-fixed OnceLock; gate tests hold the real global gate under paused time (serialised) instead of an injected gate.
+- P3 test-gap: process_host WouldBlock test covers the refusal before scratch creation; a successful gated spawn needs bwrap (Linux), not run here.

@@ -1,0 +1,6 @@
+- P2 deviation: DEVIATION: VITE_SPACE_ENTRY_LINKS_UI is read through a cast, not declared in vite-env.d.ts, to avoid editing a file outside the lock group.
+- P2 gap: production flag `features.entry_links` is not yet in the room context features (S3 / WS01-S5 gateway side), so links stay inert in production until it is.
+- P2 risk: a matched turn with empty content is not rendered by SpaceTurnList, so a found message might not be scrollable; panel caps transcripts at 500 turns, so a message beyond the cap reads as not available.
+- P3 gap: messages in the room timeline's inline previews also carry data-message-id but only the pane scrolls/highlights them.
+- P3 follow-up: Activity, search hits and palette must switch to spaceEntityHref; activity-grammar still uses spaceThreadHref.
+- P3 gap: entry_not_found / space_read_not_authorized i18n codes belong to S4b (errors.ts untouched).

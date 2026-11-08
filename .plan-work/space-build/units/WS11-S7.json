@@ -1,0 +1,48 @@
+{
+ "slice": "WS11-S7",
+ "status": "built",
+ "commit": "afd46aa77",
+ "files": [
+  "apps/Application Plane/convex-core/convex/spaceAttention.ts",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/attention.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/message_search.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers_spaces/ws11.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+  "apps/Frontend Plane/verevonv3/docker-compose.yml",
+  "apps/Frontend Plane/verevonv3/docker-compose.production.yml",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/ws11.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/domains/spaces/index.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/api/spaces-attention-items-client.ts",
+  "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts",
+  "apps/Frontend Plane/verevonv3/src/features/attention/lib/attention-grammar.ts",
+  "apps/Frontend Plane/verevonv3/src/features/attention/components/AttentionPage.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/attention/components/AttentionItemRow.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/attention/components/ThreadFollowControl.tsx",
+  "apps/Frontend Plane/verevonv3/src/styles/attention.css",
+  "apps/Frontend Plane/verevonv3/src/app/App.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/core/lib/shell-data.ts",
+  "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceThreadPanel.tsx"
+ ],
+ "compile": "ok (gateway cargo check clean; convex-core tsc --noEmit clean; SPA tsc6 -p tsconfig.app.json: no errors in touched files, only pre-existing)",
+ "migrations": [],
+ "flags": [
+  "SPACE_ATTENTION_API off in prod, dev on",
+  "SPACE_ATTENTION_UI off in prod, dev on"
+ ],
+ "tests_owed": [
+  "apps/gateway attention.rs: flag off -> 404 space_attention_disabled; rows of Spaces absent from the Control index are dropped; no title without a decision (denied space, ZDR, hide_preview give headline null with restricted/hidden); ZDR org makes no upstream call; Session Core down degrades to gaps; item state rejects unknown fields and snooze_until on a non-snoozed state; maps attention_item_not_found and invalid_snooze; follow set refused with typed 412 under ZDR while none is allowed",
+  "node --test apps/gateway/scripts/action-surface-contract.test.mjs: spaces.set_attention_item_state and spaces.set_thread_follow have dispatcher arms",
+  "src/features/attention/components/AttentionPage.test.tsx: lanes group by kind, needs_you lane from the live list, tab switch refetches and a stale answer is dropped, Done removes the row, disabled code shows the not-on notice, Show more appends with the cursor",
+  "src/features/attention/lib/attention-grammar.test.ts: laneOfKind mapping, orderItems failures first then newest, itemSentence per kind incl. count, headlineText for ok/hidden/restricted",
+  "src/shared/api/spaces-attention-items-client.test.ts: attentionItemsFromWire drops malformed rows and unknown kinds, unknown headline_state becomes restricted, request bodies of state and follow",
+  "src/features/attention/components/ThreadFollowControl.test.tsx: hidden while features.attention is off or the read is unknown; toggles following/muted/none; shows the refusal text on 412",
+  "apps/Application Plane/convex-core/test/space-attention-api.test.cjs: getThreadFollowForGateway reads own row only; listItemsForGateway returns hidePreview",
+  "src/shared/actions/action-registry.test.ts + model-access tests: both ids registered and closed to the model"
+ ],
+ "notes": "Gateway items/state/follow routes with hydration (Control bulk decisions then model-gateway /v1/spaces/attention), 2 action contracts + dispatchers, Convex getThreadFollowForGateway + hidePreview, SPA /attention page, sidebar entry, follow control in the thread panel. NOT built (S3 BFF half, no owner): GET /spaces/attention aggregate, read-all, notify, unread, so the S4 store stays dark. DashboardHome entry skipped. Live proof owed. errors.ts copy (4 WS11 codes) left uncommitted: shared file also holds the WS14 builder uncommitted hunk; their commit will carry mine."
+}

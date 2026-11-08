@@ -1,0 +1,10 @@
+- P2 decision: slot entries are static arrays (SPACE_COMPOSER_TOOLBAR, SPACE_COMPOSER_CHIPS) in components/composer/SpaceComposerSlots.tsx, same pattern as SPACE_TABS; a slice adds one entry. A runtime register() API was not built.
+- P2 decision: the send pipeline is a Solid-style factory (createSpaceSendPipeline) not a React-style hook; strategies are keyed by mode id in a Record so adding a mode without a strategy is a type error.
+- P2 decision: pipeline takes a `host` (the composer's props, read at call time) and `describeError`/`resolveTier` callbacks, so lib/ never imports from components/.
+- P2 gap: the `ask` strategy still resolves the privacy tier inside itself; WS01-S6 `post` mode (no model) will ignore resolveTier and the model selection fields in SpaceSendInput.
+- P2 gap: SpaceSendStage ('started','accepted','settled') is emitted but nothing subscribes yet; the composer passes no onStage, WS01-S6 journal and WS15-S2 draft-clear-on-accept hook there.
+- P3 gap: the `/` and `@` picker (PickerItem) is not behind a slot; WS13-S7 adds its command kind directly in the composer as its design says.
+- P3 gap: the mode registry has no selector UI and `mode` is not exposed beyond the slot context; labels (Spør Verevon / Ask Verevon) are placeholders for WS01-S6.
+- P3 risk: SpaceComposerSlotContext.spaceRef is a getter, other fields are fixed accessors; an entry that destructures ctx loses reactivity.
+- P3 follow-up: the "Stopped by you" copy still attributes any server stopped frame to the member (WS09-S8).
+- P3 follow-up: the 2-line composer change named in plan 4.1.2 was not found as uncommitted in this tree (UNVERIFIED whether it was already committed on model-plane).

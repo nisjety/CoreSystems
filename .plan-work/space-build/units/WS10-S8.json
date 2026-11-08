@@ -1,0 +1,53 @@
+{
+ "slice": "WS10-S8",
+ "status": "built",
+ "commit": "419578392",
+ "files": [
+  "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+  "apps/Model Plane/go/gen/model_plane/v1/orchestration_grpc.pb.go",
+  "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
+  "apps/Model Plane/api/openapi.yaml",
+  "apps/Model Plane/deploy/docker-compose.yml",
+  "apps/Model Plane/deploy/docker-compose.production.yml",
+  "apps/Model Plane/deploy/docker-compose.release.yml",
+  "apps/Model Plane/rust/crates/mp-orchestration/src/approval.rs",
+  "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs",
+  "apps/Model Plane/rust/services/session-core/migrations/0082_quarantined_outputs.sql",
+  "apps/Model Plane/rust/services/session-core/migrations/revert/0082_quarantined_outputs.down.sql",
+  "apps/Model Plane/rust/services/session-core/src/space/quarantine.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/mod.rs",
+  "apps/Model Plane/rust/services/session-core/src/space/approval_gate.rs",
+  "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+  "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+  "apps/Model Plane/rust/services/execution-core/src/quarantine.rs",
+  "apps/Model Plane/rust/services/execution-core/src/lib.rs",
+  "apps/Model Plane/rust/services/execution-core/src/space_gate.rs",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
+  "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+  "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+  "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.tsx"
+ ],
+ "compile": "ok (cargo check session-core, execution-core, model-gateway --lib --bins; frontend gateway cargo check; tsc -b clean for touched files; go build go/gen)",
+ "migrations": [
+  "migration session-core 0082 apps/Model Plane/rust/services/session-core/migrations/0082_quarantined_outputs.sql"
+ ],
+ "flags": [
+  "EXECUTION_CORE_QUARANTINE_MODE off|shadow|enforce (unset=off; compose dev shadow, production and release off; Control per-Space quarantine_mode must also allow)"
+ ],
+ "tests_owed": [
+  "apps/Model Plane/rust/services/session-core/src/space/quarantine.rs: inert_preview strips control/bidi/zero-width chars, cuts at 1024 bytes on a char boundary, flags truncation; validate_claim rejects bad tool_key/digest",
+  "apps/Model Plane/rust/services/session-core (DB, --ignored quarantine --test-threads=1): hold seals content and refuses non-quarantine/decided/other-run/non-Space/oversize approvals and is idempotent; two concurrent claim_release calls, one wins and the ciphertext is blanked; ungranted, denied, expired, other-thread, other-user, other-digest holds are not released; deny and timeout blank the ciphertext; preview only for the owner while requested or granted-unspent and addressee requester, same 404 otherwise; ZDR caller refused on all three RPCs",
+  "apps/Model Plane/rust/services/session-core/src/space/approval_gate.rs: claim_once never claims an untrusted_content approval",
+  "apps/Model Plane/rust/services/execution-core/src/quarantine.rs: mode parse default off, lower of local and Control applies, shadow changes nothing and counts, zdr/waived/non-Space/clean/internal results Unchanged, enforce: release wins over hold, hold failure withholds with no content, placeholder text carries no output",
+  "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: Released content is re-assessed and rendered framed; Withheld returns a completed outcome without the output",
+  "apps/Model Plane/rust/crates/mp-orchestration proto_wire_parity and apps/Model Plane/go/gen proto_wire_parity_orchestration_test.go: ApprovalKind 7 and the three new RPC messages",
+  "apps/Model Plane/rust/services/model-gateway/tests: approval_value kind is APPROVAL_KIND_UNTRUSTED_CONTENT; GET quarantine-preview maps 404 and returns format plain_text",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.test.tsx: quarantine card shows the consequence copy, preview is fetched on demand and rendered as text only",
+  "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts: readQuarantinePreview maps the wire fields",
+  "apps/Frontend Plane/verevonv3/tests/e2e/space-approvals.spec.ts: flagged fixture in enforce is held, previewed to A only, released once, a second identical call is held again"
+ ],
+ "notes": "Model Plane half plus the thin SPA and gateway preview proxy. Control side (quarantine_mode is already in S2's gate view) needs the execution-core service token from the Control train. The model-gateway http_routes.rs hunk was swept into commit 46d385127 (WS09-S8), so it is already in HEAD. See the depth file for deviations (release claimed at the render seam, ciphertext blanked not deleted, no cause code)."
+}

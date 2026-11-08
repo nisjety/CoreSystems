@@ -1,0 +1,20 @@
+{
+ "slice": "P-SPA2",
+ "status": "built",
+ "commit": "44f5d857d",
+ "files": [
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/components/composer/SpaceComposerSlots.tsx",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-composer-registry.ts",
+  "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-send-pipeline.ts"
+ ],
+ "compile": "ok (pnpm exec tsc -b: no errors in touched files)",
+ "migrations": [],
+ "flags": [],
+ "tests_owed": [
+  "src/features/spaces/components/SpaceRoomComposer.test.tsx: unchanged and green (streamChat args, Stop and cancel by requestId, title write-back only for an opened thread, subscription-model guard, privacy tier wait)",
+  "src/features/spaces/lib/space-composer-registry.test.ts: resolveSpaceComposerMode returns a registered visible id, default for unknown/undefined; visibleSpaceComposerModes skips a mode whose enabled() is false",
+  "src/features/spaces/lib/space-send-pipeline.test.ts: onStage emits started, accepted (on connected), settled in order; a done after a landed stop keeps stopped; an AbortError we caused is not an error; Stop with no requestId leaves stopRecorded false"
+ ],
+ "notes": "Pure extraction, DOM unchanged: model picker and skill chips are now the first entries of the toolbar and chip slots (no wrapper elements); submitMessage/stopMessage/exchange/in-flight handles moved to lib/space-send-pipeline.ts (createSpaceSendPipeline, one strategy per mode id; 'ask' = today's streamChat call). Mode registry has one mode (ask); no mode UI yet. The 2-line composer change named in plan 4.1.2 was not present as dirt in this tree. SkillScope moved to SpaceComposerSlots.tsx and is imported back by the picker."
+}
